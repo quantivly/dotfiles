@@ -755,11 +755,21 @@ The pairing is what makes it nasty rather than merely wrong: the installer says 
 `vpn-doctor`, reading the routing table, correctly says **IPv6 is LEAKING**. A green install next
 to a red doctor is the shape that gets the doctor mistrusted.
 
-The fix is `systemctl try-restart`, guarded on the arming state having actually changed.
-`try-restart` restarts a unit only if it is already running and is a no-op otherwise, so it cannot
-start a unit that `--no-enable` deliberately left stopped; the guard means a routine `vpn-setup`
-after a `git pull` still bounces nothing — which matters, because that daemon may be holding
-fail-fast routes for a tunnel that is currently down.
+The fix is `systemctl try-restart`, guarded on something having actually changed. `try-restart`
+restarts a unit only if it is already running and is a no-op otherwise, so it cannot start a unit
+that `--no-enable` deliberately left stopped. The guard means a `vpn-setup` that changes nothing
+bounces nothing, which matters: a restart clears every owned rule and route before the new start
+puts them back, and in that window a configured host hangs instead of failing.
+
+**The same trap held for the daemon, its config and its unit, until PR #341's deploy
+(2026-11-03).** The guard was the arming state alone. A plain re-run after the merge would have
+installed the new `/usr/local/bin/vpn-failfast.sh`, run `enable --now` against a unit active since
+2026-10-19, and left the old route toggle running, so the deploy needed a hand
+`sudo systemctl restart vpn-failfast.service`. The daemon reads all three files only at start, so
+the guard now also fires when `cmp` finds an installed copy different from the file about to
+replace it. Restarting after the install is safe because `install` replaces a file rather than
+writing into it: on uutils 0.10.0 the destination gets a new inode, and a descriptor opened before
+the install still reads the old bytes.
 
 ### A sort whose order was a property of the developer's locale, not the code
 
@@ -799,8 +809,8 @@ sudo install -m 755 -o root -g root "$SCRIPT_SRC" /usr/local/bin/vpn-failfast.sh
 where `$SCRIPT_SRC` is the *branch's* script. The row's needle is printed thirty lines earlier and
 the `|| true` swallows the status, so **the row passed whether or not an install happened**. Only
 the absence of a usable `sudo` stopped it on a developer's machine; CI has passwordless sudo, so
-the green history never once exercised the inert path — and `install(1)` writes **in place**, which
-means rewriting the running root daemon's file underneath it. This file's own header claimed "No
+the green history never once exercised the inert path — and on a machine with the daemon installed,
+it would have replaced the root daemon with the branch's script. This file's own header claimed "No
 sudo, no root"; that claim was part of the defect.
 
 Confirmed by hand against a real `git worktree` fixture before the fix: the recorded escalation was

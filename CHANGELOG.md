@@ -253,6 +253,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`vpn-setup` restarts the fail-fast daemon when it changed the daemon's files.**
+  `systemctl enable --now` does nothing to a unit that is already running, and the daemon reads its
+  script, config and unit only at start. So a re-run after a merge installed the new files and left
+  the old daemon running; PR #341's deploy needed a hand restart. The installer now compares each
+  installed copy before replacing it, and runs `try-restart` when one changed. A re-run that
+  changes nothing still restarts nothing. `scripts/test-vpn-failfast.sh` goes from 332 to 336
+  checks.
+
 - **The VPN fail-fast no longer crashes the AWS VPN Client.** AWS VPN Client 5.x died 24 times
   between 2026-08-26 and 2026-11-02, and each crash took the tunnel down for a median of 3.3 h.
   Its route listener reads an uninitialized interface name for any IPv4 route event with no
