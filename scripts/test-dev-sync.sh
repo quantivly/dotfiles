@@ -62,6 +62,19 @@ write_stubs() {   # $1 = HOME
 S="$HOME/stub"; echo "claude $*" >>"$S/calls"
 # Which calls ran with the long-lived token in their environment, by name only.
 [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && echo "claude $*" >>"$S/calls-with-token"
+# The lock case: whether --apply's lock is held while this child runs (a fresh open, so the
+# descriptor this child may have inherited does not count) ...
+if [[ -e "$S/daemonize" ]]; then
+    { flock -n "$HOME/.local/state/dev-sync/lock" true && echo free || echo held; } >>"$S/lock-during"
+fi
+# ... and a child that daemonizes, as an ssh-agent started under a `claude` call does: it closes
+# 0-2 and keeps every other descriptor it inherited. It stops on its stop file, or once the
+# case directory is gone, so a failed run never leaves it behind.
+if [[ -e "$S/daemonize" && ! -e "$S/daemon.pid" ]]; then
+    setsid bash -c 'until [[ -e "$1" || ! -d "${1%/*}" ]]; do sleep 0.1; done' _ "$S/daemon-stop" \
+        </dev/null >/dev/null 2>&1 &
+    echo "$!" >"$S/daemon.pid"
+fi
 P="$HOME/.claude/plugins"; SET="$HOME/.claude/settings.json"; IP="$P/installed_plugins.json"; KM="$P/known_marketplaces.json"
 jqi() { local f=$1; shift; jq "$@" "$f" >"$f.tmp" && mv "$f.tmp" "$f"; }
 case "$1" in
@@ -307,6 +320,28 @@ run_level --apply
 check "--apply on a level dev exits 0" "$RC" 0
 check "--apply on a level dev calls nothing mutating" "$(mutations)" 0
 check "--apply on a level dev does not re-run ./install" "$([[ -e "$H/stub/install-ran" ]] && echo ran || echo no)" no
+
+echo "== the lock: one --apply at a time, and no child keeps it"
+# dev, 10-17 to 11-03: an ssh-agent started under one --apply inherited the lock's fd 9, kept it for
+# its whole life, and every later run was refused. Here the stub claude leaves such a daemon behind.
+new_case
+LOCK="$H/.local/state/dev-sync/lock"
+exec 8>"$LOCK"; flock -n 8 || fatal "could not take $LOCK for the refusal row"
+run_level --apply
+exec 8>&-
+check "a second --apply while one holds the lock: exit 2" "$RC" 2
+has   "a second --apply while one holds the lock: refused, by name" "$OUT" "another run holds"
+touch "$H/stub/daemonize"
+run_level --apply
+check "a daemonizing child: the --apply exits 0" "$RC" 0
+check "a daemonizing child: the lock is held while children run" "$(sort -u "$H/stub/lock-during" 2>/dev/null)" held
+DPID="$(cat "$H/stub/daemon.pid" 2>/dev/null)"
+check "a daemonizing child: it outlives the run (else the rows below prove nothing)" \
+    "$([[ -n "$DPID" ]] && kill -0 "$DPID" 2>/dev/null && echo alive || echo gone)" alive
+check "a daemonizing child: the lock is free once the run ends" "$(flock -n "$LOCK" true && echo free || echo held)" free
+run_level --apply
+check "a daemonizing child: the next --apply is not refused" "$RC" 0
+touch "$H/stub/daemon-stop"
 
 echo "== --check writes nothing"
 # Every kind of drift at once, so every step's apply path is one gate away. The stub log is the
@@ -1059,7 +1094,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher: a line of any other shape is never sourced" "$([[ -e "$C/pwned" ]] && echo ran || echo no)" no
 
 printf '\n'
-EXPECTED_ROWS=237
+EXPECTED_ROWS=244
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

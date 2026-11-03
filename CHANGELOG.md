@@ -253,6 +253,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`dev-sync --apply` no longer leaves its lock to a child that daemonizes.** Every row now runs
+  with the lock's fd 9 closed; bash keeps its own copy on a close-on-exec descriptor, so the run
+  still holds the lock and no exec'd child inherits it. From 10-17 to 11-03 an `ssh-agent` started
+  under one run kept fd 9, and with it the lock, so every later run on dev exited 2 with "another
+  run holds …". `scripts/test-dev-sync.sh` goes from 237 to 244 checks.
+
 - **`vpn-doctor`'s IPv6 canary lines show what they found.** When the block leaked, the FAIL line
   meant to show the route winning outside the tunnel printed an empty line, and so did the two
   WARNs that quote `ip -6 route get`. The doctor called its probe inside `$(...)`, and the output
