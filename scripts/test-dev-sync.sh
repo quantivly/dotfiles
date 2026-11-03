@@ -288,7 +288,7 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
 run() {   # $@ = dev-sync args after --here
     # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
     OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
-        DEV_SYNC_HERDR_RELEASES="file://$C/releases" DEV_SYNC_PROC="$C/proc" \
+        DEV_SYNC_HERDR_RELEASES="file://$C/releases" DEV_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash "$SUT" --here "$@" 2>&1)"
     RC=$?
 }
@@ -766,6 +766,15 @@ OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_SSH="$C/oomssh" DE
     DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" DEV_SYNC_GITHUB_BASE="file://$GH" \
     bash "$SUT" --check 2>&1)"; RC=$?
 check "the remote run killed (137): exit 2, never read as drift" "$RC" 2
+# dev-sync's own ssh never forwards the laptop's agent, whatever ssh_config says: a forwarded
+# agent's socket on dev is usable by any process there while the run is open (review 3, S2). The
+# default ssh command, through a stub that logs its argv and answers as an unreachable host.
+mkdir -p "$C/sshbin"; printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexit 255\n' "$C/ssh-argv" >"$C/sshbin/ssh"
+chmod +x "$C/sshbin/ssh"
+env -u DEV_SYNC_SSH HOME="$L" PATH="$C/sshbin:/usr/local/bin:/usr/bin:/bin" DEV_SYNC_NO_SCOPE=1 \
+    bash "$SUT" --check >/dev/null 2>&1 </dev/null
+check "dev-sync's ssh never forwards an agent (-o ForwardAgent=no)" \
+    "$(grep -c -e '-o ForwardAgent=no' "$C/ssh-argv" 2>/dev/null | awk '{print ($1 > 0)}')" 1
 has   "the remote run killed: says so" "$OUT" "ended with status 137"
 
 echo "== the long-lived Claude token"
@@ -1067,9 +1076,16 @@ reset_calls; run_level --check
 has   "children: the mcp row sourced ~/.zshrc.local (else the next rows prove nothing)" "$OUT" "LINEAR_API_KEY is set in ~/.zshrc.local"
 check "children: a shell dev-sync starts is handed the stable link" "$(cat "$H/stub/zl-sock" 2>/dev/null)" "$H/.ssh/ssh_auth_sock"
 check "children: so the template's block starts no agent" "$(agents_started)" 0
+# Without a link to hand on, systemd's socket path: never forwarded, and non-empty even when it is
+# absent, so the block still starts nothing and ssh falls back to the key files (review 3, S1).
 ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"; fake_proc "$SSHD_PID" sshd 0
-run_level --check
-check "children: a link on a forwarded agent is never handed on" "$(cat "$H/stub/zl-sock" 2>/dev/null)" "unset"
+reset_calls; run_level --check
+check "children: a link on a forwarded agent is never handed on: systemd's socket instead" \
+    "$(cat "$H/stub/zl-sock" 2>/dev/null)" "$R/ssh-agent.socket"
+check "children: a forwarded link: the template's block starts no agent" "$(agents_started)" 0
+rm "$H/.ssh/ssh_auth_sock"
+reset_calls; run_level --check
+check "children: no link: the template's block starts no agent" "$(agents_started)" 0
 agent_done
 
 echo "== shells and the herdr launcher load it"
@@ -1129,7 +1145,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher: a line of any other shape is never sourced" "$([[ -e "$C/pwned" ]] && echo ran || echo no)" no
 
 printf '\n'
-EXPECTED_ROWS=251
+EXPECTED_ROWS=254
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

@@ -261,10 +261,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     answers, and otherwise starts none. The laptop keeps its last resort;
   - **the workstation template's block in `~/.zshrc.local`**, which starts an agent when
     `SSH_AUTH_SOCK` is empty, as it is under dev-sync over ssh. dev-sync's mcp row sources that
-    file. dev-sync now hands its children the stable link when it has no agent of its own,
-    never a forwarded one, so the block starts nothing. The file itself is unchanged.
+    file. dev-sync now hands its children an agent path when it has none of its own: the stable
+    link unless it is forwarded, else systemd's socket path, which is non-empty even when absent.
+    Either way the block starts nothing. The file itself is unchanged.
 
-  `scripts/test-dev-sync.sh` goes from 244 to 251 checks.
+  dev-sync's own ssh also passes `-o ForwardAgent=no`, so the laptop's agent never reaches dev
+  during a run. `scripts/test-dev-sync.sh` goes from 244 to 254 checks.
 
 - **`dev-sync --apply` no longer leaves its lock to a child that daemonizes.** Every row now runs
   with the lock's fd 9 closed; bash keeps its own copy on a close-on-exec descriptor, so the run
