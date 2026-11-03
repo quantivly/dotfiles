@@ -253,6 +253,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`vpn-doctor`'s IPv6 canary lines show what they found.** When the block leaked, the FAIL line
+  meant to show the route winning outside the tunnel printed an empty line, and so did the two
+  WARNs that quote `ip -6 route get`. The doctor called its probe inside `$(...)`, and the output
+  the probe saved was lost with the subshell. `scripts/test-vpn-failfast.sh` goes from 336 to 339
+  checks.
+
 - **`vpn-setup` restarts the fail-fast daemon when it changed the daemon's files.**
   `systemctl enable --now` does nothing to a unit that is already running, and the daemon reads its
   script, config and unit only at start. So a re-run after a merge installed the new files and left
