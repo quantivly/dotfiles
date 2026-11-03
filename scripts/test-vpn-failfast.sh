@@ -402,10 +402,10 @@ chmod +x "$STUBBIN/ip" || fatal setup
 # lines earlier and the `|| true` swallows the status, so the row passes whether
 # or not an install happened. Only the absence of a usable `sudo` stopped it on a
 # developer's machine; on CI, which has passwordless sudo, the block actually
-# ran — so the green history never once exercised the inert path, and
-# `install(1)` writes IN PLACE, which means rewriting the running root daemon's
-# file underneath it. The header of this file claims "No sudo, no root"; that
-# claim was part of the defect.
+# ran — so the green history never once exercised the inert path, and the
+# branch's script replaced the root daemon's installed copy on the runner. The
+# header of this file claims "No sudo, no root"; that claim was part of the
+# defect.
 #
 # Recording and REFUSING (exit 1) is what a developer's machine already does, so
 # it is the behaviour every green run to date was actually measured against.
@@ -1944,13 +1944,39 @@ OUT="$(setup_run "$FAKEROOT" --no-block-ipv6)"
 grep_ok "$(cat "$IPSTATE/sudo.log")" 'systemctl try-restart vpn-failfast.service' \
         "disarming re-reads it too, so the block is really withdrawn"
 
-# ... and a routine re-run restarts NOTHING. This is the other half of the
-# tri-state: `vpn-setup` after a `git pull` must not bounce a root daemon that
-# is holding fail-fast routes for a tunnel that is currently down.
+# ... and a re-run that CHANGES NOTHING restarts nothing. This is the other
+# half of the tri-state: a restart clears every owned rule and route before the
+# new start puts them back, so bouncing a daemon for no reason opens a window in
+# which a configured host hangs instead of failing.
 reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
 OUT="$(setup_run "$FAKEROOT")"
 grep_none "$(cat "$IPSTATE/sudo.log")" 'try-restart' \
           "a plain re-run does NOT bounce the running daemon"
+
+# A RE-RUN THAT CHANGES WHAT THE DAEMON READS DOES RESTART IT. It reads its
+# script, config and unit only at start, and `enable --now` is a no-op on a
+# running unit, so without the restart the new files sit on disk while the old
+# daemon runs on: PR #341's deploy needed a hand restart for exactly this. Each
+# row makes ONE installed file stale, so each names the cmp that caught it.
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '# an older daemon\n' >> "$FAKEROOT/usr/local/bin/vpn-failfast.sh"
+OUT="$(setup_run "$FAKEROOT")"
+grep_ok "$(cat "$IPSTATE/sudo.log")" 'systemctl try-restart vpn-failfast.service' \
+        "a re-run that changes the DAEMON restarts the running unit"
+grep_ok "$OUT" "so it runs what was just installed: $FAKEROOT/usr/local/bin/vpn-failfast.sh" \
+        "...and names the daemon as what changed"
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '# an older config\n' >> "$FAKEROOT/etc/vpn-failfast.conf"
+OUT="$(setup_run "$FAKEROOT")"
+grep_ok "$OUT" "so it runs what was just installed: $FAKEROOT/etc/vpn-failfast.conf" \
+        "a re-run that changes the CONFIG restarts it too: the daemon reads it only at start"
+
+reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
+printf '# an older unit\n' >> "$FAKEROOT/etc/systemd/system/vpn-failfast.service"
+OUT="$(setup_run "$FAKEROOT")"
+grep_ok "$OUT" "so it runs what was just installed: $FAKEROOT/etc/systemd/system/vpn-failfast.service" \
+        "a re-run that changes the UNIT restarts it too"
 
 # The seam itself is validated rather than trusted: a relative or absent prefix
 # would silently install to the real /etc.
@@ -2145,7 +2171,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=332
+EXPECTED_ROWS=336
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
