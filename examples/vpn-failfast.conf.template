@@ -2,10 +2,11 @@
 # ======================
 # Destinations that are reachable ONLY through the AWS Client VPN tunnel.
 #
-# While the tunnel is down, scripts/vpn-failfast.sh installs an `unreachable`
-# route for each of these, so anything aimed at them fails INSTANTLY instead of
-# hanging for the ~127 seconds a TCP SYN takes to give up. When the tunnel
-# returns, the routes are withdrawn.
+# scripts/vpn-failfast.sh installs two policy rules for each of these, so that
+# while the tunnel is down anything aimed at them fails INSTANTLY instead of
+# hanging for the ~127 seconds a TCP SYN takes to give up, and while it is up
+# they go through the tunnel as usual. The rules never change when the tunnel
+# does; the kernel decides on every lookup.
 #
 # Installed root-owned to /etc/vpn-failfast.conf by `vpn-setup`. Edit the live
 # file and then `sudo systemctl restart vpn-failfast` — this repo copy is the

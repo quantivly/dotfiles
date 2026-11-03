@@ -159,7 +159,7 @@ SHAPES = [
     _rule("notion-token",       rb"ntn_[A-Za-z0-9]{40,}"),
     _rule("linear-key",         rb"lin_api_[A-Za-z0-9]{30,}"),
     _rule("saml-request",       rb"(SAMLRequest=)[A-Za-z0-9%+/=_-]{20,}", b"\\1"),
-    _rule("vpn-auth-challenge", rb"(AUTH_FAILED,CRV1:)[^\s\"\\<]+", b"\\1"),
+    _rule("vpn-auth-challenge", rb"(CRV1:)[^\s\"\\<]+", b"\\1"),
     _rule("bearer",             rb"([Bb]earer[ \t]+)[A-Za-z0-9._~+/-]{20,}=*", b"\\1"),
     _rule("private-key",
           rb"(-----BEGIN [A-Z ]*PRIVATE KEY-----)(?:\\n|[A-Za-z0-9+/=])+"

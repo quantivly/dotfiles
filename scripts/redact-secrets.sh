@@ -76,7 +76,7 @@ exec sed -E \
   -e 's/ntn_[A-Za-z0-9]{40,}/<REDACTED:notion-token>/g' \
   -e 's/lin_api_[A-Za-z0-9]{30,}/<REDACTED:linear-key>/g' \
   -e 's/(SAMLRequest=)[A-Za-z0-9%+\/=_-]{20,}/\1<REDACTED:saml-request>/g' \
-  -e 's/(AUTH_FAILED,CRV1:)[^[:space:]]+/\1<REDACTED:vpn-auth-challenge>/g' \
+  -e 's/(CRV1:)[^[:space:]"<]+/\1<REDACTED:vpn-auth-challenge>/g' \
   -e 's/([Bb]earer[[:space:]]+)[A-Za-z0-9._~+\/-]{20,}=*/\1<REDACTED:bearer>/g' \
   -e 's/(-----BEGIN [A-Z ]*PRIVATE KEY-----).*/\1<REDACTED:private-key>/g' \
   -e 's/(https?:\/\/[^:@[:space:]\/]+):[^@[:space:]\/]+@/\1:<REDACTED:url-password>@/g' \
@@ -115,9 +115,12 @@ exec sed -E \
   #   phishing payload would be built from. The KEY is kept and only the value
   #   replaced, so a redacted line still reads as what it is.
   #
-  #   AUTH_FAILED,CRV1:… is the AWS Client VPN re-auth challenge. Its
-  #   `R:instance-…` segment is a session identifier of its own, so the value is
-  #   dropped to the first whitespace.
+  #   CRV1:… is the AWS Client VPN re-auth challenge. Its `R:instance-…`
+  #   segment is a session identifier of its own, so the value is dropped to the
+  #   first whitespace or quote. Anchored on CRV1: ALONE, not on the 5.x client's
+  #   `AUTH_FAILED,CRV1:`: 6.x logs it as `info: "CRV1:…"`, and the 5.x anchor
+  #   let that through untouched (2026-11-02). `<` is excluded so the rule never
+  #   re-matches its own replacement.
   #
   # The {20,} floor on SAMLRequest matches the `ntn_short` row's reasoning: a
   # bare `SAMLRequest=` with nothing after it is prose, and a redactor that

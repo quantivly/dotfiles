@@ -130,7 +130,9 @@ Design decisions that are load-bearing, not preferences:
   which is why it is easy to wave through, but it names the IdP, the service provider and the
   local assertion-consumer endpoint, and it is the string a phishing payload would be built
   from. `AUTH_FAILED,CRV1:…` is the Client VPN re-auth challenge, whose `R:instance-…` segment
-  is a session identifier in its own right. **Both keep the key and replace only the value**,
+  is a session identifier in its own right. Since 2026-11-02 that rule anchors on `CRV1:`
+  alone. The 6.x client logs the challenge as `info: "CRV1:…"`, with no `AUTH_FAILED` in front,
+  and the 5.x anchor let it through untouched. **Both keep the key and replace only the value**,
   which is load-bearing rather than cosmetic: `vpn-sweeps` pipes `vpn-log-report.py` through
   *this very script*, and that reporter counts events by plain substring (`needle in line`) —
   `AUTH_FAILED`, `Attempting to open browser with URL`, `SAML ACS received a request`,
@@ -159,7 +161,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (202 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (203 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this

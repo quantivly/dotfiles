@@ -1,0 +1,14 @@
+# AWS VPN Client, version: 6.2.0 (build fixture)
+# Fixture for scripts/test-vpn-failfast.sh, in the line shapes the 6.2.0 daemon wrote on
+# 2026-11-02. A first connect (5 s), then one drop that needs a SAML re-auth (300 s).
+# The Connecting -> Connecting lines are the daemon's own no-op steps and are not transitions.
+2026-10-25T10:00:00.000000Z  INFO ThreadId(14) connection: ConnectionStatus state transition old_state=Disconnected new_state=Connecting connection_id=00000000-0000-0000-0000-000000000001 profile=Fixture endpoint_id=cvpn-endpoint-fixture
+2026-10-25T10:00:01.000000Z  INFO ThreadId(14) connection: ConnectionStatus state transition old_state=Connecting new_state=Connecting connection_id=00000000-0000-0000-0000-000000000001 profile=Fixture endpoint_id=cvpn-endpoint-fixture
+2026-10-25T10:00:05.000000Z  INFO ThreadId(14) connection: ConnectionStatus state transition old_state=Connecting new_state=Connected connection_id=00000000-0000-0000-0000-000000000001 profile=Fixture endpoint_id=cvpn-endpoint-fixture
+2026-10-25T11:00:00.000000Z  INFO ThreadId(14) connection: ConnectionStatus state transition old_state=Connected new_state=Connecting connection_id=00000000-0000-0000-0000-000000000001 profile=Fixture endpoint_id=cvpn-endpoint-fixture
+2026-10-25T11:00:02.000000Z  INFO ThreadId(14) connection: OpenVPN callback Event(OvpnEvent { error: true, fatal: true, name: "DYNAMIC_CHALLENGE", info: "CRV1:R:fixture" }) profile=Fixture endpoint_id=cvpn-endpoint-fixture
+2026-10-25T11:00:02.100000Z  INFO ThreadId(14) connection: ConnectionStatus state transition old_state=Connecting new_state=WaitingForIdentity connection_id=00000000-0000-0000-0000-000000000001 profile=Fixture endpoint_id=cvpn-endpoint-fixture
+2026-10-25T11:00:20.000000Z  INFO tokio-rt-worker ThreadId(04) SAML callback received successfully
+2026-10-25T11:00:20.100000Z  INFO ThreadId(14) connection: ConnectionStatus state transition old_state=WaitingForIdentity new_state=Connecting connection_id=00000000-0000-0000-0000-000000000001 profile=Fixture endpoint_id=cvpn-endpoint-fixture
+2026-10-25T11:05:00.000000Z  INFO ThreadId(14) connection: ConnectionStatus state transition old_state=Connecting new_state=Connected connection_id=00000000-0000-0000-0000-000000000001 profile=Fixture endpoint_id=cvpn-endpoint-fixture
+2026-10-25T11:05:00.200000Z  INFO ThreadId(15) connection: OpenVPN callback Log(OvpnLog { text: "Connected via tun\n" }) profile=Fixture

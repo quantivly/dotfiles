@@ -23,11 +23,19 @@ ones are someone noticing. The long ones are nobody telling him.
 
 Those are the same problem. Making the tunnel-down state *fail* is what makes it visible.
 
+**And the client itself crashed.** AWS VPN Client 5.x died 24 times between August and November
+2026, and the tunnel died with it. Recovery took a median of 3.3 hours, because nothing restarts
+it. Its route listener crashes on IPv4 reject-route events, and until November this fail-fast
+toggled exactly such routes on every reconnect, so it was the trigger in 15 of 17 crashes. The
+fail-fast now uses static policy rules the listener never sees, and 6.x no longer contains that
+listener. Upgrade the client ([Keeping the client current](#keeping-the-client-current)); the
+evidence is in [VPN_INTERNALS.md](VPN_INTERNALS.md) §11.
+
 ## What gets installed
 
 | piece | what it is | installed by |
 |---|---|---|
-| `vpn-failfast.service` | **system** unit (root, `CAP_NET_ADMIN`). Installs `unreachable` routes for VPN-only destinations while the tunnel is down, withdraws them when it returns | `vpn-setup` |
+| `vpn-failfast.service` | **system** unit (root, `CAP_NET_ADMIN`). Installs two policy rules per VPN-only destination, once: through the tunnel while it is up, `ENETUNREACH` at once while it is down. Nothing changes when the tunnel does. Also converges the IPv6 block | `vpn-setup` |
 | `/etc/vpn-failfast.conf` | the destination list | `vpn-setup`, from `~/.vpn-failfast.conf` |
 | `/etc/sysctl.d/99-vpn-acs-port.conf` | keeps port 35001 out of the ephemeral range | `vpn-setup` |
 | `vpn-notify.service` | **user** unit. Persistent critical notification when the tunnel has been down past a threshold | `./install` links it; **you** enable it |
@@ -197,25 +205,34 @@ all of it *correct*", including the things that look fine and are not.
 
 ## If something goes wrong
 
-**A host is unreachable and the tunnel is up.** This is the one real risk in the design: a stale
-`unreachable` route blackholes a host permanently and looks exactly like a server outage.
-`vpn-doctor` reports it as a FAIL and names the routes. Two ways out:
+**A host is unreachable and the tunnel is up.** Two things can do that, and `vpn-doctor` names
+both as FAILs:
+
+- a **legacy `unreachable` route** left by the old route toggle. A /32 beats the tunnel's /1, so it
+  blackholes its host. `ip route show proto 66` lists them; the new daemon removes them at start.
+- a destination with a **reject rule and no tunnel rule** (`reject-only` in the doctor). The
+  daemon never leaves that state itself: it adds the tunnel rule first and removes it last.
 
 ```bash
-sudo systemctl restart vpn-failfast     # it clears orphans at start
-sudo ip route del unreachable <dst> proto 66     # or by hand
+sudo systemctl restart vpn-failfast     # reconciles the rules, clears legacy routes
+ip rule show | grep 'proto 66'          # the rules: two per destination, at 6600 and 6601
+ip route get <dst>                      # which way it ACTUALLY goes (no root needed)
 ```
 
-Routes this tool owns all carry route protocol **66**, and nothing is ever deleted except by that
-filter — so a route you or anything else installed is never touched, whatever its destination.
-List them with `ip route show proto 66` (no root needed).
+Everything this tool owns carries protocol **66**. A rule is also identified by its priority, and
+nothing is ever deleted except by that identity, so a rule or route that you or anything else
+installed is never touched. Tailscale's rules sit at 5210–5270, before ours, so the tailnet is
+never affected.
 
 **The unit will not start.** Almost always a config it refuses. `sudo systemctl status
 vpn-failfast` and `journalctl -u vpn-failfast -e`; the refusal names the file, the line and the
 reason. Fix `~/.vpn-failfast.conf` and re-run `vpn-setup`.
 
 **You got a notification but the VPN Client looks connected — or is not on screen at all.**
-Check whether the client is still *running*:
+On 5.x this was usually the crash described at the top of this page. On 6.x the tunnel lives in a
+root daemon (`aws-client-vpn-daemon.service`), so the GUI exiting no longer drops it; check with
+`aws-vpn-client get-connection-status --profile-name Quantivly`. On 5.x, check whether the client
+is still *running*:
 
 ```bash
 systemctl --user list-units --all 'app-gnome-awsvpnclient-*'   # the GUI application
@@ -252,6 +269,47 @@ merge. `source ~/.zshrc` (or `zshreload`), or open a new shell, then re-run. The
 every `*-doctor` in this repo; "the checkout IS the deployment" moves files, not the functions a
 running shell already holds.
 
+## Keeping the client current
+
+AWS supports only recent client versions, and 5.x is listed as "No longer supported". Run
+`vpn-doctor`. It WARNs on a 5.x client, on an available update, and on an **expired apt signing
+key**. That last one is how this machine stayed on 5.4.0 from June to November 2026: AWS rotated
+its key, the old one expired on 2026-09-05, and every `apt update` dropped the AWS repo without
+anyone noticing.
+
+The fix is the current key, scoped to that one source rather than trusted for every repo:
+
+```bash
+curl -fsS -o /tmp/awsvpnclient.asc \
+  https://d20adtppz83p9s.cloudfront.net/GTK/latest/debian-repo/awsvpnclient_public_key.asc
+gpg --show-keys --with-colons /tmp/awsvpnclient.asc | awk -F: '/^fpr:/{print $10; exit}'
+#   expect F3DACFA438D147D81BCA38B3CA08BD64C7EFCC8B (the key signing the repo since 2026-09-25)
+sudo install -D -m 0644 /tmp/awsvpnclient.asc /etc/apt/keyrings/awsvpnclient.asc
+# then, in /etc/apt/sources.list.d/aws-vpn-client.sources:
+#   Signed-By: /etc/apt/keyrings/awsvpnclient.asc
+sudo rm /etc/apt/trusted.gpg.d/awsvpnclient_public_key.asc     # the expired one
+sudo apt-get update --allow-releaseinfo-change-origin --allow-releaseinfo-change-label
+apt-cache policy awsvpnclient
+```
+
+Both `--allow-releaseinfo-change-*` flags are needed once. When AWS re-signed the repo it also
+renamed its `Origin` and `Label` (`AWS VPN Client Repository` → `AWS VPN Client`), and apt
+refuses a release-info change until it is accepted explicitly. With only the key fixed,
+`apt-get update` still fails, on that. Accept exactly those two fields, never the blanket
+`--allow-releaseinfo-change`.
+
+Check the package's sha256 against the [release notes](https://docs.aws.amazon.com/vpn/latest/clientvpn-user/client-vpn-connect-linux-release-notes.html)
+before installing. They are on docs.aws.amazon.com, a different channel from the CloudFront host
+that serves both the key and the package. After a 5.x → 6.x upgrade:
+
+- Check that the tunnel is still `tun0` (`ip -j route show 0.0.0.0/1`). Both daemons here assume
+  it.
+- If the profile did not migrate, re-import it with `aws-vpn-client import-profile`.
+- The tunnel lives in `aws-client-vpn-daemon.service` (root, `Restart=always`), which logs to
+  `/var/log/awsvpnclient/`. That directory is root-owned, unlike both 5.x log directories.
+  `vpn-sweeps` reads it alongside the old ones, so a window spanning the upgrade is one
+  history.
+
 ## What this deliberately does not do
 
 It does not reconnect, re-open a browser, or touch the tunnel. The client already opens the
@@ -267,8 +325,10 @@ for convenience.
 
 ## Measuring whether it worked
 
-`vpn-sweeps` is the instrument, and the number this work targets is **SAML timeout → next
-attempt**. Compare it against itself a week apart:
+`vpn-sweeps` is the instrument. It leads with **client crashes** and crash → reconnect time,
+the numbers the November fix targets: 12 crashes in the 14 days to 2026-11-02, and the target is
+0. The number the original work targets is **SAML timeout → next attempt**. Compare each against
+itself a week apart:
 
 ```bash
 vpn-sweeps --days 7 --json > /tmp/vpn-baseline.json
