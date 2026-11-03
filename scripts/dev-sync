@@ -515,9 +515,17 @@ busy_panes() {
 # forwarded agent here (zshrc.conditionals.plugins); this reports what the link is now.
 # Forwarded means VSCode's socket, or sshd's /tmp/ssh-*/agent.<pid> with sshd behind the pid: a
 # local `ssh-agent -s` makes the same shape, named after its own parent.
+# 0 if the link resolves to a forwarded agent; AGENT_TARGET is where it resolves.
+agent_link_forwarded() {
+    local pid="" comm=""
+    AGENT_TARGET="$(readlink -f "$HOME/.ssh/ssh_auth_sock")"
+    [[ "$AGENT_TARGET" =~ /ssh-[^/]+/agent\.([0-9]+)$ ]] && pid="${BASH_REMATCH[1]}"
+    [[ -n "$pid" && -r "$PROC/$pid/comm" ]] && comm="$(<"$PROC/$pid/comm")"
+    [[ "$AGENT_TARGET" == */vscode-ssh-auth-sock-* || "$comm" == sshd* ]]
+}
 # shellcheck disable=SC2088  # "~/.ssh/..." is a label in the rows, not a path to expand
 here_agent() {
-    local link="$HOME/.ssh/ssh_auth_sock" t pid="" comm="" t0 ms rc
+    local link="$HOME/.ssh/ssh_auth_sock" t t0 ms rc
     if [[ ! -L "$link" ]]; then
         row info agent "no ~/.ssh/ssh_auth_sock link$([[ -e "$link" ]] && echo ", a plain file is there")"
         return
@@ -526,10 +534,8 @@ here_agent() {
         row info agent "~/.ssh/ssh_auth_sock dangles (→ $(readlink "$link")); the next shell relinks it to dev's own agent"
         return
     fi
-    t="$(readlink -f "$link")"
-    [[ "$t" =~ /ssh-[^/]+/agent\.([0-9]+)$ ]] && pid="${BASH_REMATCH[1]}"
-    [[ -n "$pid" && -r "$PROC/$pid/comm" ]] && comm="$(<"$PROC/$pid/comm")"
-    if [[ "$t" == */vscode-ssh-auth-sock-* || "$comm" == sshd* ]]; then
+    agent_link_forwarded; rc=$?; t="$AGENT_TARGET"
+    if (( rc == 0 )); then
         # Never probed: asking a forwarded agent is the hang this row exists for.
         row oper agent "~/.ssh/ssh_auth_sock → an agent FORWARDED from the laptop ($t): any process here can use its keys, and new panes' ssh-add waits on it. Set ForwardAgent no for dev and end that ssh; the next shell relinks to dev's own agent"
         return
@@ -1002,6 +1008,19 @@ here_main() {
     load_token && TOKEN_LOADED=1
     # A non-interactive ssh and a user unit both lack ~/.local/bin (docs/HERDR_GUIDE.md).
     export PATH="$HOME/.local/bin:$PATH"
+    # Children get dev's own agent when this run has none. A shell that finds no SSH_AUTH_SOCK
+    # may start `ssh-agent -s`: the workstation template for ~/.zshrc.local does, and here_mcp
+    # sources that file. The agent outlives the shell, and on 2026-11-03 dev had one orphan under
+    # pid 1 per run. The stable link if it is not forwarded (its keys would be the laptop's), else
+    # systemd's socket path, the shell's own Try 2: never forwarded, and non-empty even when the
+    # socket is absent, so the block still starts nothing and ssh falls back to the key files.
+    if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
+        if [[ -L "$HOME/.ssh/ssh_auth_sock" ]] && ! agent_link_forwarded; then
+            export SSH_AUTH_SOCK="$HOME/.ssh/ssh_auth_sock"
+        else
+            export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ssh-agent.socket"
+        fi
+    fi
 
     local tool
     for tool in git jq curl timeout flock; do
@@ -1122,7 +1141,9 @@ laptop_main() {
         return 0
     fi
 
-    local ssh_cmd="${DEV_SYNC_SSH:-ssh -o BatchMode=yes -o ConnectTimeout=30}"
+    # ForwardAgent=no whatever ssh_config says: a forwarded agent's socket on dev is usable by any
+    # process there while the run is open, and every child would inherit it.
+    local ssh_cmd="${DEV_SYNC_SSH:-ssh -o BatchMode=yes -o ConnectTimeout=30 -o ForwardAgent=no}"
     local dotfiles_head behind="" remote_args
     # A behind COUNT needs both commits; dev may not have fetched the target and check mode
     # will not fetch, so count here, from this checkout's objects, when it has both.

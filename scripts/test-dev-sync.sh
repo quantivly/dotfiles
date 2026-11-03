@@ -314,8 +314,9 @@ run() {   # $@ = dev-sync args after --here; XTRACE=1 traces it to $C/xtrace
     # The trace goes to its own fd, as a person debugging with BASH_XTRACEFD would see it: a
     # command's own 2>/dev/null then hides nothing from it.
     local xt=(); [[ -n "${XTRACE:-}" ]] && xt=(BASH_XTRACEFD=3)
-    OUT="$(env -u LINEAR_API_KEY "${xt[@]}" HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
-        DEV_SYNC_HERDR_RELEASES="file://$C/releases" DEV_SYNC_PROC="$C/proc" \
+    # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
+    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
+        DEV_SYNC_HERDR_RELEASES="file://$C/releases" DEV_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash ${XTRACE:+-x} "$SUT" --here "$@" 2>&1 3>"$C/xtrace")"
     RC=$?
 }
@@ -793,6 +794,15 @@ OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_SSH="$C/oomssh" DE
     DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" DEV_SYNC_GITHUB_BASE="file://$GH" \
     bash "$SUT" --check 2>&1)"; RC=$?
 check "the remote run killed (137): exit 2, never read as drift" "$RC" 2
+# dev-sync's own ssh never forwards the laptop's agent, whatever ssh_config says: a forwarded
+# agent's socket on dev is usable by any process there while the run is open (review 3, S2). The
+# default ssh command, through a stub that logs its argv and answers as an unreachable host.
+mkdir -p "$C/sshbin"; printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexit 255\n' "$C/ssh-argv" >"$C/sshbin/ssh"
+chmod +x "$C/sshbin/ssh"
+env -u DEV_SYNC_SSH HOME="$L" PATH="$C/sshbin:/usr/local/bin:/usr/bin:/bin" DEV_SYNC_NO_SCOPE=1 \
+    bash "$SUT" --check >/dev/null 2>&1 </dev/null
+check "dev-sync's ssh never forwards an agent (-o ForwardAgent=no)" \
+    "$(grep -c -e '-o ForwardAgent=no' "$C/ssh-argv" 2>/dev/null | awk '{print ($1 > 0)}')" 1
 has   "the remote run killed: says so" "$OUT" "ended with status 137"
 
 echo "== the long-lived Claude token"
@@ -1110,6 +1120,9 @@ zagent() {   # $1 = SSH_AUTH_SOCK the shell starts with ("" = unset). Sets ZS (i
     ZL="${ZL/#$LOCAL/local}"; ZL="${ZL/#$FWD/fwd}"; ZL="${ZL/#$OWN/own}"
 }
 fwd_asked() { grep -c "ssh-Fwd123" "$H/stub/ssh-add-calls" 2>/dev/null || true; }
+# An `ssh-agent -s` the shell starts outlives it: on dev, one per dev-sync run sat orphaned under
+# pid 1 (2026-11-03). The stub logs the call and starts nothing.
+agents_started() { grep -c '^ssh-agent' "$H/stub/calls" 2>/dev/null || true; }
 
 new_case
 agent_fixture
@@ -1119,8 +1132,9 @@ check "dev pane, link on a forwarded agent: repaired to dev's own agent" "$ZS/$Z
 
 # With no agent of dev's own to fall back on, the link must still not be reused or asked.
 mv "$R/ssh-agent.socket" "$R/off.socket"; ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"
-zagent "$H/.ssh/ssh_auth_sock"
+reset_calls; zagent "$H/.ssh/ssh_auth_sock"
 check "dev, no local agent, link on a forwarded agent: never asked, never reused" "$(fwd_asked)/$ZS" "0/"
+check "dev, no local agent: no ssh-agent of its own is started" "$(agents_started)" 0
 mv "$R/off.socket" "$R/ssh-agent.socket"
 
 ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
@@ -1135,10 +1149,13 @@ zagent "$OWN"
 check "dev, a local ssh-agent -s socket is not mistaken for a forwarded one" "$ZS/$ZL" "own/own"
 
 touch "$H/stub/ssh-add-hangs"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
-zagent ""
+reset_calls; zagent ""
 rm "$H/stub/ssh-add-hangs"
 check "dev, an agent that never answers: shell start bounded (two 1 s probes, not two 10 s ones), and not adopted" \
     "$(( ZMS < 5000 ))/$ZS" "1/"
+# A slow agent is the likely shape under a dev-sync run's load: the probes time out, and the
+# last resort used to start a stray agent there.
+check "dev, an agent that never answers: no ssh-agent of its own is started" "$(agents_started)" 0
 
 # VSCode forwards an agent too, and the shell prefers it to dev's own when one is keyed.
 mksock "$R/vscode-ssh-auth-sock-1"; echo 0 >"$H/stub/ssh-add-rc"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
@@ -1150,6 +1167,11 @@ mv "$H/.config/dev-sync" "$H/.config/dev-sync.off"
 ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
 zagent "$FWD"
 check "laptop (no dev-sync marker): unchanged, the login's agent is published as before" "$ZS/$ZL" "fwd/fwd"
+# The last resort stands off a shared host: with no agent anywhere, the shell starts one.
+mv "$R/ssh-agent.socket" "$R/off.socket"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
+reset_calls; zagent ""
+check "laptop, no agent anywhere: the shell still starts one" "$(agents_started)" 1
+mv "$R/off.socket" "$R/ssh-agent.socket"
 mv "$H/.config/dev-sync.off" "$H/.config/dev-sync"
 agent_done
 
@@ -1183,6 +1205,35 @@ rm "$H/.ssh/ssh_auth_sock"
 run_level --check
 # shellcheck disable=SC2088  # a label as dev-sync prints it
 has   "agent: no link is information" "$OUT" "$(rowtxt · agent "no ~/.ssh/ssh_auth_sock link")"
+agent_done
+
+echo "== dev-sync hands its children dev's own agent link"
+new_case
+agent_fixture
+# The workstation template's block, which dev's ~/.zshrc.local holds (counted, not read, 11-03), and
+# a line recording what the shell sourcing it was handed. The mcp row sources this file; the stub
+# ssh-agent logs its call and starts nothing.
+cat >>"$H/.zshrc.local" <<'ZL'
+print -r -- "${SSH_AUTH_SOCK:-unset}" >"$HOME/stub/zl-sock"
+if [ -z "$SSH_AUTH_SOCK" ]; then
+    eval "$(ssh-agent -s)" > /dev/null
+fi
+ZL
+ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
+reset_calls; run_level --check
+has   "children: the mcp row sourced ~/.zshrc.local (else the next rows prove nothing)" "$OUT" "LINEAR_API_KEY is set in ~/.zshrc.local"
+check "children: a shell dev-sync starts is handed the stable link" "$(cat "$H/stub/zl-sock" 2>/dev/null)" "$H/.ssh/ssh_auth_sock"
+check "children: so the template's block starts no agent" "$(agents_started)" 0
+# Without a link to hand on, systemd's socket path: never forwarded, and non-empty even when it is
+# absent, so the block still starts nothing and ssh falls back to the key files (review 3, S1).
+ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"; fake_proc "$SSHD_PID" sshd 0
+reset_calls; run_level --check
+check "children: a link on a forwarded agent is never handed on: systemd's socket instead" \
+    "$(cat "$H/stub/zl-sock" 2>/dev/null)" "$R/ssh-agent.socket"
+check "children: a forwarded link: the template's block starts no agent" "$(agents_started)" 0
+rm "$H/.ssh/ssh_auth_sock"
+reset_calls; run_level --check
+check "children: no link: the template's block starts no agent" "$(agents_started)" 0
 agent_done
 
 echo "== shells and the herdr launcher load it"
@@ -1259,7 +1310,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=307
+EXPECTED_ROWS=317
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

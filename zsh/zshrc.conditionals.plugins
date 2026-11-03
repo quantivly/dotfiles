@@ -30,6 +30,7 @@
 # on, the link pointed at the laptop's agent: while any ssh to dev stayed open,
 # every new pane's ssh-add went back through it to Bitwarden and hung (5 s and
 # more, 2026-10-14), and every process on the box could use the laptop's keys.
+# A shared host also never starts an `ssh-agent -s` of its own (Try 3, below).
 # The laptop is not a shared host, so nothing below changes there.
 
 # Helper: Is this a shared agent host? Marked by the directory dev-sync's timer
@@ -142,10 +143,16 @@ _setup_ssh_agent() {
   # agent when there's nothing to reuse; reusing the symlink keeps repeated shells
   # from piling up duplicate agents when SSH_AUTH_SOCK starts unset.
   # On a shared host the link is reused only if it is not a forwarded agent.
+  #
+  # A shared host never spawns one. Its agent is systemd's (Try 2), and when that is slow
+  # or down the probes above fail, the shell used to start `ssh-agent -s`. That agent
+  # outlives the shell: on 2026-11-03 dev had one orphan under pid 1 per dev-sync run, the
+  # slow probe being the likely shape under that run's load. With no agent here, ssh uses the
+  # key files and dev-sync's agent row says what the link is; a person restarts the agent.
   if ! { _ssh_shared_host && _ssh_sock_forwarded "$HOME/.ssh/ssh_auth_sock"; } &&
      _ssh_agent_is_valid "$HOME/.ssh/ssh_auth_sock" allow-empty; then
     export SSH_AUTH_SOCK="$HOME/.ssh/ssh_auth_sock"
-  elif ! _ssh_add_l "$SSH_AUTH_SOCK"; then
+  elif ! _ssh_shared_host && ! _ssh_add_l "$SSH_AUTH_SOCK"; then
     eval "$(ssh-agent -s)" >/dev/null
     [[ -n "$SSH_AUTH_SOCK" ]] && ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
   fi
