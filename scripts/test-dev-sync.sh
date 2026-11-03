@@ -926,6 +926,10 @@ XTRACE=1 run_level --check
 has   "xtrace: the counts are unchanged" "$OUT" "1 of 2 Claude process(es) started without the token"
 has   "xtrace: the trace covers the /proc scan (else the next row proves nothing)" "$(cat "$C/xtrace")" "proc/4101/comm"
 hasnt "xtrace: no environ entry reaches a shell variable (a set -x run shows none)" "$(cat "$C/xtrace")" "$FAKE_TOK2"
+# dev's OWN stored token, too (A3): load_token reads it into this shell, and the counts row above
+# is printed only once it loaded. The trace must reach load_token, or the hasnt proves nothing.
+has   "xtrace: the trace covers load_token (else the next row proves nothing)" "$(cat "$C/xtrace")" "+ load_token"
+hasnt "xtrace: dev's own stored token never reaches the trace" "$(cat "$C/xtrace")" "$FAKE_TOK"
 
 echo "== claude-oauth-store"
 STORE="$DOTFILES/scripts/claude-oauth-store"
@@ -1220,7 +1224,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=298
+EXPECTED_ROWS=300
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

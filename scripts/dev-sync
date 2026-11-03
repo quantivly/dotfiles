@@ -364,7 +364,11 @@ token_layout() {
         TOKEN_LINK_BAD="${t//[^A-Za-z0-9._\/-]/?}"
     fi
 }
+# The token's value passes through this function's variables, so a `bash -x` run while debugging
+# would trace it. `local -` (bash >= 4.4) restores the caller's options on return, so tracing
+# stops here and resumes after.
 load_token() {
+    local -; set +x
     local line=""
     [[ -z "$TOKEN_LINK_BAD" ]] || return 1
     [[ -r "$TOKEN_FILE" ]] || return 1
