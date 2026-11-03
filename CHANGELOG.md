@@ -15,10 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and ⚠s a dangling link or a target outside `seats/`; `claude-oauth-store` renews the seat the
   link names, keeps the link, and takes its new `.lock` only after its probe exits. dev-sync also
   ⚠s when the shared `/login` (`claudeAiOauth`) comes back, by `jq -e` on the key alone, and its
-  `/proc` scan no longer reads environments into bash. The secret guard refuses a read of
-  anything under `~/.config/claude-oauth/` in any segment, interpreters included.
-  `scripts/test-dev-sync.sh` goes from 237 to 298 checks, `scripts/test-secret-guard.sh` from
-  203 to 246.
+  `/proc` scan no longer reads environments into bash; a `bash -x` run no longer traces dev's
+  own token either. In a command that names `~/.config/claude-oauth/`, the secret guard refuses
+  a content verb, an interpreter or a shell at command position, an input redirection, and
+  `$(< file)`, in any segment. It raises the bar and does not block: an obfuscated path,
+  `xargs -a`, `cp … /dev/stdout`, `dd`, `pr`, `hexdump`, a wrapper it can't parse and a read
+  quoted for `ssh` still pass, as `docs/SECRET_EMISSION.md` lists.
+  `scripts/test-dev-sync.sh` goes from 237 to 300 checks, `scripts/test-secret-guard.sh` from
+  203 to 272.
 
 - **herdr makes a sound only when you are needed.** It used to beep at every turn end of every
   background agent, and with a dozen panes none of those beeps needed you.

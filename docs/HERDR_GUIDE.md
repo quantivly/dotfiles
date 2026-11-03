@@ -1082,9 +1082,9 @@ Regenerate it after every `herdr update`.
 stack. Treat it as **shared, not disposable**: an OOM or an unasked-for restart there is a team
 outage.
 
-- **Policy: quantivly only.** Nothing non-work goes on dev. Its seat is **quantivly-0**,
-  held by dev's own `/login`. The laptop keeps its own login to that account, which is how it —
-  and rabota — *sees* that window. Two logins to one seat are independent, so a laptop session
+- **Policy: quantivly only.** Nothing non-work goes on dev. Its seat is **quantivly-0**. The
+  laptop keeps its own login to that account, which is how it — and rabota — *sees* that
+  window. Two logins to one seat are independent, so a laptop session
   on it logs nothing out, but it spends the window dev's lanes are gated on: on the laptop it is
   the quantivly pool's spill seat (`CLAUDE_TENANT_SPILL`), taken only once the pool is spent.
 - **The declared seat is checked, by `rabota doctor`, without reading a credential.**
@@ -1108,14 +1108,16 @@ outage.
   (`zsh/zshrc.company`, at shell start); the herdr server (`scripts/herdr-server-launch.sh`,
   through the same 0600 hand-off as `LINEAR_API_KEY`, since its `env -i` would drop a unit
   `EnvironmentFile=`); rabota's remote lanes (`-p EnvironmentFile=-…`, so a host without the file
-  runs on its login as before); and dev-sync's own `claude` calls. To store or renew it, a person
-  runs this in a plain terminal, never a pane an agent reads and never `!` in a Claude session:
+  runs on its own login, if it has one; dev has had none since 11-03 12:36Z, so a lane there
+  without the file fails "not logged in"); and dev-sync's own `claude` calls. To store or renew
+  it, a person runs this in a plain terminal, never a pane an agent reads and never `!` in a
+  Claude session:
   ```bash
   ssh -t dev '~/.local/bin/claude setup-token && ~/.dotfiles/scripts/claude-oauth-store'
   ```
-  Approve in a browser signed in to **quantivly-0**, the seat dev's `/login` uses: `rabota
-  doctor` reads the account from `.claude.json`, which the token does not change, so a token
-  minted on another account would bill it unseen. Paste the token at the hidden prompt and press
+  Approve in a browser signed in to **quantivly-0**: `rabota doctor` reads the account from
+  `.claude.json`, which the token does not change, so a token minted on another account would
+  bill it unseen. Paste the token at the hidden prompt and press
   Enter twice: input ends at an empty line, so a token the terminal wrapped is joined back
   together, and the store sends one request with it before writing anything. Then clear that
   terminal's scrollback. `dev-sync --check` reports the method (which shows the token is in use, not that it works:
