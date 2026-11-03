@@ -95,7 +95,12 @@ Design decisions that are load-bearing, not preferences:
   interpreter (`python`, `perl`, `ruby`, `node`) at command position, or an input redirection,
   in **any** segment, is refused. Per segment, `cd ~/.config/claude-oauth && cat token.env`
   passed. The verb has to be at command position because every heredoc line is a segment, and a
-  commit message that names the directory says "more" and "sort". Still missed, pinned as
+  commit message that names the directory says "more" and "sort". Command position takes what
+  ordinary commands put first: a path (`/bin/cat`), an assignment, `sudo`, `env`, `nice`,
+  `timeout` and the like with their options, `!`, `{`, the `then`/`do` of an `if` or a loop,
+  and a quoted or escaped verb. Seat files also join the per-segment rule's path list, so a
+  wrapper the directory rule cannot parse (`timeout -s KILL 5 cat …/seats/x.env`) still meets
+  that rule. Still missed, pinned as
   `uncovered` rows: an obfuscated path (`claude-o''auth`, a variable, a glob). Newly refused,
   pinned as a known false positive: a code search that names the directory, for which `grep -l`
   piped through the redactor is the way through. A `cat >… <<EOF` that only writes text naming
@@ -173,7 +178,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (232 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (246 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this

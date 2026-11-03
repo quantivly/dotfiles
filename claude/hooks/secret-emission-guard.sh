@@ -385,7 +385,7 @@ credential_file_read() {
 
     # Path on the RAW segment: `cat "$HOME/.zshrc.local"` must still match, and
     # $stripped below cannot see a path that exists only inside quotes.
-    [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env|\.aws/credentials|\.aws/login/cache) ]] || continue
+    [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env|claude-oauth/seats/|\.aws/credentials|\.aws/login/cache) ]] || continue
     hit="${BASH_REMATCH[1]}"
 
     # Verb on the QUOTE-STRIPPED segment: a message naming the file is not a read.
@@ -401,7 +401,7 @@ credential_file_read() {
     # nothing from the named file.
     # In a variable: an unquoted `<` inside [[ =~ ]] is parsed as a redirection
     # before the regex is ever seen, and `\<` does not escape it.
-    redir_re='(^|[^<])[<][[:space:]]*[^<[:space:]]*(\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env|\.aws/credentials|\.aws/login/cache)'
+    redir_re='(^|[^<])[<][[:space:]]*[^<[:space:]]*(\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env|claude-oauth/seats/|\.aws/credentials|\.aws/login/cache)'
     if [[ "$stripped" =~ $redir_re ]]; then
       CFR_WHY="an input redirection from \`$hit\`, which holds credentials"
       return 0
@@ -429,34 +429,45 @@ credential_file_read() {
 #   the DIRECTORY anywhere in the command, not a file name in the same segment. Per segment,
 #   `cd ~/.config/claude-oauth && cat token.env` passed, because no segment held both;
 #
-#   a verb in ANY segment -- but at COMMAND POSITION (a segment's start, or after `|`, `(` or a
-#   backtick, past sudo/xargs and the like). Every heredoc line is a segment, so a verb anywhere
-#   would refuse a commit message that names the directory and says "more" or "sort";
+#   a verb in ANY segment -- but at COMMAND POSITION. Every heredoc line is a segment, so a verb
+#   anywhere would refuse a commit message that names the directory and says "more" or "sort".
+#   Command position is a segment's start or a `|`, `(`, backtick, `{`, `!`, `;` or `&`, then
+#   what ordinary commands put first: assignments, sudo/command/exec/nohup/time, env/nice/
+#   timeout/stdbuf/xargs/ionice with their options, a keyword, and a path (`/bin/cat`). The
+#   `then`/`do`/`else` that cmd_segments merges into a loop or an `if` counts only in a segment
+#   that starts with if/for/while/until, which prose seldom does. A quoted or escaped first
+#   word (`"cat"`, `c\at`) is read with its quotes and backslashes removed;
 #
 #   interpreters count (python, perl, ruby, node). credential_file_read leaves them out on
 #   purpose, because ~/.zshrc.local is edited that way; nothing edits this directory that way.
 #
 # `claude-oauth-store`, the script, is not the directory: the name must end at a character that
-# cannot continue it (`/`, `;`, a quote, whitespace, the end). This RAISES THE BAR AND DOES NOT BLOCK (docs/SECRET_EMISSION.md): an
-# obfuscated path passes, and a code search that names the directory is refused -- grep -l piped
-# through the redactor is the way through.
+# cannot continue it (`/`, `;`, a quote, whitespace, the end). This RAISES THE BAR AND DOES NOT
+# BLOCK (docs/SECRET_EMISSION.md): an obfuscated path or an unparsed wrapper (`timeout -s KILL`)
+# passes it, though credential_file_read still sees a seat file's path; and a code search that
+# names the directory is refused, for which grep -l piped through the redactor is the way through.
 COR_WHY=""
 claude_oauth_read() {
-  local seg stripped dir_re verb_re redir_re pre verbs
+  local seg stripped first dir_re verb_re kw_re redir_re lead path verbs
   dir_re='claude-oauth([^A-Za-z0-9_.-]|$)'
   [[ "$cmd" =~ $dir_re ]] || return 1
   cmd_segments_ensure || return 1
-  pre='((sudo|command|exec|nohup|time)[[:space:]]+|xargs[[:space:]]+(-[^[:space:]]*[[:space:]]+)*)*'
+  lead='(([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|command|exec|nohup|time|then|do|else|elif|if|while|until|!|\{)[[:space:]]+'
+  lead+='|(env|nice|timeout|stdbuf|xargs|ionice)([[:space:]]+(-[^[:space:]]*|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|[0-9][0-9.]*[smhd]?))*[[:space:]]+)*'
+  path='([^[:space:]]*/)?'
   verbs='(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|cut|base64|paste|sort|uniq|rev|fold|expand|column|jq|diff|\.|python[0-9.]*|perl|ruby|node)'
-  verb_re="(^|[|(\`])[[:space:]]*${pre}${verbs}([[:space:]]|\$)"
+  verb_re="(^|[|(\`{;!&])[[:space:]]*${lead}${path}${verbs}([[:space:]]|\$)"
+  kw_re="^[[:space:]]*(if|for|while|until)[[:space:]].*[[:space:]](then|do|else)[[:space:]]+${lead}${path}${verbs}([[:space:]]|\$)"
   # As in credential_file_read: `<` and not `<<` (a heredoc or herestring reads no file), and not
   # `<(`, a process substitution, whose own command is a segment of its own here.
   redir_re='(^|[^<])[<][[:space:]]*[^<([:space:]]'
   while IFS= read -r seg || [[ -n "$seg" ]]; do
     [[ -n "$seg" ]] || continue
     stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
-    if [[ "$stripped" =~ $verb_re ]]; then
-      COR_WHY="\`${BASH_REMATCH[5]}\` in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens (if this only WRITES text that mentions it, write the file with an editor tool instead)"
+    first="${seg#"${seg%%[![:space:]]*}"}"; first="${first%%[[:space:]]*}"
+    first="${first//[\"\'\\]/}"; first="${first##*/}"
+    if [[ "$stripped" =~ $verb_re || "$stripped" =~ $kw_re || "$first" =~ ^${verbs}$ ]]; then
+      COR_WHY="a content verb or an interpreter in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens (if this only WRITES text that mentions it, write the file with an editor tool instead)"
       return 0
     elif [[ "$stripped" =~ $redir_re ]]; then
       COR_WHY="an input redirection in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"

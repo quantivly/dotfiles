@@ -736,6 +736,29 @@ py_oauth='python3 -c "print(open(\"/home/zvi/.config/claude-oauth/token.env\").r
 check "refuses: an interpreter handed the token file" "$(ask "$py_oauth")" "deny"
 py_seat='python3 -c "print(open(\"/home/zvi/.config/claude-oauth/seats/quantivly-5.env\").read())"'
 check "refuses: an interpreter handed a seat file" "$(ask "$py_seat")" "deny"
+# Command position includes what ordinary commands put before a verb: a path, an assignment, a
+# wrapper with its options, a keyword, a quoted or escaped verb. Each row reaches the file through
+# `cd`, so the directory rule alone decides it.
+# shellcheck disable=SC2016  # the fixtures must reach the guard UNEXPANDED
+for c in \
+  'cd ~/.config/claude-oauth && /bin/cat token.env' \
+  'cd ~/.config/claude-oauth && sudo /bin/cat token.env' \
+  'cd ~/.config/claude-oauth && LC_ALL=C cat token.env' \
+  'cd ~/.config/claude-oauth && env LC_ALL=C cat token.env' \
+  'cd ~/.config/claude-oauth && timeout 5 cat token.env' \
+  'cd ~/.config/claude-oauth && nice -n 10 head -1 token.env' \
+  'cd ~/.config/claude-oauth && if [ -f token.env ]; then cat token.env; fi' \
+  'cd ~/.config/claude-oauth && { cat token.env; }' \
+  'cd ~/.config/claude-oauth && ! cat token.env' \
+  'cd ~/.config/claude-oauth && "cat" token.env' \
+  'cd ~/.config/claude-oauth && c\at token.env' \
+  'cd ~/.config/claude-oauth/seats && for f in *.env; do head -1 "$f"; done'
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+# A wrapper this rule cannot parse still meets the per-segment rule, which knows seat files too.
+check "refuses: a seat file behind an unparsed wrapper (the per-segment rule)" \
+      "$(ask 'timeout -s KILL 5 cat ~/.config/claude-oauth/seats/quantivly-5.env')" "deny"
 # Metadata stays allowed, and so does the store's SCRIPT, whose name is not the directory.
 for c in \
   'ls -la ~/.config/claude-oauth' \
@@ -746,12 +769,13 @@ for c in \
   'sed -n 1,40p ~/.dotfiles/scripts/claude-oauth-store' \
   'grep -n TOKEN_RE scripts/claude-oauth-store' \
   'git commit -m "read the claude-oauth date through the link"' \
+  'git commit -m "renew the seat; more rows read claude-oauth"' \
   'grep -rln "claude-oauth/" scripts | ~/.dotfiles/scripts/redact-secrets.sh'
 do
   check "allows: $c" "$(ask "$c")" "allow"
 done
 # A verb counts only at command position, so prose that names the directory is not a read.
-msg_named=$'git commit -F - <<\'EOF\'\nThe store renews ~/.config/claude-oauth/seats/S.env, and more\nof the rows sort out a dangling link.\nEOF'
+msg_named=$'git commit -F - <<\'EOF\'\nThe store renews a seat under ~/.config/claude-oauth/, and more\nof the rows sort out a dangling link, and then more of them read it.\nEOF'
 check "allows: a heredoc message naming the directory, with verb words mid-line" "$(ask "$msg_named")" "allow"
 # A known false positive, by decision (N10): a code search that names the directory is refused.
 # The way through is grep -l piped through the redactor, the allowed row above.
@@ -874,7 +898,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=232
+EXPECTED_ROWS=246
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.

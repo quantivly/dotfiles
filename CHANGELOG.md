@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/proc` scan no longer reads environments into bash. The secret guard refuses a read of
   anything under `~/.config/claude-oauth/` in any segment, interpreters included.
   `scripts/test-dev-sync.sh` goes from 237 to 298 checks, `scripts/test-secret-guard.sh` from
-  203 to 232.
+  203 to 246.
 
 - **herdr makes a sound only when you are needed.** It used to beep at every turn end of every
   background agent, and with a dozen panes none of those beeps needed you.
