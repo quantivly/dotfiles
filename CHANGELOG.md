@@ -268,9 +268,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Nothing on dev starts a stray `ssh-agent` any more.** An agent a shell starts outlives it,
-  and on 2026-11-03 dev had one orphan under pid 1 per dev-sync run, and one more inside
-  `herdr-server.service`. Three paths reached `eval "$(ssh-agent -s)"`:
+- **dev-sync and the herdr launcher no longer start a stray `ssh-agent` on dev.** An agent a
+  shell starts outlives it, and on 2026-11-03 dev had one orphan under pid 1 per dev-sync run,
+  and one more inside `herdr-server.service`. Three paths reached `eval "$(ssh-agent -s)"`, and
+  these close them for dev-sync and the launcher; an interactive shell on dev whose agent doesn't
+  answer still runs the template's block, because its last resort hands that block no path:
   - **the shell's last resort.** When dev's own agent (systemd's) was slow or down, the shell's
     1 s probes failed. A shared host now reuses the stable link or systemd's agent when either
     answers, and otherwise starts none. The laptop keeps its last resort;
@@ -286,8 +288,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     as before, never in an argv and never printed. It takes effect at herdr's next restart.
 
   dev-sync's own ssh also passes `-o ForwardAgent=no`, so the laptop's agent never reaches dev
-  during a run. `scripts/test-dev-sync.sh` goes from 307 to 317 checks, and to 321 with the
-  launcher's rows.
+  during a run. `scripts/test-dev-sync.sh` goes from 307 to 321 checks.
 
 - **`dev-sync --apply` no longer leaves its lock to a child that daemonizes.** Every row now runs
   with the lock's fd 9 closed; bash keeps its own copy on a close-on-exec descriptor, so the run
