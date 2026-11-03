@@ -77,6 +77,31 @@ class RankTests(unittest.TestCase):
         seq = rank.rank(self.base(plan=plan, rr=rr))
         self.assertEqual([i["key"] for i in seq["items"] if i["bucket"] == 1], ["quantivly/hub#1", "HUB-1"])
 
+    def test_bucket_1_folds_a_thread_to_one_row_and_a_review_request_in_both_sources_to_one(self):
+        # DO-876: three notifications on one thread and one review request carried by both the plan
+        # and github.json yield two rows. Each row orders by its key's OLDEST notification and says
+        # how many it folded; the first row seen keeps its other fields.
+        plan = {"buckets": {"reply_queue": [
+            {"issue_identifier": "HUB-1", "actor": "b", "created_at": "2026-09-14T00:00:00Z", "url": "u", "title": "t", "type": "issueNewComment"},
+            {"issue_identifier": "HUB-1", "actor": "c", "created_at": "2026-09-12T00:00:00Z", "url": "u", "title": "t", "type": "issueNewComment"},
+            {"issue_identifier": "HUB-1", "actor": "b", "created_at": "2026-09-15T00:00:00Z", "url": "u", "title": "t", "type": "issueCommentMention"},
+            {"issue_identifier": None, "pr_url": "https://github.com/quantivly/hub/pull/7", "url": "https://github.com/quantivly/hub/pull/7",
+             "title": "", "actor": "alex", "created_at": "2026-09-13T00:00:00Z", "type": "pullRequestReviewRequested"}]}}
+        rr = [review("quantivly/hub", 7, True, [], updated="2026-09-15T00:00:00Z")]
+        seq = rank.rank(self.base(plan=plan, rr=rr))
+        b1 = [i for i in seq["items"] if i["bucket"] == 1]
+        self.assertEqual([i["key"] for i in b1], ["HUB-1", "quantivly/hub#7"])      # HUB-1's oldest is 09-12, the PR's 09-13
+        self.assertEqual(b1[0]["why_now"], "3 notifications on the thread since 2026-09-12, unanswered")
+        self.assertEqual(b1[0]["waiting_on"], "b")                                  # the first row seen keeps its fields
+        self.assertEqual(b1[1]["why_now"], "2 notifications on the thread since 2026-09-13, unanswered")
+        self.assertEqual(len({i["key"] for i in b1}), len(b1))
+
+    def test_bucket_1_single_rows_keep_their_own_why_now(self):
+        plan = {"buckets": {"reply_queue": [{"issue_identifier": "HUB-2", "actor": "b", "created_at": "2026-09-14T00:00:00Z",
+                                              "url": "u", "title": "t", "type": "issueNewComment"}]}}
+        seq = rank.rank(self.base(plan=plan))
+        self.assertEqual(seq["items"][0]["why_now"], "issueNewComment 2026-09-14, unanswered")
+
     def test_p0_in_backlog_is_a_decision_and_batch_date_not_a_deadline(self):
         issues = [issue("DO-9", "backlog", "Urgent")] + [issue(f"HUB-{i}", "unstarted", "High", due="2026-09-04") for i in range(5)]
         seq = rank.rank(self.base(issues=issues))

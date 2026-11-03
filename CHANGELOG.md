@@ -212,6 +212,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Persistent=true` kept. The cost is one ~100 s sync per tick while the laptop is awake: at most 33
   ticks a day instead of 24, and weekend ticks that did not exist.
 
+- **The rank's bucket 1 holds one row per key (DO-876).** The reply queue is one notification per
+  comment, so a thread with twenty-four comments was twenty-four "people blocked on you" rows and
+  crowded the brief's twelve lines (83 rows over 28 keys on 2026-11-03); a review request the plan
+  and `github.json` both carry was two rows under one key. A key now ranks once, by its oldest
+  notification, and a folded row's `why_now` says how many it folded and since when.
+
 - **The laptop sleeps only when asked to: closing the lid locks the screen, and GNOME no longer
   suspends on idle.** Agents run for hours unattended, and from 2026-10-21 to 2026-10-28 the
   laptop suspended ten times by three paths: a lid closed on battery, a charger pulled with the

@@ -78,7 +78,15 @@ def _reply_key(n: dict) -> str:
 
 
 def _bucket_1(inp: RankInputs, reviews: list[dict], triage: list[dict]) -> list[dict]:
-    """Reply queue plus individually requested reviews, oldest first; team-derived reviews go to triage or are dropped."""
+    """Reply queue plus individually requested reviews, one row per key, oldest first; team-derived
+    reviews go to triage or are dropped.
+
+    One row per KEY, not per notification (DO-876). The reply queue holds one notification per
+    comment on a thread, so a thread with twenty-four comments was twenty-four rows and crowded
+    the brief's twelve lines out of real rows (83 rows over 28 keys on 2026-11-03); a review
+    request the plan carries as a notification and ``github.json`` carries as a request was two
+    rows under the one key both already spell (``owner/repo#n``). ``_one_row_per_key`` folds them.
+    """
     aged: list[tuple[str, dict]] = []
     for n in (inp.inbox_plan or {}).get("buckets", {}).get("reply_queue", []):
         since = n.get("created_at") or ""
@@ -95,7 +103,30 @@ def _bucket_1(inp: RankInputs, reviews: list[dict], triage: list[dict]) -> list[
         elif not any(team in owned_teams for team in pr["via_teams"]):   # an owned team's reviews are someone else's
             triage.append({"key": key, "why": f"team-derived review request via {','.join(pr['via_teams'])}",
                            "url": pr["url"]})
-    return [item for _, item in sorted(aged, key=lambda pair: pair[0])]
+    return _one_row_per_key(aged)
+
+
+def _one_row_per_key(aged: list[tuple[str, dict]]) -> list[dict]:
+    """``(since, item)`` pairs folded to one item per key, ordered by each key's oldest ``since``.
+
+    The first row seen for a key keeps its fields (title, who is waiting, url); a key that folded
+    more than one row says so in ``why_now``, dated from the oldest, because "asked three times
+    since Tuesday" is the fact the brief's line is for.
+    """
+    folded: dict[str, tuple[str, dict, int]] = {}
+    for since, item in aged:
+        key = item["key"]
+        if key not in folded:
+            folded[key] = (since, item, 1)
+            continue
+        oldest, kept, count = folded[key]
+        folded[key] = (min(oldest, since), kept, count + 1)
+    rows = []
+    for since, item, count in sorted(folded.values(), key=lambda t: t[0]):
+        if count > 1:
+            item = {**item, "why_now": f"{count} notifications on the thread since {since[:10]}, unanswered"}
+        rows.append(item)
+    return rows
 
 
 def _bucket_2(pins: list[dict]) -> list[dict]:
