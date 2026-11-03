@@ -19,6 +19,8 @@
 #
 # Run via `vpn-setup` (zsh/functions/system.sh). NEVER by ./install — ./install
 # never uses sudo. Idempotent: re-run to resync after editing the repo copies.
+# A re-run that changes the daemon, its config or its unit restarts a RUNNING
+# unit, so it runs what was installed; one that changes nothing restarts nothing.
 #
 # Usage: setup-vpn-failfast.sh [--yes] [--no-enable] [--block-ipv6|--no-block-ipv6]
 #   --yes             do not prompt before enabling the unit
@@ -161,6 +163,19 @@ if grep -q '__VPN_[A-Z_]*__' "$UNIT_SRC"; then
   exit 1
 fi
 
+# WHAT THIS RUN CHANGES, measured before it changes it. The daemon reads its
+# script, its config and its unit only when it starts, and `enable --now` below
+# is a no-op on a unit that is already running. So without a restart, a re-run
+# puts new files on disk and leaves the OLD daemon running: PR #341's deploy
+# needed a hand restart for exactly this. `install` replaces each file rather
+# than writing into it (a new inode, measured on uutils 0.10.0), so the running
+# daemon keeps the copy it started from until it is restarted. A missing
+# destination counts as changed; try-restart is a no-op on a unit not running.
+changed_files=()
+cmp -s "$SCRIPT_SRC" "$SCRIPT_DST" || changed_files+=("$SCRIPT_DST")
+cmp -s "$CONF_LOCAL" "$CONF_DST"   || changed_files+=("$CONF_DST")
+cmp -s "$UNIT_SRC"   "$UNIT_DST"   || changed_files+=("$UNIT_DST")
+
 log INFO "Installing root-owned files"
 sudo install -m 755 -o root -g root "$SCRIPT_SRC" "$SCRIPT_DST"
 sudo install -m 644 -o root -g root "$CONF_LOCAL" "$CONF_DST"
@@ -255,10 +270,13 @@ sudo systemctl daemon-reload
 #
 # `try-restart`, not `restart`: it restarts the unit only if it is ALREADY
 # running, and is a no-op otherwise -- so it cannot start a unit that --no-enable
-# deliberately left stopped. Guarded on the arming state having actually changed,
-# so a plain re-run still restarts nothing.
+# deliberately left stopped. Guarded on the arming state or an installed file
+# having actually changed, so a re-run that changes nothing restarts nothing.
 if [[ -n "$BLOCK_IPV6" ]]; then
   log INFO "Re-reading the unit so the drop-in takes effect now, not at the next boot"
+  sudo systemctl try-restart vpn-failfast.service
+elif (( ${#changed_files[@]} > 0 )); then
+  log INFO "Restarting the unit if it is running, so it runs what was just installed: ${changed_files[*]}"
   sudo systemctl try-restart vpn-failfast.service
 fi
 
