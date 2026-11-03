@@ -1692,16 +1692,19 @@ mkget() {   # mkget <addr> <rc> <stdout> <stderr>
     if [[ -n "$3" ]]; then printf '%s\n' "$3" > "$IPSTATE/get-$1.out"; else rm -f "$IPSTATE/get-$1.out"; fi
     if [[ -n "$4" ]]; then printf '%s\n' "$4" > "$IPSTATE/get-$1.err"; else rm -f "$IPSTATE/get-$1.err"; fi
 }
+# The probe prints nothing and sets _VPN_V6_PROBE_STATE, so it is called the way
+# the doctor calls it -- directly, in the same shell -- and the state read after.
+zprobe_state() { zv6 "_vpn_v6_probe '$1'; print -r -- \"\$_VPN_V6_PROBE_STATE\""; }
 
 reset
 mkget 2606:4700:4700::1111 2 "" "RTNETLINK answers: No route to host"
 check "_vpn_v6_probe: EHOSTUNREACH is 'blocked'" \
-      "$(zv6 '_vpn_v6_probe 2606:4700:4700::1111')" "blocked"
+      "$(zprobe_state 2606:4700:4700::1111)" "blocked"
 
 reset
 mkget 2606:4700:4700::1111 0 "2606:4700:4700::1111 from :: via fe80::1 dev wlp0s20f3 proto ra src 2a06:c701::1 metric 600 pref medium" ""
 check "_vpn_v6_probe: rc 0 with a route on stdout is 'open'" \
-      "$(zv6 '_vpn_v6_probe 2606:4700:4700::1111')" "open"
+      "$(zprobe_state 2606:4700:4700::1111)" "open"
 
 # THE ROW THAT WOULD HAVE CAUGHT THE INVERTED CANARY. A machine with no IPv6 at
 # all answers ENETUNREACH, and the naive `grep -q unreachable` matches that
@@ -1710,12 +1713,12 @@ check "_vpn_v6_probe: rc 0 with a route on stdout is 'open'" \
 reset
 mkget 2606:4700:4700::1111 2 "" "RTNETLINK answers: Network is unreachable"
 check "_vpn_v6_probe: ENETUNREACH is 'no-v6', NOT 'blocked'" \
-      "$(zv6 '_vpn_v6_probe 2606:4700:4700::1111')" "no-v6"
+      "$(zprobe_state 2606:4700:4700::1111)" "no-v6"
 
 reset
 mkget 2606:4700:4700::1111 2 "" "RTNETLINK answers: Some new message nobody has seen"
 check "_vpn_v6_probe: anything else is 'odd', never a pass" \
-      "$(zv6 '_vpn_v6_probe 2606:4700:4700::1111')" "odd"
+      "$(zprobe_state 2606:4700:4700::1111)" "odd"
 
 # ... and the probe is answering from the STUB, not from this machine's kernel.
 # Without this the four rows above would pass on a host whose real routing table
@@ -1732,6 +1735,37 @@ grep_ok "$(cat "$IPSTATE/calls.log")" '^-6 route get 2606:4700:4700::1111$' \
 reset
 OUT="$(PATH="$STUBBIN:$PATH" ip -6 route get 2606:4700:4700::1111 2>&1)"; RC=$?
 check "a missing route-get fixture is exit 99, never a quiet default" "$RC" 99
+
+# --- the canary lines quote what the probe saw ----------------------------
+# The FAIL line under "REACHABLE outside the tunnel" exists to show WHICH route
+# is winning. Until 2026-11-03 it printed an empty line, as did the two WARNs that
+# quote the probe: the doctor called the probe inside $(...), a subshell, and
+# _VPN_V6_PROBE_OUT died with it. Each needle is text that exists only in a
+# fixture, so only a line that really quotes the probe can print it.
+CANARY_LEAK_ROUTE="2606:4700:4700::1111 from :: via fe80::1 dev wlp0s20f3 proto ra src 2a06:c701::1 metric 600 pref medium"
+CANARY_TAILNET_ROUTE="fd7a:115c:a1e0::53 dev tailscale0 table 52 src fd7a:115c:a1e0::1 metric 1024 pref medium"
+canary_fixtures() {   # canary_fixtures <resolver: rc stdout stderr> <tailnet: rc stdout stderr>
+    mkget 2606:4700:4700::1111 "$1" "$2" "$3"
+    mkget 64:ff9b::1 2 "" "RTNETLINK answers: No route to host"
+    mkget fd7a:115c:a1e0::53 "$4" "$5" "$6"
+}
+
+reset; canary_fixtures 0 "$CANARY_LEAK_ROUTE" "" 0 "$CANARY_TAILNET_ROUTE" ""
+grep_ok "$(zv6 '_vpn_v6_report_canaries 1')" "✗ *${CANARY_LEAK_ROUTE}\$" \
+        "canary lines: the leak FAIL quotes the route that is winning"
+
+reset; canary_fixtures 2 "" "RTNETLINK answers: Some new message nobody has seen" 0 "$CANARY_TAILNET_ROUTE" ""
+grep_ok "$(zv6 '_vpn_v6_report_canaries 1')" "could not classify .* Some new message nobody has seen\$" \
+        "canary lines: an unclassified answer is quoted in the WARN"
+
+# The call BEFORE the tailnet's answers with a route, not "No route to host": a
+# tailnet probe whose result was lost would otherwise quote the previous call's
+# identical text and pass. Here it would say "open" and quote a NAT64 route.
+CANARY_NAT64_ROUTE="64:ff9b::1 from :: via fe80::1 dev wlp0s20f3 proto ra src 2a06:c701::1 metric 600 pref medium"
+reset; canary_fixtures 2 "" "RTNETLINK answers: No route to host" 2 "" "RTNETLINK answers: No route to host"
+mkget 64:ff9b::1 0 "$CANARY_NAT64_ROUTE" ""
+grep_ok "$(zv6 '_vpn_v6_report_canaries 1')" "tailnet canary is blocked .* broader than intended: RTNETLINK answers: No route to host\$" \
+        "canary lines: a blocked tailnet canary is quoted in the WARN"
 
 printf '\nvpn-doctor and the IPv4 rules\n'
 
@@ -2171,7 +2205,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=336
+EXPECTED_ROWS=339
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

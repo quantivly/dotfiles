@@ -3342,7 +3342,13 @@ _VPN_ACS_PORT=35001
 # expectation from the thing under test cannot disagree with it.
 _VPN_V6_HALVES=('::/1' '8000::/1')
 
-# _vpn_v6_probe <addr> -> blocked | open | no-v6 | odd   (sets _VPN_V6_PROBE_OUT)
+# _vpn_v6_probe <addr>
+#   sets _VPN_V6_PROBE_STATE (blocked | open | no-v6 | odd) and _VPN_V6_PROBE_OUT
+#   (what `ip` printed), and prints nothing.
+#
+# Call it directly, never inside $(...). A command substitution is a subshell,
+# and both variables die with it: until 2026-11-03 the doctor did exactly that,
+# so every line quoting the probe's output printed an empty one.
 #
 # THE FIRST VERSION OF THIS WAS EXACTLY INVERTED, so the shape is written down.
 # Measured on iproute2-6.19.0: `ip -6 route get` prints the WINNING ROUTE on
@@ -3356,11 +3362,11 @@ _VPN_V6_HALVES=('::/1' '8000::/1')
 _vpn_v6_probe() {
   local out rc
   out="$(ip -6 route get "$1" 2>&1)"; rc=$?
-  _VPN_V6_PROBE_OUT="$out"
-  if   (( rc == 0 ));                              then print -r -- open
-  elif [[ "$out" == *"No route to host"* ]];       then print -r -- blocked   # EHOSTUNREACH
-  elif [[ "$out" == *"Network is unreachable"* ]]; then print -r -- no-v6     # ENETUNREACH
-  else print -r -- odd
+  typeset -g _VPN_V6_PROBE_OUT="$out"
+  if   (( rc == 0 ));                              then typeset -g _VPN_V6_PROBE_STATE=open
+  elif [[ "$out" == *"No route to host"* ]];       then typeset -g _VPN_V6_PROBE_STATE=blocked   # EHOSTUNREACH
+  elif [[ "$out" == *"Network is unreachable"* ]]; then typeset -g _VPN_V6_PROBE_STATE=no-v6     # ENETUNREACH
+  else typeset -g _VPN_V6_PROBE_STATE=odd
   fi
 }
 
@@ -3404,10 +3410,10 @@ _VPN_V6_TAILNET_CANARY_ADDR=fd7a:115c:a1e0::53
 # the probe's output is reachable only with a routing table in the state it
 # describes.
 _vpn_v6_report_canaries() {
-  local halves="$1" addr state
+  local halves="$1" addr
   for addr in "${_VPN_V6_LEAK_CANARY_ADDRS[@]}"; do
-    state="$(_vpn_v6_probe "$addr")"
-    case "$(_vpn_v6_canary_verdict "$state" "$halves")" in
+    _vpn_v6_probe "$addr"
+    case "$(_vpn_v6_canary_verdict "$_VPN_V6_PROBE_STATE" "$halves")" in
       ok)      _doctor_ok "$addr is unreachable, and this tool owns both halves" ;;
       not-ours)
         _doctor_bad "$addr is rejected, but this tool owns neither half — something ELSE is rejecting it" ;;
@@ -3420,11 +3426,11 @@ _vpn_v6_report_canaries() {
         _doctor_warn "$addr: could not classify \`ip -6 route get\` — ${_VPN_V6_PROBE_OUT}" ;;
     esac
   done
-  state="$(_vpn_v6_probe "$_VPN_V6_TAILNET_CANARY_ADDR")"
-  if [[ "$state" == "open" ]]; then
+  _vpn_v6_probe "$_VPN_V6_TAILNET_CANARY_ADDR"
+  if [[ "$_VPN_V6_PROBE_STATE" == "open" ]]; then
     _doctor_ok "the tailnet still resolves past the block (table 52 precedes main)"
   else
-    _doctor_warn "the tailnet canary is $state — the block may be broader than intended: ${_VPN_V6_PROBE_OUT}"
+    _doctor_warn "the tailnet canary is $_VPN_V6_PROBE_STATE — the block may be broader than intended: ${_VPN_V6_PROBE_OUT}"
   fi
 }
 
