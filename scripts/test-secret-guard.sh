@@ -825,6 +825,19 @@ check "allows: a single-quoted \$(< naming the directory, which never expands" \
 # shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
 check "allows: an escaped \\\$(< naming the directory, which prints as written" \
       "$(ask 'git commit -m "never run \$(< ~/.config/claude-oauth/token.env)"')" "allow"
+# What the scan does not parse, it refuses: ANSI-C quoting, where \' does not close the quote, and
+# a substitution's own quotes inside double quotes. And a segment past the segmenter's bound is
+# refused unscanned: a character loop over it would outlast the hook's timeout, which fails open.
+# shellcheck disable=SC2016  # the fixtures must reach the guard UNEXPANDED
+for c in \
+  "cd ~/.config/claude-oauth && echo \$'it\\'s' \"\$(<token.env)\"" \
+  "cd ~/.config/claude-oauth && echo \"\$(echo \"'\")\$(<token.env)\""
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+long_sq="git commit -m '$(printf 'x%.0s' {1..8200}) never run \$(< ~/.config/claude-oauth/token.env)'"
+check "refuses: a \$(< segment past the segmenter's bound, unscanned (fails closed)" \
+      "$(ask "$long_sq")" "deny"
 check "allows: a shell run on the store's script, whose name is not the directory" \
       "$(ask 'bash -n scripts/claude-oauth-store')" "allow"
 # `sh` is a whole word: `ssh` is not a shell, and dev's metadata is read this way.
@@ -971,7 +984,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=275
+EXPECTED_ROWS=278
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.

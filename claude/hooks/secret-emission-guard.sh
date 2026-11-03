@@ -445,7 +445,7 @@ credential_file_read() {
 #
 # Two spellings of a read need care with quotes. `$(< f)` and `` `< f` `` read a file with no verb
 # and still expand inside double quotes, where the quote-stripped copy has lost them, so they are
-# looked for wherever the shell expands them (file_subst_expands, below). And a `<word>` whose word
+# looked for wherever the shell may expand them (subst_may_expand, below). And a `<word>` whose word
 # has no `.` or `/` is a placeholder in prose (`seats/<seat>.env`), not a redirection: it cannot
 # name a token file.
 #
@@ -457,17 +457,26 @@ credential_file_read() {
 # file's path in its own segment. A code search that names the directory is refused, for which
 # grep -l piped through the redactor is the way through.
 #
-# 0 if segment $1 holds `$(<` or `` `< `` where the shell would expand it: outside single quotes,
-# and not after a backslash. Quote state is tracked as the shell tracks it, so a `'` inside double
-# quotes is a literal: a sed that strips every '...' pair would read `"'$(<f)'"` or
-# `"it's" "$(<f)" 'x'` as quoted and miss the read. Not a full parser: a command substitution's own
-# quotes are not tracked separately. A character loop, so the caller gates it on a cheap regex.
-file_subst_expands() {
+# 0 if segment $1 (which the caller found to hold `$(<` or `` `< ``) may expand a substitution, so
+# the read must be refused. Only two shapes are let through, both of them how one WRITES about the
+# read: inside single quotes, and after a backslash. Quote state is tracked as the shell tracks it,
+# so a `'` inside double quotes is a literal: a sed that strips every '...' pair read `"'$(<f)'"`
+# and `"it's" "$(<f)" 'x'` as quoted and missed the read.
+#
+# It fails CLOSED wherever it stops being a parser, because a wrong guess here allows a read:
+#   - any `$(` or backtick outside single quotes, not only `$(<`: a substitution's own quotes
+#     (`"$(echo "'")$(<f)"`) are not tracked, so whatever follows one cannot be trusted;
+#   - `$'`, ANSI-C quoting, where `\'` does not close the quote (`$'it\'s' "$(<f)"`);
+#   - a segment longer than the segmenter's own bound. cmd_segments emits a longer command whole,
+#     and a character loop over it measured past 20s on 300 KB, while this hook's 5s timeout
+#     FAILS OPEN. Refusing unscanned is the segmenter's own answer to the same length.
+subst_may_expand() {
   # Bytes, not characters: in a UTF-8 locale ${s:i:1} counts from the start of the string at
   # every step. No byte of a multibyte character equals the ASCII bytes this looks for.
   local LC_ALL=C
-  local s="$1" i=0 j n ch dq=""
+  local s="$1" i=0 n ch dq=""
   n=${#s}
+  (( n > 8192 )) && return 0
   while (( i < n )); do
     ch="${s:i:1}"
     case "$ch" in
@@ -479,17 +488,9 @@ file_subst_expands() {
           (( i++ ))
           while (( i < n )) && [[ "${s:i:1}" != "'" ]]; do (( i++ )); done
         fi ;;
-      '$'|'`')
-        # String tests, not a regex: bash compiles a [[ =~ ]] pattern at every evaluation, which
-        # measured 0.8s -> 2.0s on a 7,850-character command of `$x`s, and this hook's 5s
-        # timeout fails open. `$(` or a backtick, any spaces, then `<`.
-        j=$(( i + 1 ))
-        if [[ "$ch" == '$' ]]; then
-          [[ "${s:j:1}" == '(' ]] || { (( i++ )); continue; }
-          (( j++ ))
-        fi
-        while (( j < n )) && [[ "${s:j:1}" == [[:space:]] ]]; do (( j++ )); done
-        [[ "${s:j:1}" == '<' ]] && return 0 ;;
+      '`') return 0 ;;
+      # String tests, not a regex: bash compiles a [[ =~ ]] pattern at every evaluation.
+      '$') [[ "${s:i+1:1}" == '(' || "${s:i+1:1}" == "'" ]] && return 0 ;;
     esac
     (( i++ ))
   done
@@ -511,7 +512,7 @@ claude_oauth_read() {
   # As in credential_file_read: `<` and not `<<` (a heredoc or herestring reads no file), and not
   # `<(`, a process substitution, whose own command is a segment of its own here.
   redir_re='(^|[^<])[<][[:space:]]*[^<([:space:]]'
-  # `$(<`, or a backtick then `<`: the cheap gate for file_subst_expands. In a variable: an
+  # `$(<`, or a backtick then `<`: the cheap gate for subst_may_expand. In a variable: an
   # unquoted `<` inside [[ =~ ]] is parsed as a redirection.
   subst_re='(\$\(|`)[[:space:]]*<'
   # The LAST placeholder in the string, so the loop below removes one per turn and ends.
@@ -527,7 +528,7 @@ claude_oauth_read() {
     fi
     # The raw segment gates the character loop: only a segment that holds the substitution at all
     # pays for it.
-    if [[ "$seg" =~ $subst_re ]] && file_subst_expands "$seg"; then
+    if [[ "$seg" =~ $subst_re ]] && subst_may_expand "$seg"; then
       COR_WHY="a \`\$(< file)\` read in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
       return 0
     fi

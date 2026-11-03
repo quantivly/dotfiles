@@ -107,7 +107,10 @@ Design decisions that are load-bearing, not preferences:
   - `$(< file)` or `` `< file` ``, outside single quotes and not escaped. Inside double quotes
     it still expands, so it is looked for before the double-quoted text is stripped, by a scan
     that tracks quotes as the shell does: a `'` inside double quotes (`"it's"`) is a literal and
-    doesn't hide it.
+    doesn't hide it. Where the scan stops being a parser it refuses: any other `$(` or backtick
+    in that segment (a substitution's own quotes aren't tracked), `$'…'` quoting, and a segment
+    longer than the segmenter's 8,192-character bound, which a character loop could not finish
+    inside the hook's timeout, and a timeout fails open.
 
   Seat files also join the per-segment rule's path list, so a wrapper the directory rule cannot
   parse (`timeout -s KILL 5 cat …/seats/x.env`) still meets that rule when the path is whole.
@@ -202,7 +205,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (275 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (278 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this
