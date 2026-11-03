@@ -23,6 +23,12 @@
 #              herdr launcher and zshrc.company read, and dev-sync's check.
 #   created    the date it was stored, YYYY-MM-DD. Not secret: dev-sync reads it to
 #              warn before the token's year runs out.
+#   .lock      taken only after the `claude -p` check has exited, and held for the write and
+#              the rename alone, so no child of this script can carry it (dev-sync's lock, 10-17).
+# In the SEAT LAYOUT token.env is a link to seats/<seat>.env. Then it renews that seat: the
+# token goes to seats/<seat>.env and the date to seats/<seat>.created, by temp file and rename,
+# and the link stays. Replacing the link with a file would strand the old token in seats/. A link
+# to anything but seats/<seat>.env is refused before the prompt.
 # The token is read at a hidden prompt and never echoed or logged. Input ends at an empty line,
 # so a paste wrapped across lines is joined back together, and the token must answer one
 # `claude -p` before anything is written.
@@ -41,6 +47,9 @@ TOKEN_FILE="$DIR/token.env"
 # setup-token's shape. The character class is also what makes the file safe to read as
 # shell and as an EnvironmentFile= without quoting.
 TOKEN_RE='^sk-ant-oat[0-9]+-[A-Za-z0-9_-]{20,}$'
+# A seat's name. A CONSTANT, never read from the environment; dev-sync spells the same string, and
+# a row in scripts/test-dev-sync.sh checks that they agree.
+SEAT_RE='^quantivly-[a-z0-9][a-z0-9-]{0,30}$'
 
 die() { printf 'claude-oauth-store: %s\n' "$*" >&2; exit 1; }
 
@@ -54,6 +63,19 @@ if [[ -d "$HOME/.clauth" ]] || command -v clauth >/dev/null 2>&1; then
     die "refusing: clauth manages Claude accounts here, and this token would outrank every account dir. It is for a host on one login (dev)."
 fi
 [[ -t 0 ]] || die "refusing: stdin is not a terminal. Run it with ssh -t, and paste at the prompt; never pipe the token in."
+command -v flock >/dev/null 2>&1 || die "refusing: flock (util-linux) is not installed here. Nothing was read."
+
+# Where the token goes: token.env itself, or, through a link, the seat it names.
+target="$TOKEN_FILE"
+date_file="$DIR/created"
+if [[ -L "$TOKEN_FILE" ]]; then
+    link="$(readlink "$TOKEN_FILE")"
+    seat="${link#seats/}"; seat="${seat%.env}"
+    [[ "$link" == "seats/$seat.env" && "$seat" =~ $SEAT_RE ]] ||
+        die "refusing: $TOKEN_FILE links to ${link//[^A-Za-z0-9._\/-]/?}, which is not a seat (seats/<name>.env, <name> like quantivly-5). Nothing was read."
+    target="$DIR/seats/$seat.env"
+    date_file="$DIR/seats/$seat.created"
+fi
 
 printf 'Paste the token claude setup-token printed (input hidden), press Enter, then Enter again: ' >&2
 # setup-token wraps a long token across lines, and a copy keeps the breaks. Reading one line
@@ -98,14 +120,22 @@ fi
 umask 077
 mkdir -p "$DIR"
 chmod 700 "$DIR"
-tmp="$(mktemp "$DIR/.token.XXXXXX")"
+# The lock, only now that the probe child has exited: a child that daemonizes keeps every fd it
+# inherited, and with it a flock, which is how dev-sync's lock was lost from 10-17 to 11-03.
+exec 9>"$DIR/.lock"
+flock -n 9 || { token=""; die "another claude-oauth-store run holds $DIR/.lock. Nothing was written; run this again once it ends."; }
+# The temp file sits beside its target, so the rename stays in one directory (seats/ for a link).
+mkdir -p "$(dirname "$target")"
+chmod 700 "$(dirname "$target")"
+tmp="$(mktemp "$(dirname "$target")/.token.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$token" >"$tmp"
 token=""
-mv -f "$tmp" "$TOKEN_FILE"
-date +%F >"$DIR/created"
+mv -f "$tmp" "$target"
+date +%F >"$date_file"
+exec 9>&-
 
-printf 'Stored in %s (mode %s), dated %s.\n' "$TOKEN_FILE" "$(stat -c %a "$TOKEN_FILE")" "$(cat "$DIR/created")"
+printf 'Stored in %s (mode %s), dated %s.\n' "$target" "$(stat -c %a "$target")" "$(cat "$date_file")"
 printf 'New shells, rabota lanes and dev-sync use it now. Sessions already running keep the old login\n'
 printf 'until they restart; herdr panes get it from their shell, and the server itself at its next start.\n'
 printf 'Check from the laptop: ~/.dotfiles/scripts/dev-sync --check\n'
