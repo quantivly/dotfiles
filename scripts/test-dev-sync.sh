@@ -962,6 +962,9 @@ zagent() {   # $1 = SSH_AUTH_SOCK the shell starts with ("" = unset). Sets ZS (i
     ZL="${ZL/#$LOCAL/local}"; ZL="${ZL/#$FWD/fwd}"; ZL="${ZL/#$OWN/own}"
 }
 fwd_asked() { grep -c "ssh-Fwd123" "$H/stub/ssh-add-calls" 2>/dev/null || true; }
+# An `ssh-agent -s` the shell starts outlives it: on dev, one per dev-sync run sat orphaned under
+# pid 1 (2026-11-03). The stub logs the call and starts nothing.
+agents_started() { grep -c '^ssh-agent' "$H/stub/calls" 2>/dev/null || true; }
 
 new_case
 agent_fixture
@@ -971,8 +974,9 @@ check "dev pane, link on a forwarded agent: repaired to dev's own agent" "$ZS/$Z
 
 # With no agent of dev's own to fall back on, the link must still not be reused or asked.
 mv "$R/ssh-agent.socket" "$R/off.socket"; ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"
-zagent "$H/.ssh/ssh_auth_sock"
+reset_calls; zagent "$H/.ssh/ssh_auth_sock"
 check "dev, no local agent, link on a forwarded agent: never asked, never reused" "$(fwd_asked)/$ZS" "0/"
+check "dev, no local agent: no ssh-agent of its own is started" "$(agents_started)" 0
 mv "$R/off.socket" "$R/ssh-agent.socket"
 
 ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
@@ -987,10 +991,13 @@ zagent "$OWN"
 check "dev, a local ssh-agent -s socket is not mistaken for a forwarded one" "$ZS/$ZL" "own/own"
 
 touch "$H/stub/ssh-add-hangs"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
-zagent ""
+reset_calls; zagent ""
 rm "$H/stub/ssh-add-hangs"
 check "dev, an agent that never answers: shell start bounded (two 1 s probes, not two 10 s ones), and not adopted" \
     "$(( ZMS < 5000 ))/$ZS" "1/"
+# A slow agent is the likely shape under a dev-sync run's load: the probes time out, and the
+# last resort used to start a stray agent there.
+check "dev, an agent that never answers: no ssh-agent of its own is started" "$(agents_started)" 0
 
 # VSCode forwards an agent too, and the shell prefers it to dev's own when one is keyed.
 mksock "$R/vscode-ssh-auth-sock-1"; echo 0 >"$H/stub/ssh-add-rc"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
@@ -1002,6 +1009,11 @@ mv "$H/.config/dev-sync" "$H/.config/dev-sync.off"
 ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
 zagent "$FWD"
 check "laptop (no dev-sync marker): unchanged, the login's agent is published as before" "$ZS/$ZL" "fwd/fwd"
+# The last resort stands off a shared host: with no agent anywhere, the shell starts one.
+mv "$R/ssh-agent.socket" "$R/off.socket"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
+reset_calls; zagent ""
+check "laptop, no agent anywhere: the shell still starts one" "$(agents_started)" 1
+mv "$R/off.socket" "$R/ssh-agent.socket"
 mv "$H/.config/dev-sync.off" "$H/.config/dev-sync"
 agent_done
 
@@ -1094,7 +1106,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher: a line of any other shape is never sourced" "$([[ -e "$C/pwned" ]] && echo ran || echo no)" no
 
 printf '\n'
-EXPECTED_ROWS=244
+EXPECTED_ROWS=247
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

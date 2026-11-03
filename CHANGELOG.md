@@ -253,6 +253,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A shell on dev no longer starts a stray `ssh-agent`.** When dev's own agent (systemd's) was
+  slow or down, the shell's 1 s probes failed and it fell back to `eval "$(ssh-agent -s)"`. The
+  agent it started outlived the shell, and on 2026-11-03 dev had one orphan under pid 1 per
+  dev-sync run. A shared host now reuses the stable link or systemd's agent when either answers,
+  and otherwise starts none. The laptop keeps its last resort. `scripts/test-dev-sync.sh` goes
+  from 244 to 247 checks.
+
 - **`dev-sync --apply` no longer leaves its lock to a child that daemonizes.** Every row now runs
   with the lock's fd 9 closed; bash keeps its own copy on a close-on-exec descriptor, so the run
   still holds the lock and no exec'd child inherits it. From 10-17 to 11-03 an `ssh-agent` started
