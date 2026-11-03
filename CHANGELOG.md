@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rabota show` prints the current sequence and inbox plan, read-only (DO-872).** The one
+  subcommand nanoclaw's laptop agent execs for the Sol Linear workspace bridge: the newest dated
+  `sequence.json` with its own stamp (Friday's on a Sunday), items once per key in rank order,
+  per-bucket counts, the inbox plan's decision-tier buckets and batches capped at 25 rows with the
+  remainder counted, the precompute timer's `next_elapse` from `systemctl show --timestamp=utc`,
+  and explicit `no-sequence` / `no-plan` arms. It writes nothing and never notifies; a corrupt file
+  exits 5 naming the file. `answers` is DO-877's field, empty until it lands.
+
 - **dev's token handling is ready for seats, with no change on dev.** `token.env` may be a link
   to `seats/<seat>.env`, where `<seat>` matches a constant rule that no environment can widen.
   Every loader reads through it; dev-sync reads the seat file's mode (`stat -L`) and its date,
