@@ -1100,21 +1100,33 @@ agent_fixture() {
     R="$C/run"; mksock "$R/ssh-agent.socket"; LOCAL="$(readlink -f "$R/ssh-agent.socket")"
     mkdir -p "$C/abin" "$H/.ssh"; printf '#!/bin/sh\nwhile :; do sleep 1; done\n' >"$C/abin/sshd"; chmod +x "$C/abin/sshd"
     "$C/abin/sshd" & SSHD_PID=$!
-    [[ "$(cat "/proc/$SSHD_PID/comm" 2>/dev/null)" == sshd ]] || fatal "the fixture's sshd process is named $(cat "/proc/$SSHD_PID/comm" 2>/dev/null)"
+    # The name is the script's only once the fork has exec'd it: read at once, it raced and read
+    # bash's name, and the fatal below then left this loop running for good. Wait for it, briefly.
+    local _
+    for _ in {1..100}; do
+        [[ "$(cat "/proc/$SSHD_PID/comm" 2>/dev/null)" == sshd ]] && break
+        sleep 0.02
+    done
+    if [[ "$(cat "/proc/$SSHD_PID/comm" 2>/dev/null)" != sshd ]]; then
+        kill "$SSHD_PID" 2>/dev/null
+        fatal "the fixture's sshd process is named $(cat "/proc/$SSHD_PID/comm" 2>/dev/null)"
+    fi
     FWD="$C/ssh-Fwd123/agent.$SSHD_PID"; mksock "$FWD"
     sleep 300 & OTHER_PID=$!   # a local `ssh-agent -s` socket is named after its parent: not sshd
     OWN="$C/ssh-Own456/agent.$OTHER_PID"; mksock "$OWN"
 }
 agent_done() { kill "$SSHD_PID" "$OTHER_PID" 2>/dev/null; wait "$SSHD_PID" "$OTHER_PID" 2>/dev/null; }
 zagent() {   # $1 = SSH_AUTH_SOCK the shell starts with ("" = unset). Sets ZS (its final socket), ZL (the link), ZMS
+    # ZTEMPLATE = a file sourced after the plugins file, as zshrc sources ~/.zshrc.local after it.
     local out
     : >"$H/stub/ssh-add-calls"
     # shellcheck disable=SC2016  # expanded by the inner zsh, deliberately
     out="$(env -i HOME="$H" XDG_RUNTIME_DIR="$R" PATH="$H/.local/bin:/usr/bin:/bin" ${1:+SSH_AUTH_SOCK="$1"} zsh -f -c '
         zmodload zsh/datetime; t=$EPOCHREALTIME
         source "$1" >/dev/null 2>&1
+        [[ -n "$2" ]] && source "$2" >/dev/null 2>&1
         print -r -- "${SSH_AUTH_SOCK:+${SSH_AUTH_SOCK:A}}|$(readlink -f ~/.ssh/ssh_auth_sock 2>/dev/null)|$(( (EPOCHREALTIME - t) * 1000 ))"' \
-        zsh "$DOTFILES/zsh/zshrc.conditionals.plugins")"
+        zsh "$DOTFILES/zsh/zshrc.conditionals.plugins" "${ZTEMPLATE:-}")"
     IFS='|' read -r ZS ZL ZMS <<<"$out"; ZMS="${ZMS%%.*}"
     ZS="${ZS/#$LOCAL/local}"; ZS="${ZS/#$FWD/fwd}"; ZS="${ZS/#$OWN/own}"
     ZL="${ZL/#$LOCAL/local}"; ZL="${ZL/#$FWD/fwd}"; ZL="${ZL/#$OWN/own}"
@@ -1133,7 +1145,8 @@ check "dev pane, link on a forwarded agent: repaired to dev's own agent" "$ZS/$Z
 # With no agent of dev's own to fall back on, the link must still not be reused or asked.
 mv "$R/ssh-agent.socket" "$R/off.socket"; ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"
 reset_calls; zagent "$H/.ssh/ssh_auth_sock"
-check "dev, no local agent, link on a forwarded agent: never asked, never reused" "$(fwd_asked)/$ZS" "0/"
+# (Systemd's socket path is exported instead, absent here, so the template's block below starts none.)
+check "dev, no local agent, link on a forwarded agent: never asked, never reused" "$(fwd_asked)/$ZS" "0/local"
 check "dev, no local agent: no ssh-agent of its own is started" "$(agents_started)" 0
 mv "$R/off.socket" "$R/ssh-agent.socket"
 
@@ -1151,11 +1164,25 @@ check "dev, a local ssh-agent -s socket is not mistaken for a forwarded one" "$Z
 touch "$H/stub/ssh-add-hangs"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
 reset_calls; zagent ""
 rm "$H/stub/ssh-add-hangs"
+# Not adopted: the shell is handed the dangling link (`:A` leaves it unresolved), never the
+# socket that hangs.
 check "dev, an agent that never answers: shell start bounded (two 1 s probes, not two 10 s ones), and not adopted" \
-    "$(( ZMS < 5000 ))/$ZS" "1/"
+    "$(( ZMS < 5000 ))/$ZS" "1/$H/.ssh/ssh_auth_sock"
 # A slow agent is the likely shape under a dev-sync run's load: the probes time out, and the
 # last resort used to start a stray agent there.
 check "dev, an agent that never answers: no ssh-agent of its own is started" "$(agents_started)" 0
+# An interactive shell then sources ~/.zshrc.local, whose workstation template block starts an
+# agent when SSH_AUTH_SOCK is empty. With nothing answering, a shared host still hands it a path:
+# the link unless forwarded, else systemd's socket path (#347's review, U1). The stub agent logs.
+# shellcheck disable=SC2016  # the block's own text, expanded only by the shell that sources it
+printf 'if [ -z "$SSH_AUTH_SOCK" ]; then\n    eval "$(ssh-agent -s)" > /dev/null\nfi\n' >"$C/zl-template"
+mv "$R/ssh-agent.socket" "$R/off.socket"; rm -f "$H/.ssh/ssh_auth_sock"
+reset_calls; ZTEMPLATE="$C/zl-template" zagent ""
+check "dev, no agent and no link, then the template's block: no agent started" "$(agents_started)" 0
+ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
+reset_calls; ZTEMPLATE="$C/zl-template" zagent ""
+check "dev, no agent and a dangling link, then the template's block: no agent started" "$(agents_started)" 0
+mv "$R/off.socket" "$R/ssh-agent.socket"
 
 # VSCode forwards an agent too, and the shell prefers it to dev's own when one is keyed.
 mksock "$R/vscode-ssh-auth-sock-1"; echo 0 >"$H/stub/ssh-add-rc"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
@@ -1171,6 +1198,7 @@ check "laptop (no dev-sync marker): unchanged, the login's agent is published as
 mv "$R/ssh-agent.socket" "$R/off.socket"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
 reset_calls; zagent ""
 check "laptop, no agent anywhere: the shell still starts one" "$(agents_started)" 1
+check "laptop, no agent anywhere: no fallback path is exported (the shared-host branch only)" "$ZS" ""
 mv "$R/off.socket" "$R/ssh-agent.socket"
 mv "$H/.config/dev-sync.off" "$H/.config/dev-sync"
 agent_done
@@ -1277,6 +1305,10 @@ reset_calls
 env -i HOME="$H" USER=t PATH="$H/.local/bin:/usr/bin:/bin" "$LAUNCH" --print-env >/dev/null 2>&1
 check "launcher, with the agent link: the template's block starts no agent" "$(agents_started)" 0
 rm "$H/.ssh/ssh_auth_sock"
+# The server gets the same fallback, so a pane's shell starts with a path even when the server
+# started without the link (#347's review, U1).
+OUT="$(env -i HOME="$H" USER=t XDG_RUNTIME_DIR="$C/run" PATH="/usr/bin:/bin" "$LAUNCH" --print-env 2>/dev/null)"
+has   "launcher, no agent link: the server still gets systemd's socket path" "$OUT" "SSH_AUTH_SOCK=$C/run/ssh-agent.socket"
 # A real launch, into a herdr stub that reports what the server would inherit.
 mkdir -p "$C/run"; chmod 700 "$C/run"
 # shellcheck disable=SC2016  # expanded by the stub, deliberately
@@ -1329,7 +1361,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=321
+EXPECTED_ROWS=325
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

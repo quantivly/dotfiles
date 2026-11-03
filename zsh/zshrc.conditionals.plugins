@@ -149,10 +149,21 @@ _setup_ssh_agent() {
   # outlives the shell: on 2026-11-03 dev had one orphan under pid 1 per dev-sync run, the
   # slow probe being the likely shape under that run's load. With no agent here, ssh uses the
   # key files and dev-sync's agent row says what the link is; a person restarts the agent.
+  #
+  # It still exports a path. zshrc sources ~/.zshrc.local next, and the workstation template's
+  # block there starts `ssh-agent -s` whenever SSH_AUTH_SOCK is empty. So: the link unless it is
+  # forwarded, else systemd's socket path, as dev-sync and the herdr launcher hand on. A local
+  # agent that was only slow answers later; an absent one means ssh uses the key files.
   if ! { _ssh_shared_host && _ssh_sock_forwarded "$HOME/.ssh/ssh_auth_sock"; } &&
      _ssh_agent_is_valid "$HOME/.ssh/ssh_auth_sock" allow-empty; then
     export SSH_AUTH_SOCK="$HOME/.ssh/ssh_auth_sock"
-  elif ! _ssh_shared_host && ! _ssh_add_l "$SSH_AUTH_SOCK"; then
+  elif _ssh_shared_host; then
+    if [[ -L "$HOME/.ssh/ssh_auth_sock" ]] && ! _ssh_sock_forwarded "$HOME/.ssh/ssh_auth_sock"; then
+      export SSH_AUTH_SOCK="$HOME/.ssh/ssh_auth_sock"
+    else
+      export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR:-/run/user/$UID}/ssh-agent.socket"
+    fi
+  elif ! _ssh_add_l "$SSH_AUTH_SOCK"; then
     eval "$(ssh-agent -s)" >/dev/null
     [[ -n "$SSH_AUTH_SOCK" ]] && ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock" 2>/dev/null
   fi

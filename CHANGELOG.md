@@ -268,11 +268,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **dev-sync and the herdr launcher no longer start a stray `ssh-agent` on dev.** An agent a
-  shell starts outlives it, and on 2026-11-03 dev had one orphan under pid 1 per dev-sync run,
-  and one more inside `herdr-server.service`. Three paths reached `eval "$(ssh-agent -s)"`, and
-  these close them for dev-sync and the launcher; an interactive shell on dev whose agent doesn't
-  answer still runs the template's block, because its last resort hands that block no path:
+- **Nothing on dev starts a stray `ssh-agent` any more.** An agent a shell starts outlives it,
+  and on 2026-11-03 dev had one orphan under pid 1 per dev-sync run, and one more inside
+  `herdr-server.service`. Four paths reached `eval "$(ssh-agent -s)"`:
   - **the shell's last resort.** When dev's own agent (systemd's) was slow or down, the shell's
     1 s probes failed. A shared host now reuses the stable link or systemd's agent when either
     answers, and otherwise starts none. The laptop keeps its last resort;
@@ -285,10 +283,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in a `zsh` to read `LINEAR_API_KEY`, and a headless user manager has no `SSH_AUTH_SOCK`, so
     every server start left an agent in `herdr-server.service` until the next restart. That
     `zsh` now gets the agent path the server gets, else systemd's socket path. The key is read
-    as before, never in an argv and never printed. It takes effect at herdr's next restart.
+    as before, never in an argv and never printed. It takes effect at herdr's next restart;
+  - **an interactive shell on dev whose agent doesn't answer.** Its last resort started none,
+    but exported nothing either, so the block in `~/.zshrc.local`, sourced next, started one. On
+    a shared host it now exports the link unless forwarded, else systemd's socket path, and the
+    herdr launcher hands the server the same fallback, so every pane starts with a path. The
+    laptop's last resort is unchanged.
 
   dev-sync's own ssh also passes `-o ForwardAgent=no`, so the laptop's agent never reaches dev
-  during a run. `scripts/test-dev-sync.sh` goes from 307 to 321 checks.
+  during a run. `scripts/test-dev-sync.sh` goes from 307 to 325 checks.
 
 - **`dev-sync --apply` no longer leaves its lock to a child that daemonizes.** Every row now runs
   with the lock's fd 9 closed; bash keeps its own copy on a close-on-exec descriptor, so the run

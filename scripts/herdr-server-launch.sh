@@ -293,8 +293,10 @@ for var in LANG LC_ALL WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XD
     if [[ -n "${!var:-}" ]]; then server_env+=("$var=${!var}"); fi
 done
 # SSH_AUTH_SOCK is resolved above rather than merely passed through: without it
-# every new pane shell takes zshrc's slow agent-repair path.
-if [[ -n "$ssh_auth_sock" ]]; then server_env+=("SSH_AUTH_SOCK=$ssh_auth_sock"); fi
+# every new pane shell takes zshrc's slow agent-repair path. With nothing resolved, systemd's
+# socket path, so a pane's ~/.zshrc.local never finds it empty (the template's block would start
+# an agent there).
+server_env+=("SSH_AUTH_SOCK=${ssh_auth_sock:-$xdg_runtime_dir/ssh-agent.socket}")
 # LINEAR_API_KEY is deliberately NOT in server_env: server_env becomes env(1)'s
 # argv, and /proc/<pid>/cmdline is world-readable. It reaches the server via the
 # 0600 env file at the exec below.
