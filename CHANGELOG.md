@@ -198,6 +198,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The rabota precompute timer runs 07:00–23:00 every day (DO-873).** It ran Mon–Fri 07:00–18:30,
+  so the rank Sol's home is about to show was Friday's until Monday morning and last night's until
+  07:00, while the phone is looked at in the evening and at weekends. Still every 30 minutes,
+  `Persistent=true` kept. The cost is one ~100 s sync per tick while the laptop is awake: at most 33
+  ticks a day instead of 24, and weekend ticks that did not exist.
+
 - **The laptop sleeps only when asked to: closing the lid locks the screen, and GNOME no longer
   suspends on idle.** Agents run for hours unattended, and from 2026-10-21 to 2026-10-28 the
   laptop suspended ten times by three paths: a lid closed on battery, a charger pulled with the

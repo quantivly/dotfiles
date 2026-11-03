@@ -1,9 +1,9 @@
 # systemd/rabota-precompute@.timer
 [Unit]
-Description=Run rabota pre-compute for tenant %i every 30 minutes on weekdays, 07:00-18:30
+Description=Run rabota pre-compute for tenant %i every 30 minutes, 07:00-23:00 every day
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 07..18:00,30:00
+OnCalendar=*-*-* 07..23:00,30:00
 Persistent=true
 RandomizedDelaySec=120
 Unit=rabota-precompute@%i.service
