@@ -253,12 +253,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A shell on dev no longer starts a stray `ssh-agent`.** When dev's own agent (systemd's) was
-  slow or down, the shell's 1 s probes failed and it fell back to `eval "$(ssh-agent -s)"`. The
-  agent it started outlived the shell, and on 2026-11-03 dev had one orphan under pid 1 per
-  dev-sync run. A shared host now reuses the stable link or systemd's agent when either answers,
-  and otherwise starts none. The laptop keeps its last resort. `scripts/test-dev-sync.sh` goes
-  from 244 to 247 checks.
+- **Nothing on dev starts a stray `ssh-agent` any more.** An agent a shell starts outlives it,
+  and on 2026-11-03 dev had one orphan under pid 1 per dev-sync run. Two paths reached
+  `eval "$(ssh-agent -s)"`:
+  - **the shell's last resort.** When dev's own agent (systemd's) was slow or down, the shell's
+    1 s probes failed. A shared host now reuses the stable link or systemd's agent when either
+    answers, and otherwise starts none. The laptop keeps its last resort;
+  - **the workstation template's block in `~/.zshrc.local`**, which starts an agent when
+    `SSH_AUTH_SOCK` is empty, as it is under dev-sync over ssh. dev-sync's mcp row sources that
+    file. dev-sync now hands its children the stable link when it has no agent of its own,
+    never a forwarded one, so the block starts nothing. The file itself is unchanged.
+
+  `scripts/test-dev-sync.sh` goes from 244 to 251 checks.
 
 - **`dev-sync --apply` no longer leaves its lock to a child that daemonizes.** Every row now runs
   with the lock's fd 9 closed; bash keeps its own copy on a close-on-exec descriptor, so the run

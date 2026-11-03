@@ -286,7 +286,8 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
 
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
 run() {   # $@ = dev-sync args after --here
-    OUT="$(env -u LINEAR_API_KEY HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
+    # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
+    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
         DEV_SYNC_HERDR_RELEASES="file://$C/releases" DEV_SYNC_PROC="$C/proc" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash "$SUT" --here "$@" 2>&1)"
     RC=$?
@@ -1049,6 +1050,28 @@ run_level --check
 has   "agent: no link is information" "$OUT" "$(rowtxt · agent "no ~/.ssh/ssh_auth_sock link")"
 agent_done
 
+echo "== dev-sync hands its children dev's own agent link"
+new_case
+agent_fixture
+# The workstation template's block, which dev's ~/.zshrc.local holds (counted, not read, 11-03), and
+# a line recording what the shell sourcing it was handed. The mcp row sources this file; the stub
+# ssh-agent logs its call and starts nothing.
+cat >>"$H/.zshrc.local" <<'ZL'
+print -r -- "${SSH_AUTH_SOCK:-unset}" >"$HOME/stub/zl-sock"
+if [ -z "$SSH_AUTH_SOCK" ]; then
+    eval "$(ssh-agent -s)" > /dev/null
+fi
+ZL
+ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
+reset_calls; run_level --check
+has   "children: the mcp row sourced ~/.zshrc.local (else the next rows prove nothing)" "$OUT" "LINEAR_API_KEY is set in ~/.zshrc.local"
+check "children: a shell dev-sync starts is handed the stable link" "$(cat "$H/stub/zl-sock" 2>/dev/null)" "$H/.ssh/ssh_auth_sock"
+check "children: so the template's block starts no agent" "$(agents_started)" 0
+ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"; fake_proc "$SSHD_PID" sshd 0
+run_level --check
+check "children: a link on a forwarded agent is never handed on" "$(cat "$H/stub/zl-sock" 2>/dev/null)" "unset"
+agent_done
+
 echo "== shells and the herdr launcher load it"
 zload() {   # what an interactive shell on the host ends up with: unset, the token, or other
     # shellcheck disable=SC2016  # expanded by the inner zsh, deliberately
@@ -1106,7 +1129,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher: a line of any other shape is never sourced" "$([[ -e "$C/pwned" ]] && echo ran || echo no)" no
 
 printf '\n'
-EXPECTED_ROWS=247
+EXPECTED_ROWS=251
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
