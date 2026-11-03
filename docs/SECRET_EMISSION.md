@@ -115,10 +115,15 @@ Design decisions that are load-bearing, not preferences:
   Seat files also join the per-segment rule's path list, so a wrapper the directory rule cannot
   parse (`timeout -s KILL 5 cat …/seats/x.env`) still meets that rule when the path is whole.
   **What still passes**, each pinned as an `uncovered` row:
-  - an obfuscated path: `claude-o''auth`, a variable, a glob;
+  - an obfuscated path: `claude-o''auth`, a variable, a glob, or an alias with no `.` in its
+    name, which reads as a placeholder (`ln -sf token.env t && read -r l <t>/dev/null`; keep
+    every token file here named with a `.`);
   - a plain-path read by a verb the rule doesn't list: `xargs -a token.env echo`,
     `cp token.env /dev/stdout`, `dd if=token.env`, `pr -t token.env`, `hexdump -C token.env`;
-  - a wrapper it can't parse, past a `cd`: `cd … && timeout -s KILL 5 cat token.env`;
+  - a wrapper it can't parse, past a `cd`: `cd … && timeout -s KILL 5 cat token.env`,
+    `find . -name token.env -exec cat {} +`;
+  - a verb inside a double-quoted substitution: `echo "$(cat …/token.env)"`, or the backtick
+    form. The verb test reads the copy with double-quoted text stripped; unquoted, it is refused;
   - a read quoted for another host: `ssh dev 'cat ~/.config/claude-oauth/token.env'`.
 
   **What it refuses that reads nothing**, each pinned as a known false positive, with the way
@@ -205,7 +210,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (278 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (283 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this

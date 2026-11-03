@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `xargs -a`, `cp … /dev/stdout`, `dd`, `pr`, `hexdump`, a wrapper it can't parse and a read
   quoted for `ssh` still pass, as `docs/SECRET_EMISSION.md` lists.
   `scripts/test-dev-sync.sh` goes from 244 to 307 checks, `scripts/test-secret-guard.sh` from
-  203 to 278.
+  203 to 283.
 
 - **herdr makes a sound only when you are needed.** It used to beep at every turn end of every
   background agent, and with a dozen panes none of those beeps needed you.

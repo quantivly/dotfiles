@@ -499,7 +499,7 @@ subst_may_expand() {
 
 COR_WHY=""
 claude_oauth_read() {
-  local seg stripped first np dir_re verb_re kw_re redir_re subst_re ph_re lead path verbs
+  local seg stripped first np dir_re verb_re kw_re redir_re subst_re lead path verbs
   dir_re='claude-oauth([^A-Za-z0-9_.-]|$)'
   [[ "$cmd" =~ $dir_re ]] || return 1
   cmd_segments_ensure || return 1
@@ -515,8 +515,6 @@ claude_oauth_read() {
   # `$(<`, or a backtick then `<`: the cheap gate for subst_may_expand. In a variable: an
   # unquoted `<` inside [[ =~ ]] is parsed as a redirection.
   subst_re='(\$\(|`)[[:space:]]*<'
-  # The LAST placeholder in the string, so the loop below removes one per turn and ends.
-  ph_re='^(.*)<[A-Za-z][A-Za-z0-9_-]*>(.*)$'
   while IFS= read -r seg || [[ -n "$seg" ]]; do
     [[ -n "$seg" ]] || continue
     stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
@@ -532,8 +530,11 @@ claude_oauth_read() {
       COR_WHY="a \`\$(< file)\` read in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
       return 0
     fi
+    # Placeholders go in ONE linear pass, and only from a segment with a `<` at all. A loop of one
+    # whole-string regex per placeholder took 5.5 s on 4,000 of them in 12 KB, past this hook's 5 s
+    # timeout, which fails open.
     np="$stripped"
-    while [[ "$np" =~ $ph_re ]]; do np="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"; done
+    [[ "$np" == *'<'* ]] && np="$(printf '%s' "$np" | sed -E 's/<[A-Za-z][A-Za-z0-9_-]*>/ /g')"
     if [[ "$np" =~ $redir_re ]]; then
       COR_WHY="an input redirection in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
       return 0

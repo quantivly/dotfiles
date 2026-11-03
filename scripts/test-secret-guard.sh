@@ -860,12 +860,35 @@ for c in \
 do
   check "uncovered (by decision): $c" "$(ask "$c")" "allow"
 done
+# A verb inside a double-quoted substitution: the verb test runs on the quote-stripped copy, so it
+# never sees inside "$( … )" or "` … `". Unquoted, the same substitution is refused (R1).
+# shellcheck disable=SC2016  # the fixtures must reach the guard UNEXPANDED
+for c in \
+  'echo "$(cat ~/.config/claude-oauth/token.env)"' \
+  'cd ~/.config/claude-oauth && printf "%s\n" "`head -1 token.env`"'
+do
+  check "uncovered (by decision): $c" "$(ask "$c")" "allow"
+done
+# Two more the docs name: a verb behind -exec, and an alias with no dot, which reads as a
+# placeholder (R3's note: keep every token file here named with a `.`).
+for c in \
+  'cd ~/.config/claude-oauth && find . -name token.env -exec cat {} +' \
+  'cd ~/.config/claude-oauth && ln -sf token.env t && read -r l <t>/dev/null'
+do
+  check "uncovered (by decision): $c" "$(ask "$c")" "allow"
+done
 # A `<word>` with no `.` or `/` in the word is a placeholder in prose, not a redirection: it cannot
 # name token.env or a seat file. PR B's messages write `seats/<seat>.env` (A2).
 msg_seat=$'git commit -F - <<\'EOF\'\nfix: renew ~/.config/claude-oauth/seats/<seat>.env through the link\nEOF'
 check "allows: a heredoc message with a <placeholder> beside the directory" "$(ask "$msg_seat")" "allow"
 check "refuses: a redirection whose word runs into a > (not a placeholder: it has a dot)" \
       "$(ask 'cd ~/.config/claude-oauth && tr -d x <token.env>/dev/stdout')" "deny"
+# Placeholders are removed in one pass, not one regex per placeholder: 4,000 of them in a 12 KB
+# command took 5.5 s, past the hook's 5 s timeout, which fails open (R3). Past the segmenter's
+# bound the command is one segment, so the read behind them is in the same one.
+many_ph=": $(printf '<a>%.0s' {1..4000}); cd ~/.config/claude-oauth && tr x y < token.env"
+t0="${EPOCHREALTIME/./}"; v="$(ask "$many_ph")"; ms=$(( (${EPOCHREALTIME/./} - t0) / 1000 ))
+check "refuses: a read behind 4,000 placeholders, within 2 s" "$v/$(( ms < 2000 ))" "deny/1"
 # Known false positives, by decision (A2): a heredoc line that STARTS with a verb word, and
 # metadata piped into a filter. The ways round: the -m "$(cat <<'EOF' ...)" idiom, whose message is
 # one quoted word, and the metadata command without the filter.
@@ -984,7 +1007,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=278
+EXPECTED_ROWS=283
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.
