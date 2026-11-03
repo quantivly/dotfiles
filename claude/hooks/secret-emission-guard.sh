@@ -385,7 +385,7 @@ credential_file_read() {
 
     # Path on the RAW segment: `cat "$HOME/.zshrc.local"` must still match, and
     # $stripped below cannot see a path that exists only inside quotes.
-    [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env|\.aws/credentials|\.aws/login/cache) ]] || continue
+    [[ "$seg" =~ (\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env|claude-oauth/seats/|\.aws/credentials|\.aws/login/cache) ]] || continue
     hit="${BASH_REMATCH[1]}"
 
     # Verb on the QUOTE-STRIPPED segment: a message naming the file is not a read.
@@ -401,7 +401,7 @@ credential_file_read() {
     # nothing from the named file.
     # In a variable: an unquoted `<` inside [[ =~ ]] is parsed as a redirection
     # before the regex is ever seen, and `\<` does not escape it.
-    redir_re='(^|[^<])[<][[:space:]]*[^<[:space:]]*(\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env|\.aws/credentials|\.aws/login/cache)'
+    redir_re='(^|[^<])[<][[:space:]]*[^<[:space:]]*(\.zshrc\.local|\.gitconfig\.local|\.backup\.local|\.credentials\.json|claude-oauth/token\.env|claude-oauth/seats/|\.aws/credentials|\.aws/login/cache)'
     if [[ "$stripped" =~ $redir_re ]]; then
       CFR_WHY="an input redirection from \`$hit\`, which holds credentials"
       return 0
@@ -417,6 +417,129 @@ credential_file_read() {
     return 0
   done <<< "$CMD_SEGS"
 
+  return 1
+}
+
+# --- the token directory ----------------------------------------------------
+#
+# ~/.config/claude-oauth/ holds the long-lived Claude tokens: token.env, and in the seat layout
+# seats/<seat>.env, all a year long. Nothing in it is edited by hand (claude-oauth-store writes
+# it), so the rule here is wider than credential_file_read's, in three ways:
+#
+#   the DIRECTORY anywhere in the command, not a file name in the same segment. Per segment,
+#   `cd ~/.config/claude-oauth && cat token.env` passed, because no segment held both;
+#
+#   a verb in ANY segment -- but at COMMAND POSITION. Every heredoc line is a segment, so a verb
+#   anywhere would refuse a commit message that names the directory and says "more" or "sort".
+#   Command position is a segment's start or a `|`, `(`, backtick, `{`, `!`, `;` or `&`, then
+#   what ordinary commands put first: assignments, sudo/command/exec/nohup/time, env/nice/
+#   timeout/stdbuf/xargs/ionice with their options, a keyword, and a path (`/bin/cat`). The
+#   `then`/`do`/`else` that cmd_segments merges into a loop or an `if` counts only in a segment
+#   that starts with if/for/while/until, which prose seldom does. A quoted or escaped first
+#   word (`"cat"`, `c\at`) is read with its quotes and backslashes removed;
+#
+#   interpreters count (python, perl, ruby, node), and so do the shells (bash, sh, zsh, dash,
+#   ksh): every line of a KEY=value file is an assignment, so `bash -x` or `sh -v` of it prints
+#   the token. credential_file_read leaves interpreters out on purpose, because ~/.zshrc.local is
+#   edited that way; nothing edits this directory that way.
+#
+# Two spellings of a read need care with quotes. `$(< f)` and `` `< f` `` read a file with no verb
+# and still expand inside double quotes, where the quote-stripped copy has lost them, so they are
+# looked for wherever the shell may expand them (subst_may_expand, below). And a `<word>` whose word
+# has no `.` or `/` is a placeholder in prose (`seats/<seat>.env`), not a redirection: it cannot
+# name a token file.
+#
+# `claude-oauth-store`, the script, is not the directory: the name must end at a character that
+# cannot continue it (`/`, `;`, a quote, whitespace, the end). This RAISES THE BAR AND DOES NOT
+# BLOCK (docs/SECRET_EMISSION.md lists what passes): an obfuscated path, a verb it does not list
+# (`dd`, `cp … /dev/stdout`, `xargs -a`), an unparsed wrapper (`timeout -s KILL`) and a read
+# quoted for another host (`ssh dev 'cat …'`) pass it, though credential_file_read still sees a
+# file's path in its own segment. A code search that names the directory is refused, for which
+# grep -l piped through the redactor is the way through.
+#
+# 0 if segment $1 (which the caller found to hold `$(<` or `` `< ``) may expand a substitution, so
+# the read must be refused. Only two shapes are let through, both of them how one WRITES about the
+# read: inside single quotes, and after a backslash. Quote state is tracked as the shell tracks it,
+# so a `'` inside double quotes is a literal: a sed that strips every '...' pair read `"'$(<f)'"`
+# and `"it's" "$(<f)" 'x'` as quoted and missed the read.
+#
+# It fails CLOSED wherever it stops being a parser, because a wrong guess here allows a read:
+#   - any `$(` or backtick outside single quotes, not only `$(<`: a substitution's own quotes
+#     (`"$(echo "'")$(<f)"`) are not tracked, so whatever follows one cannot be trusted;
+#   - `$'`, ANSI-C quoting, where `\'` does not close the quote (`$'it\'s' "$(<f)"`);
+#   - a segment longer than the segmenter's own bound. cmd_segments emits a longer command whole,
+#     and a character loop over it measured past 20s on 300 KB, while this hook's 5s timeout
+#     FAILS OPEN. Refusing unscanned is the segmenter's own answer to the same length.
+subst_may_expand() {
+  # Bytes, not characters: in a UTF-8 locale ${s:i:1} counts from the start of the string at
+  # every step. No byte of a multibyte character equals the ASCII bytes this looks for.
+  local LC_ALL=C
+  local s="$1" i=0 n ch dq=""
+  n=${#s}
+  (( n > 8192 )) && return 0
+  while (( i < n )); do
+    ch="${s:i:1}"
+    case "$ch" in
+      \\) (( i += 2 )); continue ;;   # an escaped character is a literal, quoted or not
+      '"') if [[ -n "$dq" ]]; then dq=""; else dq=1; fi ;;
+      "'")
+        # Outside double quotes, a single-quoted span: skip to its close (or the end, unbalanced).
+        if [[ -z "$dq" ]]; then
+          (( i++ ))
+          while (( i < n )) && [[ "${s:i:1}" != "'" ]]; do (( i++ )); done
+        fi ;;
+      '`') return 0 ;;
+      # String tests, not a regex: bash compiles a [[ =~ ]] pattern at every evaluation.
+      '$') [[ "${s:i+1:1}" == '(' || "${s:i+1:1}" == "'" ]] && return 0 ;;
+    esac
+    (( i++ ))
+  done
+  return 1
+}
+
+COR_WHY=""
+claude_oauth_read() {
+  local seg stripped first np dir_re verb_re kw_re redir_re subst_re lead path verbs
+  dir_re='claude-oauth([^A-Za-z0-9_.-]|$)'
+  [[ "$cmd" =~ $dir_re ]] || return 1
+  cmd_segments_ensure || return 1
+  lead='(([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|command|exec|nohup|time|then|do|else|elif|if|while|until|!|\{)[[:space:]]+'
+  lead+='|(env|nice|timeout|stdbuf|xargs|ionice)([[:space:]]+(-[^[:space:]]*|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|[0-9][0-9.]*[smhd]?))*[[:space:]]+)*'
+  path='([^[:space:]]*/)?'
+  verbs='(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|cut|base64|paste|sort|uniq|rev|fold|expand|column|jq|diff|\.|python[0-9.]*|perl|ruby|node|bash|sh|zsh|dash|ksh)'
+  verb_re="(^|[|(\`{;!&])[[:space:]]*${lead}${path}${verbs}([[:space:]]|\$)"
+  kw_re="^[[:space:]]*(if|for|while|until)[[:space:]].*[[:space:]](then|do|else)[[:space:]]+${lead}${path}${verbs}([[:space:]]|\$)"
+  # As in credential_file_read: `<` and not `<<` (a heredoc or herestring reads no file), and not
+  # `<(`, a process substitution, whose own command is a segment of its own here.
+  redir_re='(^|[^<])[<][[:space:]]*[^<([:space:]]'
+  # `$(<`, or a backtick then `<`: the cheap gate for subst_may_expand. In a variable: an
+  # unquoted `<` inside [[ =~ ]] is parsed as a redirection.
+  subst_re='(\$\(|`)[[:space:]]*<'
+  while IFS= read -r seg || [[ -n "$seg" ]]; do
+    [[ -n "$seg" ]] || continue
+    stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
+    first="${seg#"${seg%%[![:space:]]*}"}"; first="${first%%[[:space:]]*}"
+    first="${first//[\"\'\\]/}"; first="${first##*/}"
+    if [[ "$stripped" =~ $verb_re || "$stripped" =~ $kw_re || "$first" =~ ^${verbs}$ ]]; then
+      COR_WHY="a content verb, a shell or an interpreter in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens (if this only WRITES text that mentions it, write the file with an editor tool instead)"
+      return 0
+    fi
+    # The raw segment gates the character loop: only a segment that holds the substitution at all
+    # pays for it.
+    if [[ "$seg" =~ $subst_re ]] && subst_may_expand "$seg"; then
+      COR_WHY="a \`\$(< file)\` read in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
+      return 0
+    fi
+    # Placeholders go in ONE linear pass, and only from a segment with a `<` at all. A loop of one
+    # whole-string regex per placeholder took 5.5 s on 4,000 of them in 12 KB, past this hook's 5 s
+    # timeout, which fails open.
+    np="$stripped"
+    [[ "$np" == *'<'* ]] && np="$(printf '%s' "$np" | sed -E 's/<[A-Za-z][A-Za-z0-9_-]*>/ /g')"
+    if [[ "$np" =~ $redir_re ]]; then
+      COR_WHY="an input redirection in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
+      return 0
+    fi
+  done <<< "$CMD_SEGS"
   return 1
 }
 
@@ -513,6 +636,8 @@ if [[ -z "$why" ]]; then
   #   anywhere. Keeping them would mean keeping that false positive; telling
   #   them apart needs real dataflow, which a command-string matcher does not
   #   have. Do not read the verb list as coverage.
+  elif claude_oauth_read; then
+    why="$COR_WHY"
   elif credential_file_read; then
     why="$CFR_WHY"
   # `printenv NAME` prints one variable's value. The bare-dump rule above

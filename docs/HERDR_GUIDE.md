@@ -1082,9 +1082,9 @@ Regenerate it after every `herdr update`.
 stack. Treat it as **shared, not disposable**: an OOM or an unasked-for restart there is a team
 outage.
 
-- **Policy: quantivly only.** Nothing non-work goes on dev. Its seat is **quantivly-0**,
-  held by dev's own `/login`. The laptop keeps its own login to that account, which is how it —
-  and rabota — *sees* that window. Two logins to one seat are independent, so a laptop session
+- **Policy: quantivly only.** Nothing non-work goes on dev. Its seat is **quantivly-0**. The
+  laptop keeps its own login to that account, which is how it — and rabota — *sees* that
+  window. Two logins to one seat are independent, so a laptop session
   on it logs nothing out, but it spends the window dev's lanes are gated on: on the laptop it is
   the quantivly pool's spill seat (`CLAUDE_TENANT_SPILL`), taken only once the pool is spent.
 - **The declared seat is checked, by `rabota doctor`, without reading a credential.**
@@ -1108,14 +1108,16 @@ outage.
   (`zsh/zshrc.company`, at shell start); the herdr server (`scripts/herdr-server-launch.sh`,
   through the same 0600 hand-off as `LINEAR_API_KEY`, since its `env -i` would drop a unit
   `EnvironmentFile=`); rabota's remote lanes (`-p EnvironmentFile=-…`, so a host without the file
-  runs on its login as before); and dev-sync's own `claude` calls. To store or renew it, a person
-  runs this in a plain terminal, never a pane an agent reads and never `!` in a Claude session:
+  runs on its own login, if it has one; dev has had none since 11-03 12:36Z, so a lane there
+  without the file fails "not logged in"); and dev-sync's own `claude` calls. To store or renew
+  it, a person runs this in a plain terminal, never a pane an agent reads and never `!` in a
+  Claude session:
   ```bash
   ssh -t dev '~/.local/bin/claude setup-token && ~/.dotfiles/scripts/claude-oauth-store'
   ```
-  Approve in a browser signed in to **quantivly-0**, the seat dev's `/login` uses: `rabota
-  doctor` reads the account from `.claude.json`, which the token does not change, so a token
-  minted on another account would bill it unseen. Paste the token at the hidden prompt and press
+  Approve in a browser signed in to **quantivly-0**: `rabota doctor` reads the account from
+  `.claude.json`, which the token does not change, so a token minted on another account would
+  bill it unseen. Paste the token at the hidden prompt and press
   Enter twice: input ends at an empty line, so a token the terminal wrapped is joined back
   together, and the store sends one request with it before writing anything. Then clear that
   terminal's scrollback. `dev-sync --check` reports the method (which shows the token is in use, not that it works:
@@ -1128,10 +1130,23 @@ outage.
     `.credentials.json`, so two sessions refreshing or signing in together can blank Slack's or
     Notion's entry ([CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md)). The symptom is one server needing
     a sign-in again (dev-sync's `mcp` ⚠), not a logout.
-  - **Still on the shared login:** a session started before the token was stored, until it
-    restarts; a bare `ssh dev claude …`, which reads no zshrc; and any session that runs
-    `/login`, which switches that session to the stored login. Never `/login` on dev. (`--bare`
-    reads neither credential, only `ANTHROPIC_API_KEY` or `apiKeyHelper`, so it cannot race.)
+  - **Fail with "not logged in"** since 11-03 12:36Z, when the shared `/login` (`claudeAiOauth`)
+    was removed from dev's `.credentials.json` (`mcpOAuth` stays):
+    - a nested `claude` in a session's own shell, whose token Claude Code scrubs;
+    - a bare `ssh dev claude …`, which reads no zshrc;
+    - a script calling `$HOME/.local/bin/claude` directly.
+
+    Never `/login` on dev: it puts the race back. A session started before the token still holds
+    the old login, and its next refresh writes `claudeAiOauth` back, as any `/login` does.
+    `dev-sync --check` then shows ⚠ "the shared /login is back on dev" (a `jq -e` test of the key's
+    presence that reads nothing else), next to the row counting processes without the token, which
+    names the likely writer: restart those, then remove the key again. (`--bare` reads neither
+    credential, only `ANTHROPIC_API_KEY` or `apiKeyHelper`, so it cannot race.)
+  - **Ready for seats, not using them yet.** `token.env` may be a link to `seats/<seat>.env`
+    (`<seat>` like `quantivly-5`, a fixed rule). Every loader reads through it, dev-sync reports the
+    seat file's mode and `seats/<seat>.created` date and ⚠s a dangling link or a target outside
+    `seats/`, and `claude-oauth-store` renews the seat the link names, keeping the link. dev's
+    `token.env` is still a file.
 - **Two doors, not one.** **Attended:** pick `dev (EC2)` in the machine sidebar and spawn with
   herdr-draft's popup in that machine's workspace. `herdr-draft` is **not on dev's `PATH`** — the
   popup finds its own binary, but a shell invocation needs

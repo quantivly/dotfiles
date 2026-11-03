@@ -82,6 +82,9 @@ case "$1" in
     install) [[ -e "$S/claude-install-fails" ]] && exit 1; echo "$2" >"$S/claude-version" ;;
     mcp) cat "$S/mcp-list" 2>/dev/null ;;
     -p)   # claude-oauth-store's check of a token: shapes measured against claude 2.1.299
+        # Whether the store's lock is free while this probe child runs (a fresh open).
+        [[ -d "$HOME/.config/claude-oauth" ]] &&
+            { flock -n "$HOME/.config/claude-oauth/.lock" true && echo free || echo held; } >>"$S/store-lock-during"
         if [[ -e "$S/token-rejected" ]]; then
             echo '{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 401 OAuth access token is invalid."}'
             exit 1
@@ -273,6 +276,28 @@ store_token() {   # $1 = the created date; writes what claude-oauth-store writes
     chmod 600 "$H/.config/claude-oauth/token.env"
     echo "$1" >"$H/.config/claude-oauth/created"
 }
+# The seat layout PR B's --adopt makes (docs/HERDR_GUIDE.md, "Working on dev"): the token moves to
+# seats/$1.env with its date beside it, and token.env becomes a link to it. The legacy `created` is
+# left behind dated 300 days ago, so a row can tell which date was read.
+link_token() {   # $1 = seat name
+    local d="$H/.config/claude-oauth"
+    mkdir -p "$d/seats"; chmod 700 "$d/seats"
+    mv "$d/token.env" "$d/seats/$1.env"; mv "$d/created" "$d/seats/$1.created"
+    date -d '300 days ago' +%F >"$d/created"
+    ln -s "seats/$1.env" "$d/token.env"
+}
+# A credentials file holding a fake /login, or not: only the key's presence may ever be read.
+FAKE_LOGIN="FIXTURErefreshNOTREAL0123456789"
+# A row's glyph and area, as dev-sync's row() prints them, so a needle also pins ✓ against ⚠.
+AUTH_OK="$(printf '✓ %-14s ' auth)"; AUTH_OPER="$(printf '⚠ %-14s ' auth)"
+creds() {   # $1 = login | none | garbage
+    case "$1" in
+        login) printf '{"claudeAiOauth":{"refreshToken":"%s"},"mcpOAuth":{}}\n' "$FAKE_LOGIN" ;;
+        none) printf '{"mcpOAuth":{"x":"%s"}}\n' "$FAKE_LOGIN" ;;
+        garbage) printf '{"claudeAiOauth": %s\n' "$FAKE_LOGIN" ;;
+    esac >"$H/.claude/.credentials.json"
+    chmod 600 "$H/.claude/.credentials.json"
+}
 ntok() { if [[ -e "$H/stub/calls-with-token" ]]; then wc -l <"$H/stub/calls-with-token"; else echo 0; fi; }
 fake_proc() {   # $1 = pid, $2 = comm, $3 = 1 if its environment carries the token
     local d="$C/proc/$1"; mkdir -p "$d"; echo "$2" >"$d/comm"
@@ -285,10 +310,13 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
     --dotfiles-sha "$(git --git-dir="$GH/quantivly/dotfiles.git" rev-parse main)" --clone alpha=quantivly/alpha; }
 
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
-run() {   # $@ = dev-sync args after --here
-    OUT="$(env -u LINEAR_API_KEY HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
+run() {   # $@ = dev-sync args after --here; XTRACE=1 traces it to $C/xtrace
+    # The trace goes to its own fd, as a person debugging with BASH_XTRACEFD would see it: a
+    # command's own 2>/dev/null then hides nothing from it.
+    local xt=(); [[ -n "${XTRACE:-}" ]] && xt=(BASH_XTRACEFD=3)
+    OUT="$(env -u LINEAR_API_KEY "${xt[@]}" HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
         DEV_SYNC_HERDR_RELEASES="file://$C/releases" DEV_SYNC_PROC="$C/proc" \
-        PATH="/usr/local/bin:/usr/bin:/bin" bash "$SUT" --here "$@" 2>&1)"
+        PATH="/usr/local/bin:/usr/bin:/bin" bash ${XTRACE:+-x} "$SUT" --here "$@" 2>&1 3>"$C/xtrace")"
     RC=$?
 }
 run_level() { local m="$1"; shift; mapfile -t F < <(facts); run "$m" "${F[@]}" "$@"; }
@@ -856,6 +884,88 @@ rm -rf "$C/proc"
 run_level --check
 has   "no Claude process: information only" "$OUT" "no Claude process running"
 
+echo "== token.env as a link to a seat (the layout PR B adopts; dev's token.env is still a file)"
+new_case
+link_token quantivly-5
+run_level --check
+check "link: --check exits 0" "$RC" 0
+has   "link: the token is loaded through it" "$OUT" "claude uses the long-lived token (oauth_token)"
+hasnt "link: the mode read is the seat file's 600, not the link's 777" "$OUT" "not 600"
+has   "link: the date is the seat's, not the legacy file's" "$OUT" "token stored $(date -d '10 days ago' +%F), 10 day(s) old"
+hasnt "link: the token value is never printed" "$OUT" "$FAKE_TOK"
+new_case
+link_token quantivly-5; chmod 644 "$H/.config/claude-oauth/seats/quantivly-5.env"
+run_level --check
+has   "link to a mode-644 seat file: the seat file's mode is warned" "$OUT" "the token file is mode 644, not 600"
+new_case
+link_token quantivly-5; rm "$H/.config/claude-oauth/seats/quantivly-5.created"
+run_level --check
+has   "link to a seat with no date: expiry unknown, naming the seat's date file" "$OUT" "/seats/quantivly-5.created, so its expiry is unknown"
+new_case
+link_token quantivly-5; rm "$H/.config/claude-oauth/seats/quantivly-5.env"
+run_level --check
+has   "a dangling link: ⚠, naming the missing seat" "$OUT" "token.env links to seats/quantivly-5.env, which does not exist"
+check "a dangling link: nothing is loaded" "$(ntok)" 0
+# A target outside the layout is refused by name, whatever the file there holds: here every one
+# holds a well-formed token, so only the name rule can refuse it. The environment tries to widen
+# the rule (v2's dropped CLAUDE_OAUTH_SEAT_PREFIX); the rule is a constant and must not move.
+# The last two pass the name rule alone, so only "exactly seats/<name>.env" refuses them.
+for t in ../outside.env seats/../outside.env ABSOLUTE seats/other-5.env seats/Quantivly-5.env \
+    seats/quantivly-5.env.bak seats/sub/quantivly-5.env quantivly-5.env seats/quantivly-5; do
+    new_case
+    d="$H/.config/claude-oauth"; link_token quantivly-5
+    [[ "$t" == ABSOLUTE ]] && t="$d/seats/quantivly-5.env"   # the real seat, named absolutely
+    mkdir -p "$(dirname "$d/${t#"$d/"}")"
+    [[ -e "$d/${t#"$d/"}" ]] || cp "$d/seats/quantivly-5.env" "$d/${t#"$d/"}"
+    ln -sfn "$t" "$d/token.env"
+    CLAUDE_OAUTH_SEAT_PREFIX='../' run_level --check
+    has   "a link to ${t#"$H/"}: ⚠, not a seat" "$OUT" "which is not a seat"
+    check "a link to ${t#"$H/"}: dev-sync loads nothing through it" "$(ntok)" 0
+done
+STORE="$DOTFILES/scripts/claude-oauth-store"
+check "the seat-name rule: one constant, spelt the same in the store and in dev-sync" \
+    "$(grep -h '^SEAT_RE=' "$SUT" "$STORE" | uniq -c | sed 's/^ *//')" "2 SEAT_RE='^quantivly-[a-z0-9][a-z0-9-]{0,30}\$'"
+
+echo "== the shared /login coming back (claudeAiOauth)"
+new_case
+run_level --check
+has   "no credentials file: ✓, no shared /login" "$OUT" "${AUTH_OK}no shared /login on dev (claudeAiOauth absent)"
+new_case
+creds none
+run_level --check
+has   "credentials without claudeAiOauth: ✓" "$OUT" "${AUTH_OK}no shared /login on dev (claudeAiOauth absent)"
+hasnt "credentials without claudeAiOauth: nothing of the file is printed" "$OUT" "$FAKE_LOGIN"
+new_case
+creds login
+run_level --check
+has   "claudeAiOauth back: ⚠, said so" "$OUT" "${AUTH_OPER}the shared /login is back on dev"
+check "claudeAiOauth back: a person's step, not drift" "$RC" 0
+hasnt "claudeAiOauth back: nothing of the file is printed" "$OUT" "$FAKE_LOGIN"
+new_case
+creds garbage
+run_level --check
+has   "unparseable credentials: ⚠ unknown, never ✓" "$OUT" "${AUTH_OPER}could not tell whether the shared /login is back"
+hasnt "unparseable credentials: nothing of it is printed, jq's error included" "$OUT" "$FAKE_LOGIN"
+new_case
+rm -rf "$H/.config/claude-oauth"; creds login
+run_level --check
+hasnt "no token stored: the /login is the only login, so no write-back row" "$OUT" "is back on dev"
+
+echo "== claude_procs reads no environment into bash (F11)"
+new_case
+# The running process carries a SECOND fake token, which only the /proc scan could ever see.
+FAKE_TOK2="sk-ant-""oat01-FIXTUREsecondNOTREAL0123456789abcd"
+printf 'HOME=/x\0CLAUDE_CODE_OAUTH_TOKEN=%s\0TERM=y\0' "$FAKE_TOK2" >"$C/proc/4101/environ"
+fake_proc 4102 claude 0
+XTRACE=1 run_level --check
+has   "xtrace: the counts are unchanged" "$OUT" "1 of 2 Claude process(es) started without the token"
+has   "xtrace: the trace covers the /proc scan (else the next row proves nothing)" "$(cat "$C/xtrace")" "proc/4101/comm"
+hasnt "xtrace: no environ entry reaches a shell variable (a set -x run shows none)" "$(cat "$C/xtrace")" "$FAKE_TOK2"
+# dev's OWN stored token, too (A3): load_token reads it into this shell, and the counts row above
+# is printed only once it loaded. The trace must reach load_token, or the hasnt proves nothing.
+has   "xtrace: the trace covers load_token (else the next row proves nothing)" "$(cat "$C/xtrace")" "+ load_token"
+hasnt "xtrace: dev's own stored token never reaches the trace" "$(cat "$C/xtrace")" "$FAKE_TOK"
+
 echo "== claude-oauth-store"
 STORE="$DOTFILES/scripts/claude-oauth-store"
 store() {   # $1 = what is typed at the prompt, then the empty line that ends it; under a pty
@@ -931,6 +1041,44 @@ rm -rf "$H/.config/claude-oauth"; mkdir -p "$H/.clauth"
 store "$FAKE_TOK"
 check "store: refused where clauth manages accounts" "$RC" 1
 has   "store: says why" "$(cat "$SE")" "clauth manages Claude accounts here"
+
+echo "== claude-oauth-store over a link: it renews the seat the link names"
+FAKE_TOK3="sk-ant-""oat01-FIXTUREthirdNOTREAL0123456789abcdef"
+new_case
+D="$H/.config/claude-oauth"; link_token quantivly-5
+store "$FAKE_TOK3"
+check "store over a link: exit 0" "$RC" 0
+check "store over a link: token.env is still the same link" \
+    "$([[ -L "$D/token.env" ]] && readlink "$D/token.env")" "seats/quantivly-5.env"
+check "store over a link: the seat file holds the new token" "$(cat "$D/seats/quantivly-5.env")" "CLAUDE_CODE_OAUTH_TOKEN=$FAKE_TOK3"
+check "store over a link: the seat file is mode 600" "$(stat -c %a "$D/seats/quantivly-5.env")" 600
+check "store over a link: the seat is dated today" "$(cat "$D/seats/quantivly-5.created")" "$(date +%F)"
+check "store over a link: the legacy date is left alone" "$(cat "$D/created")" "$(date -d '300 days ago' +%F)"
+has   "store over a link: reports the seat file's mode, not the link's" "$(cat "$SO")" "(mode 600)"
+hasnt "store over a link: never prints the token" "$(cat "$SO" "$SE")" "$FAKE_TOK3"
+check "store: the probe child runs before the lock is taken" "$(sort -u "$H/stub/store-lock-during" 2>/dev/null)" free
+run_level --check
+has   "store over a link: dev-sync reads the renewed seat's date" "$OUT" "token stored $(date +%F), 0 day(s) old"
+new_case
+D="$H/.config/claude-oauth"; link_token quantivly-5; rm "$D/seats/quantivly-5.env"
+store "$FAKE_TOK3"
+check "store over a dangling seat link: the seat file is written, the link kept" \
+    "$(cat "$D/seats/quantivly-5.env" 2>/dev/null)/$(readlink "$D/token.env")" "CLAUDE_CODE_OAUTH_TOKEN=$FAKE_TOK3/seats/quantivly-5.env"
+new_case
+D="$H/.config/claude-oauth"; link_token quantivly-5
+cp "$D/seats/quantivly-5.env" "$D/outside.env"; ln -sfn seats/../outside.env "$D/token.env"
+store "$FAKE_TOK3"
+check "store over a link that is not a seat: refused" "$RC" 1
+has   "store over a link that is not a seat: says why" "$(cat "$SE")" "which is not a seat"
+check "store over a link that is not a seat: its target is untouched" "$(cat "$D/outside.env")" "CLAUDE_CODE_OAUTH_TOKEN=$FAKE_TOK"
+new_case
+D="$H/.config/claude-oauth"
+exec 8>"$D/.lock"; flock -n 8 || fatal "could not take $D/.lock for the refusal row"
+store "$FAKE_TOK3"
+exec 8>&-
+check "store while another run holds its lock: refused, nothing written" \
+    "$RC/$(cat "$D/token.env")" "1/CLAUDE_CODE_OAUTH_TOKEN=$FAKE_TOK"
+has   "store while another run holds its lock: says so" "$(cat "$SE")" "another claude-oauth-store run holds"
 
 echo "== dev never publishes a forwarded ssh agent"
 rowtxt() { printf '%s %-14s %s' "$1" "$2" "$3"; }   # a row as dev-sync prints it
@@ -1093,8 +1241,25 @@ printf 'CLAUDE_CODE_OAUTH_TOKEN=%s; touch %s\n' "$FAKE_TOK" "$C/pwned" >"$H/.con
 env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" >/dev/null 2>&1
 check "launcher: a line of any other shape is never sourced" "$([[ -e "$C/pwned" ]] && echo ran || echo no)" no
 
+# Every loader reads token.env through a link exactly as it reads a file (the layout PR B adopts).
+# These pin what already holds: a loader that tested -f, or refused a link, would fail them. rabota
+# has no row: it only NAMES the file in EnvironmentFile=, and systemd does the reading.
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$FAKE_TOK" >"$H/.config/claude-oauth/token.env"
+date +%F >"$H/.config/claude-oauth/created"
+link_token quantivly-5
+check "zshrc.company exports the token through a link" "$(zload)" token
+OUT="$(env -i HOME="$H" USER=t PATH="/usr/bin:/bin" "$LAUNCH" --print-env 2>/dev/null)"
+has   "launcher --print-env through a link: the token is declared, masked" "$OUT" "CLAUDE_CODE_OAUTH_TOKEN=<set>"
+: >"$C/server-env"
+env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" >/dev/null 2>&1
+check "launcher through a link: the server starts with the token" "$(cat "$C/server-env")" yes
+rm "$H/.config/claude-oauth/seats/quantivly-5.env"; : >"$C/server-env"
+check "zshrc.company exports nothing through a dangling link" "$(zload)" unset
+env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" >/dev/null 2>&1
+check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
+
 printf '\n'
-EXPECTED_ROWS=244
+EXPECTED_ROWS=307
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
