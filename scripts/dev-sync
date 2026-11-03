@@ -972,6 +972,16 @@ here_main() {
         flock -n 9 || { echo "dev-sync: another run holds $STATE/lock" >&2; return 2; }
     fi
 
+    # Every row runs with fd 9 closed, so no child can inherit the lock. A child that
+    # daemonizes keeps every descriptor it inherited, and a flock lives as long as any of
+    # them: from 10-17 to 11-03 an ssh-agent started under one --apply held it, and every
+    # later run was refused. bash parks its own copy of fd 9 on a close-on-exec descriptor
+    # for the call, so this run still holds the lock while no exec'd child can.
+    here_rows 9>&-
+}
+
+# The rows and the summary, run by here_main with the lock's fd closed for every child.
+here_rows() {
     printf 'dev-sync %s on %s, %s\n' "$MODE" "$(hostname)" "$(date '+%F %T %Z')"
     [[ -n "$ARG_CLAUDE$ARG_DOTFILES_SHA" ]] ||
         printf '  (no laptop facts: targets are origin/main, Claude Code latest, herdr-draft main)\n'

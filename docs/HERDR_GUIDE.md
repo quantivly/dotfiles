@@ -1260,6 +1260,13 @@ outage.
   never signs in to an MCP server, never stores the Claude token, never handles `LINEAR_API_KEY`'s
   value and never runs sudo;
   those come back as ⚠ rows for a person.
+- **One `--apply` at a time, and no child keeps the lock.** `--apply` holds
+  `~/.local/state/dev-sync/lock` and runs every row with its fd closed, so a child that daemonizes
+  cannot carry the lock past the run. Before that fix, from 10-17 to 11-03, an `ssh-agent` started
+  under one run kept it, and every later run on dev exited 2 with "another run holds …". If that
+  message comes back while no dev-sync runs, some process still has the file open:
+  `grep -c ":$(stat -c %i ~/.local/state/dev-sync/lock) " /proc/locks` is 1 while it does. The pid
+  that line names is the run that took the lock, which may be long gone.
 - **Disarming dev-sync's timer is sticky, and takes three steps on dev.** Deleting the `armed`
   marker alone leaves an enabled timer whose runs are skipped, which
   [timer health](TIMER_HEALTH.md) rightly reports as broken, and the next laptop `--apply` would
