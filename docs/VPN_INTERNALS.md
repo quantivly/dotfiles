@@ -598,10 +598,18 @@ Measured on iproute2-6.19.0:
 
 So `grep -q unreachable` on the output is **never** true for the blocked case and **always** true
 for the no-IPv6 case — a green tick for a block that is not installed, on the machine least able to
-notice. `_vpn_v6_probe` classifies rc and the message instead, and returns four states with
+notice. `_vpn_v6_probe` classifies rc and the message instead, into four states with
 `no-v6` explicitly **not** a pass. Three further rules sit on top: `blocked` passes only if this
 tool also owns both halves (otherwise the tick credits our block for somebody else's reject route),
 `open` is the FAIL and prints the winning route verbatim, and anything unrecognised is `odd`.
+
+**Until 2026-11-03 that FAIL printed an empty line**, as did both WARNs that quote the probe. The
+probe printed its state and saved its output in a global, and the doctor called it inside `$(...)`:
+a subshell, so the global was gone before the line that quotes it ran. No row could see it, because
+the lines were reachable only from a whole `vpn-doctor` run. The probe now sets
+`_VPN_V6_PROBE_STATE` and `_VPN_V6_PROBE_OUT` and prints nothing, and the canary lines are
+`_vpn_v6_report_canaries`, which three rows drive through the `ip` stub. Of 8 mutants, 7 were
+killed; the survivor deletes the doctor's call to the canaries, and no row runs the whole doctor.
 
 `ip -6 route show` is **not** a substitute. It lists what exists; only `route get` asks the kernel
 which route *wins*, and a more-specific route from an RA, a second VPN or a v6-enabled Docker
