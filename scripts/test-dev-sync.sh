@@ -1258,6 +1258,25 @@ new_case
 OUT="$(env -i HOME="$H" USER=t PATH="/usr/bin:/bin" "$LAUNCH" --print-env 2>/dev/null)"
 has   "launcher --print-env: the token is declared, masked" "$OUT" "CLAUDE_CODE_OAUTH_TOKEN=<set>"
 hasnt "launcher --print-env: never its value" "$OUT" "$FAKE_TOK"
+# The launcher's own zsh sources ~/.zshrc.local for LINEAR_API_KEY. A headless user manager has no
+# SSH_AUTH_SOCK, so the workstation template's block started an agent at every server start, inside
+# herdr-server.service (#346's re-check, T1). That zsh now gets the agent path the server gets. A
+# temp HOME and the stub ssh-agent, which logs its call and starts nothing.
+cat >>"$H/.zshrc.local" <<'ZL'
+if [ -z "$SSH_AUTH_SOCK" ]; then
+    eval "$(ssh-agent -s)" > /dev/null
+fi
+ZL
+reset_calls
+OUT="$(env -i HOME="$H" USER=t PATH="$H/.local/bin:/usr/bin:/bin" "$LAUNCH" --print-env 2>/dev/null)"
+has   "launcher: LINEAR_API_KEY is still read from ~/.zshrc.local (else the next rows prove nothing)" "$OUT" "LINEAR_API_KEY=<set>"
+hasnt "launcher: ...and its value is never printed" "$OUT" "$FAKE_KEY"
+check "launcher, no agent link: the template's block starts no agent" "$(agents_started)" 0
+mkdir -p "$H/.ssh"; ln -sfn "$C/run/ssh-agent.socket" "$H/.ssh/ssh_auth_sock"
+reset_calls
+env -i HOME="$H" USER=t PATH="$H/.local/bin:/usr/bin:/bin" "$LAUNCH" --print-env >/dev/null 2>&1
+check "launcher, with the agent link: the template's block starts no agent" "$(agents_started)" 0
+rm "$H/.ssh/ssh_auth_sock"
 # A real launch, into a herdr stub that reports what the server would inherit.
 mkdir -p "$C/run"; chmod 700 "$C/run"
 # shellcheck disable=SC2016  # expanded by the stub, deliberately
@@ -1310,7 +1329,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=317
+EXPECTED_ROWS=321
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

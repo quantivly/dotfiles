@@ -234,9 +234,15 @@ fi
 # in any argv either (see LINEAR_API_KEY in the header): /proc/<pid>/cmdline is
 # world-readable, so a secret in argv is a secret published.
 # ---------------------------------------------------------------------------
+#
+# The zsh that reads the file gets the agent path the server gets, else systemd's socket path. A
+# headless user manager has no SSH_AUTH_SOCK, and the workstation template's block in that file
+# starts `ssh-agent -s` when it finds none: one per server start, left in herdr-server.service until
+# the next restart. Any non-empty path stops it; an absent socket only means ssh uses the key files.
 linear_key=""
 if [[ -r "$home/.zshrc.local" ]] && command -v zsh >/dev/null 2>&1; then
-    linear_key="$(zsh -c 'source "$1" >/dev/null 2>&1; printf %s "${LINEAR_API_KEY:-}"' zsh "$home/.zshrc.local" 2>/dev/null || true)"
+    linear_key="$(SSH_AUTH_SOCK="${ssh_auth_sock:-$xdg_runtime_dir/ssh-agent.socket}" \
+        zsh -c 'source "$1" >/dev/null 2>&1; printf %s "${LINEAR_API_KEY:-}"' zsh "$home/.zshrc.local" 2>/dev/null || true)"
 fi
 if [[ -z "$linear_key" ]]; then
     warn "LINEAR_API_KEY not found in ~/.zshrc.local — tdi.worktree-from-linear (the Linear picker) will not authenticate"
