@@ -438,38 +438,63 @@ credential_file_read() {
 #   that starts with if/for/while/until, which prose seldom does. A quoted or escaped first
 #   word (`"cat"`, `c\at`) is read with its quotes and backslashes removed;
 #
-#   interpreters count (python, perl, ruby, node). credential_file_read leaves them out on
-#   purpose, because ~/.zshrc.local is edited that way; nothing edits this directory that way.
+#   interpreters count (python, perl, ruby, node), and so do the shells (bash, sh, zsh, dash,
+#   ksh): every line of a KEY=value file is an assignment, so `bash -x` or `sh -v` of it prints
+#   the token. credential_file_read leaves interpreters out on purpose, because ~/.zshrc.local is
+#   edited that way; nothing edits this directory that way.
+#
+# Two spellings of a read need care with quotes. `$(< f)` and `` `< f` `` read a file with no verb
+# and still expand inside double quotes, where the quote-stripped copy has lost them, so they are
+# looked for with only the single-quoted spans removed. And a `<word>` whose word has no `.` or `/`
+# is a placeholder in prose (`seats/<seat>.env`), not a redirection: it cannot name a token file.
 #
 # `claude-oauth-store`, the script, is not the directory: the name must end at a character that
 # cannot continue it (`/`, `;`, a quote, whitespace, the end). This RAISES THE BAR AND DOES NOT
-# BLOCK (docs/SECRET_EMISSION.md): an obfuscated path or an unparsed wrapper (`timeout -s KILL`)
-# passes it, though credential_file_read still sees a seat file's path; and a code search that
-# names the directory is refused, for which grep -l piped through the redactor is the way through.
+# BLOCK (docs/SECRET_EMISSION.md lists what passes): an obfuscated path, a verb it does not list
+# (`dd`, `cp … /dev/stdout`, `xargs -a`), an unparsed wrapper (`timeout -s KILL`) and a read
+# quoted for another host (`ssh dev 'cat …'`) pass it, though credential_file_read still sees a
+# file's path in its own segment. A code search that names the directory is refused, for which
+# grep -l piped through the redactor is the way through.
 COR_WHY=""
 claude_oauth_read() {
-  local seg stripped first dir_re verb_re kw_re redir_re lead path verbs
+  local seg stripped sq first np dir_re verb_re kw_re redir_re subst_re ph_re lead path verbs
   dir_re='claude-oauth([^A-Za-z0-9_.-]|$)'
   [[ "$cmd" =~ $dir_re ]] || return 1
   cmd_segments_ensure || return 1
   lead='(([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|command|exec|nohup|time|then|do|else|elif|if|while|until|!|\{)[[:space:]]+'
   lead+='|(env|nice|timeout|stdbuf|xargs|ionice)([[:space:]]+(-[^[:space:]]*|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|[0-9][0-9.]*[smhd]?))*[[:space:]]+)*'
   path='([^[:space:]]*/)?'
-  verbs='(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|cut|base64|paste|sort|uniq|rev|fold|expand|column|jq|diff|\.|python[0-9.]*|perl|ruby|node)'
+  verbs='(cat|tac|head|tail|less|more|bat|batcat|nl|od|xxd|strings|grep|egrep|fgrep|rg|sed|awk|source|cut|base64|paste|sort|uniq|rev|fold|expand|column|jq|diff|\.|python[0-9.]*|perl|ruby|node|bash|sh|zsh|dash|ksh)'
   verb_re="(^|[|(\`{;!&])[[:space:]]*${lead}${path}${verbs}([[:space:]]|\$)"
   kw_re="^[[:space:]]*(if|for|while|until)[[:space:]].*[[:space:]](then|do|else)[[:space:]]+${lead}${path}${verbs}([[:space:]]|\$)"
   # As in credential_file_read: `<` and not `<<` (a heredoc or herestring reads no file), and not
   # `<(`, a process substitution, whose own command is a segment of its own here.
   redir_re='(^|[^<])[<][[:space:]]*[^<([:space:]]'
+  # `$(<` or a backtick then `<`, but not `<<` or `<(`. In variables: an unquoted `<` inside
+  # [[ =~ ]] is parsed as a redirection.
+  subst_re='(\$\(|`)[[:space:]]*<([^<(]|$)'
+  # The LAST placeholder in the string, so the loop below removes one per turn and ends.
+  ph_re='^(.*)<[A-Za-z][A-Za-z0-9_-]*>(.*)$'
   while IFS= read -r seg || [[ -n "$seg" ]]; do
     [[ -n "$seg" ]] || continue
     stripped="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")"
     first="${seg#"${seg%%[![:space:]]*}"}"; first="${first%%[[:space:]]*}"
     first="${first//[\"\'\\]/}"; first="${first##*/}"
     if [[ "$stripped" =~ $verb_re || "$stripped" =~ $kw_re || "$first" =~ ^${verbs}$ ]]; then
-      COR_WHY="a content verb or an interpreter in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens (if this only WRITES text that mentions it, write the file with an editor tool instead)"
+      COR_WHY="a content verb, a shell or an interpreter in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens (if this only WRITES text that mentions it, write the file with an editor tool instead)"
       return 0
-    elif [[ "$stripped" =~ $redir_re ]]; then
+    fi
+    # The raw segment gates the fork: only a segment that holds the substitution at all pays it.
+    if [[ "$seg" =~ $subst_re ]]; then
+      sq="$(printf '%s' "$seg" | sed -E "s/'[^']*'//g")"
+      if [[ "$sq" =~ $subst_re ]]; then
+        COR_WHY="a \`\$(< file)\` read in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
+        return 0
+      fi
+    fi
+    np="$stripped"
+    while [[ "$np" =~ $ph_re ]]; do np="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"; done
+    if [[ "$np" =~ $redir_re ]]; then
       COR_WHY="an input redirection in a command that names ~/.config/claude-oauth/, which holds the long-lived Claude tokens"
       return 0
     fi

@@ -91,20 +91,42 @@ Design decisions that are load-bearing, not preferences:
 - **The token directory gets a wider rule, which raises the bar and does not block**
   (2026-11-03, the dev multi-seat design's F10 and N10). `~/.config/claude-oauth/` holds
   year-long tokens (`token.env`, and `seats/<seat>.env` in the seat layout), and nothing edits
-  it by hand. So a command that names the *directory* anywhere, and runs a content verb or an
-  interpreter (`python`, `perl`, `ruby`, `node`) at command position, or an input redirection,
-  in **any** segment, is refused. Per segment, `cd ~/.config/claude-oauth && cat token.env`
-  passed. The verb has to be at command position because every heredoc line is a segment, and a
-  commit message that names the directory says "more" and "sort". Command position takes what
-  ordinary commands put first: a path (`/bin/cat`), an assignment, `sudo`, `env`, `nice`,
-  `timeout` and the like with their options, `!`, `{`, the `then`/`do` of an `if` or a loop,
-  and a quoted or escaped verb. Seat files also join the per-segment rule's path list, so a
-  wrapper the directory rule cannot parse (`timeout -s KILL 5 cat …/seats/x.env`) still meets
-  that rule. Still missed, pinned as
-  `uncovered` rows: an obfuscated path (`claude-o''auth`, a variable, a glob). Newly refused,
-  pinned as a known false positive: a code search that names the directory, for which `grep -l`
-  piped through the redactor is the way through. A `cat >… <<EOF` that only writes text naming
-  the directory is refused too; write that file with an editor tool.
+  it by hand. Per segment, `cd ~/.config/claude-oauth && cat token.env` passed, so this rule
+  looks at the whole command. **What it refuses**, in a command that names the *directory*
+  anywhere, in **any** segment:
+  - a content verb (the per-segment rule's list), an interpreter (`python`, `perl`, `ruby`,
+    `node`) or a shell (`bash`, `sh`, `zsh`, `dash`, `ksh`) at command position. A shell counts
+    because each line of a `KEY=value` file is an assignment, so `bash -x` or `sh -v` of it
+    prints the token. Command position is a segment's start, or after `|`, `(`, a backtick, `{`,
+    `!`, `;` or `&`, past what ordinary commands put first: a path (`/bin/cat`), an assignment,
+    `sudo`, `env`, `nice`, `timeout` and the like with their options, the `then`/`do` of an `if`
+    or a loop, and a quoted or escaped verb. It has to be command position because every heredoc
+    line is a segment, and a commit message that names the directory says "more" and "sort";
+  - an input redirection (`tr -d x < token.env`). A `<word>` with no `.` or `/` in the word is a
+    placeholder in prose (`seats/<seat>.env`), not a redirection;
+  - `$(< file)` or `` `< file` ``, outside single quotes. Inside double quotes it still expands,
+    so it is looked for before the double-quoted text is stripped.
+
+  Seat files also join the per-segment rule's path list, so a wrapper the directory rule cannot
+  parse (`timeout -s KILL 5 cat …/seats/x.env`) still meets that rule when the path is whole.
+  **What still passes**, each pinned as an `uncovered` row:
+  - an obfuscated path: `claude-o''auth`, a variable, a glob;
+  - a plain-path read by a verb the rule doesn't list: `xargs -a token.env echo`,
+    `cp token.env /dev/stdout`, `dd if=token.env`, `pr -t token.env`, `hexdump -C token.env`;
+  - a wrapper it can't parse, past a `cd`: `cd … && timeout -s KILL 5 cat token.env`;
+  - a read quoted for another host: `ssh dev 'cat ~/.config/claude-oauth/token.env'`.
+
+  **What it refuses that reads nothing**, each pinned as a known false positive, with the way
+  round:
+  - a code search that names the directory: `grep -l`, piped through the redactor;
+  - a shell that runs only metadata (`bash -c 'ls -la ~/.config/claude-oauth'`): run the
+    metadata command itself;
+  - metadata piped into a filter (`ls -la ~/.config/claude-oauth | grep token`): drop the filter,
+    or pipe through the redactor;
+  - a heredoc line that starts with a verb word ("sort the seats by date") in a
+    `git commit -F - <<'EOF'` message naming the directory: `git commit -m "$(cat <<'EOF' …)"`,
+    whose message is one quoted word;
+  - a `cat >… <<EOF` that only writes text naming the directory: write it with an editor tool.
 - **The remedy the guard names did not remedy.** Immediately after the rule above shipped,
   running its own suggested `tail ~/.zshrc.local | redact-secrets` against the real file
   printed the `NOTION_PAT` in full. `NOTION_PAT` matched no name pattern (the alternation is
@@ -178,7 +200,7 @@ is not ignored at all and reads as the opposite of the truth.
 `~/.claude/hooks/`; it does nothing until it is also registered as a `PreToolUse` hook in
 `~/.claude/settings.json`, which is user-level and not in this repo.
 
-State table: `scripts/test-secret-guard.sh` (246 checks, run in CI, hermetic — the fixture
+State table: `scripts/test-secret-guard.sh` (272 checks, run in CI, hermetic — the fixture
 credentials are assembled at runtime so this file contains no string that would trip the
 `gitleaks` pre-commit hook over its own test data). **That count is asserted, not
 maintained**: the suite builds a fixed needle from its own `EXPECTED_ROWS` and greps this

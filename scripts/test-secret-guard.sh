@@ -790,6 +790,73 @@ for c in \
 do
   check "uncovered (by decision): $c" "$(ask "$c")" "allow"
 done
+# A shell handed the file prints it: each line is an assignment, and xtrace (-x) or verbose (-v)
+# echoes it. A KEY=value file invites exactly this interpreter, so the shells are verbs here (A1).
+# One row per shell, so dropping any one from the list fails a row.
+# shellcheck disable=SC2016  # the fixtures must reach the guard UNEXPANDED
+for c in \
+  'bash -x ~/.config/claude-oauth/token.env' \
+  'sh -v ~/.config/claude-oauth/seats/quantivly-5.env' \
+  'cd ~/.config/claude-oauth && sh -v token.env' \
+  'cd ~/.config/claude-oauth && zsh -x token.env' \
+  'cd ~/.config/claude-oauth && /bin/dash -v token.env' \
+  'cd ~/.config/claude-oauth && ksh -x token.env' \
+  "cd ~/.config/claude-oauth && bash -c 'cat token.env'"
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+# `$(< file)` reads the file with no verb at all, and inside double quotes it still expands. The
+# quote-stripped copy has lost it, so it is looked for with only the single-quoted spans removed,
+# which is where no expansion happens (A1). Backticks spell the same substitution.
+# shellcheck disable=SC2016  # the fixtures must reach the guard UNEXPANDED
+for c in \
+  'echo "$(< ~/.config/claude-oauth/token.env)"' \
+  'cd ~/.config/claude-oauth && echo "$(<token.env)"' \
+  'cd ~/.config/claude-oauth && printf "%s\n" "`< token.env`"'
+do
+  check "refuses: $c" "$(ask "$c")" "deny"
+done
+# shellcheck disable=SC2016  # the fixture must reach the guard UNEXPANDED
+check "allows: a single-quoted \$(< naming the directory, which never expands" \
+      "$(ask "git commit -m 'never run \$(< ~/.config/claude-oauth/token.env)'")" "allow"
+check "allows: a shell run on the store's script, whose name is not the directory" \
+      "$(ask 'bash -n scripts/claude-oauth-store')" "allow"
+# `sh` is a whole word: `ssh` is not a shell, and dev's metadata is read this way.
+check "allows: ssh to dev for the directory's metadata" \
+      "$(ask "ssh dev 'ls -la ~/.config/claude-oauth'")" "allow"
+# The cost, by decision: a shell at command position is refused even when it runs metadata. The
+# way round is the metadata command itself, unwrapped.
+check "refuses: a shell running only metadata on the directory (known FP, by decision)" \
+      "$(ask "bash -c 'ls -la ~/.config/claude-oauth'")" "deny"
+# Plain-path reads this rule still lets through: a verb it does not list, or a wrapper it cannot
+# parse. Pinned so the docs' list of them is checked, not claimed (A1).
+for c in \
+  'cd ~/.config/claude-oauth && xargs -a token.env echo' \
+  'cd ~/.config/claude-oauth && cp token.env /dev/stdout' \
+  'cd ~/.config/claude-oauth && dd if=token.env' \
+  'cd ~/.config/claude-oauth && pr -t token.env' \
+  'cd ~/.config/claude-oauth && hexdump -C token.env' \
+  'cd ~/.config/claude-oauth && timeout -s KILL 5 cat token.env' \
+  "ssh dev 'cat ~/.config/claude-oauth/token.env'"
+do
+  check "uncovered (by decision): $c" "$(ask "$c")" "allow"
+done
+# A `<word>` with no `.` or `/` in the word is a placeholder in prose, not a redirection: it cannot
+# name token.env or a seat file. PR B's messages write `seats/<seat>.env` (A2).
+msg_seat=$'git commit -F - <<\'EOF\'\nfix: renew ~/.config/claude-oauth/seats/<seat>.env through the link\nEOF'
+check "allows: a heredoc message with a <placeholder> beside the directory" "$(ask "$msg_seat")" "allow"
+check "refuses: a redirection whose word runs into a > (not a placeholder: it has a dot)" \
+      "$(ask 'cd ~/.config/claude-oauth && tr -d x <token.env>/dev/stdout')" "deny"
+# Known false positives, by decision (A2): a heredoc line that STARTS with a verb word, and
+# metadata piped into a filter. The ways round: the -m "$(cat <<'EOF' ...)" idiom, whose message is
+# one quoted word, and the metadata command without the filter.
+msg_verb=$'git commit -F - <<\'EOF\'\nThe store writes under ~/.config/claude-oauth/.\nsort the seats by date\nEOF'
+check "refuses: a heredoc line starting with a verb word, beside the directory (known FP, by decision)" \
+      "$(ask "$msg_verb")" "deny"
+check "refuses: metadata piped into a filter (known FP, by decision)" \
+      "$(ask 'ls -la ~/.config/claude-oauth | grep token')" "deny"
+msg_sub=$'git commit -m "$(cat <<\'EOF\'\nThe store writes under ~/.config/claude-oauth/seats/<seat>.env.\nsort the seats by date\nEOF\n)"'
+check "allows: the same message through -m \"\$(cat <<'EOF' ...)\" (the way round)" "$(ask "$msg_sub")" "allow"
 
 echo "=== the guard fails OPEN, always ==="
 # A hook that blocks the shell when it breaks gets disabled wholesale, taking
@@ -898,7 +965,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=246
+EXPECTED_ROWS=272
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.
