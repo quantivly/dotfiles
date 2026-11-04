@@ -546,8 +546,272 @@ remote_tmp_leftovers=$(find "$REMOTE_TMPDIR" -mindepth 1 -print)
 check "read-only: h1's and lap's trees identical after every collect above, the collect script's temp dir removed" \
     "$tree_unchanged $lap_tree_unchanged $listing_covers_fixture|$remote_tmp_leftovers" "yes yes yes|"
 
+# ---------------------------------------------------------------------------------------------
+# --matrix
+# ---------------------------------------------------------------------------------------------
+#
+# Three fixture hosts, named h1 h2 h3 in the workspace and collected from the fixture homes mh1
+# mh2 mh3 (the collect rows' h1 stays as it was), through the stub ssh in the order h3 h1 h2.
+# That order is the column order, and it puts h3's files in the workspace FIRST: a newest:h3 can
+# then come only from the hosts' own mtimes, never from the order the collect wrote them in.
+
+make_host mh1; make_host mh2; make_host mh3
+MH1="$FIXTURE_HOSTS/mh1"; MH2="$FIXTURE_HOSTS/mh2"; MH3="$FIXTURE_HOSTS/mh3"
+for matrix_host_home in "$MH1" "$MH2" "$MH3"; do
+    printf '# global instructions\n' > "$matrix_host_home/.claude/CLAUDE.md"
+done
+# cfg/agents/x.md only on h2: h1 keeps an empty agents/, h3 has no agents/ at all.
+rm "$MH1/.claude/agents/x.md"
+rm -r "$MH3/.claude/agents"
+rm "$MH3/.claude/keybindings.json"
+# cfg/hooks/a.sh: h3's copy differs and is the newest by the hosts' own clocks.
+OLDER_MTIME_STAMP=202601010000
+NEWER_MTIME_STAMP=202606010000
+printf '#!/bin/sh\necho hook-a-changed-on-h3\n' > "$MH3/.claude/hooks/a.sh"
+touch -t "$OLDER_MTIME_STAMP" "$MH1/.claude/hooks/a.sh" "$MH2/.claude/hooks/a.sh"
+touch -t "$NEWER_MTIME_STAMP" "$MH3/.claude/hooks/a.sh"
+# cfg/hooks/b.sh: a link into dotfiles on h1 and h3 (make_host), a real copy on h2.
+rm "$MH2/.claude/hooks/b.sh"
+cp "$MH2/.dotfiles/claude/hooks/b.sh" "$MH2/.claude/hooks/b.sh"
+# On h1 a whole skill dir is a link, and one file inside it is a link of its own.
+MH1_SHARED_SKILL="$MH1/.dotfiles/claude/skills/shared"
+MH1_SHARED_REFERENCE="$MH1/.dotfiles/docs/ref.md"
+mkdir -p "$MH1_SHARED_SKILL" "$(dirname "$MH1_SHARED_REFERENCE")"
+printf -- '---\nname: shared\n---\n' > "$MH1_SHARED_SKILL/SKILL.md"
+printf 'reference\n' > "$MH1_SHARED_REFERENCE"
+ln -s "$MH1_SHARED_REFERENCE" "$MH1_SHARED_SKILL/ref.md"
+ln -s "$MH1_SHARED_SKILL" "$MH1/.claude/skills/shared"
+# Memory: h3's user is ec2.user, so its projects key has a dash where the user name has a dot.
+MATRIX_STORE='quantivly-hub'
+H3_USER='ec2.user'
+mv "$MH3/.claude/projects/-home-mh3-$MATRIX_STORE" "$MH3/.claude/projects/-home-ec2-user-$MATRIX_STORE"
+MH1_MEMORY="$MH1/.claude/projects/-home-mh1-$MATRIX_STORE/memory"
+MH2_MEMORY="$MH2/.claude/projects/-home-mh2-$MATRIX_STORE/memory"
+MH3_MEMORY="$MH3/.claude/projects/-home-ec2-user-$MATRIX_STORE/memory"
+# fact-one.md: one name, two bodies (h2's differs), and h3's copy (h1's body) as new as h2's: a
+# tie for newest names both.
+printf -- '---\ndescription: fact one\n---\nrewritten on h2\n' > "$MH2_MEMORY/fact-one.md"
+touch -t "$OLDER_MTIME_STAMP" "$MH1_MEMORY/fact-one.md"
+touch -t "$NEWER_MTIME_STAMP" "$MH2_MEMORY/fact-one.md" "$MH3_MEMORY/fact-one.md"
+# One fact under two names, its description spelled with other case, spacing and quotes...
+printf -- '---\nname: fact two\ndescription: The Same  Fact\n---\nbody on h1\n' > "$MH1_MEMORY/fact-two.md"
+printf -- '---\ndescription:   "the same fact"\n---\nbody on h2\n' > "$MH2_MEMORY/fact-2.md"
+# ...and a note with no frontmatter, which must not pair with MEMORY.md over two empty descriptions,
+# and one whose body (not its frontmatter) states the same description, which must not join them.
+printf 'a note with no frontmatter\n' > "$MH1_MEMORY/notes.md"
+printf -- '---\nname: body mention\n---\ndescription: the same fact\n' > "$MH2_MEMORY/body-mention.md"
+# settings.json: allow rules a,b,d / b,c,d / b; the hook x.sh run three ways and y.sh only on h2;
+# a plugin's boolean, a marketplace's source and one other key differ; h2 orders statusLine's keys
+# differently, which is no difference.
+cat > "$MH1/.claude/settings.json" <<'JSON'
+{"permissions": {"allow": ["Bash(rule-a)", "Bash(rule-b)", "Bash(rule-d)"], "defaultMode": "auto"},
+ "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "bash '/home/h1/.claude/hooks/x.sh'"}]}]},
+ "enabledPlugins": {"tool@market": true},
+ "extraKnownMarketplaces": {"market": {"source": {"source": "github", "repo": "owner/repo"}}},
+ "statusLine": {"type": "command", "command": "status-line"},
+ "model": "opus", "theme": "dark"}
+JSON
+cat > "$MH2/.claude/settings.json" <<'JSON'
+{"theme": "light", "model": "opus", "statusLine": {"command": "status-line", "type": "command"},
+ "permissions": {"defaultMode": "auto", "allow": ["Bash(rule-b)", "Bash(rule-c)", "Bash(rule-d)"]},
+ "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+   {"type": "command", "command": "f=\"$HOME/.claude/hooks/x.sh\"; [ -r \"$f\" ] && exec bash \"$f\"; exit 0"},
+   {"type": "command", "command": "python3 \"$HOME/.claude/hooks/y.sh\""}]}]},
+ "enabledPlugins": {"tool@market": false},
+ "extraKnownMarketplaces": {"market": {"source": {"source": "directory", "path": "/srv/market"}}}}
+JSON
+cat > "$MH3/.claude/settings.json" <<'JSON'
+{"permissions": {"allow": ["Bash(rule-b)"], "defaultMode": "auto"},
+ "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/home/h3/.claude/hooks/x.sh"}]}]},
+ "enabledPlugins": {"tool@market": true},
+ "statusLine": {"type": "command", "command": "status-line"},
+ "model": "opus", "theme": "dark"}
+JSON
+
+W_MATRIX="$TMPROOT/ws-matrix"
+"$SUT" --collect --workspace "$W_MATRIX" --host h3=mh3:.claude --host h1=mh1:.claude --host h2=mh2:.claude \
+    >/dev/null 2>&1 || fatal "the --matrix fixture collect failed; every --matrix row below would be hollow"
+
+# The stub runs every host as this user, so each collect's facts.tsv says so; the user each
+# fixture's projects key was made for is written in its place.
+set_fact_user() {   # HOST_DIR USER
+    awk -F'\t' -v OFS='\t' -v user_name="$2" '$1 == "user" { $2 = user_name } 1' "$1/facts.tsv" > "$1/facts.tsv.new" \
+        && mv "$1/facts.tsv.new" "$1/facts.tsv"
+}
+set_fact_user "$W_MATRIX/h1" mh1
+set_fact_user "$W_MATRIX/h2" mh2
+set_fact_user "$W_MATRIX/h3" "$H3_USER"
+
+# Copies made before the matrix runs, so no report is in them yet.
+W_MATRIX_NO_FACTS="$TMPROOT/ws-matrix-no-facts"
+W_MATRIX_FAILED_HOST="$TMPROOT/ws-matrix-failed-host"
+cp -R "$W_MATRIX" "$W_MATRIX_NO_FACTS"
+cp -R "$W_MATRIX" "$W_MATRIX_FAILED_HOST"
+
+MATRIX_REPORTS=(matrix.tsv matrix.md settings-matrix.md memory-matrix.tsv memory-matrix.md)
+workspace_listing() { find "$1" -mindepth 1 -printf '%y %T@ %P\n' | LC_ALL=C sort; }   # DIR
+MATRIX_LISTING_BEFORE=$(workspace_listing "$W_MATRIX")
+matrix_ssh_recorder_live=no; [[ -s $SSH_CALLS ]] && matrix_ssh_recorder_live=yes
+rm -f "$SSH_CALLS"
+"$SUT" --matrix --workspace "$W_MATRIX" >/dev/null 2>&1; MATRIX_RC=$?
+MATRIX_LISTING_AFTER=$(workspace_listing "$W_MATRIX")
+M_TSV="$W_MATRIX/matrix.tsv"
+M_SETTINGS="$W_MATRIX/settings-matrix.md"
+M_MEMORY="$W_MATRIX/memory-matrix.tsv"
+
+tsv_row() {   # FILE FIRST_FIELD [SECOND_FIELD] → the first line whose leading field(s) match
+    awk -F'\t' -v first_field="$2" -v second_field="${3-}" \
+        '$1 == first_field && (second_field == "" || $2 == second_field) { print; exit }' "$1" 2>/dev/null
+}
+tsv_status() { tsv_row "$1" "$2" | cut -f2; }   # MATRIX_TSV ARTIFACT
+# matrix.tsv columns: artifact, status, then h3 h1 h2 (hosts.tsv order).
+H3_COLUMN=3; H1_COLUMN=4
+
+printf 'matrix: identical / only-on / missing-on / differs are each classified\n'
+check "classified: CLAUDE.md identical, x.md only on h2, keybindings missing on h3, a.sh differs and h3 is newest" \
+    "$(tsv_status "$M_TSV" cfg/CLAUDE.md)|$(tsv_status "$M_TSV" cfg/agents/x.md)|$(tsv_status "$M_TSV" cfg/keybindings.json)|$(tsv_status "$M_TSV" cfg/hooks/a.sh)" \
+    "identical|only-on:h2|missing-on:h3|differs newest:h3"
+
+printf 'matrix: identical content, link on one host, copy on the other, is identical with provenance\n'
+b_row_expected="cfg/hooks/b.sh${TAB}identical${TAB}h3:link→$MH3/.dotfiles/claude/hooks/b.sh"
+b_row_expected+="${TAB}h1:link→$MH1/.dotfiles/claude/hooks/b.sh${TAB}h2:copy"
+b_row_matches=no; [[ "$(tsv_row "$M_TSV" cfg/hooks/b.sh)" == "$b_row_expected" ]] && b_row_matches=yes
+# A file under a linked directory is that directory's target plus its own path, unless it is a
+# link itself: the nearest link wins.
+shared_skill_cell=$(tsv_row "$M_TSV" cfg/skills/shared/SKILL.md | cut -f"$H1_COLUMN")
+shared_reference_cell=$(tsv_row "$M_TSV" cfg/skills/shared/ref.md | cut -f"$H1_COLUMN")
+check "provenance: b.sh identical, h3 and h1 links, h2 a copy; a linked dir's files resolve through the nearest link" \
+    "$b_row_matches|$shared_skill_cell|$shared_reference_cell" \
+    "yes|h1:link→$MH1_SHARED_SKILL/SKILL.md|h1:link→$MH1_SHARED_REFERENCE"
+
+printf 'matrix: missing is a status, not an abort\n'
+expected_artifact_count=$(for matrix_host in h1 h2 h3; do
+    ( cd "$W_MATRIX/$matrix_host" && find cfg roots repos account-dirs -type f 2>/dev/null )
+done | LC_ALL=C sort -u | wc -l)
+artifact_row_count=$(awk 'NR > 1' "$M_TSV" 2>/dev/null | wc -l)
+rows_with_h3_cell=$(awk -F'\t' -v h3_column="$H3_COLUMN" 'NR > 1 && index($h3_column, "h3:") == 1' "$M_TSV" 2>/dev/null | wc -l)
+x_on_h3=$(tsv_row "$M_TSV" cfg/agents/x.md | cut -f"$H3_COLUMN")
+# The fixture's artifact count, so equal row counts cannot be two zeros.
+MIN_FIXTURE_ARTIFACTS=10
+fixture_has_artifacts=no; (( expected_artifact_count > MIN_FIXTURE_ARTIFACTS )) && fixture_has_artifacts=yes
+check "missing: exit 1 (drift, not 2), one row per artifact of any host, each with an h3 cell; x.md is h3:absent" \
+    "$MATRIX_RC $fixture_has_artifacts $artifact_row_count $rows_with_h3_cell $x_on_h3" \
+    "1 yes $expected_artifact_count $expected_artifact_count h3:absent"
+
+printf 'matrix: a declared host without facts.tsv exits 2 and names it\n'
+rm "$W_MATRIX_NO_FACTS/h2/facts.tsv"
+err=$("$SUT" --matrix --workspace "$W_MATRIX_NO_FACTS" 2>&1 >/dev/null); no_facts_rc=$?
+names_h2=no; [[ "$err" == *"h2 has no facts.tsv"* ]] && names_h2=yes
+no_facts_reports=$(cd "$W_MATRIX_NO_FACTS" && ls "${MATRIX_REPORTS[@]}" 2>/dev/null)
+# hosts.tsv is the authority on which collects are valid: a failed one is refused the same way.
+awk -F'\t' -v OFS='\t' '$1 == "h3" { $5 = "failed" } 1' "$W_MATRIX_FAILED_HOST/hosts.tsv" \
+    > "$W_MATRIX_FAILED_HOST/hosts.tsv.new" && mv "$W_MATRIX_FAILED_HOST/hosts.tsv.new" "$W_MATRIX_FAILED_HOST/hosts.tsv"
+err=$("$SUT" --matrix --workspace "$W_MATRIX_FAILED_HOST" 2>&1 >/dev/null); failed_host_rc=$?
+names_h3=no; [[ "$err" == *"h3: hosts.tsv says its collect failed"* ]] && names_h3=yes
+failed_host_reports=$(cd "$W_MATRIX_FAILED_HOST" && ls "${MATRIX_REPORTS[@]}" 2>/dev/null)
+check "no facts.tsv, or hosts.tsv status failed: exit 2, the host named, no report written" \
+    "$no_facts_rc $names_h2|$no_facts_reports|$failed_host_rc $names_h3|$failed_host_reports" "2 yes||2 yes|"
+
+printf 'matrix: settings permissions.allow is reported as set differences\n'
+allow_lines_present=yes
+# shellcheck disable=SC2016  # the backticks are Markdown code spans, not command substitutions
+for expected_line in '| `Bash(rule-a)` | only h1 | — | ✓ | — |' '| `Bash(rule-b)` | same | ✓ | ✓ | ✓ |' \
+        '| `Bash(rule-c)` | only h2 | — | — | ✓ |' '| `Bash(rule-d)` | missing on h3 | — | ✓ | ✓ |'; do
+    [[ $(has_line "$M_SETTINGS" "$expected_line") == yes ]] || allow_lines_present+=" (missing: $expected_line)"
+done
+check "allow: rule-a only h1, rule-b same, rule-c only h2, rule-d missing on h3" "$allow_lines_present" "yes"
+
+printf 'matrix: settings hooks are compared by basename\n'
+# shellcheck disable=SC2016  # the backticks are Markdown code spans, not command substitutions
+x_hook_same=$(has_line "$M_SETTINGS" '| `PreToolUse x.sh` | same | ✓ | ✓ | ✓ |')
+# shellcheck disable=SC2016  # the backticks are Markdown code spans, not command substitutions
+y_hook_only_h2=$(has_line "$M_SETTINGS" '| `PreToolUse y.sh` | only h2 | — | — | ✓ |')
+check "hooks: x.sh same though each host runs it differently, y.sh only h2" "$x_hook_same $y_hook_only_h2" "yes yes"
+
+printf 'matrix: settings enabledPlugins, extraKnownMarketplaces and the other keys are compared by value\n'
+other_settings_present=yes
+# shellcheck disable=SC2016  # the backticks are Markdown code spans, not command substitutions
+for expected_line in '| `tool@market` | differs | true | true | false |' '| `market` | differs | — | github | directory |' \
+        '| `model` | same | v1 | v1 | v1 |' '| `theme` | differs | v1 | v1 | v2 |' \
+        '| `permissions.defaultMode` | same | v1 | v1 | v1 |' '| `statusLine` | same | v1 | v1 | v1 |'; do
+    [[ $(has_line "$M_SETTINGS" "$expected_line") == yes ]] || other_settings_present+=" (missing: $expected_line)"
+done
+check "settings: plugin boolean differs, marketplace source differs, model same, theme differs, key order ignored" \
+    "$other_settings_present" "yes"
+
+printf 'matrix: memory stores meet across homes\n'
+memory_index_row=$(has_line "$M_MEMORY" \
+    "$MATRIX_STORE${TAB}MEMORY.md${TAB}identical${TAB}h3:present${TAB}h1:present${TAB}h2:present")
+home_keyed_stores=$(awk -F'\t' 'NR > 1 && index($1, "-home-") == 1 { print $1 }' "$M_MEMORY" 2>/dev/null | LC_ALL=C sort -u)
+check "memory: three homes' quantivly-hub stores are one store; no row keeps a -home- key" \
+    "$memory_index_row|$home_keyed_stores" "yes|"
+
+printf 'matrix: a memory topic file with one name and two bodies is differs; one description under two names is flagged\n'
+fact_one_status=$(tsv_row "$M_MEMORY" "$MATRIX_STORE" fact-one.md | cut -f3)
+same_fact_rows=$(awk -F'\t' '$2 == "same-fact?"' "$M_MEMORY" 2>/dev/null)
+check "memory: fact-one.md differs, newest tied on h3 and h2; exactly one same-fact? row, fact-two.md~fact-2.md, naming the host of each" \
+    "$fact_one_status|$same_fact_rows" \
+    "differs newest:h3,h2|$MATRIX_STORE${TAB}same-fact?${TAB}fact-two.md~fact-2.md${TAB}h3:absent${TAB}h1:fact-two.md${TAB}h2:fact-2.md"
+
+printf 'matrix: account-dir settings copies are compared against cfg/settings.json\n'
+make_host mlap
+MLAP_ACCOUNT_DIRS="$FIXTURE_HOSTS/mlap/.local/state/claude-account-dirs"
+mkdir -p "$MLAP_ACCOUNT_DIRS/q1" "$MLAP_ACCOUNT_DIRS/q2"
+printf '{"model":"sonnet"}\n' > "$MLAP_ACCOUNT_DIRS/q1/settings.json"
+cp "$FIXTURE_HOSTS/mlap/.claude/settings.json" "$MLAP_ACCOUNT_DIRS/q2/settings.json"
+W_MATRIX_LAPTOP="$TMPROOT/ws-matrix-laptop"
+HOME="$FIXTURE_HOSTS/mlap" TMPDIR="$REMOTE_TMPDIR" "$SUT" --collect --workspace "$W_MATRIX_LAPTOP" \
+    --host laptop=local:.claude >/dev/null 2>&1
+"$SUT" --matrix --workspace "$W_MATRIX_LAPTOP" >/dev/null 2>&1
+q1_differs=$(has_line "$W_MATRIX_LAPTOP/matrix.tsv" \
+    "account-dirs/q1/settings.json${TAB}differs-from:cfg/settings.json${TAB}laptop:present")
+q2_same=$(has_line "$W_MATRIX_LAPTOP/matrix.tsv" \
+    "account-dirs/q2/settings.json${TAB}same-as:cfg/settings.json${TAB}laptop:present")
+check "account dirs: q1 differs-from cfg/settings.json, q2 same-as it" "$q1_differs $q2_same" "yes yes"
+
+printf 'matrix: exit 0 when every artifact is identical, 1 when any row is not\n'
+# One fixture HOME collected twice as two hosts: every file the same on both, including an
+# account-dir copy equal to cfg/settings.json, which is no drift.
+make_host msame
+mkdir -p "$FIXTURE_HOSTS/msame/.local/state/claude-account-dirs/q1"
+cp "$FIXTURE_HOSTS/msame/.claude/settings.json" "$FIXTURE_HOSTS/msame/.local/state/claude-account-dirs/q1/settings.json"
+W_MATRIX_SAME="$TMPROOT/ws-matrix-same"
+HOME="$FIXTURE_HOSTS/msame" TMPDIR="$REMOTE_TMPDIR" "$SUT" --collect --workspace "$W_MATRIX_SAME" \
+    --host a=local:.claude --host b=local:.claude >/dev/null 2>&1
+W_MATRIX_CFG_DRIFT="$TMPROOT/ws-matrix-cfg-drift"
+W_MATRIX_MEMORY_DRIFT="$TMPROOT/ws-matrix-memory-drift"
+cp -R "$W_MATRIX_SAME" "$W_MATRIX_CFG_DRIFT"
+cp -R "$W_MATRIX_SAME" "$W_MATRIX_MEMORY_DRIFT"
+"$SUT" --matrix --workspace "$W_MATRIX_SAME" >/dev/null 2>&1; identical_rc=$?
+same_row_count=$(awk 'NR > 1' "$W_MATRIX_SAME/matrix.tsv" 2>/dev/null | wc -l)
+same_has_rows=no; (( same_row_count > MIN_FIXTURE_ARTIFACTS )) && same_has_rows=yes
+printf 'changed on b\n' >> "$W_MATRIX_CFG_DRIFT/b/cfg/CLAUDE.md"
+"$SUT" --matrix --workspace "$W_MATRIX_CFG_DRIFT" >/dev/null 2>&1; cfg_drift_rc=$?
+# A drift in memory alone, which matrix.tsv does not carry.
+printf 'changed on b\n' >> "$W_MATRIX_MEMORY_DRIFT/b/memory/-home-msame-quantivly-hub/fact-one.md"
+"$SUT" --matrix --workspace "$W_MATRIX_MEMORY_DRIFT" >/dev/null 2>&1; memory_drift_rc=$?
+check "exit: 0 with every artifact identical (rows present), 1 on a cfg drift, 1 on a memory-only drift" \
+    "$identical_rc $same_has_rows $cfg_drift_rc $memory_drift_rc" "0 yes 1 1"
+
+printf 'matrix: it writes its five reports and nothing else, and reaches no host\n'
+new_workspace_entries=$(LC_ALL=C comm -13 <(cut -d' ' -f3- <<<"$MATRIX_LISTING_BEFORE" | LC_ALL=C sort) \
+    <(cut -d' ' -f3- <<<"$MATRIX_LISTING_AFTER" | LC_ALL=C sort) | tr '\n' ' ')
+expected_new_entries=$(printf '%s\n' "${MATRIX_REPORTS[@]}" | LC_ALL=C sort | tr '\n' ' ')
+# Every entry that was there before is still there, with its type and mtime.
+changed_workspace_entries=$(LC_ALL=C comm -23 <(printf '%s\n' "$MATRIX_LISTING_BEFORE") \
+    <(printf '%s\n' "$MATRIX_LISTING_AFTER") | tr '\n' ' ')
+matrix_ssh_calls=none; [[ -s $SSH_CALLS ]] && matrix_ssh_calls=some
+check "writes: exactly the five reports added, nothing else changed, no ssh call (the recorder saw the collect's)" \
+    "$new_workspace_entries|$changed_workspace_entries|$matrix_ssh_recorder_live $matrix_ssh_calls" \
+    "$expected_new_entries||yes none"
+
+printf 'matrix: --host is refused, the matrix reports on every host in hosts.tsv\n'
+err=$("$SUT" --matrix --workspace "$W_MATRIX" --host h1=mh1:.claude 2>&1 >/dev/null); rc=$?
+names_collect_only=no; [[ "$err" == *"--host applies to --collect only"* ]] && names_collect_only=yes
+check "--matrix --host: exit 64, says --host is for --collect" "$rc $names_collect_only" "64 yes"
+
 printf '\n'
-EXPECTED_ROWS=27
+EXPECTED_ROWS=40
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

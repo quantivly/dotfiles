@@ -17,8 +17,10 @@
 #   --collect   for each host, copy its configuration tree into
 #               <workspace>/<name>/ (over ssh, or locally for `local`) and write
 #               facts.tsv beside it, replacing that host's earlier collect.
-#   --matrix    read the workspace's facts.tsv files and print one row per fact,
-#               one column per host, marking where the hosts differ.
+#   --matrix    read only the workspace and write five reports at its root, one
+#               column per host: matrix.tsv/.md (every collected file by layout
+#               path), settings-matrix.md (settings.json key by key) and
+#               memory-matrix.tsv/.md (memory files per store, across homes).
 #
 # READ-ONLY. Nothing is changed on any host. Credentials, transcripts, caches and
 # plugin stores are excluded from what is copied (EXCLUDE_NAMES), and the only
@@ -26,15 +28,17 @@
 #
 # Usage:
 #   claude-config-audit.sh --collect [--workspace DIR] [--host NAME=ALIAS:CFGDIR]...
-#   claude-config-audit.sh --matrix  [--workspace DIR] [--host NAME=ALIAS:CFGDIR]...
+#   claude-config-audit.sh --matrix  [--workspace DIR]
 #   claude-config-audit.sh --help
 #     --workspace DIR              default: ~/Projects/handoffs/2026-11-claude-config-audit
-#     --host NAME=ALIAS:CFGDIR     repeatable; replaces the default hosts. ALIAS is an
-#                                  ssh alias, or `local` to collect without ssh;
-#                                  CFGDIR is a dot-directory under that host's $HOME
+#     --host NAME=ALIAS:CFGDIR     --collect only, repeatable; replaces the default hosts.
+#                                  ALIAS is an ssh alias, or `local` to collect without
+#                                  ssh; CFGDIR is a dot-directory under that host's $HOME.
+#                                  --matrix reports on every host in hosts.tsv
 #
 # Exit: --collect  0 every host collected · 2 a host failed · 130/143 interrupted (Ctrl-C/SIGTERM)
-#       --matrix   0 identical · 1 drift · 2 a declared host has no facts.tsv
+#       --matrix   0 every row identical · 1 drift · 2 a host in hosts.tsv has no facts.tsv
+#                  or a failed collect (no report is written)
 #       64 usage
 #
 # Test overrides (scripts/test-claude-config-audit.sh): CLAUDE_CONFIG_AUDIT_SSH (the ssh
@@ -94,6 +98,7 @@ EXCLUDE_NAMES=(
     'worktrees'
 )
 
+EXIT_DRIFT=1
 EXIT_COLLECT_FAILED=2
 EXIT_USAGE=64
 EXIT_INTERRUPTED=130
@@ -138,6 +143,7 @@ BINARY_SKIPPED_TAG='binary-skipped'
 ACCOUNT_DIR_LINK_TAG='account-dir-link'
 
 LOCAL_ALIAS='local'
+TAB=$'\t'
 # How every host runs remote_script, given CFGDIR as $1: over ssh, or directly for `local`.
 COLLECT_SCRIPT_SHELL=(bash -s --)
 STAGING_PREFIX='.collecting-'
@@ -345,6 +351,9 @@ parse_args() {
         shift
     done
     [[ -n "$MODE" ]] || usage_error "say what to do: --collect or --matrix"
+    if [[ "$MODE" == matrix ]] && (( ${#custom_hosts[@]} )); then
+        usage_error "--host applies to --collect only; --matrix reports on every host in hosts.tsv"
+    fi
     if (( ${#custom_hosts[@]} )); then HOSTS=("${custom_hosts[@]}"); else HOSTS=("${DEFAULT_HOSTS[@]}"); fi
 }
 
@@ -438,6 +447,8 @@ redact_tree() {   # DIR → 0 when every file was redacted or skipped, 1 when on
             rm -f "$redacting_path"
             return 1
         fi
+        # The host's mtime, which tar restored, is kept: --matrix names the newest copy by it.
+        touch -r "$file_path" "$redacting_path" || return 1
         mv -f "$redacting_path" "$file_path" || return 1
     done
     if (( ${#binary_skipped_lines[@]} )); then
@@ -627,9 +638,653 @@ collect_main() {
     (( ${#failed_names[@]} == 0 )) || die "not every host was collected; failed: ${failed_names[*]}"
 }
 
-# --- --matrix (Task 5) --------------------------------------------------------------------------
+# --- --matrix -----------------------------------------------------------------------------------
+#
+# Reads the workspace only: hosts.tsv, and each host's facts.tsv, links.tsv and collected tree.
+# Writes the five reports at the workspace root and nothing else; no host is reached.
 
-matrix_main()  { die "--matrix is not implemented"; }
+HOSTS_TSV_NAME='hosts.tsv'
+HOST_OK_STATUS='ok'
+FACTS_NAME='facts.tsv'
+LINKS_NAME='links.tsv'
+MATRIX_TSV_NAME='matrix.tsv'
+MATRIX_MD_NAME='matrix.md'
+SETTINGS_MATRIX_MD_NAME='settings-matrix.md'
+MEMORY_MATRIX_TSV_NAME='memory-matrix.tsv'
+MEMORY_MATRIX_MD_NAME='memory-matrix.md'
+
+# Every file under these layout roots is an artifact, keyed by its layout path; memory/ is
+# compared per store instead, since a store's key differs from home to home.
+ARTIFACT_LAYOUT_ROOTS=(cfg roots repos "$ACCOUNT_DIRS_LAYOUT_DIR")
+MEMORY_LAYOUT_ROOT='memory'
+CFG_SETTINGS_LAYOUT_PATH='cfg/settings.json'
+
+# artifact_status's classes. ABSENT_HASH stands for a host without the file.
+ABSENT_HASH='-'
+STATUS_IDENTICAL='identical'
+STATUS_DIFFERS='differs'
+ONLY_ON_PREFIX='only-on:'
+MISSING_ON_PREFIX='missing-on:'
+NEWEST_PREFIX='newest:'
+SAME_AS_CFG_SETTINGS="same-as:$CFG_SETTINGS_LAYOUT_PATH"
+DIFFERS_FROM_CFG_SETTINGS="differs-from:$CFG_SETTINGS_LAYOUT_PATH"
+SHA256_HEX_LENGTH=64
+
+# A host's state in a row: present or absent, or, when any host holds the artifact through a
+# symlink, every holder's provenance, so a link is never mistaken for a duplicate copy.
+PRESENT_STATE='present'
+ABSENT_STATE='absent'
+COPY_STATE='copy'
+LINK_STATE_PREFIX='link→'
+
+# A projects key is the project's absolute path with every character but a letter or digit
+# turned into a dash: /home/zvi/quantivly/hub is -home-zvi-quantivly-hub.
+PROJECTS_HOME_PREFIX='-home-'
+FRONTMATTER_FENCE='---'
+FRONTMATTER_DESCRIPTION_KEY='description:'
+SAME_FACT_LABEL='same-fact?'
+SAME_FACT_NAME_SEPARATOR='~'
+
+# settings-matrix.md. Each JQ_ filter reads one host's settings.json and prints key<TAB>value
+# lines for one section; the values are then compared host by host.
+SETTINGS_PARSED_STATE='parsed'
+SETTINGS_INVALID_STATE='invalid'
+SETTINGS_KEY_ABSENT_CELL='—'
+PRESENT_MARK='✓'
+NO_MARKETPLACE_SOURCE='none'
+VARIANT_LABEL_PREFIX='v'
+# settings_status reuses artifact_status, which wants an mtime; a settings value has none.
+SETTINGS_VALUE_MTIME=0
+# A hook command's script: the first word holding a slash, without its quotes or an assignment.
+HOOK_SCRIPT_PATH_RE=$'[^[:space:]\'"=;|&<>()]*/[^[:space:]\'"/;|&<>()]+'
+# The top-level keys that have a section of their own; permissions' other keys join the rest.
+KEYS_COMPARED_APART_JSON='["permissions","hooks","enabledPlugins","extraKnownMarketplaces"]'
+JQ_IS_OBJECT='type == "object"'
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_ALLOW_SETS='.permissions.allow? // [] | .[]? | strings | [., $present] | @tsv'
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_HOOK_BASENAMES='.hooks? // {} | to_entries[]? | .key as $event | .value | arrays | .[] | .hooks? // [] | .[]? | .command? | strings | (first(match($script_path_re).string) // (split(" ") | map(select(length > 0)) | first) // "") as $script_path | [$event + " " + ($script_path | split("/") | last // ""), $present] | @tsv'
+JQ_PLUGIN_NAMES='.enabledPlugins? // {} | to_entries[]? | [.key, (.value | tostring)] | @tsv'
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_MARKETPLACE_SOURCES='.extraKnownMarketplaces? // {} | to_entries[]? | [.key, ((.value | objects | .source | objects | .source) // $no_source | tostring)] | @tsv'
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_OTHER_KEYS='def key_sorted: walk(if type == "object" then to_entries | sort_by(.key) | from_entries else . end); ((to_entries[] | select(.key | IN($compared_apart[]) | not)), (.permissions | objects | to_entries[] | select(.key != "allow") | .key |= "permissions." + .)) | [.key, (.value | key_sorted | tojson)] | @tsv'
+JQ_SETTINGS_ARGUMENTS=(--arg present "$PRESENT_MARK" --arg script_path_re "$HOOK_SCRIPT_PATH_RE"
+    --arg no_source "$NO_MARKETPLACE_SOURCE" --argjson compared_apart "$KEYS_COMPARED_APART_JSON")
+
+# The Markdown tables: column 1 is the artifact, store file or key, column 2 the status, and
+# the hosts' columns follow.
+FIRST_HOST_COLUMN=3
+MATRIX_LEGEND="Status: identical (one hash on every host) · only-on:HOST · missing-on:HOSTS (equal where present) · differs newest:HOST (by mtime). An account-dir copy is compared with its own host's cfg/settings.json instead: same-as or differs-from. Cell: present · absent, or for an artifact any host holds through a symlink, link→TARGET · copy."
+MEMORY_LEGEND='One section per store, its key stripped of -home-USER- so stores meet across homes. Status as in matrix.md. A same-fact? row names files whose frontmatter descriptions match (lowercased, whitespace collapsed) under different names.'
+SETTINGS_LEGEND="Each host's cfg/settings.json, key by key. Status: same · only HOST · missing on HOSTS · differs. A host without the file reads absent; a key a host does not set reads —."
+
+# Filled by load_matrix_hosts and load_host_index; HOST<TAB>... keys are per host.
+MATRIX_HOSTS=()
+declare -A HOST_COLLECTED_AT=()
+declare -A FILE_HASHES=()       # HOST<TAB>layout path → sha256
+declare -A FILE_MTIMES=()       # HOST<TAB>layout path → mtime, in seconds
+declare -A LINK_TARGETS=()      # HOST<TAB>layout path → target, from links.tsv
+declare -A ARTIFACT_PATHS=()    # layout path under ARTIFACT_LAYOUT_ROOTS → 1
+declare -A MEMORY_FILES=()      # HOST<TAB>store<TAB>file → its layout path on HOST
+declare -A MEMORY_ENTRIES=()    # store<TAB>file → 1
+declare -A SETTINGS_FILE_STATES=()   # HOST → parsed, absent or invalid
+
+facts_value() { awk -F'\t' -v fact_key="$2" '$1 == fact_key { print $2; exit }' "$1"; }   # FACTS_TSV KEY
+
+# hosts.tsv is the authority on which collects are valid: every host it names must be `ok` and
+# hold facts.tsv, or no report is written (exit 2, each such host named).
+load_matrix_hosts() {
+    local hosts_tsv="$WORKSPACE/$HOSTS_TSV_NAME" host_name host_alias host_cfgdir collected_at host_status
+    local -a invalid_hosts=()
+    [[ -f "$hosts_tsv" ]] || die "$WORKSPACE has no $HOSTS_TSV_NAME; run --collect first"
+    while IFS="$TAB" read -r host_name host_alias host_cfgdir collected_at host_status; do
+        [[ -n "$host_name" ]] || continue
+        if [[ ! "$host_name" =~ $ALIAS_RE ]]; then
+            warn "$HOSTS_TSV_NAME names a host '$host_name', which is not a valid host name"
+            invalid_hosts+=("$host_name")
+            continue
+        fi
+        if [[ "$host_status" != "$HOST_OK_STATUS" ]]; then
+            warn "$host_name: $HOSTS_TSV_NAME says its collect failed (status '$host_status', not '$HOST_OK_STATUS'); re-run --collect"
+            invalid_hosts+=("$host_name")
+        elif [[ ! -f "$WORKSPACE/$host_name/$FACTS_NAME" ]]; then
+            warn "$host_name has no $FACTS_NAME in $WORKSPACE; re-run --collect"
+            invalid_hosts+=("$host_name")
+        fi
+        MATRIX_HOSTS+=("$host_name")
+        HOST_COLLECTED_AT[$host_name]=$collected_at
+    done < "$hosts_tsv"
+    (( ${#MATRIX_HOSTS[@]} )) || die "$hosts_tsv names no host"
+    (( ${#invalid_hosts[@]} == 0 )) || die "no report written; not every host in $HOSTS_TSV_NAME has a valid collect: ${invalid_hosts[*]}"
+}
+
+# Every file under ROOT... of HOST_DIR, one line each: layout path<TAB>sha256<TAB>mtime. The
+# hashes and mtimes are read in batches in the order of the path list and matched to it by
+# position, so no file name is ever parsed back out of sha256sum's or stat's output.
+index_host_files() {   # HOST_DIR ROOT... → 0, or 1 when a file cannot be indexed (why, on stderr)
+    local host_dir="$1" layout_root layout_path hash_line path_index
+    shift
+    local -a existing_roots=() layout_paths=() hash_lines=() mtimes=()
+    for layout_root in "$@"; do
+        if [[ -d "$host_dir/$layout_root" ]]; then existing_roots+=("$layout_root"); fi
+    done
+    (( ${#existing_roots[@]} )) || return 0
+    mapfile -d '' layout_paths < <(cd "$host_dir" && find "${existing_roots[@]}" -type f -print0 | LC_ALL=C sort -z)
+    (( ${#layout_paths[@]} )) || return 0
+    for layout_path in "${layout_paths[@]}"; do
+        if [[ "$layout_path" == *[$'\t\n']* ]]; then
+            warn "$host_dir/$layout_path has a tab or newline in its name, which no matrix row can hold"
+            return 1
+        fi
+    done
+    mapfile -t hash_lines < <(cd "$host_dir" && printf '%s\0' "${layout_paths[@]}" | xargs -0 sha256sum --)
+    mapfile -t mtimes < <(cd "$host_dir" && printf '%s\0' "${layout_paths[@]}" | xargs -0 stat -c %Y --)
+    if (( ${#hash_lines[@]} != ${#layout_paths[@]} || ${#mtimes[@]} != ${#layout_paths[@]} )); then
+        warn "could not hash and date every file under $host_dir"
+        return 1
+    fi
+    for path_index in "${!layout_paths[@]}"; do
+        # sha256sum marks a line whose name it had to escape with a leading backslash.
+        hash_line="${hash_lines[path_index]#\\}"
+        printf '%s\t%s\t%s\n' "${layout_paths[path_index]}" "${hash_line:0:SHA256_HEX_LENGTH}" "${mtimes[path_index]}"
+    done
+}
+
+# KEY USER → the store's name across hosts: KEY without a leading -home-USER-, USER spelled as a
+# projects key spells it (every character but a letter or digit a dash); KEY itself otherwise.
+store_key() {
+    local projects_key="$1" user_as_projects_key="${2//[^A-Za-z0-9]/-}"
+    local home_prefix="$PROJECTS_HOME_PREFIX$user_as_projects_key-"
+    if [[ "$projects_key" == "$home_prefix"?* ]]; then
+        printf '%s\n' "${projects_key#"$home_prefix"}"
+    else
+        printf '%s\n' "$projects_key"
+    fi
+}
+
+# FILE → its frontmatter description: lowercased, whitespace collapsed, one pair of enclosing
+# quotes dropped; empty when the file has no frontmatter or no description in it.
+fact_signature() {
+    local file_path="$1" line description="" in_frontmatter=no
+    local -a description_words=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        if [[ "$in_frontmatter" == no ]]; then
+            [[ "$line" == "$FRONTMATTER_FENCE" ]] || return 0
+            in_frontmatter=yes
+            continue
+        fi
+        [[ "$line" != "$FRONTMATTER_FENCE" ]] || return 0
+        if [[ "$line" == "$FRONTMATTER_DESCRIPTION_KEY"* ]]; then
+            description="${line#"$FRONTMATTER_DESCRIPTION_KEY"}"
+            break
+        fi
+    done < "$file_path"
+    read -r -a description_words <<<"$description"
+    description="${description_words[*]}"
+    if [[ "$description" == \"*\" || "$description" == \'*\' ]] && (( ${#description} >= 2 )); then
+        description="${description:1:${#description}-2}"
+        read -r -a description_words <<<"$description"
+        description="${description_words[*]}"
+    fi
+    printf '%s\n' "${description,,}"
+}
+
+load_host_index() {   # HOST → the indexes filled from $WORKSPACE/HOST; 1 when it cannot be indexed
+    local host="$1" host_dir="$WORKSPACE/$1" host_files user_name layout_path file_hash file_mtime
+    local path_in_memory projects_key file_in_store store_name link_line
+    local -A store_names_by_key=()
+    host_files=$(index_host_files "$host_dir" "${ARTIFACT_LAYOUT_ROOTS[@]}" "$MEMORY_LAYOUT_ROOT") || return 1
+    user_name=$(facts_value "$host_dir/$FACTS_NAME" user)
+    while IFS="$TAB" read -r layout_path file_hash file_mtime; do
+        [[ -n "$layout_path" ]] || continue
+        FILE_HASHES[$host$TAB$layout_path]=$file_hash
+        FILE_MTIMES[$host$TAB$layout_path]=$file_mtime
+        if [[ "$layout_path" != "$MEMORY_LAYOUT_ROOT"/* ]]; then
+            ARTIFACT_PATHS[$layout_path]=1
+            continue
+        fi
+        path_in_memory="${layout_path#"$MEMORY_LAYOUT_ROOT"/}"
+        projects_key="${path_in_memory%%/*}"
+        file_in_store="${path_in_memory#*/}"
+        if [[ -z "${store_names_by_key[$projects_key]+named}" ]]; then
+            store_names_by_key[$projects_key]=$(store_key "$projects_key" "$user_name")
+        fi
+        store_name="${store_names_by_key[$projects_key]}"
+        MEMORY_FILES[$host$TAB$store_name$TAB$file_in_store]=$layout_path
+        MEMORY_ENTRIES[$store_name$TAB$file_in_store]=1
+    done <<<"$host_files"
+    [[ -f "$host_dir/$LINKS_NAME" ]] || return 0
+    while IFS= read -r link_line; do
+        [[ "$link_line" == *"$TAB"* ]] || continue
+        LINK_TARGETS[$host$TAB${link_line%%"$TAB"*}]="${link_line#*"$TAB"}"
+    done < "$host_dir/$LINKS_NAME"
+}
+
+# HOST HASH MTIME [HOST HASH MTIME]... → how the copies compare, HASH being the file's sha256 on
+# HOST or $ABSENT_HASH where HOST lacks it:
+#   identical          present on every host, one hash
+#   only-on:H          present on exactly one host (with one host in hosts.tsv, every artifact)
+#   missing-on:H,…     present on some hosts, equal wherever present
+#   differs newest:H   more than one hash; H holds the newest mtime (every host tied for it)
+artifact_status() {
+    local host file_hash file_mtime newest_mtime=-1
+    local -a present_hosts=() missing_hosts=() newest_hosts=()
+    local -A distinct_hashes=()
+    while (( $# >= 3 )); do
+        host="$1" file_hash="$2" file_mtime="$3"
+        shift 3
+        if [[ "$file_hash" == "$ABSENT_HASH" ]]; then
+            missing_hosts+=("$host")
+            continue
+        fi
+        present_hosts+=("$host")
+        distinct_hashes[$file_hash]=1
+        if (( file_mtime > newest_mtime )); then
+            newest_mtime=$file_mtime
+            newest_hosts=("$host")
+        elif (( file_mtime == newest_mtime )); then
+            newest_hosts+=("$host")
+        fi
+    done
+    local IFS=,
+    if (( ${#distinct_hashes[@]} > 1 )); then
+        printf '%s %s%s\n' "$STATUS_DIFFERS" "$NEWEST_PREFIX" "${newest_hosts[*]}"
+    elif (( ${#present_hosts[@]} == 1 )); then
+        printf '%s%s\n' "$ONLY_ON_PREFIX" "${present_hosts[0]}"
+    elif (( ${#missing_hosts[@]} )); then
+        printf '%s%s\n' "$MISSING_ON_PREFIX" "${missing_hosts[*]}"
+    else
+        printf '%s\n' "$STATUS_IDENTICAL"
+    fi
+}
+
+# HOST LAYOUT_PATH → link→TARGET when LAYOUT_PATH, or failing that its nearest ancestor, was a
+# symlink on HOST (links.tsv records a linked directory once, so its files resolve to
+# TARGET/<the rest of the path>); copy otherwise.
+provenance() {
+    local host="$1" linked_path="$2" path_below_link=""
+    while :; do
+        if [[ -n "${LINK_TARGETS[$host$TAB$linked_path]+recorded}" ]]; then
+            printf '%s%s%s\n' "$LINK_STATE_PREFIX" "${LINK_TARGETS[$host$TAB$linked_path]}" "$path_below_link"
+            return 0
+        fi
+        [[ "$linked_path" == */* ]] || break
+        path_below_link="/${linked_path##*/}$path_below_link"
+        linked_path="${linked_path%/*}"
+    done
+    printf '%s\n' "$COPY_STATE"
+}
+
+# LAYOUT_PATH... (one per host, in MATRIX_HOSTS order; empty where the host lacks the file) →
+# the row's host:state cells, each after a tab.
+print_host_state_cells() {
+    local -a layout_paths=("$@") host_provenances=()
+    local host_index any_link=no host_state
+    for host_index in "${!MATRIX_HOSTS[@]}"; do
+        host_provenances[host_index]=""
+        [[ -n "${layout_paths[host_index]}" ]] || continue
+        host_provenances[host_index]=$(provenance "${MATRIX_HOSTS[host_index]}" "${layout_paths[host_index]}")
+        if [[ "${host_provenances[host_index]}" == "$LINK_STATE_PREFIX"* ]]; then any_link=yes; fi
+    done
+    for host_index in "${!MATRIX_HOSTS[@]}"; do
+        if [[ -z "${layout_paths[host_index]}" ]]; then host_state=$ABSENT_STATE
+        elif [[ "$any_link" == yes ]]; then host_state=${host_provenances[host_index]}
+        else host_state=$PRESENT_STATE
+        fi
+        printf '\t%s:%s' "${MATRIX_HOSTS[host_index]}" "$host_state"
+    done
+}
+
+print_tsv_header() {   # LEADING_COLUMN... → the header line: those columns, then one per host
+    local IFS="$TAB"
+    printf '%s\t%s\n' "$*" "${MATRIX_HOSTS[*]}"
+}
+
+sorted_lines() { (( $# )) || return 0; printf '%s\n' "$@" | LC_ALL=C sort; }   # WORD...
+
+# account-dirs/<seat>/settings.json, the laptop's per-seat copies of cfg/settings.json.
+is_account_dir_settings() {   # LAYOUT_PATH
+    local seat_path="${1#"$ACCOUNT_DIRS_LAYOUT_DIR"/}"
+    [[ "$1" == "$ACCOUNT_DIRS_LAYOUT_DIR"/* && "$seat_path" == */"$ACCOUNT_DIR_SETTINGS_NAME" ]] || return 1
+    seat_path="${seat_path%/"$ACCOUNT_DIR_SETTINGS_NAME"}"
+    [[ -n "$seat_path" && "$seat_path" != */* ]]
+}
+
+# ARTIFACT (an account-dir copy) → same-as:cfg/settings.json when every host holding it holds an
+# identical cfg/settings.json, else differs-from:cfg/settings.json. The copies exist only on the
+# laptop, so this, not a cross-host status, is how one drifts.
+account_copy_status() {
+    local artifact="$1" host
+    for host in "${MATRIX_HOSTS[@]}"; do
+        [[ -n "${FILE_HASHES[$host$TAB$artifact]+indexed}" ]] || continue
+        if [[ "${FILE_HASHES[$host$TAB$artifact]}" != "${FILE_HASHES[$host$TAB$CFG_SETTINGS_LAYOUT_PATH]:-$ABSENT_HASH}" ]]; then
+            printf '%s\n' "$DIFFERS_FROM_CFG_SETTINGS"
+            return 0
+        fi
+    done
+    printf '%s\n' "$SAME_AS_CFG_SETTINGS"
+}
+
+# matrix.tsv: artifact<TAB>status<TAB>host:state…, one row per layout path of any host.
+write_artifact_matrix() {
+    local artifact host artifact_row_status
+    local -a status_arguments=() host_layout_paths=()
+    {
+        print_tsv_header artifact status
+        while IFS= read -r artifact; do
+            [[ -n "$artifact" ]] || continue
+            status_arguments=()
+            host_layout_paths=()
+            for host in "${MATRIX_HOSTS[@]}"; do
+                if [[ -n "${FILE_HASHES[$host$TAB$artifact]+indexed}" ]]; then
+                    status_arguments+=("$host" "${FILE_HASHES[$host$TAB$artifact]}" "${FILE_MTIMES[$host$TAB$artifact]}")
+                    host_layout_paths+=("$artifact")
+                else
+                    status_arguments+=("$host" "$ABSENT_HASH" "$ABSENT_HASH")
+                    host_layout_paths+=("")
+                fi
+            done
+            if is_account_dir_settings "$artifact"; then
+                artifact_row_status=$(account_copy_status "$artifact")
+            else
+                artifact_row_status=$(artifact_status "${status_arguments[@]}")
+            fi
+            printf '%s\t%s' "$artifact" "$artifact_row_status"
+            print_host_state_cells "${host_layout_paths[@]}"
+            printf '\n'
+        done < <(sorted_lines "${!ARTIFACT_PATHS[@]}")
+    } > "$WORKSPACE/$MATRIX_TSV_NAME"
+}
+
+# STORE FILE... → one same-fact? row for each description that two or more of the store's file
+# names share: store<TAB>same-fact?<TAB>name~name…, names in the order first seen (hosts in
+# hosts.tsv order, files sorted), each host's cell naming those it holds.
+print_same_fact_rows() {
+    local store_name="$1" host file_in_store layout_path signature names held_names delimited_names
+    shift
+    local -a signatures_in_order=() group_names=() held=()
+    local -A names_by_signature=()
+    for host in "${MATRIX_HOSTS[@]}"; do
+        for file_in_store in "$@"; do
+            [[ "$file_in_store" == *.md ]] || continue
+            layout_path=${MEMORY_FILES[$host$TAB$store_name$TAB$file_in_store]:-}
+            [[ -n "$layout_path" ]] || continue
+            signature=$(fact_signature "$WORKSPACE/$host/$layout_path")
+            [[ -n "$signature" ]] || continue
+            if [[ -z "${names_by_signature[$signature]+seen}" ]]; then
+                signatures_in_order+=("$signature")
+                names_by_signature[$signature]=$file_in_store
+                continue
+            fi
+            # Fenced by the separator on both sides, so a name matches only as a whole name.
+            delimited_names="$SAME_FACT_NAME_SEPARATOR${names_by_signature[$signature]}$SAME_FACT_NAME_SEPARATOR"
+            if [[ "$delimited_names" != *"$SAME_FACT_NAME_SEPARATOR$file_in_store$SAME_FACT_NAME_SEPARATOR"* ]]; then
+                names_by_signature[$signature]+="$SAME_FACT_NAME_SEPARATOR$file_in_store"
+            fi
+        done
+    done
+    for signature in "${signatures_in_order[@]}"; do
+        names=${names_by_signature[$signature]}
+        [[ "$names" == *"$SAME_FACT_NAME_SEPARATOR"* ]] || continue
+        IFS="$SAME_FACT_NAME_SEPARATOR" read -r -a group_names <<<"$names"
+        printf '%s\t%s\t%s' "$store_name" "$SAME_FACT_LABEL" "$names"
+        for host in "${MATRIX_HOSTS[@]}"; do
+            held=()
+            for file_in_store in "${group_names[@]}"; do
+                if [[ -n "${MEMORY_FILES[$host$TAB$store_name$TAB$file_in_store]+held}" ]]; then held+=("$file_in_store"); fi
+            done
+            held_names=$(IFS=,; printf '%s' "${held[*]}")
+            printf '\t%s:%s' "$host" "${held_names:-$ABSENT_STATE}"
+        done
+        printf '\n'
+    done
+}
+
+# memory-matrix.tsv: store<TAB>file<TAB>status<TAB>host:state…, each store's files sorted, then
+# its same-fact? rows.
+write_memory_matrix() {
+    local entry store_name file_in_store host layout_path memory_row_status current_store=""
+    local -a status_arguments=() host_layout_paths=() current_store_files=()
+    {
+        print_tsv_header store file status
+        while IFS= read -r entry; do
+            [[ -n "$entry" ]] || continue
+            store_name="${entry%%"$TAB"*}"
+            file_in_store="${entry#*"$TAB"}"
+            if [[ "$store_name" != "$current_store" ]]; then
+                if [[ -n "$current_store" ]]; then print_same_fact_rows "$current_store" "${current_store_files[@]}"; fi
+                current_store=$store_name
+                current_store_files=()
+            fi
+            current_store_files+=("$file_in_store")
+            status_arguments=()
+            host_layout_paths=()
+            for host in "${MATRIX_HOSTS[@]}"; do
+                layout_path=${MEMORY_FILES[$host$TAB$entry]:-}
+                if [[ -n "$layout_path" ]]; then
+                    status_arguments+=("$host" "${FILE_HASHES[$host$TAB$layout_path]}" "${FILE_MTIMES[$host$TAB$layout_path]}")
+                else
+                    status_arguments+=("$host" "$ABSENT_HASH" "$ABSENT_HASH")
+                fi
+                host_layout_paths+=("$layout_path")
+            done
+            memory_row_status=$(artifact_status "${status_arguments[@]}")
+            printf '%s\t%s\t%s' "$store_name" "$file_in_store" "$memory_row_status"
+            print_host_state_cells "${host_layout_paths[@]}"
+            printf '\n'
+        done < <(sorted_lines "${!MEMORY_ENTRIES[@]}")
+        if [[ -n "$current_store" ]]; then print_same_fact_rows "$current_store" "${current_store_files[@]}"; fi
+    } > "$WORKSPACE/$MEMORY_MATRIX_TSV_NAME"
+}
+
+# TSV on stdin, header line first → a Markdown table. Column 1 prints as code, every `|` is
+# escaped, and a cell in a host column (FIRST_HOST_COLUMN on) drops its `<host>:` prefix, since
+# the column's header names the host.
+markdown_table() {
+    awk -F'\t' -v first_host_column="$FIRST_HOST_COLUMN" '
+        function escaped(text) { gsub(/\|/, "\\|", text); return text }
+        function as_code(text) { if (index(text, "`")) return "`` " text " ``"; return "`" text "`" }
+        NR == 1 {
+            header_line = "|"; rule_line = "|"
+            for (column = 1; column <= NF; column++) {
+                column_name[column] = $column
+                header_line = header_line " " escaped($column) " |"
+                rule_line = rule_line "---|"
+            }
+            print header_line; print rule_line
+            next
+        }
+        {
+            row_line = "|"
+            for (column = 1; column <= NF; column++) {
+                cell = $column
+                if (column >= first_host_column && index(cell, column_name[column] ":") == 1)
+                    cell = substr(cell, length(column_name[column]) + 2)
+                if (column == 1) cell = as_code(cell)
+                row_line = row_line " " escaped(cell) " |"
+            }
+            print row_line
+        }'
+}
+
+report_heading() {   # TITLE → a report's first line: TITLE, the workspace and each host's collect time
+    local host collect_time_list
+    local -a collect_times=()
+    for host in "${MATRIX_HOSTS[@]}"; do
+        collect_times+=("$host ${HOST_COLLECTED_AT[$host]}")
+    done
+    printf -v collect_time_list '%s, ' "${collect_times[@]}"
+    printf '# %s: %s (collected %s)\n' "$1" "$WORKSPACE" "${collect_time_list%, }"
+}
+
+# matrix.md: matrix.tsv as one table per layout root.
+write_matrix_markdown() {
+    local matrix_tsv="$WORKSPACE/$MATRIX_TSV_NAME" layout_root table_header section_rows
+    table_header=$(head -n 1 "$matrix_tsv")
+    {
+        report_heading 'Claude config matrix'
+        printf '\n%s\n' "$MATRIX_LEGEND"
+        for layout_root in "${ARTIFACT_LAYOUT_ROOTS[@]}"; do
+            section_rows=$(awk -F'\t' -v layout_prefix="$layout_root/" 'NR > 1 && index($1, layout_prefix) == 1' "$matrix_tsv")
+            [[ -n "$section_rows" ]] || continue
+            printf '\n## %s/\n\n' "$layout_root"
+            printf '%s\n%s\n' "$table_header" "$section_rows" | markdown_table
+        done
+    } > "$WORKSPACE/$MATRIX_MD_NAME"
+}
+
+# memory-matrix.md: memory-matrix.tsv as one table per store, the store column dropped.
+write_memory_markdown() {
+    local memory_tsv="$WORKSPACE/$MEMORY_MATRIX_TSV_NAME" store_name table_header store_rows
+    table_header=$(head -n 1 "$memory_tsv" | cut -f2-)
+    {
+        report_heading 'Claude memory matrix'
+        printf '\n%s\n' "$MEMORY_LEGEND"
+        while IFS= read -r store_name; do
+            store_rows=$(awk -F'\t' -v store_name="$store_name" 'NR > 1 && $1 == store_name' "$memory_tsv" | cut -f2-)
+            printf '\n## %s\n\n' "$store_name"
+            printf '%s\n%s\n' "$table_header" "$store_rows" | markdown_table
+        done < <(awk -F'\t' 'NR > 1 && !seen[$1]++ { print $1 }' "$memory_tsv")
+    } > "$WORKSPACE/$MEMORY_MATRIX_MD_NAME"
+}
+
+# HOST VALUE [HOST VALUE]... → same · only HOST · missing on H,… · differs: artifact_status's
+# classes over one settings key's values ($ABSENT_HASH where a host does not set it), in words.
+settings_status() {
+    local value_status
+    local -a status_arguments=()
+    while (( $# >= 2 )); do
+        status_arguments+=("$1" "$2" "$SETTINGS_VALUE_MTIME")
+        shift 2
+    done
+    value_status=$(artifact_status "${status_arguments[@]}")
+    case "$value_status" in
+        "$STATUS_IDENTICAL")     printf 'same\n' ;;
+        "$ONLY_ON_PREFIX"*)      printf 'only %s\n' "${value_status#"$ONLY_ON_PREFIX"}" ;;
+        "$MISSING_ON_PREFIX"*)   printf 'missing on %s\n' "${value_status#"$MISSING_ON_PREFIX"}" ;;
+        *)                       printf '%s\n' "$STATUS_DIFFERS" ;;
+    esac
+}
+
+# TITLE KEY_HEADER JQ_FILTER CELL_KIND → one settings-matrix.md section: a heading and a table
+# with one row per key any host sets. CELL_KIND `value` prints each host's value; `variant`
+# prints v1, v2… so that hosts sharing a label share the value, for values too long to print.
+print_settings_section() {
+    local section_title="$1" key_header="$2" jq_filter="$3" cell_kind="$4"
+    local host settings_path section_lines section_line key value key_status host_cell host_cells section_tsv
+    local variant_number
+    local -a section_keys=() status_arguments=()
+    local -A section_values=() key_seen=() variant_labels=() unreadable_hosts=()
+    for host in "${MATRIX_HOSTS[@]}"; do
+        [[ "${SETTINGS_FILE_STATES[$host]}" == "$SETTINGS_PARSED_STATE" ]] || continue
+        settings_path="$WORKSPACE/$host/$CFG_SETTINGS_LAYOUT_PATH"
+        if ! section_lines=$(jq -r "${JQ_SETTINGS_ARGUMENTS[@]}" "$jq_filter" "$settings_path" 2>/dev/null); then
+            warn "$host: cannot read $section_title from $CFG_SETTINGS_LAYOUT_PATH; its column reads $SETTINGS_INVALID_STATE"
+            unreadable_hosts[$host]=1
+            continue
+        fi
+        while IFS= read -r section_line; do
+            key="${section_line%%"$TAB"*}"
+            value="${section_line#*"$TAB"}"
+            [[ -n "$key" ]] || continue
+            section_values[$host$TAB$key]=$value
+            if [[ -z "${key_seen[$key]+seen}" ]]; then
+                key_seen[$key]=1
+                section_keys+=("$key")
+            fi
+        done <<<"$section_lines"
+    done
+    printf '\n## %s\n\n' "$section_title"
+    if (( ${#section_keys[@]} == 0 )); then
+        printf 'No host sets any.\n'
+        return 0
+    fi
+    section_tsv=$(print_tsv_header "$key_header" status)
+    while IFS= read -r key; do
+        status_arguments=()
+        for host in "${MATRIX_HOSTS[@]}"; do
+            status_arguments+=("$host" "${section_values[$host$TAB$key]-$ABSENT_HASH}")
+        done
+        key_status=$(settings_status "${status_arguments[@]}")
+        host_cells=""
+        variant_labels=()
+        for host in "${MATRIX_HOSTS[@]}"; do
+            if [[ "${SETTINGS_FILE_STATES[$host]}" != "$SETTINGS_PARSED_STATE" ]]; then
+                host_cell=${SETTINGS_FILE_STATES[$host]}
+            elif [[ -n "${unreadable_hosts[$host]+unreadable}" ]]; then
+                host_cell=$SETTINGS_INVALID_STATE
+            elif [[ -z "${section_values[$host$TAB$key]+set}" ]]; then
+                host_cell=$SETTINGS_KEY_ABSENT_CELL
+            elif [[ "$cell_kind" == variant ]]; then
+                value=${section_values[$host$TAB$key]}
+                if [[ -z "${variant_labels[$value]+labelled}" ]]; then
+                    variant_number=$(( ${#variant_labels[@]} + 1 ))
+                    variant_labels[$value]="$VARIANT_LABEL_PREFIX$variant_number"
+                fi
+                host_cell=${variant_labels[$value]}
+            else
+                host_cell=${section_values[$host$TAB$key]}
+            fi
+            host_cells+="$TAB$host:$host_cell"
+        done
+        section_tsv+=$'\n'"$key$TAB$key_status$host_cells"
+    done < <(sorted_lines "${section_keys[@]}")
+    printf '%s\n' "$section_tsv" | markdown_table
+}
+
+# settings-matrix.md, on stdout: every host's cfg/settings.json compared key by key.
+settings_diff() {
+    local host settings_path
+    for host in "${MATRIX_HOSTS[@]}"; do
+        settings_path="$WORKSPACE/$host/$CFG_SETTINGS_LAYOUT_PATH"
+        if [[ ! -f "$settings_path" ]]; then
+            SETTINGS_FILE_STATES[$host]=$ABSENT_STATE
+        elif jq -e "$JQ_IS_OBJECT" "$settings_path" >/dev/null 2>&1; then
+            SETTINGS_FILE_STATES[$host]=$SETTINGS_PARSED_STATE
+        else
+            warn "$host: $CFG_SETTINGS_LAYOUT_PATH is not a JSON object; its column reads $SETTINGS_INVALID_STATE"
+            SETTINGS_FILE_STATES[$host]=$SETTINGS_INVALID_STATE
+        fi
+    done
+    report_heading 'Claude settings matrix'
+    printf '\n%s\n' "$SETTINGS_LEGEND"
+    print_settings_section 'permissions.allow' rule "$JQ_ALLOW_SETS" value
+    print_settings_section "hooks, by each command's script basename" 'event and script' "$JQ_HOOK_BASENAMES" value
+    print_settings_section 'enabledPlugins' plugin "$JQ_PLUGIN_NAMES" value
+    print_settings_section 'extraKnownMarketplaces, by source.source' marketplace "$JQ_MARKETPLACE_SOURCES" value
+    print_settings_section 'every other key, by value' key "$JQ_OTHER_KEYS" variant
+}
+
+# The rows that are not identical: a matrix.tsv row whose status is neither identical nor
+# same-as cfg/settings.json, and a memory-matrix.tsv row whose status is not identical (a
+# same-fact? row's status is its file names, so it always counts).
+count_drift_rows() {
+    awk -F'\t' -v identical="$STATUS_IDENTICAL" -v same_as_cfg="$SAME_AS_CFG_SETTINGS" \
+        -v matrix_tsv="$WORKSPACE/$MATRIX_TSV_NAME" '
+        FNR == 1 { next }
+        FILENAME == matrix_tsv { if ($2 != identical && $2 != same_as_cfg) drift_rows++; next }
+        $3 != identical { drift_rows++ }
+        END { print drift_rows + 0 }' "$WORKSPACE/$MATRIX_TSV_NAME" "$WORKSPACE/$MEMORY_MATRIX_TSV_NAME"
+}
+
+matrix_main() {
+    local host drift_rows
+    load_matrix_hosts
+    for host in "${MATRIX_HOSTS[@]}"; do
+        load_host_index "$host" || die "cannot index $WORKSPACE/$host; no report written"
+    done
+    write_artifact_matrix
+    write_memory_matrix
+    write_matrix_markdown
+    write_memory_markdown
+    settings_diff > "$WORKSPACE/$SETTINGS_MATRIX_MD_NAME"
+    drift_rows=$(count_drift_rows)
+    printf 'claude-config-audit: %s rows not identical across %s; reports in %s\n' \
+        "$drift_rows" "${MATRIX_HOSTS[*]}" "$WORKSPACE"
+    (( drift_rows == 0 )) || exit "$EXIT_DRIFT"
+}
 
 main() {
     parse_args "$@"
