@@ -19,6 +19,11 @@ shows as age. No such directory is an explicit arm, never an error. Items print 
 first occurrence first (bucket 1 held one row per notification on a thread, 83 rows over 28
 keys on 2026-11-03; DO-876 gives the rank the same rule), and the per-bucket counts count what
 is printed.
+
+``snoozes`` (DO-874) are the rows active at ``at``, read through ``Store.open_current``: an
+absent ``rabota.db`` means no snoozes and stays absent (this printer creates nothing), and a
+store at another schema is refused by name rather than migrated here — the tenant's next writing
+command migrates it, which the precompute timer's tick does within the half hour.
 """
 import json
 import re
@@ -29,7 +34,7 @@ from rabota import cli, errors
 from rabota.commands.doctor import parse_show
 from rabota.context import Context
 from rabota.snapshots import FETCHED_AT_FORMAT
-from rabota.store import now
+from rabota.store import Store, now
 
 SCHEMA = 1
 
@@ -39,6 +44,7 @@ MAX_ROWS = 25
 
 SEQUENCE_FILE = "sequence.json"
 PLAN_FILE = "inbox-plan.json"
+STORE_FILE = "rabota.db"
 DAY_DIR = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 # The arms a reader must handle before any field: the day directory or the plan is absent.
@@ -160,11 +166,26 @@ def answers_part() -> dict:
     return {"pending": [], "applied": []}
 
 
+def snoozes_part(ctx: Context, at: str) -> list[dict]:
+    """The snoozes active at ``at`` (DO-874) as ``key``/``until``/``ts``, the soonest to end first;
+    see the module header for the store it opens and the two cases it does not."""
+    if not (ctx.state_dir / STORE_FILE).is_file():
+        return []
+    store = Store.open_current(ctx.state_dir)
+    try:
+        rows = store.active_snoozes(ctx.tenant.name, at)
+    finally:
+        store.close()
+    return [{"key": r["item_key"], "until": r["until"], "ts": r["ts"]} for r in rows]
+
+
 def run_show(ctx: Context) -> dict:
-    return {"schema": SCHEMA, "at": now(), "next_elapse": next_elapse(ctx),
+    at = now()
+    return {"schema": SCHEMA, "at": at, "next_elapse": next_elapse(ctx),
             "sequence": sequence_part(newest_sequence_path(ctx.state_dir)),
             "plan": plan_part(ctx.state_dir / PLAN_FILE),
-            "answers": answers_part()}
+            "answers": answers_part(),
+            "snoozes": snoozes_part(ctx, at)}
 
 
 def _sequence_lines(sequence: dict, next_run: str | None) -> list[str]:
@@ -191,10 +212,17 @@ def _plan_lines(plan: dict) -> list[str]:
     return [f"plan {plan['generated_at']} · {plan['unread_total']} unread · {buckets} · {batches}"]
 
 
+def _snoozes_line(snoozes: list[dict]) -> str:
+    if not snoozes:
+        return "snoozed: none"
+    return "snoozed: " + ", ".join(f"{s['key']} until {s['until']}" for s in snoozes)
+
+
 def lines(report: dict) -> list[str]:
     answers = report["answers"]
     return (_sequence_lines(report["sequence"], report["next_elapse"]) + _plan_lines(report["plan"])
-            + [f"answers: {len(answers['pending'])} pending · {len(answers['applied'])} applied"])
+            + [f"answers: {len(answers['pending'])} pending · {len(answers['applied'])} applied",
+               _snoozes_line(report["snoozes"])])
 
 
 def _build(sub):

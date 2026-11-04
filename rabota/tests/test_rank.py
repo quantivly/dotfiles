@@ -1,4 +1,5 @@
 import argparse, json, tempfile, unittest
+from unittest import mock
 from datetime import date
 from pathlib import Path
 from rabota import config, context, errors, rank, secrets, snapshots
@@ -139,6 +140,23 @@ class RankTests(unittest.TestCase):
         self.assertEqual(b5, ["HUB-14", "HUB-13", "HUB-12"])           # newest first, capped to 3
         self.assertEqual([i["bucket"] for i in seq["items"]], sorted(i["bucket"] for i in seq["items"]))
 
+    def test_snoozed_key_leaves_every_bucket_and_is_a_decision_once(self):
+        # DO-874: a snoozed key is dropped wherever a bucket placed it (1 by a notification, 2 by a
+        # pin, 3 as a hot issue) and said once in decisions with the stamp it comes back at; a key
+        # not snoozed stays, and a snooze on a key nothing ranks says nothing.
+        plan = {"buckets": {"reply_queue": [{"issue_identifier": "HUB-1", "actor": "someone", "created_at": "2026-09-14T00:00:00Z", "url": "u", "title": "t"}]}}
+        pins = [{"item_key": "HUB-2", "bucket": 2, "rationale": "promised"}]
+        issues = [issue("HUB-3", "unstarted", "High", due="2026-09-20"), issue("HUB-4", "unstarted", "High", due="2026-09-21")]
+        inp = self.base(plan=plan, pins=pins, issues=issues)
+        until = "2026-09-17T00:00:00Z"
+        inp.snoozes = [{"item_key": k, "until": until, "ts": "2026-09-16T08:00:00Z"} for k in ("HUB-1", "HUB-2", "HUB-3", "HUB-9")]
+        seq = rank.rank(inp)
+        self.assertEqual([i["key"] for i in seq["items"]], ["HUB-4"])
+        self.assertEqual([(d["key"], d["why"]) for d in seq["decisions"]],
+                         [("HUB-1", f"snoozed until {until}"), ("HUB-2", f"snoozed until {until}"), ("HUB-3", f"snoozed until {until}")])
+        self.assertEqual([i["key"] for i in rank.rank(self.base(plan=plan, pins=pins, issues=issues))["items"]],
+                         ["HUB-1", "HUB-2", "HUB-3", "HUB-4"])
+
     def test_issues_assigned_to_others_are_not_own(self):
         other = issue("HUB-8", "unstarted", "High", due="2026-09-20"); other["assignee"] = {"id": "someone"}
         seq = rank.rank(self.base(issues=[other]))
@@ -162,6 +180,18 @@ class RankCommandTests(unittest.TestCase):
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"), today=date(2026, 9, 16))
         self.addCleanup(ctx.close)
         return ctx
+
+    def test_compute_sequence_hands_rank_only_the_snoozes_active_now(self):
+        # DO-874: an expired snooze is still a row and no longer hides anything; a live one does.
+        ctx = self.ctx()
+        snapshots.write(ctx.state_dir, "linear", {"ok": True, "viewer": {"id": "me"},
+                                                  "issues": [issue("HUB-3", "unstarted", "High", due="2026-09-20")], "notifications": []})
+        ctx.store.set_snooze("quantivly", "HUB-3", "2000-01-01T00:00:00Z")
+        self.assertEqual([i["key"] for i in rank_cmd.compute_sequence(ctx)["items"]], ["HUB-3"])
+        ctx.store.set_snooze("quantivly", "HUB-3", "2999-01-01T00:00:00Z")
+        seq = rank_cmd.compute_sequence(ctx)
+        self.assertEqual(seq["items"], [])
+        self.assertEqual([(d["key"], d["why"]) for d in seq["decisions"]], [("HUB-3", "snoozed until 2999-01-01T00:00:00Z")])
 
     def test_run_rank_writes_sequence_files_and_failed_sources(self):
         ctx = self.ctx()
@@ -247,6 +277,17 @@ class RankCommandTests(unittest.TestCase):
         self.assertNotEqual(after_set["pins"], base["pins"])
         ctx.store.clear_pin("quantivly", "PROMISE-1")
         self.assertNotEqual(rank_cmd.inputs_signature(ctx)["pins"], after_set["pins"])
+
+        # The snoozes (DO-874): a `set_snooze` moves it, a `clear_snooze` moves it, and so does the
+        # CLOCK passing a snooze's `until` with no write at all -- which is why the term is the
+        # active set as a value and not a counter like the pins'.
+        ctx.store.set_snooze("quantivly", "SNOOZED-1", "2999-01-01T00:00:00Z")
+        after_snooze = rank_cmd.inputs_signature(ctx)
+        self.assertNotEqual(after_snooze["snoozes"], base["snoozes"])
+        with mock.patch("rabota.commands.rank.now", return_value="2999-01-01T00:00:00Z"):
+            self.assertNotEqual(rank_cmd.inputs_signature(ctx)["snoozes"], after_snooze["snoozes"])
+        ctx.store.clear_snooze("quantivly", "SNOOZED-1")
+        self.assertNotEqual(rank_cmd.inputs_signature(ctx)["snoozes"], after_snooze["snoozes"])
 
     def test_inputs_signature_ignores_slack_because_rank_never_reads_it(self):
         # `RankInputs.slack` is filled in by `compute_sequence` but `rank.rank` never dereferences

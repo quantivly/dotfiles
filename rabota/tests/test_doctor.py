@@ -1124,13 +1124,17 @@ class ScheduleTimerTests(SchedulerHealthBase):
         self.assertEqual(self.unsched_calls(), [])
 
     def test_after_a_schema_bump_a_store_that_has_the_schedules_table_is_unmeasured_not_empty(self):
-        # Only a store BELOW SCHEDULES_SCHEMA is known to hold no run. Once SCHEMA_VERSION moves
-        # past it, a store at SCHEDULES_SCHEMA can hold pending runs open_current refuses to read.
+        # Only a store BELOW SCHEDULES_SCHEMA is known to hold no run. SCHEMA_VERSION has moved past
+        # it (DO-874's v6), so a store still at SCHEDULES_SCHEMA can hold pending runs that
+        # open_current refuses to read: unmeasured, never "no runs". The store is restamped to
+        # that version rather than SCHEMA_VERSION patched down, because the bump is real now.
         ctx = self.make_ctx()
         d = self.put(ctx, "personal", sched("s-p1"))
+        conn = sqlite3.connect(Path(d) / "rabota.db")
+        conn.execute("UPDATE schema_version SET version=?", (doctor.SCHEDULES_SCHEMA,)); conn.commit(); conn.close()
         self.assertEqual(stamped(d), doctor.SCHEDULES_SCHEMA)
-        with mock.patch.object(store, "SCHEMA_VERSION", doctor.SCHEDULES_SCHEMA + 1):
-            got = doctor.schedule_stores(ctx)["personal"]
+        self.assertLess(doctor.SCHEDULES_SCHEMA, SCHEMA_VERSION)
+        got = doctor.schedule_stores(ctx)["personal"]
         self.assertIsNone(got["rows"])
         self.assertIn(f"is at schema {doctor.SCHEDULES_SCHEMA}", got["why"])
 

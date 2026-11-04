@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rabota import errors, secrets
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 # One spelling, used by both the v4 → v5 step and the fresh-database SCHEMA below, so the two can
 # never describe different tables. Field meanings: design §3 and ``commands/schedule.py``.
 SCHEDULES_DDL = """CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, tenant TEXT NOT NULL,
@@ -20,6 +20,11 @@ SCHEDULES_DDL = """CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, ten
   status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, last_reason TEXT, unit TEXT, lane_id TEXT,
   out_dir TEXT, outcome TEXT, cost_usd REAL, escalation_id INTEGER, created_at TEXT NOT NULL,
   updated_at TEXT, started_at TEXT, ended_at TEXT, created_from_cwd TEXT, created_from_session TEXT)"""
+# DO-874: a snooze hides a ranked key until ``until``, a UTC stamp in ``now()``'s spelling so the
+# stamps compare as text. One row per key: a second snooze replaces the first. Named once, used by
+# the v5 → v6 step and by SCHEMA below, for the same reason as SCHEDULES_DDL.
+SNOOZES_DDL = """CREATE TABLE IF NOT EXISTS snoozes(tenant TEXT NOT NULL, item_key TEXT NOT NULL,
+  until TEXT NOT NULL, ts TEXT NOT NULL, PRIMARY KEY(tenant, item_key))"""
 # v(N) → v(N+1) steps, keyed by the version they upgrade FROM. Each list runs in one
 # transaction and restamps. A fresh database gets the final shape from SCHEMA directly.
 MIGRATIONS = {
@@ -46,6 +51,11 @@ MIGRATIONS = {
           # see is a queue it cannot list, cancel or report on.
         SCHEDULES_DDL,
     ],
+    5: [  # v5 → v6 (DO-874): the `snoozes` table. Additive, like v4 → v5, and stamped for the same
+          # reason: an older rabota must refuse a store whose snoozes it cannot see, since it would
+          # rank the very keys the reader asked to hide.
+        SNOOZES_DDL,
+    ],
 }
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -69,7 +79,7 @@ CREATE TABLE IF NOT EXISTS pins(tenant TEXT, item_key TEXT, bucket INTEGER, rati
 CREATE TABLE IF NOT EXISTS pins_meta(tenant TEXT PRIMARY KEY, version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fireflies_freeze_faults(tenant TEXT PRIMARY KEY, fails INTEGER NOT NULL,
   last_error TEXT, last_failed_at TEXT);
-""" + SCHEDULES_DDL + ";\n"
+""" + SCHEDULES_DDL + ";\n" + SNOOZES_DDL + ";\n"
 # `fireflies_freeze_faults` (DO-768) reaches a pre-existing v4 store through the trailing
 # `executescript(SCHEMA)` at the end of `migrate()`, not a migration step -- `SCHEMA_VERSION` stayed 4
 # for it, a table add with no column on an existing table and nothing for old rows to backfill. See
@@ -431,6 +441,19 @@ class Store:
         self._exec("UPDATE inbox_decisions SET rolled_back_at=? WHERE batch_id=?", (now(), batch_id))
 
     # pins
+    # snoozes (DO-874): one row per key, replaced whole by a later snooze on the same key. ``rank``
+    # reads them through ``active_snoozes`` only, so an expired row is inert without a delete.
+    def set_snooze(self, tenant, item_key, until):
+        self._exec("INSERT OR REPLACE INTO snoozes VALUES (?,?,?,?)", (tenant, item_key, until, now()))
+    def clear_snooze(self, tenant, item_key) -> bool:
+        """Delete the key's snooze; True when there was one."""
+        return self._exec("DELETE FROM snoozes WHERE tenant=? AND item_key=?", (tenant, item_key)).rowcount == 1
+    def snoozes(self, tenant):
+        return self._rows("SELECT * FROM snoozes WHERE tenant=? ORDER BY until, item_key", (tenant,))
+    def active_snoozes(self, tenant, at: str):
+        """The rows whose ``until`` is after ``at``; both are ``now()``-shaped, so text order is time order."""
+        return self._rows("SELECT * FROM snoozes WHERE tenant=? AND until > ? ORDER BY until, item_key", (tenant, at))
+
     def set_pin(self, tenant, item_key, bucket, rationale):
         self._exec("INSERT OR REPLACE INTO pins VALUES (?,?,?,?,?)", (tenant, item_key, bucket, rationale, now()))
         self._bump_pins_version(tenant)
