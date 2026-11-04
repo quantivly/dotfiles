@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rabota snooze <key> --until <when>` and `rabota unsnooze <key>` (DO-874).** A snooze is a
+  `snoozes` row (tenant, key, `until`, `ts`; one per key, a second snooze replaces the first), and
+  `rank` drops the key from every bucket while `until` is ahead of the clock, saying so in
+  `decisions` ("snoozed until …"), so the brief no longer ranks a row Sol snoozed; `show` carries
+  the active snoozes. `--until` is an ISO-8601 date or datetime (naive means the laptop's zone) or
+  `tomorrow`; a stamp already past is a usage error. The rank's inputs signature carries the
+  active set as a value, so a snooze that expires with no write re-ranks on time. Schema v6, the
+  table only; the next writing command migrates a v5 store.
+
 - **`rabota show` prints the current sequence and inbox plan, read-only (DO-872).** The one
   subcommand nanoclaw's laptop agent execs for the Sol Linear workspace bridge: the newest dated
   `sequence.json` with its own stamp (Friday's on a Sunday), items once per key in rank order,

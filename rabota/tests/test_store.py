@@ -80,6 +80,38 @@ class StoreTests(unittest.TestCase):
         self.store.set_pin("toysim", "T-1", 1, "promise")
         self.assertEqual(self.store.pins_version("quantivly"), v3, "an unrelated tenant's pin bumped this one")
 
+    def test_snoozes_replace_per_key_clear_and_filter_by_until(self):
+        # DO-874: one row per key (a second snooze replaces the first), per tenant; `active_snoozes`
+        # keeps the rows whose `until` is after the given stamp -- an equal stamp has expired.
+        s = self.store
+        s.set_snooze("quantivly", "EX-1", "2026-11-05T00:00:00Z")
+        s.set_snooze("quantivly", "EX-1", "2026-11-06T00:00:00Z")
+        s.set_snooze("quantivly", "EX-2", "2026-11-04T12:00:00Z")
+        s.set_snooze("other", "EX-1", "2026-11-09T00:00:00Z")
+        self.assertEqual([(r["item_key"], r["until"]) for r in s.snoozes("quantivly")],
+                         [("EX-2", "2026-11-04T12:00:00Z"), ("EX-1", "2026-11-06T00:00:00Z")])
+        self.assertEqual([r["item_key"] for r in s.active_snoozes("quantivly", "2026-11-04T11:59:59Z")], ["EX-2", "EX-1"])
+        self.assertEqual([r["item_key"] for r in s.active_snoozes("quantivly", "2026-11-04T12:00:00Z")], ["EX-1"])
+        self.assertEqual([r["item_key"] for r in s.active_snoozes("quantivly", "2026-11-06T00:00:00Z")], [])
+        self.assertTrue(s.clear_snooze("quantivly", "EX-1"))
+        self.assertFalse(s.clear_snooze("quantivly", "EX-1"))
+        self.assertEqual([r["item_key"] for r in s.snoozes("quantivly")], ["EX-2"])
+        self.assertEqual([r["item_key"] for r in s.snoozes("other")], ["EX-1"])
+
+    def test_migrate_v5_to_v6_adds_snoozes_on_a_v5_shaped_store(self):
+        # DO-874: the step is the stamp (see the comment under SCHEMA); the table itself would
+        # arrive through the trailing executescript either way.
+        from rabota.store import Store, SCHEMA_VERSION
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        conn = sqlite3.connect(Path(tmp.name) / "rabota.db", isolation_level=None)
+        conn.executescript("CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES (5);")
+        conn.close()
+        s = Store.open(Path(tmp.name))
+        self.assertEqual(s.schema_version(), SCHEMA_VERSION)
+        self.assertEqual({r[1] for r in s.conn.execute("PRAGMA table_info(snoozes)")}, {"tenant", "item_key", "until", "ts"})
+        self.assertEqual(s.snoozes("quantivly"), [])
+        s.close()
+
     def test_newer_on_disk_schema_is_refused_and_left_alone(self):
         # A DB written by a future rabota: this code cannot know its semantics, so it must not write.
         self.store.conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION + 1,))
@@ -182,10 +214,11 @@ class StoreTests(unittest.TestCase):
 
     def test_migrate_v4_to_v5_adds_schedules_and_touches_nothing_else(self):
         # DO-816: the step is purely additive. A v4 store carrying a lane and an escalation comes
-        # out stamped 5 with both rows exactly as they were, every pre-existing table's columns
+        # out stamped SCHEMA_VERSION (5 when this was written; the walk now continues through
+        # DO-874's v6) with both rows exactly as they were, every pre-existing table's columns
         # unchanged, and a `schedules` table a row can be written to and read back from.
         from rabota.store import Store, SCHEMA_VERSION
-        self.assertEqual(SCHEMA_VERSION, 5)
+        self.assertGreaterEqual(SCHEMA_VERSION, 5)
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         fresh = Store.open(Path(tmp.name) / "fresh")
         before = {t: [r[1] for r in fresh.conn.execute(f"PRAGMA table_info({t})")]

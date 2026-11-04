@@ -5,6 +5,7 @@ from pathlib import Path
 
 from rabota import cli, emit, rank as rank_mod, snapshots
 from rabota.context import Context
+from rabota.store import now
 
 
 def _read_json(path: Path) -> dict | None:
@@ -16,7 +17,8 @@ def inputs_signature(ctx: Context) -> dict:
     each ``brief`` call.
 
     Established by reading ``rank.rank`` itself, not by restating the issue text: it reads
-    ``inp.linear``, ``inp.github``, ``inp.inbox_plan``, ``inp.census`` and ``inp.pins`` -- never
+    ``inp.linear``, ``inp.github``, ``inp.inbox_plan``, ``inp.census``, ``inp.pins`` and
+    ``inp.snoozes`` (DO-874, see ``active_snooze_marks``) -- never
     ``inp.slack``, which ``RankInputs`` carries and ``compute_sequence`` fills in but no code under
     ``rank.rank`` dereferences. A Slack snapshot landing is real news for ``needs``
     (``NEEDS_SOURCES`` in ``commands.brief``), but it cannot move anything THIS function ranks, and
@@ -34,7 +36,18 @@ def inputs_signature(ctx: Context) -> dict:
     sd = ctx.state_dir
     return {"linear": _digest(sd / "sources" / "linear.json"), "github": _digest(sd / "sources" / "github.json"),
             "inbox_plan": _digest(sd / "inbox-plan.json"), "census": _digest(sd / "census.json"),
-            "pins": ctx.store.pins_version(ctx.tenant.name)}
+            "pins": ctx.store.pins_version(ctx.tenant.name),
+            "snoozes": active_snooze_marks(ctx)}
+
+
+def active_snooze_marks(ctx: Context) -> list[list[str]]:
+    """``[key, until]`` for every snooze active now (DO-874): exactly what ``rank`` reads, as a value.
+
+    Not a counter like the pins': a snooze also stops mattering by the CLOCK, when its ``until``
+    passes with no write at all, and a counter cannot see that. The active set can -- the expired
+    row leaves it -- so the next ``brief`` re-ranks and the key comes back on time.
+    """
+    return [[s["item_key"], s["until"]] for s in ctx.store.active_snoozes(ctx.tenant.name, now())]
 
 
 def _digest(path: Path) -> str | None:
@@ -63,7 +76,8 @@ def compute_sequence(ctx: Context) -> dict:
         slack=snapshots.read(ctx.state_dir, "slack"),
         inbox_plan=_read_json(ctx.state_dir / "inbox-plan.json"),
         census=_read_json(ctx.state_dir / "census.json"),
-        pins=ctx.store.pins(ctx.tenant.name), tenant=ctx.tenant, today=ctx.today)
+        pins=ctx.store.pins(ctx.tenant.name), tenant=ctx.tenant, today=ctx.today,
+        snoozes=ctx.store.active_snoozes(ctx.tenant.name, now()))
     seq = rank_mod.rank(inp)
     seq["failed_sources"] = [s for s in ctx.tenant.sources
                              if (ctx.store.last_sync(ctx.tenant.name, s) or {}).get("ok") == 0]

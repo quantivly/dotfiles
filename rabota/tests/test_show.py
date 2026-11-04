@@ -77,7 +77,7 @@ class FieldSetTests(Base):
                              {"due_policy": {"issues": [{"id": "x", "identifier": "EX-9", "dueDate": "2026-11-10", "reason": "r"}]},
                               "stale_backlog": {"issues": [{"id": "y", "identifier": "EX-8", "updatedAt": "2026-07-01T00:00:00Z"}]}}))
         rep = show.run_show(self.ctx())
-        self.assertEqual(sorted(rep), ["answers", "at", "next_elapse", "plan", "schema", "sequence"])
+        self.assertEqual(sorted(rep), ["answers", "at", "next_elapse", "plan", "schema", "sequence", "snoozes"])
         self.assertEqual(rep["schema"], 1)
         self.assertEqual(rep["next_elapse"], "2026-11-04T05:00:40Z")
         self.assertEqual(sorted(rep["sequence"]), ["counts", "decisions", "failed_sources", "generated_at", "items"])
@@ -97,6 +97,7 @@ class FieldSetTests(Base):
         self.assertEqual(rep["plan"]["batches"]["stale_backlog"], {"count": 1, "identifiers": ["EX-8"]})
         self.assertEqual(rep["plan"]["totals"], {"confirm_required": 1})
         self.assertEqual(rep["answers"], {"pending": [], "applied": []})
+        self.assertEqual(rep["snoozes"], [])
 
     def test_a_plan_row_carries_no_actor_issue_id_team_or_pr_url(self):
         # The subset is the point: what a decision on the phone needs. A key the Item grows later
@@ -298,3 +299,42 @@ class CliTests(unittest.TestCase):
     def test_help_lists_show(self):
         cli._load_command_modules()
         self.assertIn("show", cli.build_parser().format_help())
+
+
+class SnoozeTests(Base):
+    """DO-874: the active snoozes ride the show read; the store is opened at its current schema
+    and never created or migrated by this printer."""
+
+    def write_snoozes(self, rows, version=None):
+        from rabota.store import Store
+        store = Store.open(self.state)
+        for key, until in rows:
+            store.set_snooze("quantivly", key, until)
+        if version is not None:
+            store.conn.execute("UPDATE schema_version SET version=?", (version,))
+        store.close()
+
+    def test_active_snoozes_print_soonest_first_and_an_expired_one_does_not(self):
+        self.write_snoozes([("EX-2", "2999-01-02T00:00:00Z"), ("EX-1", "2999-01-01T00:00:00Z"), ("EX-0", "2000-01-01T00:00:00Z")])
+        rep = show.run_show(self.ctx())
+        self.assertEqual([(r["key"], r["until"]) for r in rep["snoozes"]],
+                         [("EX-1", "2999-01-01T00:00:00Z"), ("EX-2", "2999-01-02T00:00:00Z")])
+        self.assertEqual(tuple(rep["snoozes"][0]), ("key", "until", "ts"))
+        self.assertIn("snoozed: EX-1 until 2999-01-01T00:00:00Z, EX-2 until 2999-01-02T00:00:00Z", show.lines(rep))
+
+    def test_no_snoozes_is_the_empty_list_and_the_text_says_none(self):
+        self.write_snoozes([])
+        rep = show.run_show(self.ctx())
+        self.assertEqual(rep["snoozes"], [])
+        self.assertIn("snoozed: none", show.lines(rep))
+
+    def test_a_store_at_another_schema_is_refused_by_name_and_left_alone(self):
+        import sqlite3
+        from rabota.store import SCHEMA_VERSION
+        self.write_snoozes([("EX-1", "2999-01-01T00:00:00Z")], version=SCHEMA_VERSION - 1)
+        with self.assertRaises(errors.Refused) as cm:
+            show.run_show(self.ctx())
+        self.assertIn(f"schema {SCHEMA_VERSION - 1}", str(cm.exception))
+        conn = sqlite3.connect(self.state / "rabota.db")
+        self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone(), (SCHEMA_VERSION - 1,))
+        conn.close()

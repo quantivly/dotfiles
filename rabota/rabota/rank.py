@@ -7,7 +7,7 @@ not scheduled again. Every item carries the one-line rationale that put it where
 """
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 from rabota.store import now
@@ -21,7 +21,9 @@ PR_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
 
 @dataclass
 class RankInputs:
-    """Everything ``rank`` reads: snapshots (``None`` when never synced), the inbox plan, census, pins, tenant, today."""
+    """Everything ``rank`` reads: snapshots (``None`` when never synced), the inbox plan, census, pins,
+    tenant, today, and the snoozes ACTIVE now (``Store.active_snoozes``, DO-874) — an expired one
+    never reaches the ranker, so nothing here compares a stamp to a clock."""
     linear: dict | None
     github: dict | None
     slack: dict | None
@@ -30,6 +32,7 @@ class RankInputs:
     pins: list[dict]
     tenant: object
     today: date
+    snoozes: list[dict] = field(default_factory=list)
 
 
 def batch_due_dates(issues: list[dict], min_cluster: int = BATCH_MIN_CLUSTER) -> set[str]:
@@ -178,6 +181,22 @@ def _bucket_5(own: list[dict], flight: set[str], placed: set[str]) -> list[dict]
                   "bucket 5: new work into leftover capacity", i["url"], "linear") for i in todo[:NEW_WORK_CAP]]
 
 
+def _drop_snoozed(items: list[dict], snoozes: list[dict], decisions: list[dict]) -> list[dict]:
+    """DO-874: a snoozed key leaves every bucket, and ``decisions`` says so once per key with the
+    stamp it comes back at. Applied after every bucket is built, so no bucket can place it; a
+    snooze on a key nothing ranked says nothing, because there is nothing to hide."""
+    until_by_key = {s["item_key"]: s["until"] for s in snoozes}
+    kept, said = [], set()
+    for item in items:
+        until = until_by_key.get(item["key"])
+        if until is None:
+            kept.append(item)
+        elif item["key"] not in said:
+            said.add(item["key"])
+            decisions.append({"key": item["key"], "why": f"snoozed until {until}", "url": item["url"]})
+    return kept
+
+
 def rank(inp: RankInputs) -> dict:
     """Produce the ``sequence.json`` shape: ranked ``items`` with rationales, plus ``triage`` and ``decisions``."""
     lin = inp.linear or {"issues": [], "viewer": {}}
@@ -195,6 +214,7 @@ def rank(inp: RankInputs) -> dict:
     items += _bucket_4(gh.get("own_prs", []), own, {x["key"] for x in items})
     items += _bucket_5(own, flight, {x["key"] for x in items})
     items.sort(key=lambda i: i["bucket"])   # stable: order within a bucket is the order built above
+    items = _drop_snoozed(items, inp.snoozes, decisions)
     return {"generated_at": now(), "tenant": inp.tenant.name, "failed_sources": [],
             "items": items, "triage": triage, "decisions": decisions}
 
