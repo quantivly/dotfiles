@@ -14,7 +14,7 @@ from rabota.store import now
 
 BATCH_MIN_CLUSTER = 5
 NEW_WORK_CAP = 3
-BLOCKS_ORDERED_BUCKETS = (3, 4)   # DO-878: where "blocks N open issues" orders rows; never a decision or bucket 5
+REASON_ORDERED_BUCKETS = (3, 4)   # DO-878/879: where "blocks N open issues" and the active cycle order rows; never a decision or bucket 5
 HOT_PRIORITIES = ("Urgent", "High")
 ISSUE_KEY = re.compile(r"\b([A-Z]{2,6})-?(\d{1,5})\b", re.I)
 PR_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
@@ -139,28 +139,51 @@ def _bucket_2(pins: list[dict]) -> list[dict]:
             for p in pins if p.get("bucket") == 2]
 
 
-def open_blocks_count(own: list[dict], lin: dict, dead_types: set[str]) -> dict[str, int]:
-    """Own identifier → how many of the issues it blocks are open (DO-878), read from the snapshot's
-    ``blocked[]`` (DO-875/878: one row per issue the operator's issues block, with its state). An
-    identifier the section does not carry -- a snapshot older than the section, or a target the
-    relation read never saw -- counts as nobody waiting, so the rank never invents a reason."""
+@dataclass
+class RowReasons:
+    """The picture-driven inputs of one own issue (DO-878, DO-879): how many of the issues it blocks are
+    open, and the active cycle it sits in (``None`` when none). They lead the row's ``why_now`` in that
+    order and order rows within ``REASON_ORDERED_BUCKETS``: people waiting before the schedule."""
+    blocks_open: int = 0
+    cycle: dict | None = None
+
+    def lead(self, today: date) -> list[str]:
+        parts = []
+        if self.blocks_open:
+            noun = "issue" if self.blocks_open == 1 else "issues"
+            parts.append(f"blocks {self.blocks_open} open {noun}")
+        if self.cycle is not None:
+            days_left = (date.fromisoformat(self.cycle["endsAt"][:10]) - today).days
+            ending = "ends today" if days_left <= 0 else f"ends in {days_left} day{'s' if days_left != 1 else ''}"
+            parts.append(f"in the active cycle · {ending}")
+        return parts
+
+    def order_key(self) -> tuple[int, int]:
+        return (-self.blocks_open, -1 if self.cycle is not None else 0)
+
+
+def row_reasons(own: list[dict], lin: dict, dead_types: set[str]) -> dict[str, RowReasons]:
+    """Own identifier → its ``RowReasons``, read from the snapshot's ``blocked[]`` (DO-875/878: one row per
+    issue the operator's issues block, with its state; only an open target counts) and ``cycles[]``
+    (DO-875/879: each active cycle with its issue identifiers). An identifier a section does not carry
+    -- a snapshot older than the section, or a target the relation read never saw -- counts as nobody
+    waiting and no cycle, so the rank never invents a reason."""
     is_open = {}
     for row in lin.get("blocked") or []:
         state_type = (row.get("state") or {}).get("type")
         is_open[row["identifier"]] = state_type is not None and state_type not in dead_types
-    return {i["identifier"]: sum(1 for key in i.get("blocks") or [] if is_open.get(key)) for i in own}
+    cycle_by_key = {key: cycle for cycle in lin.get("cycles") or [] for key in cycle.get("issue_identifiers") or []}
+    return {i["identifier"]: RowReasons(sum(1 for key in i.get("blocks") or [] if is_open.get(key)),
+                                        cycle_by_key.get(i["identifier"])) for i in own}
 
 
-def _blocks_why_now(count: int, why_now: str) -> str:
-    """``why_now`` led by "blocks N open issue(s) · " when ``count`` is positive (DO-878), else unchanged."""
-    if not count:
-        return why_now
-    noun = "issue" if count == 1 else "issues"
-    return f"blocks {count} open {noun} · {why_now}"
+def _led_why_now(reasons: RowReasons | None, today: date, why_now: str) -> str:
+    """``why_now`` led by the row's reasons, " · "-joined (DO-878/879), or unchanged when it has none."""
+    return " · ".join((reasons.lead(today) if reasons else []) + [why_now])
 
 
 def _hot_issues(own: list[dict], batch: set[str], flight: set[str], decisions: list[dict],
-                blocks_open: dict[str, int]) -> list[dict]:
+                reasons: dict[str, RowReasons], today: date) -> list[dict]:
     """Bucket 3 (a real date or none) and the in-flight demotions; Backlog P0/P1 become decisions instead."""
     items = []
     for i in own:
@@ -172,18 +195,19 @@ def _hot_issues(own: list[dict], batch: set[str], flight: set[str], decisions: l
         elif state in ("unstarted", "started"):
             if i.get("dueDate") in batch:
                 continue   # batch artifact, not a deadline
-            blocking = blocks_open.get(i["identifier"], 0)
+            why = reasons.get(i["identifier"])
             if i["identifier"] in flight:
-                items.append(_item(4, i["identifier"], i["title"], "", _blocks_why_now(blocking, "already running"),
+                items.append(_item(4, i["identifier"], i["title"], "", _led_why_now(why, today, "already running"),
                                    "in flight per census; not scheduled", i["url"], "linear"))
                 continue
             due = f"due {i['dueDate']}" if i.get("dueDate") else "no date"
-            items.append(_item(3, i["identifier"], i["title"], "", _blocks_why_now(blocking, due),
+            items.append(_item(3, i["identifier"], i["title"], "", _led_why_now(why, today, due),
                                f"bucket 3: {prio} {i['state']['name']} with a real date", i["url"], "linear"))
     return items
 
 
-def _bucket_4(own_prs: list[dict], own: list[dict], placed: set[str], blocks_open: dict[str, int]) -> list[dict]:
+def _bucket_4(own_prs: list[dict], own: list[dict], placed: set[str], reasons: dict[str, RowReasons],
+              today: date) -> list[dict]:
     """Approved, non-draft own PRs (authors merge their own) and started issues not already placed."""
     items = [_item(4, f"{pr['repo']}#{pr['number']}", pr["title"], "", "approved — you merge your own",
                    "bucket 4: approved own PR, authors merge", pr["url"], "github")
@@ -191,7 +215,7 @@ def _bucket_4(own_prs: list[dict], own: list[dict], placed: set[str], blocks_ope
     for i in own:
         if i["state"]["type"] == "started" and i["identifier"] not in placed:
             since = f"in progress since {i['updatedAt'][:10]}"
-            items.append(_item(4, i["identifier"], i["title"], "", _blocks_why_now(blocks_open.get(i["identifier"], 0), since),
+            items.append(_item(4, i["identifier"], i["title"], "", _led_why_now(reasons.get(i["identifier"]), today, since),
                                "bucket 4: own in-flight", i["url"], "linear"))
     return items
 
@@ -229,18 +253,20 @@ def rank(inp: RankInputs) -> dict:
     own = [i for i in lin.get("issues", []) if (i.get("assignee") or {}).get("id") == me]
     batch = batch_due_dates(own)
     flight = in_flight_keys(inp.census)
-    blocks_open = open_blocks_count(own, lin, set(inp.tenant.linear.dead_state_types))
+    reasons = row_reasons(own, lin, set(inp.tenant.linear.dead_state_types))
     triage: list[dict] = []
     decisions: list[dict] = []
 
     items = _bucket_1(inp, gh.get("review_requests", []), triage)
     items += _bucket_2(inp.pins)
-    items += _hot_issues(own, batch, flight, decisions, blocks_open)
-    items += _bucket_4(gh.get("own_prs", []), own, {x["key"] for x in items}, blocks_open)
+    items += _hot_issues(own, batch, flight, decisions, reasons, inp.today)
+    items += _bucket_4(gh.get("own_prs", []), own, {x["key"] for x in items}, reasons, inp.today)
     items += _bucket_5(own, flight, {x["key"] for x in items})
-    # Stable: within a bucket the order is the order built above, except that in BLOCKS_ORDERED_BUCKETS
-    # a row blocking more open issues comes first (DO-878).
-    items.sort(key=lambda i: (i["bucket"], -blocks_open.get(i["key"], 0) if i["bucket"] in BLOCKS_ORDERED_BUCKETS else 0))
+    # Stable: within a bucket the order is the order built above, except that in REASON_ORDERED_BUCKETS a
+    # row blocking more open issues comes first, then a row in its team's active cycle (DO-878, DO-879).
+    no_reason = RowReasons()
+    items.sort(key=lambda i: (i["bucket"],) + (reasons.get(i["key"], no_reason).order_key()
+                                                if i["bucket"] in REASON_ORDERED_BUCKETS else no_reason.order_key()))
     items = _drop_snoozed(items, inp.snoozes, decisions)
     return {"generated_at": now(), "tenant": inp.tenant.name, "failed_sources": [],
             "items": items, "triage": triage, "decisions": decisions}
