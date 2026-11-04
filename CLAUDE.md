@@ -558,6 +558,7 @@ session on the wrong account, use the [claude-accounts](.claude/skills/claude-ac
   status, never the emptiness of a pipeline's output (a hash of nothing matches every hash of
   nothing); `${VAR:-x}` substitutes for *empty* as well as unset; a test stub is a claim about the
   real tool; and no diagnostic ever prints a credential.
+- **One configuration across hosts.** Design: [docs/superpowers/specs/2026-11-04-shared-claude-config-design.md](docs/superpowers/specs/2026-11-04-shared-claude-config-design.md). Audit the hosts before changing any of them: `scripts/claude-config-audit.sh --collect` then `--matrix` (read-only everywhere; workspace under `~/Projects/handoffs/`).
 
 ## GNOME Desktop Configuration
 
