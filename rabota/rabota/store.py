@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rabota import errors, secrets
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 # One spelling, used by both the v4 → v5 step and the fresh-database SCHEMA below, so the two can
 # never describe different tables. Field meanings: design §3 and ``commands/schedule.py``.
 SCHEDULES_DDL = """CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, tenant TEXT NOT NULL,
@@ -25,6 +25,12 @@ SCHEDULES_DDL = """CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, ten
 # the v5 → v6 step and by SCHEMA below, for the same reason as SCHEDULES_DDL.
 SNOOZES_DDL = """CREATE TABLE IF NOT EXISTS snoozes(tenant TEXT NOT NULL, item_key TEXT NOT NULL,
   until TEXT NOT NULL, ts TEXT NOT NULL, PRIMARY KEY(tenant, item_key))"""
+# DO-877: an answer recorded from Sol for the precompute tick to apply with its rollback rows: a
+# `due_policy` confirmation (``ids`` = the issue identifiers it covered) or a `project_prompt`
+# dismissal (``ids`` = the notification ids). ``ids`` is JSON text. ``applied_at``/``batch_id`` are
+# stamped by the tick; a row with neither is pending. Named once, used by v6 → v7 and SCHEMA.
+INBOX_ANSWERS_DDL = """CREATE TABLE IF NOT EXISTS inbox_answers(id INTEGER PRIMARY KEY, tenant TEXT NOT NULL,
+  kind TEXT NOT NULL, ids TEXT NOT NULL, recorded_at TEXT NOT NULL, applied_at TEXT, batch_id TEXT)"""
 # v(N) → v(N+1) steps, keyed by the version they upgrade FROM. Each list runs in one
 # transaction and restamps. A fresh database gets the final shape from SCHEMA directly.
 MIGRATIONS = {
@@ -56,6 +62,10 @@ MIGRATIONS = {
           # rank the very keys the reader asked to hide.
         SNOOZES_DDL,
     ],
+    6: [  # v6 → v7 (DO-877): the `inbox_answers` table. Additive and stamped, as v5 and v6 were: an
+          # older rabota must refuse a store holding answers it would never apply.
+        INBOX_ANSWERS_DDL,
+    ],
 }
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -79,7 +89,7 @@ CREATE TABLE IF NOT EXISTS pins(tenant TEXT, item_key TEXT, bucket INTEGER, rati
 CREATE TABLE IF NOT EXISTS pins_meta(tenant TEXT PRIMARY KEY, version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fireflies_freeze_faults(tenant TEXT PRIMARY KEY, fails INTEGER NOT NULL,
   last_error TEXT, last_failed_at TEXT);
-""" + SCHEDULES_DDL + ";\n" + SNOOZES_DDL + ";\n"
+""" + SCHEDULES_DDL + ";\n" + SNOOZES_DDL + ";\n" + INBOX_ANSWERS_DDL + ";\n"
 # `fireflies_freeze_faults` (DO-768) reaches a pre-existing v4 store through the trailing
 # `executescript(SCHEMA)` at the end of `migrate()`, not a migration step -- `SCHEMA_VERSION` stayed 4
 # for it, a table add with no column on an existing table and nothing for old rows to backfill. See
@@ -441,6 +451,33 @@ class Store:
         self._exec("UPDATE inbox_decisions SET rolled_back_at=? WHERE batch_id=?", (now(), batch_id))
 
     # pins
+    # inbox answers (DO-877): recorded by ``inbox answer``, applied and stamped by the tick.
+    def record_inbox_answer(self, tenant, kind, ids: list[str]) -> dict:
+        """The row, with ``duplicate`` saying whether a still-pending row for the same (kind, ids)
+        already existed -- a double tap or a re-sent push is the same answer, never a second apply."""
+        for row in self.pending_inbox_answers(tenant):
+            if row["kind"] == kind and row["ids"] == list(ids):
+                return {**row, "duplicate": True}
+        cur = self._exec("INSERT INTO inbox_answers(tenant, kind, ids, recorded_at) VALUES (?,?,?,?)",
+                         (tenant, kind, json.dumps(list(ids)), now()))
+        row = self._decode_answers(self._rows("SELECT * FROM inbox_answers WHERE id=?", (cur.lastrowid,)))[0]
+        return {**row, "duplicate": False}
+    def pending_inbox_answers(self, tenant):
+        return self._decode_answers(self._rows(
+            "SELECT * FROM inbox_answers WHERE tenant=? AND applied_at IS NULL ORDER BY id", (tenant,)))
+    def applied_inbox_answers(self, tenant, limit: int):
+        """The newest applied rows first."""
+        return self._decode_answers(self._rows(
+            "SELECT * FROM inbox_answers WHERE tenant=? AND applied_at IS NOT NULL ORDER BY applied_at DESC, id DESC LIMIT ?",
+            (tenant, limit)))
+    def mark_inbox_answer_applied(self, answer_id, batch_id):
+        self._exec("UPDATE inbox_answers SET applied_at=?, batch_id=? WHERE id=?", (now(), batch_id, answer_id))
+    @staticmethod
+    def _decode_answers(rows):
+        for r in rows:
+            r["ids"] = json.loads(r["ids"])
+        return rows
+
     # snoozes (DO-874): one row per key, replaced whole by a later snooze on the same key. ``rank``
     # reads them through ``active_snoozes`` only, so an expired row is inert without a delete.
     def set_snooze(self, tenant, item_key, until):

@@ -52,6 +52,57 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual((rep["archived"], rep["verified"], rep["failed"]), (4, 4, []))
         self.assertTrue(all(d["verified"] for d in self.store.decisions(rep["batch_id"])))
 
+    # DO-877: the answers Sol recorded, applied at the tick through the same writes.
+
+    def test_a_due_policy_answer_clears_only_the_issues_it_covered_that_are_still_in_the_batch(self):
+        self.store.record_inbox_answer("quantivly", "due_policy", ["HUB-11", "HUB-12", "HUB-99"])   # HUB-99 left the batch
+        rep = apply.apply_answers(self.plan, self.client, self.store, T)
+        self.assertEqual([(a["kind"], a["outcome"]["cleared"]) for a in rep["applied"]], [("due_policy", 2)])
+        self.assertEqual(sorted(c[1] for c in self.client.calls if c[0] == "due"), ["i-due1", "i-due2"])
+        self.assertEqual(self.client.i["i-due3"]["dueDate"], "2026-09-04")   # in the batch, not covered: untouched
+        batch = rep["applied"][0]["batch_id"]
+        self.assertEqual([(d["entity_id"], d["action"], d["prior"]) for d in self.store.decisions(batch)],
+                         [("i-due1", "clear_due_date", {"dueDate": "2026-09-04"}), ("i-due2", "clear_due_date", {"dueDate": "2026-09-04"})])
+        self.assertEqual([r["batch_id"] for r in self.store.applied_inbox_answers("quantivly", 25)], [batch])
+        self.assertEqual(self.store.pending_inbox_answers("quantivly"), [])
+
+    def test_a_project_prompt_dismissal_archives_each_id_with_a_rollback_row_and_verifies(self):
+        self.store.record_inbox_answer("quantivly", "project_prompt", ["n7", "n2"])
+        rep = apply.apply_answers(self.plan, self.client, self.store, T)
+        out = rep["applied"][0]["outcome"]
+        self.assertEqual((out["archived"], out["verified"], out["failed"], out["by_bucket"]), (2, 2, [], {"project_prompt": 2}))
+        self.assertEqual([c for c in self.client.calls if c[0] == "archive"], [("archive", "n7"), ("archive", "n2")])
+        rows = self.store.decisions(out["batch_id"])
+        self.assertEqual([(d["tier"], d["bucket"], d["entity_id"], d["action"], d["verified"]) for d in rows],
+                         [("decision", "project_prompt", "n7", "archive", 1), ("decision", "project_prompt", "n2", "archive", 1)])
+        self.assertTrue(out["batch_id"].startswith("dismiss-"))
+
+    def test_rollback_undoes_either_kind_of_answer(self):
+        self.store.record_inbox_answer("quantivly", "due_policy", ["HUB-11"])
+        self.store.record_inbox_answer("quantivly", "project_prompt", ["n7"])
+        rep = apply.apply_answers(self.plan, self.client, self.store, T)
+        self.assertIsNone(self.client.i["i-due1"]["dueDate"]); self.assertEqual(self.client.n["n7"]["archivedAt"], "now")
+        for a in rep["applied"]:
+            self.assertEqual(apply.rollback(a["batch_id"], self.client, self.store)["failed"], [])
+        self.assertEqual(self.client.i["i-due1"]["dueDate"], "2026-09-04"); self.assertIsNone(self.client.n["n7"]["archivedAt"])
+
+    def test_an_applied_answer_is_never_applied_twice_and_an_emptied_one_is_stamped_without_a_batch(self):
+        self.store.record_inbox_answer("quantivly", "due_policy", ["HUB-11"])
+        self.store.record_inbox_answer("quantivly", "due_policy", ["HUB-99"])   # nothing it covered is still in the batch
+        rep = apply.apply_answers(self.plan, self.client, self.store, T)
+        self.assertEqual([(a["kind"], a["batch_id"] is None, a["outcome"] is None) for a in rep["applied"]],
+                         [("due_policy", False, False), ("due_policy", True, True)])
+        calls = list(self.client.calls)
+        self.assertEqual(apply.apply_answers(self.plan, self.client, self.store, T), {"applied": []})
+        self.assertEqual(self.client.calls, calls)
+
+    def test_answers_dry_run_names_the_pending_rows_touches_no_client_and_stamps_nothing(self):
+        self.store.record_inbox_answer("quantivly", "project_prompt", ["n7"])
+        rep = apply.apply_answers(self.plan, None, self.store, T, dry_run=True)
+        self.assertEqual(rep, {"applied": [], "would_apply": [{"id": 1, "kind": "project_prompt", "ids": ["n7"]}]})
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(len(self.store.pending_inbox_answers("quantivly")), 1)
+
     def test_dry_run_records_nothing(self):
         rep = apply.apply_auto(self.plan, self.client, self.store, T, dry_run=True)
         self.assertEqual(self.client.calls, []); self.assertEqual(rep["archived"], 0)

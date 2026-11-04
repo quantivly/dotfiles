@@ -20,10 +20,11 @@ first occurrence first (bucket 1 held one row per notification on a thread, 83 r
 keys on 2026-11-03; DO-876 gives the rank the same rule), and the per-bucket counts count what
 is printed.
 
-``snoozes`` (DO-874) are the rows active at ``at``, read through ``Store.open_current``: an
-absent ``rabota.db`` means no snoozes and stays absent (this printer creates nothing), and a
-store at another schema is refused by name rather than migrated here — the tenant's next writing
-command migrates it, which the precompute timer's tick does within the half hour.
+``snoozes`` (DO-874, the rows active at ``at``) and ``answers`` (DO-877, pending and applied) are
+read through ``Store.open_current``: an absent ``rabota.db`` means none of either and stays absent
+(this printer creates nothing), and a store at another schema is refused by name rather than
+migrated here — the tenant's next writing command migrates it, which the precompute timer's tick
+does within the half hour.
 """
 import json
 import re
@@ -160,32 +161,36 @@ def plan_part(path: Path) -> dict:
             "totals": dict(plan["totals"]), "buckets": buckets, "batches": batches}
 
 
-def answers_part() -> dict:
-    """Pending and applied answers recorded from Sol: DO-877's rows. Until it lands there is
-    nothing to record and both lists are empty, so the field set is already the contract's."""
-    return {"pending": [], "applied": []}
+# A recorded answer as the wire carries it (nanoclaw ``RabotaAnswerWire``): the row less its id and tenant.
+ANSWER_FIELDS = ("kind", "ids", "recorded_at", "applied_at", "batch_id")
+NO_STORE_PARTS = ([], {"pending": [], "applied": []})
 
 
-def snoozes_part(ctx: Context, at: str) -> list[dict]:
-    """The snoozes active at ``at`` (DO-874) as ``key``/``until``/``ts``, the soonest to end first;
-    see the module header for the store it opens and the two cases it does not."""
+def store_parts(ctx: Context, at: str) -> tuple[list[dict], dict]:
+    """What the store contributes: the snoozes active at ``at`` (DO-874) as ``key``/``until``/``ts``,
+    soonest to end first, and the answers (DO-877) -- every pending row, the newest applied rows --
+    each the wire's fields. See the module header for the store it opens and the two cases it does not."""
     if not (ctx.state_dir / STORE_FILE).is_file():
-        return []
+        return NO_STORE_PARTS
     store = Store.open_current(ctx.state_dir)
     try:
-        rows = store.active_snoozes(ctx.tenant.name, at)
+        snoozes = store.active_snoozes(ctx.tenant.name, at)
+        pending = store.pending_inbox_answers(ctx.tenant.name)
+        applied = store.applied_inbox_answers(ctx.tenant.name, MAX_ROWS)
     finally:
         store.close()
-    return [{"key": r["item_key"], "until": r["until"], "ts": r["ts"]} for r in rows]
+    return ([{"key": r["item_key"], "until": r["until"], "ts": r["ts"]} for r in snoozes],
+            {"pending": [_project(a, ANSWER_FIELDS) for a in pending[:MAX_ROWS]],
+             "applied": [_project(a, ANSWER_FIELDS) for a in applied]})
 
 
 def run_show(ctx: Context) -> dict:
     at = now()
+    snoozes, answers = store_parts(ctx, at)
     return {"schema": SCHEMA, "at": at, "next_elapse": next_elapse(ctx),
             "sequence": sequence_part(newest_sequence_path(ctx.state_dir)),
             "plan": plan_part(ctx.state_dir / PLAN_FILE),
-            "answers": answers_part(),
-            "snoozes": snoozes_part(ctx, at)}
+            "answers": answers, "snoozes": snoozes}
 
 
 def _sequence_lines(sequence: dict, next_run: str | None) -> list[str]:

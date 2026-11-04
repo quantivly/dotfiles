@@ -322,6 +322,22 @@ class SnoozeTests(Base):
         self.assertEqual(tuple(rep["snoozes"][0]), ("key", "until", "ts"))
         self.assertIn("snoozed: EX-1 until 2999-01-01T00:00:00Z, EX-2 until 2999-01-02T00:00:00Z", show.lines(rep))
 
+    def test_answers_carry_every_pending_row_and_the_newest_applied_rows_in_the_wire_fields(self):
+        # DO-877. The applied list is newest first; both lists are capped at MAX_ROWS.
+        from rabota.store import Store
+        store = Store.open(self.state)
+        pending = store.record_inbox_answer("quantivly", "project_prompt", ["n-1", "n-2"])
+        applied = store.record_inbox_answer("quantivly", "due_policy", ["EX-1"])
+        store.mark_inbox_answer_applied(applied["id"], "due-20261104-120000")
+        store.close()
+        rep = show.run_show(self.ctx())
+        self.assertEqual([tuple(a) for a in rep["answers"]["pending"] + rep["answers"]["applied"]], [show.ANSWER_FIELDS] * 2)
+        self.assertEqual([(a["kind"], a["ids"], a["applied_at"], a["batch_id"]) for a in rep["answers"]["pending"]],
+                         [("project_prompt", ["n-1", "n-2"], None, None)])
+        self.assertEqual([(a["kind"], a["ids"], a["batch_id"]) for a in rep["answers"]["applied"]],
+                         [("due_policy", ["EX-1"], "due-20261104-120000")])
+        self.assertIn("answers: 1 pending · 1 applied", show.lines(rep))
+
     def test_no_snoozes_is_the_empty_list_and_the_text_says_none(self):
         self.write_snoozes([])
         rep = show.run_show(self.ctx())
