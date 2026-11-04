@@ -16,7 +16,8 @@ set -uo pipefail
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUT="$DOTFILES/scripts/claude-config-audit.sh"
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"' EXIT
+# Some fixtures hold read-only (555) directories, which rm -rf alone cannot empty.
+trap 'find "$TMPROOT" -type d -exec chmod u+rwx {} + 2>/dev/null; rm -rf "$TMPROOT"' EXIT
 
 PASS=0; FAIL=0
 ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
@@ -31,38 +32,6 @@ for tool in bash jq tar sha256sum; do command -v "$tool" >/dev/null || fatal "$t
 if git -C "$TMPROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
     fatal "$TMPROOT is inside a git repository; the fixtures would resolve against it"
 fi
-
-# ---------------------------------------------------------------------------------------------
-# Usage and argument validation
-# ---------------------------------------------------------------------------------------------
-
-printf 'usage: no verb → exit 64 and the usage text\n'
-out=$("$SUT" 2>&1); rc=$?
-# This line appears only in the usage block; usage_error's own message never contains it.
-USAGE_ONLY_NEEDLE='--host NAME=ALIAS:CFGDIR'
-prints_usage=no; [[ "$out" == *"$USAGE_ONLY_NEEDLE"* ]] && prints_usage=yes
-check "no verb: exit 64, usage text printed" "$rc $prints_usage" "64 yes"
-
-printf 'usage: --help → exit 0\n'
-help_stdout=$("$SUT" --help 2>/dev/null); rc=$?
-help_prints_usage=no; [[ "$help_stdout" == *"$USAGE_ONLY_NEEDLE"* ]] && help_prints_usage=yes
-check "--help: exit 0, usage text on stdout" "$rc $help_prints_usage" "0 yes"
-
-printf 'usage: a host alias with a space or semicolon → exit 64, nothing created\n'
-WS_NEVER="$TMPROOT/ws-never"
-"$SUT" --collect --workspace "$WS_NEVER" --host 'x=bad host;rm:.claude' >/dev/null 2>&1; rc=$?
-workspace_state=absent; [[ -e "$WS_NEVER" ]] && workspace_state=exists
-check "bad alias: exit 64 and no workspace created" "$rc $workspace_state" "64 absent"
-
-printf 'usage: a config dir not starting with a dot → exit 64\n'
-"$SUT" --collect --workspace "$WS_NEVER" --host 'x=x:claude' >/dev/null 2>&1; rc=$?
-check "config dir without a leading dot: exit 64" "$rc" 64
-
-printf 'usage: a duplicate host name → exit 64\n'
-out=$("$SUT" --collect --workspace "$WS_NEVER" --host 'a=x:.claude' --host 'a=y:.claude' 2>&1); rc=$?
-names_duplicate=no; [[ "$out" == *"host name 'a' is given twice"* ]] && names_duplicate=yes
-workspace_state=absent; [[ -e "$WS_NEVER" ]] && workspace_state=exists
-check "duplicate host name: exit 64, named, no workspace" "$rc $names_duplicate $workspace_state" "64 yes absent"
 
 # ---------------------------------------------------------------------------------------------
 # Fixture hosts and the stub ssh
@@ -86,7 +55,20 @@ if [[ "$alias_name" == down || ! -d "$fixture_home" ]]; then
     printf 'ssh: connect to host %s port 22: Connection refused\n' "$alias_name" >&2
     exit 255
 fi
-exec env HOME="$fixture_home" PATH=/usr/bin:/bin TMPDIR="$AUDIT_REMOTE_TMPDIR" bash -c "$*"
+# A host holding a canned stream sends it as-is, directory members and their modes included,
+# in place of what the remote script would send.
+if [[ -d "$fixture_home/canned-stream" ]]; then
+    exec tar -c -f - -C "$fixture_home/canned-stream" .
+fi
+run_remote() { env HOME="$fixture_home" PATH=/usr/bin:/bin TMPDIR="$AUDIT_REMOTE_TMPDIR" bash -c "$*"; }
+# `interrupt` sends its whole stream, then SIGTERMs the collect (this stub's parent) while
+# the collect is still waiting on the pipeline, as a Ctrl-C or a kill would.
+if [[ "$alias_name" == interrupt ]]; then
+    run_remote "$@"
+    kill -TERM "$PPID"
+    exit 0
+fi
+run_remote "$@"
 STUB
 chmod +x "$STUB_BIN/ssh"
 # The remote's one write is its own mktemp -d, so the "remote" gets a TMPDIR of its own that
@@ -135,6 +117,21 @@ make_host() {   # ALIAS → a fixture HOME at $FIXTURE_HOSTS/ALIAS
     printf 'session\n' > "$cfg/sessions/s"
     printf '# quantivly root\n' > "$host_home/quantivly/CLAUDE.md"
     printf '{"hub":true}\n' > "$host_home/quantivly/hub/.claude/settings.json"
+    # Inside the trees collected whole, only the EXCLUDE_NAMES prunes stand between these and
+    # the workspace: one path per prune, each holding the credential literal.
+    local repo_claude="$host_home/quantivly/hub/.claude" excluded_path
+    for excluded_path in "$cfg/skills/rabota/.credentials.json" "$cfg/skills/rabota/.claude.json.backup" \
+            "$repo_claude/.credentials.json" "$repo_claude/.claude.json.backup" "$repo_claude/old.jsonl" \
+            "$repo_claude/sessions/s" "$repo_claude/shell-snapshots/s" "$repo_claude/file-history/f" \
+            "$repo_claude/paste-cache/p" "$repo_claude/debug/d" "$repo_claude/cache/x" \
+            "$repo_claude/backups/b" "$repo_claude/downloads/d" "$repo_claude/telemetry/t" \
+            "$repo_claude/security/s" "$repo_claude/hook.signature" "$repo_claude/plugins/cache/c" \
+            "$repo_claude/plugins/marketplaces/m" "$repo_claude/plugins/repos/r" \
+            "$repo_claude/plugins/data/d" "$repo_claude/plugins/store/s" "$repo_claude/plugins/synced/s" \
+            "$repo_claude/skills/synced/SKILL.md" "$repo_claude/worktrees/w/CLAUDE.md"; do
+        mkdir -p "$(dirname "$excluded_path")"
+        printf '%s\n' "$FIXTURE_CREDENTIAL" > "$excluded_path"
+    done
     printf '#!/bin/sh\necho "2.1.300 (Claude Code)"\n' > "$host_home/.local/bin/claude"
     printf '#!/bin/sh\necho "herdr 0.9.5"\n' > "$host_home/.local/bin/herdr"
     chmod +x "$host_home/.local/bin/claude" "$host_home/.local/bin/herdr"
@@ -152,6 +149,43 @@ has_line() {   # FILE LINE → yes if FILE holds LINE exactly, else no
 }
 
 TAB=$'\t'
+
+# ---------------------------------------------------------------------------------------------
+# Usage and argument validation
+# ---------------------------------------------------------------------------------------------
+
+printf 'usage: no verb → exit 64 and the usage text\n'
+out=$("$SUT" 2>&1); rc=$?
+# This line appears only in the usage block; usage_error's own message never contains it.
+USAGE_ONLY_NEEDLE='--host NAME=ALIAS:CFGDIR'
+prints_usage=no; [[ "$out" == *"$USAGE_ONLY_NEEDLE"* ]] && prints_usage=yes
+check "no verb: exit 64, usage text printed" "$rc $prints_usage" "64 yes"
+
+printf 'usage: --help → exit 0\n'
+help_stdout=$("$SUT" --help 2>/dev/null); rc=$?
+help_prints_usage=no; [[ "$help_stdout" == *"$USAGE_ONLY_NEEDLE"* ]] && help_prints_usage=yes
+check "--help: exit 0, usage text on stdout" "$rc $help_prints_usage" "0 yes"
+
+printf 'usage: a host alias with a space or semicolon, or a leading dash → exit 64, nothing created\n'
+WS_NEVER="$TMPROOT/ws-never"
+"$SUT" --collect --workspace "$WS_NEVER" --host 'x=bad host;rm:.claude' >/dev/null 2>&1; rc=$?
+# ssh would read -Fevil as an option: a config file, ProxyCommand included.
+"$SUT" --collect --workspace "$WS_NEVER" --host 'x=-Fevil:.claude' >/dev/null 2>&1; dash_rc=$?
+workspace_state=absent; [[ -e "$WS_NEVER" ]] && workspace_state=exists
+check "bad alias: exit 64 for both, and no workspace created" "$rc $dash_rc $workspace_state" "64 64 absent"
+
+printf 'usage: a config dir not starting with a dot, or one that is only dots → exit 64\n'
+"$SUT" --collect --workspace "$WS_NEVER" --host 'x=x:claude' >/dev/null 2>&1; rc=$?
+"$SUT" --collect --workspace "$WS_NEVER" --host 'x=x:..' >/dev/null 2>&1; dots_rc=$?
+check "config dir without a leading dot, or ..: exit 64" "$rc $dots_rc" "64 64"
+
+printf 'usage: a duplicate host name → exit 64\n'
+# A workspace of its own, so an earlier row's failure cannot fail this one.
+WS_NEVER_DUPLICATE="$TMPROOT/ws-never-duplicate"
+out=$("$SUT" --collect --workspace "$WS_NEVER_DUPLICATE" --host 'a=x:.claude' --host 'a=y:.claude' 2>&1); rc=$?
+names_duplicate=no; [[ "$out" == *"host name 'a' is given twice"* ]] && names_duplicate=yes
+workspace_state=absent; [[ -e "$WS_NEVER_DUPLICATE" ]] && workspace_state=exists
+check "duplicate host name: exit 64, named, no workspace" "$rc $names_duplicate $workspace_state" "64 yes absent"
 
 # ---------------------------------------------------------------------------------------------
 # --collect against a remote host
@@ -257,7 +291,7 @@ check "unreachable: exit 2, named, h1 collected, hosts.tsv says failed then ok" 
     "$rc $names_down $h1_beside_down $host_statuses" \
     "2 yes yes down${TAB}down${TAB}.claude${TAB}failed|h1${TAB}h1${TAB}.claude${TAB}ok|"
 
-printf 'collect: a re-collect replaces the earlier one — no stale file on success, nothing left on failure\n'
+printf 'collect: a re-collect replaces the earlier one on success and keeps it on failure\n'
 make_host rerun
 W_RERUN="$TMPROOT/ws-rerun"
 "$SUT" --collect --workspace "$W_RERUN" --host rerun=rerun:.claude >/dev/null 2>&1
@@ -266,9 +300,12 @@ rm "$FIXTURE_HOSTS/rerun/.claude/agents/x.md"
 stale_agent=absent; [[ -e $W_RERUN/rerun/cfg/agents/x.md ]] && stale_agent=present
 rerun_rows=$(wc -l 2>/dev/null < "$W_RERUN/hosts.tsv")
 "$SUT" --collect --workspace "$W_RERUN" --host rerun=down:.claude >/dev/null 2>&1; failed_rc=$?
-facts_after_failure=absent; [[ -e $W_RERUN/rerun/facts.tsv ]] && facts_after_failure=present
-check "re-collect: stale file gone, hosts.tsv one row, a failed re-collect leaves no facts.tsv" \
-    "$rerun_rc $stale_agent $rerun_rows $failed_rc $facts_after_failure" "0 absent 1 2 absent"
+earlier_tree_kept=no
+[[ -f $W_RERUN/rerun/facts.tsv && -f $W_RERUN/rerun/cfg/CLAUDE.md ]] && earlier_tree_kept=yes
+failed_status=$(cut -f1,2,5 "$W_RERUN/hosts.tsv" 2>/dev/null | tr '\n' '|')
+check "re-collect: stale file gone, one hosts.tsv row; a failed one keeps the earlier tree, hosts.tsv says failed" \
+    "$rerun_rc $stale_agent $rerun_rows $failed_rc $earlier_tree_kept $failed_status" \
+    "0 absent 1 2 yes rerun${TAB}down${TAB}failed|"
 
 printf 'collect: a workspace entry that is not an earlier collect is never replaced\n'
 W_FOREIGN="$TMPROOT/ws-foreign"
@@ -286,6 +323,50 @@ names_missing_cfgdir=no; [[ "$err" == *"has no .claude-missing"* ]] && names_mis
 nocfg_facts=absent; [[ -e $W_NOCFG/nocfg/facts.tsv ]] && nocfg_facts=present
 check "missing config dir: exit 2, named, no facts.tsv" "$rc $names_missing_cfgdir $nocfg_facts" "2 yes absent"
 
+printf 'collect: a read-only directory, or a staging dir a killed run left, leaves nothing unredacted\n'
+W_READONLY="$TMPROOT/ws-readonly"
+# What a SIGKILLed collect leaves: a staging dir of raw host content, a 555 directory inside.
+stale_staging_dir="$W_READONLY/.collecting-killed.AbC123"
+mkdir -p "$stale_staging_dir/cfg/locked"
+printf 'linear key: %s\n' "$FIXTURE_LINEAR_KEY" > "$stale_staging_dir/cfg/locked/CLAUDE.md"
+chmod 555 "$stale_staging_dir/cfg/locked"
+# A real host with a 555 directory in its include set, through the remote script...
+make_host rotree
+rotree_locked="$FIXTURE_HOSTS/rotree/.claude/hooks/locked"
+mkdir -p "$rotree_locked"
+printf 'linear key: %s\n' "$FIXTURE_LINEAR_KEY" > "$rotree_locked/text.sh"
+printf 'BLOB\0BINARY\n' > "$rotree_locked/blob.bin"
+chmod 555 "$rotree_locked"
+# ...and a stream that carries the 555 directory as a member, which GNU tar unpacks as 555.
+canned_locked="$FIXTURE_HOSTS/rodir/canned-stream/cfg/locked"
+mkdir -p "$canned_locked"
+printf 'hostname\trodir\n' > "$FIXTURE_HOSTS/rodir/canned-stream/facts.tsv"
+: > "$FIXTURE_HOSTS/rodir/canned-stream/links.tsv"
+: > "$FIXTURE_HOSTS/rodir/canned-stream/collect.log"
+printf 'linear key: %s\n' "$FIXTURE_LINEAR_KEY" > "$canned_locked/text.sh"
+printf 'BLOB\0BINARY\n' > "$canned_locked/blob.bin"
+chmod 555 "$canned_locked"
+"$SUT" --collect --workspace "$W_READONLY" --host rotree=rotree:.claude --host rodir=rodir:.claude \
+    >/dev/null 2>&1; rc=$?
+staging_left=$(find "$W_READONLY" -name '.collecting-*' -print)
+unredacted_left=$(grep -rlF -- "$FIXTURE_LINEAR_KEY" "$W_READONLY" 2>/dev/null)
+binaries_left=$(find "$W_READONLY" -name blob.bin -print)
+both_collected=no; [[ -f $W_READONLY/rotree/cfg/hooks/locked/text.sh && -f $W_READONLY/rodir/cfg/locked/text.sh ]] \
+    && both_collected=yes
+check "read-only dirs: both hosts collected; no staging dir, unredacted literal or binary left" \
+    "$rc $both_collected|$staging_left|$unredacted_left|$binaries_left" "0 yes|||"
+
+printf 'collect: an interrupted collect leaves no staging directory\n'
+make_host interrupt
+printf 'linear key: %s\n' "$FIXTURE_LINEAR_KEY" >> "$FIXTURE_HOSTS/interrupt/.claude/CLAUDE.md"
+W_INTERRUPT="$TMPROOT/ws-interrupt"
+"$SUT" --collect --workspace "$W_INTERRUPT" --host interrupt=interrupt:.claude >/dev/null 2>&1; rc=$?
+staging_left=$(find "$W_INTERRUPT" -name '.collecting-*' -print)
+unredacted_left=$(grep -rlF -- "$FIXTURE_LINEAR_KEY" "$W_INTERRUPT" 2>/dev/null)
+interrupted_host_installed=no; [[ -e $W_INTERRUPT/interrupt ]] && interrupted_host_installed=yes
+check "interrupt: exit 143, nothing staged or unredacted left, host not installed" \
+    "$rc $interrupted_host_installed|$staging_left|$unredacted_left" "143 no||"
+
 printf 'collect: the host tree is unchanged\n'
 H1_TREE_AFTER=$(host_tree_listing "$H1")
 tree_listing_size=$(wc -l <<<"$H1_TREE_BEFORE")
@@ -297,7 +378,7 @@ check "read-only: h1's tree identical after every collect above, remote temp dir
     "$tree_unchanged $listing_covers_fixture|$remote_tmp_leftovers" "yes yes|"
 
 printf '\n'
-EXPECTED_ROWS=18
+EXPECTED_ROWS=20
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

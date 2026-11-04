@@ -33,7 +33,7 @@
 #                                  ssh alias, or `local` to collect without ssh;
 #                                  CFGDIR is a dot-directory under that host's $HOME
 #
-# Exit: --collect  0 every host collected · 2 a host failed
+# Exit: --collect  0 every host collected · 2 a host failed · 130/143 interrupted (Ctrl-C/SIGTERM)
 #       --matrix   0 identical · 1 drift · 2 a declared host has no facts.tsv
 #       64 usage
 #
@@ -56,15 +56,19 @@ DEFAULT_HOSTS=(
     "nanoclaw=nanoclaw:.claude-herdr"
 )
 
-# Interpolated into ssh command lines and tar arguments, so anything else is refused
-# before it can reach a shell or a path.
-ALIAS_RE='^[A-Za-z0-9._-]+$'
-CFGDIR_RE='^\.[A-Za-z0-9._-]+$'
+# Interpolated into ssh command lines, workspace paths and the remote's paths, so anything
+# else is refused before it can reach a shell or a path. An alias or name may not start with
+# `-` (ssh would read `-Fevil` as an option) or a dot (`.` and `..` name directories), and a
+# config dir may not be `..` or `...` (the collect would read $HOME's parent).
+ALIAS_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+CFGDIR_RE='^\.[A-Za-z0-9_-][A-Za-z0-9._-]*$'
 
 SSH_CMD="${CLAUDE_CONFIG_AUDIT_SSH:-ssh -o BatchMode=yes -o ConnectTimeout=30 -o ForwardAgent=no}"
 
-# Never copied: credentials, transcripts and caches, and plugin stores that a host
-# re-downloads. Matched against names inside the configuration directory.
+# Never copied: credentials, transcripts and caches, plugin stores that a host re-downloads,
+# and whole checkouts. Pruned at every depth of every collected tree (the config dir's paths,
+# memory dirs, repo .claude dirs): a bare name matches that name anywhere, a/b matches a
+# path ending in a/b.
 EXCLUDE_NAMES=(
     '.credentials.json*'
     '.claude.json*'
@@ -87,10 +91,13 @@ EXCLUDE_NAMES=(
     'plugins/store'
     'plugins/synced'
     'skills/synced'
+    'worktrees'
 )
 
 EXIT_COLLECT_FAILED=2
 EXIT_USAGE=64
+EXIT_INTERRUPTED=130
+EXIT_TERMINATED=143
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REDACTOR="$DOTFILES/scripts/redact-secrets.sh"
@@ -239,7 +246,7 @@ collect_this_host() {   # CFGDIR
         collected_at "$collected_at" > "$META_DIR/facts.tsv"
 
     local tar_status
-    tar -c -f - -h --hard-dereference --ignore-failed-read --null --no-recursion \
+    tar -c -f - -h --hard-dereference --ignore-failed-read --null --no-recursion --mode=u+rwX \
         "${tar_layout_args[@]}" -T "$META_DIR/include.list" \
         -C "$META_DIR" facts.tsv links.tsv collect.log
     tar_status=$?
@@ -313,12 +320,44 @@ parse_args() {
 
 # --- --collect ----------------------------------------------------------------------------------
 
+# A staging directory holds a host's content BEFORE it is redacted, so it must never outlive
+# the run that made it: the traps in collect_main remove the current one on exit, Ctrl-C or
+# SIGTERM, and collect_main sweeps any a SIGKILLed run left behind. bash runs the EXIT trap on
+# a fatal SIGTERM too (measured); INT and TERM are trapped anyway for an explicit exit status.
+CURRENT_STAGING_DIR=""
+
+# Owner rwx on every directory and rw on every file, so a read-only directory in a stream
+# (GNU tar unpacks a 555 directory member as 555) can stop neither a redaction nor a removal.
+# find, not chmod -R: -type d/-type f never follow a symlink out of the tree, and -exec \;
+# opens each directory before find descends into it.
+make_tree_owner_writable() {   # DIR
+    find "$1" -type d -exec chmod u+rwx {} \;
+    find "$1" -type f -exec chmod u+rw {} +
+}
+
+remove_tree() {   # PATH → 0 when PATH no longer exists, 1 when it survived the removal
+    local tree_path="$1"
+    [[ -e "$tree_path" || -L "$tree_path" ]] || return 0
+    if [[ -d "$tree_path" && ! -L "$tree_path" ]]; then make_tree_owner_writable "$tree_path"; fi
+    rm -rf "$tree_path"
+    [[ ! -e "$tree_path" && ! -L "$tree_path" ]]
+}
+
+remove_current_staging() {
+    [[ -n "$CURRENT_STAGING_DIR" ]] || return 0
+    rm -f "$CURRENT_STAGING_DIR$UNPACK_ERRORS_SUFFIX"
+    if ! remove_tree "$CURRENT_STAGING_DIR"; then
+        warn "could not remove $CURRENT_STAGING_DIR, which may hold UNREDACTED host content; remove it by hand"
+    fi
+    CURRENT_STAGING_DIR=""
+}
+
 # Every text file under DIR is rewritten in place through the redactor; a file grep calls
 # binary (it holds a NUL) is deleted and logged, since the redactor cannot be trusted to see
 # into it. `^` rather than `.`, and the -s guard, keep empty and blank-line-only files as text.
 # The redactor runs under LC_ALL=C because in a UTF-8 locale its by-name rules stop at an
 # invalid byte and leave the value whole (measured: MY_TOKEN=\xe9… survives under C.UTF-8).
-redact_tree() {   # DIR → 0 when every file was redacted or skipped, 1 when the redactor failed
+redact_tree() {   # DIR → 0 when every file was redacted or skipped, 1 when one could be neither
     local tree_dir="$1" file_path relative_path redacting_path
     local -a tree_files=() binary_skipped_lines=()
     mapfile -d '' tree_files < <(find "$tree_dir" -type f -print0)
@@ -326,6 +365,7 @@ redact_tree() {   # DIR → 0 when every file was redacted or skipped, 1 when th
         relative_path="${file_path#"$tree_dir"/}"
         if [[ -s "$file_path" ]] && ! LC_ALL=C grep -Iq '^' "$file_path"; then
             rm -f "$file_path"
+            [[ ! -e "$file_path" ]] || return 1
             binary_skipped_lines+=("$BINARY_SKIPPED_TAG"$'\t'"$relative_path")
             continue
         fi
@@ -341,17 +381,19 @@ redact_tree() {   # DIR → 0 when every file was redacted or skipped, 1 when th
     fi
 }
 
-# A re-collect replaces the earlier one before it starts, so neither a stale file nor, after
-# a failure, a stale facts.tsv survives it. Anything else at that path is not ours to remove.
-remove_earlier_collect() {   # NAME → 0 when $WORKSPACE/NAME is now absent, 1 when it is not ours
-    local name="$1"
-    local host_dir="$WORKSPACE/$name"
-    [[ -e "$host_dir" || -L "$host_dir" ]] || return 0
-    if [[ -L "$host_dir" || ! -f "$host_dir/facts.tsv" ]]; then
-        warn "collect of $name failed: $host_dir is not an earlier collect (no facts.tsv), so it is left alone"
-        return 1
+# Only an earlier collect (a real directory holding facts.tsv) is ever replaced; anything else
+# at a host's workspace path is not ours to remove.
+is_earlier_collect() { [[ -d "$1" && ! -L "$1" && -f "$1/facts.tsv" ]]; }
+
+# The new collect replaces the earlier one only once it is complete and redacted, so a failed
+# re-collect (an ssh drop) leaves the earlier tree whole; hosts.tsv says which is current.
+install_collect() {   # STAGING_DIR HOST_DIR → 0 when STAGING_DIR is now HOST_DIR
+    local staging_dir="$1" host_dir="$2"
+    if [[ -e "$host_dir" || -L "$host_dir" ]]; then
+        is_earlier_collect "$host_dir" || return 1
+        remove_tree "$host_dir" || return 1
     fi
-    rm -rf "$host_dir"
+    mv "$staging_dir" "$host_dir"
 }
 
 collect_remote() {   # NAME ALIAS CFGDIR → 0 collected into $WORKSPACE/NAME, 1 failed (why, on stderr)
@@ -361,11 +403,15 @@ collect_remote() {   # NAME ALIAS CFGDIR → 0 collected into $WORKSPACE/NAME, 1
     local staging_dir unpack_errors_path unpack_errors failure=""
     local -a pipe_status=()
 
-    remove_earlier_collect "$name" || return 1
+    if [[ -e "$host_dir" || -L "$host_dir" ]] && ! is_earlier_collect "$host_dir"; then
+        warn "collect of $name failed: $host_dir is not an earlier collect (no facts.tsv), so it is left alone"
+        return 1
+    fi
     if ! staging_dir=$(mktemp -d "$WORKSPACE/$STAGING_PREFIX$name.XXXXXX"); then
         warn "collect of $name failed: cannot create a staging directory in $WORKSPACE"
         return 1
     fi
+    CURRENT_STAGING_DIR="$staging_dir"
     unpack_errors_path="$staging_dir$UNPACK_ERRORS_SUFFIX"
 
     # SSH_CMD is a command with its options, word-split on purpose. CFGDIR matched CFGDIR_RE,
@@ -374,6 +420,7 @@ collect_remote() {   # NAME ALIAS CFGDIR → 0 collected into $WORKSPACE/NAME, 1
     $SSH_CMD "$alias_name" "$remote_command" <<<"$remote_script" \
         | tar -x -f - -C "$staging_dir" 2>"$unpack_errors_path"
     pipe_status=("${PIPESTATUS[@]}")
+    make_tree_owner_writable "$staging_dir"
 
     if (( pipe_status[0] != 0 )); then
         failure="the ssh session exited ${pipe_status[0]}"
@@ -383,16 +430,17 @@ collect_remote() {   # NAME ALIAS CFGDIR → 0 collected into $WORKSPACE/NAME, 1
     elif [[ ! -f "$staging_dir/facts.tsv" ]]; then
         failure="the stream carried no facts.tsv"
     elif ! redact_tree "$staging_dir"; then
-        failure="the redactor failed, so nothing from this host is kept"
-    elif ! mv "$staging_dir" "$host_dir"; then
-        failure="cannot move the collect into $host_dir"
+        failure="a collected file could be neither redacted nor removed, so nothing from this host is kept"
+    elif ! install_collect "$staging_dir" "$host_dir"; then
+        failure="cannot replace $host_dir with the new collect"
     fi
     rm -f "$unpack_errors_path"
     if [[ -n "$failure" ]]; then
-        rm -rf "$staging_dir"
         warn "collect of $name failed: $failure"
+        remove_current_staging
         return 1
     fi
+    CURRENT_STAGING_DIR=""
 }
 
 collect_host() {   # NAME ALIAS CFGDIR → 0 collected, 1 failed
@@ -408,6 +456,14 @@ collect_host() {   # NAME ALIAS CFGDIR → 0 collected, 1 failed
 collect_main() {
     [[ -x "$REDACTOR" ]] || die "the redactor $REDACTOR is missing; nothing is collected without it"
     mkdir -p "$WORKSPACE" || die "cannot create the workspace $WORKSPACE"
+    trap remove_current_staging EXIT
+    trap 'remove_current_staging; exit "$EXIT_INTERRUPTED"' INT
+    trap 'remove_current_staging; exit "$EXIT_TERMINATED"' TERM
+    local stale_staging
+    for stale_staging in "$WORKSPACE/$STAGING_PREFIX"*; do
+        remove_tree "$stale_staging" \
+            || die "cannot remove $stale_staging, left by an earlier run; it may hold UNREDACTED host content"
+    done
     local spec attempted_at host_status host_row
     local -a host_rows=() failed_names=()
     for spec in "${HOSTS[@]}"; do
