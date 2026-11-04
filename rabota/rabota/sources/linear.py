@@ -56,6 +56,7 @@ that function for the batching and the "unknown, never not_found" rule on a fail
 import json
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Callable
 
 from rabota import errors
@@ -66,7 +67,7 @@ TIMEOUT_SECONDS = 60
 
 ISSUE_FIELDS = """
   id identifier title url priority priorityLabel estimate dueDate createdAt updatedAt
-  state { name type } team { key } project { name } assignee { id displayName } creator { id }
+  state { name type } team { key } project { id name } assignee { id displayName } creator { id }
   labels { nodes { name } } attachments(first: 50) { nodes { url sourceType } pageInfo { hasNextPage } }
 """
 NOTIFICATION_FIELDS = """
@@ -89,10 +90,38 @@ Q_CREATED = """query($after: String, $dead: [String!], $me: ID!) {
 Q_NOTIFICATIONS = """query($after: String) {
   notifications(first: %d, after: $after) {
     nodes { %s } pageInfo { hasNextPage endCursor } } }""" % (PAGE_SIZE, NOTIFICATION_FIELDS)
+# DO-875: the inverse side also selects the blocker's state -- two more fields on a request that
+# already names every blocker, so `blockers` costs no second call.
 Q_RELATIONS = """query($ids: [ID!]) {
   issues(first: %d, filter: { id: { in: $ids } }) {
     nodes { id relations { nodes { type relatedIssue { identifier } } }
-            inverseRelations { nodes { type issue { identifier } } } } } }""" % PAGE_SIZE
+            inverseRelations { nodes { type issue { identifier state { name type } } } } } } }""" % PAGE_SIZE
+BLOCKING_RELATION_TYPE = "blocks"
+# DO-875, the picture. Field names checked against Linear's live schema by `__type` introspection
+# on 2026-11-04 (no key needed): `CycleFilter.isActive`/`.team.key` and `NullableCycleFilter.id`
+# take `in`; `Project.status { name type }` is the project's state (the schema has no `state`
+# field on Project any more), `lastUpdate` is the newest ProjectUpdate, `health` an enum
+# (onTrack/atRisk/offTrack) or null. Cycle membership is a FLAT `issues` query under the SAME
+# predicate as the cycles query (active, those teams), not a nested `issues` connection on each
+# cycle: a nested connection is capped at a page size with no cursor to follow, and the flat one
+# pages through `pages` like everything else. Not `cycle: { id: { in: <the cycle ids> } }`,
+# which was the first cut: measured live 2026-11-04, that filter also matched the issues of a
+# team OUTSIDE the asked set whose own active cycle `inheritedFrom` an asked cycle (9 of 836
+# rows), so the exact-id guard refused a reply Linear had filtered correctly. The shared
+# predicate returned the same membership (827 rows, 9 pages) with no row outside the asked
+# cycles, and the guard stands on it.
+CYCLE_FIELDS = "id number name startsAt endsAt team { key }"
+ACTIVE_CYCLE_FILTER = "{ isActive: { eq: true }, team: { key: { in: $keys } } }"
+Q_ACTIVE_CYCLES = """query($after: String, $keys: [String!]) {
+  cycles(first: %d, after: $after, filter: %s) {
+    nodes { %s } pageInfo { hasNextPage endCursor } } }""" % (PAGE_SIZE, ACTIVE_CYCLE_FILTER, CYCLE_FIELDS)
+Q_ACTIVE_CYCLE_ISSUES = """query($after: String, $keys: [String!]) {
+  issues(first: %d, after: $after, filter: { cycle: %s }) {
+    nodes { identifier cycle { id } } pageInfo { hasNextPage endCursor } } }""" % (PAGE_SIZE, ACTIVE_CYCLE_FILTER)
+PROJECT_FIELDS = "id name status { name type } lead { id displayName } targetDate lastUpdate { createdAt } health"
+Q_PROJECTS = """query($after: String, $ids: [ID!]) {
+  projects(first: %d, after: $after, filter: { id: { in: $ids } }) {
+    nodes { %s } pageInfo { hasNextPage endCursor } } }""" % (PAGE_SIZE, PROJECT_FIELDS)
 # DO-754: IssueFilter has no direct "identifier" field (linear.app/developers/filtering) -- an
 # identifier is a team key plus issue number, and the documented filter schema combines
 # alternatives with `or`, so each requested identifier becomes its own `{team, number}` branch.
@@ -114,6 +143,17 @@ M_ARCHIVE_ONE = """mutation($id: String!) { notificationArchive(id: $id) { succe
 M_UNARCHIVE_ONE = """mutation($id: String!) { notificationUnarchive(id: $id) { success } }"""
 M_SET_DUE = """mutation($id: String!, $due: TimelessDate) {
   issueUpdate(id: $id, input: { dueDate: $due }) { success issue { id dueDate } } }"""
+
+
+@dataclass
+class IssueRelations:
+    """What ``LinearClient.relations`` reads in one pass (DO-875): ``by_issue`` maps an issue id to its
+    ``{"blockedBy": [identifiers], "blocks": [identifiers]}``; ``blockers`` lists every issue that blocks
+    one of them -- ``{"identifier", "state": {"name", "type"}}`` -- once each, in identifier order.
+    Attributes, not keys: ``commands/sync.py`` is inside the static ingestion-boundary scan, which judges
+    every literal key read in that function, and these are not notification fields."""
+    by_issue: dict
+    blockers: list
 
 
 def _urllib_post(api_key: str) -> Callable[[dict], dict]:
@@ -164,22 +204,29 @@ class LinearClient:
             raise errors.RabotaError("Linear reply has neither data nor errors")
         return reply["data"]
 
-    def paginate(self, gql: str, path: list[str], variables: dict | None = None) -> list[dict]:
-        """Collect ``nodes`` from the connection at ``path``, following ``pageInfo.endCursor`` until the last page."""
-        nodes, after = [], None
+    def pages(self, gql: str, path: list[str], variables: dict | None = None):
+        """Yield each page's ``nodes`` from the connection at ``path``, following ``pageInfo.endCursor``
+        until the last page -- so a caller can refuse a reply at its first page instead of after the
+        walk (DO-875: a filter Linear drops must not be paged to the end of the org)."""
+        after = None
         while True:
             data = self.query(gql, {**(variables or {}), "after": after})
             conn = data
             try:
                 for key in path:
                     conn = conn[key]
-                nodes.extend(conn["nodes"])
+                nodes = conn["nodes"]
                 page = conn["pageInfo"]
             except (KeyError, TypeError):
                 raise errors.RabotaError(f"Linear reply lacks a connection at {'.'.join(path)}") from None
+            yield nodes
             if not page.get("hasNextPage"):
-                return nodes
+                return
             after = page.get("endCursor")
+
+    def paginate(self, gql: str, path: list[str], variables: dict | None = None) -> list[dict]:
+        """Collect ``nodes`` from every page of the connection at ``path``."""
+        return [node for nodes in self.pages(gql, path, variables) for node in nodes]
 
     def viewer(self) -> dict:
         return self.query(Q_VIEWER)["viewer"]
@@ -204,16 +251,70 @@ class LinearClient:
             out.append(n)
         return out
 
-    def relations(self, issue_ids: list[str]) -> dict[str, dict]:
-        """Map issue id → ``{"blockedBy": [identifiers], "blocks": [identifiers]}`` in batches of ``PAGE_SIZE``."""
-        rel = {}
+    def relations(self, issue_ids: list[str]) -> IssueRelations:
+        """The blocking relations of ``issue_ids`` in batches of ``PAGE_SIZE``; no ids, no call.
+
+        ``blockers`` (DO-875) is read off the same reply that names each blocker, so "unblocked" is
+        a fact of the snapshot rather than an ``issueUnblocked`` notification left in ``other``.
+        """
+        by_issue, blockers = {}, {}
         for start in range(0, len(issue_ids), PAGE_SIZE):
             batch = issue_ids[start:start + PAGE_SIZE]
             for node in self.query(Q_RELATIONS, {"ids": batch})["issues"]["nodes"]:
-                blocks = [r["relatedIssue"]["identifier"] for r in node["relations"]["nodes"] if r["type"] == "blocks"]
-                blocked_by = [r["issue"]["identifier"] for r in node["inverseRelations"]["nodes"] if r["type"] == "blocks"]
-                rel[node["id"]] = {"blockedBy": blocked_by, "blocks": blocks}
-        return rel
+                blocks = [r["relatedIssue"]["identifier"] for r in node["relations"]["nodes"]
+                          if r["type"] == BLOCKING_RELATION_TYPE]
+                blocking = [r["issue"] for r in node["inverseRelations"]["nodes"] if r["type"] == BLOCKING_RELATION_TYPE]
+                by_issue[node["id"]] = {"blockedBy": [b["identifier"] for b in blocking], "blocks": blocks}
+                for blocker in blocking:
+                    blockers[blocker["identifier"]] = {"identifier": blocker["identifier"], "state": blocker.get("state")}
+        return IssueRelations(by_issue, [blockers[key] for key in sorted(blockers)])
+
+    def active_cycles(self, team_keys: list[str]) -> list[dict]:
+        """DO-875: the active cycle of each team in ``team_keys`` (distinct, sorted; none → no call),
+        each carrying ``issue_identifiers``, every issue in it, in Linear's order.
+
+        Two paged reads under one predicate: the cycles, then one flat ``issues`` query (see
+        ``Q_ACTIVE_CYCLE_ISSUES`` for why neither a nested connection nor the cycle ids); no
+        cycles, no second call. A cycle with no issues is still a cycle; a team without an active
+        cycle has no row. A reply carrying a cycle of a team not asked for, or an issue outside
+        the fetched cycles, means Linear dropped the filter (the DO-754 crawl, by another door)
+        and is refused at that page.
+        """
+        keys = sorted(set(team_keys))
+        if not keys:
+            return []
+        cycles = []
+        for page in self.pages(Q_ACTIVE_CYCLES, ["cycles"], {"keys": keys}):
+            for cycle in page:
+                if (cycle.get("team") or {}).get("key") not in keys:
+                    raise errors.RabotaError("Linear returned a cycle of a team not asked for: the team filter was not applied")
+                cycles.append(dict(cycle, issue_identifiers=[]))
+        by_id = {cycle["id"]: cycle for cycle in cycles}
+        if not by_id:
+            return cycles
+        for page in self.pages(Q_ACTIVE_CYCLE_ISSUES, ["issues"], {"keys": keys}):
+            for node in page:
+                cycle = by_id.get((node.get("cycle") or {}).get("id"))
+                if cycle is None:
+                    raise errors.RabotaError("Linear returned an issue outside the asked cycles: the cycle filter was not applied")
+                cycle["issue_identifiers"].append(node["identifier"])
+        return cycles
+
+    def projects_by_id(self, project_ids: list[str]) -> list[dict]:
+        """DO-875: the projects with exactly these ids (distinct, sorted; none → no call), in
+        batches of ``PAGE_SIZE`` ids, each flattened by ``_flatten_project``. A node outside the
+        asked ids means Linear dropped the filter (the DO-754 crawl) and the reply is refused.
+        """
+        wanted = sorted(set(project_ids))
+        out = []
+        for start in range(0, len(wanted), PAGE_SIZE):
+            batch = wanted[start:start + PAGE_SIZE]
+            for page in self.pages(Q_PROJECTS, ["projects"], {"ids": batch}):
+                for node in page:
+                    if node.get("id") not in batch:
+                        raise errors.RabotaError("Linear returned a project not asked for: the id filter was not applied")
+                    out.append(_flatten_project(node))
+        return out
 
     # mutations — callers record rollback rows before calling these
     def mutate(self, gql: str, variables: dict, result_key: str) -> dict:
@@ -303,3 +404,12 @@ def _flatten(issue: dict) -> dict:
     issue.setdefault("blockedBy", [])
     issue.setdefault("blocks", [])
     return issue
+
+
+def _flatten_project(project: dict) -> dict:
+    """Snapshot shape for a project: the selected fields verbatim, with ``lastUpdate { createdAt }``
+    flattened to ``lastUpdateAt`` (null when the project has never had an update) so a reader has
+    one key for "when was this last updated"."""
+    project = dict(project)
+    project["lastUpdateAt"] = (project.pop("lastUpdate", None) or {}).get("createdAt")
+    return project
