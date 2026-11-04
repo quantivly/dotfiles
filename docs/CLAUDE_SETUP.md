@@ -178,7 +178,7 @@ replaces them: `ALIAS` is an ssh alias or `local`, `CFGDIR` a dot-directory unde
 `$HOME`. The default workspace is `~/Projects/handoffs/2026-11-claude-config-audit`
 (`--workspace DIR`). `CLAUDE_CONFIG_AUDIT_WORKSPACE` overrides that default and
 `CLAUDE_CONFIG_AUDIT_SSH` the ssh command; the state table,
-`scripts/test-claude-config-audit.sh`, uses both.
+`scripts/test-claude-config-audit.sh`, points the latter at its stub.
 
 **Known limits.**
 
