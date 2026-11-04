@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/claude-config-audit.sh` audits every host's Claude Code configuration, read-only
+  (DO-880).** Step 1 of the shared-configuration design
+  (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`): before any host is
+  rendered from a shared source, know what each one has. `--collect` copies the laptop's, dev's,
+  sol-build's and nanoclaw's config dirs (`--host NAME=ALIAS:CFGDIR` for others) into one workspace
+  under `~/Projects/handoffs/`: settings, hooks, skills, agents, commands, rules, plugin
+  registries, every `projects/*/memory/`, tenant-root `CLAUDE.md` files, repo `.claude/` dirs, and
+  the laptop's account-dir `settings.json` copies. Each host runs only `find`, `sed`, `tar`,
+  `date`, `hostname`, `id` and two `--version` calls; credentials, transcripts, caches and plugin
+  stores are pruned and each pruned path logged, every file is redacted (a `*.json` file's
+  credentials by key name too), binaries are dropped, symlinks are recorded in `links.tsv`. A
+  host's earlier collect is replaced only once the new one is whole, `hosts.tsv` is merged per
+  run, and a workspace lock refuses a second concurrent `--collect`. `--matrix` reads the workspace only and writes five reports:
+  every file by layout path (`identical`, `only-on`, `missing-on`, `differs newest:`),
+  `settings.json` key by key, and memory per store across homes; it exits 1 on drift and 2 on a
+  collect `hosts.tsv` does not vouch for. Guide: `docs/CLAUDE_SETUP.md` ("Auditing the hosts").
+  State table: `scripts/test-claude-config-audit.sh` (51 rows, hermetic: stub ssh, fixture
+  `HOME`; CI `claude-config-audit-test`).
+
 - **`rabota snooze <key> --until <when>` and `rabota unsnooze <key>` (DO-874).** A snooze is a
   `snoozes` row (tenant, key, `until`, `ts`; one per key, a second snooze replaces the first), and
   `rank` drops the key from every bucket while `until` is ahead of the clock, saying so in

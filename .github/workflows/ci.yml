@@ -351,6 +351,30 @@ jobs:
       - name: Run the transcript scrub state table
         run: ./scripts/test-scrub-transcript-secrets.sh
 
+  claude-config-audit-test:
+    name: Claude Config Audit State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq
+
+      # The subject reads other hosts over ssh and writes a workspace under
+      # $HOME, so the suite replaces both: ssh is a stub that runs the remote
+      # script against a fixture HOME (CLAUDE_CONFIG_AUDIT_SSH), the whole table
+      # runs under an empty fixture HOME, and every workspace is under mktemp -d.
+      # A runner having no ~/.claude and no ssh config is not what makes it safe
+      # — nothing outside the mktemp tree is ever named. tar and sha256sum are
+      # stock; the suite exits 2 rather than passing if any tool is missing.
+      - name: Run the claude-config-audit state table
+        run: ./scripts/test-claude-config-audit.sh
+
   timer-health-test:
     name: Repo-Owned Timer Health State Table
     runs-on: ubuntu-latest
