@@ -38,12 +38,15 @@ fi
 
 printf 'usage: no verb → exit 64 and the usage text\n'
 out=$("$SUT" 2>&1); rc=$?
-names_collect=no; [[ "$out" == *"--collect"* && "$out" == *"--matrix"* ]] && names_collect=yes
-check "no verb: exit 64, usage names both verbs" "$rc $names_collect" "64 yes"
+# This line appears only in the usage block; usage_error's own message never contains it.
+USAGE_ONLY_NEEDLE='--host NAME=ALIAS:CFGDIR'
+prints_usage=no; [[ "$out" == *"$USAGE_ONLY_NEEDLE"* ]] && prints_usage=yes
+check "no verb: exit 64, usage text printed" "$rc $prints_usage" "64 yes"
 
 printf 'usage: --help → exit 0\n'
-"$SUT" --help >/dev/null 2>&1; rc=$?
-check "--help: exit 0" "$rc" 0
+help_stdout=$("$SUT" --help 2>/dev/null); rc=$?
+help_prints_usage=no; [[ "$help_stdout" == *"$USAGE_ONLY_NEEDLE"* ]] && help_prints_usage=yes
+check "--help: exit 0, usage text on stdout" "$rc $help_prints_usage" "0 yes"
 
 printf 'usage: a host alias with a space or semicolon → exit 64, nothing created\n'
 WS_NEVER="$TMPROOT/ws-never"
