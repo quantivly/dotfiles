@@ -90,11 +90,12 @@ Q_CREATED = """query($after: String, $dead: [String!], $me: ID!) {
 Q_NOTIFICATIONS = """query($after: String) {
   notifications(first: %d, after: $after) {
     nodes { %s } pageInfo { hasNextPage endCursor } } }""" % (PAGE_SIZE, NOTIFICATION_FIELDS)
-# DO-875: the inverse side also selects the blocker's state -- two more fields on a request that
-# already names every blocker, so `blockers` costs no second call.
+# DO-875 / DO-878: both sides also select the related issue's state -- two more fields each on a
+# request that already names every blocker and every blocked issue, so `blockers` and `blocked`
+# cost no second call.
 Q_RELATIONS = """query($ids: [ID!]) {
   issues(first: %d, filter: { id: { in: $ids } }) {
-    nodes { id relations { nodes { type relatedIssue { identifier } } }
+    nodes { id relations { nodes { type relatedIssue { identifier state { name type } } } }
             inverseRelations { nodes { type issue { identifier state { name type } } } } } } }""" % PAGE_SIZE
 BLOCKING_RELATION_TYPE = "blocks"
 # DO-875, the picture. Field names checked against Linear's live schema by `__type` introspection
@@ -147,13 +148,15 @@ M_SET_DUE = """mutation($id: String!, $due: TimelessDate) {
 
 @dataclass
 class IssueRelations:
-    """What ``LinearClient.relations`` reads in one pass (DO-875): ``by_issue`` maps an issue id to its
-    ``{"blockedBy": [identifiers], "blocks": [identifiers]}``; ``blockers`` lists every issue that blocks
-    one of them -- ``{"identifier", "state": {"name", "type"}}`` -- once each, in identifier order.
+    """What ``LinearClient.relations`` reads in one pass: ``by_issue`` maps an issue id to its
+    ``{"blockedBy": [identifiers], "blocks": [identifiers]}``; ``blockers`` (DO-875) lists every issue that
+    blocks one of them and ``blocked`` (DO-878) every issue one of them blocks -- each
+    ``{"identifier", "state": {"name", "type"}}``, once, in identifier order.
     Attributes, not keys: ``commands/sync.py`` is inside the static ingestion-boundary scan, which judges
     every literal key read in that function, and these are not notification fields."""
     by_issue: dict
     blockers: list
+    blocked: list
 
 
 def _urllib_post(api_key: str) -> Callable[[dict], dict]:
@@ -254,20 +257,23 @@ class LinearClient:
     def relations(self, issue_ids: list[str]) -> IssueRelations:
         """The blocking relations of ``issue_ids`` in batches of ``PAGE_SIZE``; no ids, no call.
 
-        ``blockers`` (DO-875) is read off the same reply that names each blocker, so "unblocked" is
-        a fact of the snapshot rather than an ``issueUnblocked`` notification left in ``other``.
+        ``blockers`` (DO-875) and ``blocked`` (DO-878) are read off the same reply that names each
+        related issue, so "unblocked" and "blocks N open issues" are facts of the snapshot rather
+        than an ``issueUnblocked`` notification left in ``other`` or a guess.
         """
-        by_issue, blockers = {}, {}
+        by_issue, blockers, blocked = {}, {}, {}
         for start in range(0, len(issue_ids), PAGE_SIZE):
             batch = issue_ids[start:start + PAGE_SIZE]
             for node in self.query(Q_RELATIONS, {"ids": batch})["issues"]["nodes"]:
-                blocks = [r["relatedIssue"]["identifier"] for r in node["relations"]["nodes"]
-                          if r["type"] == BLOCKING_RELATION_TYPE]
+                blocks = [r["relatedIssue"] for r in node["relations"]["nodes"] if r["type"] == BLOCKING_RELATION_TYPE]
                 blocking = [r["issue"] for r in node["inverseRelations"]["nodes"] if r["type"] == BLOCKING_RELATION_TYPE]
-                by_issue[node["id"]] = {"blockedBy": [b["identifier"] for b in blocking], "blocks": blocks}
+                by_issue[node["id"]] = {"blockedBy": [b["identifier"] for b in blocking],
+                                        "blocks": [b["identifier"] for b in blocks]}
                 for blocker in blocking:
-                    blockers[blocker["identifier"]] = {"identifier": blocker["identifier"], "state": blocker.get("state")}
-        return IssueRelations(by_issue, [blockers[key] for key in sorted(blockers)])
+                    blockers[blocker["identifier"]] = _related_state(blocker)
+                for target in blocks:
+                    blocked[target["identifier"]] = _related_state(target)
+        return IssueRelations(by_issue, [blockers[key] for key in sorted(blockers)], [blocked[key] for key in sorted(blocked)])
 
     def active_cycles(self, team_keys: list[str]) -> list[dict]:
         """DO-875: the active cycle of each team in ``team_keys`` (distinct, sorted; none → no call),
@@ -404,6 +410,11 @@ def _flatten(issue: dict) -> dict:
     issue.setdefault("blockedBy", [])
     issue.setdefault("blocks", [])
     return issue
+
+
+def _related_state(related_issue: dict) -> dict:
+    """A ``blockers``/``blocked`` row: the related issue's identifier and its ``state { name type }``."""
+    return {"identifier": related_issue["identifier"], "state": related_issue.get("state")}
 
 
 def _flatten_project(project: dict) -> dict:

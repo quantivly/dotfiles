@@ -22,6 +22,8 @@ def review(repo, n, individually, teams, updated="2026-09-15T00:00:00Z", author=
 class RankTests(unittest.TestCase):
     def base(self, **over):
         linear = {"viewer": {"id": "me"}, "issues": over.get("issues", []), "notifications": []}
+        if "blocked" in over:                       # DO-878: the snapshot section; absent on a snapshot older than DO-875/878
+            linear["blocked"] = over["blocked"]
         github = {"login": "work-login", "review_requests": over.get("rr", []), "own_prs": over.get("prs", []), "merged_recent": []}
         return rank.RankInputs(linear=linear, github=github, slack=None, inbox_plan=over.get("plan"),
                                census=over.get("census"), pins=over.get("pins", []), tenant=T, today=date(2026, 9, 16))
@@ -139,6 +141,47 @@ class RankTests(unittest.TestCase):
         self.assertEqual(b4, ["quantivly/hub#5", "HUB-3"])            # draft PR excluded
         self.assertEqual(b5, ["HUB-14", "HUB-13", "HUB-12"])           # newest first, capped to 3
         self.assertEqual([i["bucket"] for i in seq["items"]], sorted(i["bucket"] for i in seq["items"]))
+
+    def test_bucket_3_and_4_issues_that_block_open_issues_say_so_and_order_first(self):
+        # DO-878: the people waiting on an own issue are a reason. The count reads the snapshot's
+        # `blocked[]` (DO-875's relation read: one row per issue the operator's issues block, with
+        # its state); only open targets count, the row says how many before its own line, and
+        # within buckets 3 and 4 a blocking row orders before the rows that block none.
+        issues = [issue("HUB-1", "unstarted", "High", due="2026-09-22"), issue("HUB-2", "unstarted", "High", due="2026-09-18"),
+                  issue("HUB-3", "started", "Medium", updated="2026-09-10T00:00:00Z"),
+                  issue("HUB-4", "started", "Medium", updated="2026-09-12T00:00:00Z")]
+        issues[0]["blocks"] = ["CORE-1", "CORE-2", "CORE-3"]; issues[3]["blocks"] = ["CORE-4"]
+        blocked = [{"identifier": "CORE-1", "state": {"name": "In Progress", "type": "started"}},
+                   {"identifier": "CORE-2", "state": {"name": "Done", "type": "completed"}},
+                   {"identifier": "CORE-3", "state": {"name": "Todo", "type": "unstarted"}},
+                   {"identifier": "CORE-4", "state": {"name": "Backlog", "type": "backlog"}}]
+        prs = [{"repo": "quantivly/hub", "number": 5, "url": "u5", "title": "t5", "isDraft": False, "mergeable": "MERGEABLE",
+                "reviewDecision": "APPROVED", "approved_by": ["alex"], "headRefName": "f", "baseRefName": "main"}]
+        seq = rank.rank(self.base(issues=issues, blocked=blocked, prs=prs))
+        rows = {i["key"]: i for i in seq["items"]}
+        self.assertEqual([i["key"] for i in seq["items"] if i["bucket"] == 3], ["HUB-1", "HUB-2"])   # HUB-2's date is sooner; HUB-1 blocks two
+        self.assertEqual(rows["HUB-1"]["why_now"], "blocks 2 open issues · due 2026-09-22")
+        self.assertEqual(rows["HUB-2"]["why_now"], "due 2026-09-18")
+        self.assertEqual([i["key"] for i in seq["items"] if i["bucket"] == 4], ["HUB-4", "quantivly/hub#5", "HUB-3"])
+        self.assertEqual(rows["HUB-4"]["why_now"], "blocks 1 open issue · in progress since 2026-09-12")
+        self.assertEqual(rows["HUB-3"]["why_now"], "in progress since 2026-09-10")
+        self.assertEqual([i["bucket"] for i in seq["items"]], sorted(i["bucket"] for i in seq["items"]))
+
+    def test_backlog_p0_that_blocks_open_issues_is_still_a_decision(self):
+        # DO-878: the standing correction is not weakened by the new input.
+        issues = [issue("DO-9", "backlog", "Urgent")]; issues[0]["blocks"] = ["CORE-1"]
+        blocked = [{"identifier": "CORE-1", "state": {"name": "In Progress", "type": "started"}}]
+        seq = rank.rank(self.base(issues=issues, blocked=blocked))
+        self.assertEqual([d["key"] for d in seq["decisions"]], ["DO-9"])
+        self.assertEqual(seq["items"], [])
+
+    def test_blocks_count_ignores_closed_targets_and_a_snapshot_without_the_section(self):
+        # DO-878: a closed target is nobody waiting; a snapshot older than the section ranks as before.
+        issues = [issue("HUB-1", "unstarted", "High", due="2026-09-22")]; issues[0]["blocks"] = ["CORE-2", "CORE-9"]
+        blocked = [{"identifier": "CORE-2", "state": {"name": "Done", "type": "completed"}}]   # CORE-9 unknown to the snapshot
+        for inputs in (self.base(issues=issues, blocked=blocked), self.base(issues=issues)):
+            seq = rank.rank(inputs)
+            self.assertEqual(seq["items"][0]["why_now"], "due 2026-09-22")
 
     def test_snoozed_key_leaves_every_bucket_and_is_a_decision_once(self):
         # DO-874: a snoozed key is dropped wherever a bucket placed it (1 by a notification, 2 by a
