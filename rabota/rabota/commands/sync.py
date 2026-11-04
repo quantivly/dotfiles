@@ -100,20 +100,38 @@ def fireflies_since(ctx: Context, now: datetime) -> datetime:
 
 
 def sync_linear(ctx: Context, lin) -> dict:
-    """Assigned-open ∪ created-by-me-open (deduped by id) with relations, plus every non-archived notification."""
+    """Assigned-open ∪ created-by-me-open (deduped by id) with relations, every non-archived
+    notification, and the picture around the issues (DO-875): ``cycles`` (the active cycle of each
+    team an issue sits in, with its issue identifiers), ``projects`` (the ones the issues belong to)
+    and ``blockers`` (the state of every issue that blocks one of them).
+
+    The three are keyed off the fetched issues -- their team keys, project ids and relations --
+    never a second walk of the workspace, and they ride in the one payload ``snapshots.write``
+    checks whole, so a token echoed into a project name costs the source, never a file.
+    """
     dead = ctx.tenant.linear.dead_state_types
     viewer = lin.viewer()
     issues = {i["id"]: i for i in lin.assigned_open(dead)}
     for i in lin.created_open(viewer["id"], dead):
         issues.setdefault(i["id"], i)
-    for iid, rel in lin.relations(list(issues)).items():
+    related = lin.relations(list(issues))
+    for iid, rel in related.by_issue.items():
         if iid in issues:
             issues[iid].update(rel)
+    cycles = lin.active_cycles(_distinct_sorted((i.get("team") or {}).get("key") for i in issues.values()))
+    projects = lin.projects_by_id(_distinct_sorted((i.get("project") or {}).get("id") for i in issues.values()))
     notifications = lin.inbox_notifications()
     payload = {"ok": True, "error": None, "viewer": viewer, "issues": list(issues.values()),
-               "notifications": notifications}
+               "notifications": notifications, "cycles": cycles, "projects": projects,
+               "blockers": related.blockers}
     snapshots.write(ctx.state_dir, "linear", payload, dry_run=ctx.dry_run)
-    return {"issues": len(issues), "notifications": len(notifications)}
+    return {"issues": len(issues), "notifications": len(notifications), "cycles": len(cycles),
+            "projects": len(projects), "blockers": len(related.blockers)}
+
+
+def _distinct_sorted(values) -> list:
+    """The distinct non-``None`` values, sorted -- the keys one fetched list hands the next fetch."""
+    return sorted({value for value in values if value is not None})
 
 
 def sync_github(ctx: Context, gh) -> dict:

@@ -607,8 +607,8 @@ class LinearClientTests(unittest.TestCase):
         hook = "    notifications = lin.inbox_notifications()\n"
         cases = (
             ("the container re-read off sync's own payload is clean",
-             '    return {"issues": len(issues), "notifications": len(notifications)}\n',
-             '    return {"issues": len(issues), "notifications": len(payload["notifications"])}\n', []),
+             '    return {"issues": len(issues), "notifications": len(notifications), "cycles": len(cycles),\n',
+             '    return {"issues": len(issues), "notifications": len(payload["notifications"]), "cycles": len(cycles),\n', []),
             ("E1: a node's project.issues is a real unrequested field, not plumbing",
              hook, hook + '    _pi = [(n["project"] or {}).get("issues") for n in notifications]\n', [".get() reads 'issues'"]),
             ("E2: a node's issue.team.issues.nodes, every key at node depth judged",
@@ -726,13 +726,127 @@ class LinearClientTests(unittest.TestCase):
         rec.setdefault("a", {}).get("b"); dict(rec).get("zz"); rec["new"] = 1; rec["new"]
         self.assertEqual(s, {"a", "a.b", COPIED})
 
-    def test_relations_map_blocks_and_blocked_by(self):
-        page = {"data": {"issues": {"nodes": [
+    def test_relations_map_blocks_and_blocked_by_and_carry_each_blocker_state_once(self):
+        # DO-875: a blocker's state rides on the relation query that already names it (two more
+        # fields on the same request, never a second one), so "unblocked" is a fact of the snapshot.
+        # A blocker two own issues share is one row; the rows are in identifier order.
+        tree = selection_tree(linear.Q_RELATIONS)["query"]["issues"]["nodes"]
+        started = {"name": "In Progress", "type": "started"}
+        done = {"name": "Done", "type": "completed"}
+        nodes = [
             {"id": "a", "relations": {"nodes": [{"type": "blocks", "relatedIssue": {"identifier": "HUB-2"}},
                                                 {"type": "related", "relatedIssue": {"identifier": "HUB-3"}}]},
-                        "inverseRelations": {"nodes": [{"type": "blocks", "issue": {"identifier": "CORE-1"}}]}}]}}}
-        rel = linear.LinearClient("k" * 20, post=FakePost([page])).relations(["a"])
-        self.assertEqual(rel, {"a": {"blockedBy": ["CORE-1"], "blocks": ["HUB-2"]}})
+                        "inverseRelations": {"nodes": [{"type": "blocks", "issue": {"identifier": "CORE-1", "state": started}}]}},
+            {"id": "b", "relations": {"nodes": []},
+                        "inverseRelations": {"nodes": [{"type": "blocks", "issue": {"identifier": "CORE-2", "state": done}},
+                                                       {"type": "blocks", "issue": {"identifier": "CORE-1", "state": started}},
+                                                       {"type": "related", "issue": {"identifier": "CORE-9", "state": done}}]}}]
+        for n in nodes:
+            assert_within_selection(self, n, tree, n["id"])
+        page = {"data": {"issues": {"nodes": nodes}}}
+        rel = linear.LinearClient("k" * 20, post=FakePost([page])).relations(["a", "b"])
+        self.assertEqual(rel.by_issue, {"a": {"blockedBy": ["CORE-1"], "blocks": ["HUB-2"]},
+                                        "b": {"blockedBy": ["CORE-2", "CORE-1"], "blocks": []}})
+        self.assertEqual(rel.blockers, [{"identifier": "CORE-1", "state": started},
+                                        {"identifier": "CORE-2", "state": done}])
+
+    def test_relations_of_no_issues_make_no_call(self):
+        post = FakePost([])
+        self.assertEqual(linear.LinearClient("k" * 20, post=post).relations([]), linear.IssueRelations({}, []))
+        self.assertEqual(post.calls, [])
+
+    def test_active_cycles_are_the_named_teams_active_cycles_with_every_issue_identifier_in_them(self):
+        # DO-875: one paged query for the active cycles of the teams the operator's issues sit in,
+        # then one paged query for every issue in those cycles -- the SAME predicate (active, those
+        # teams), a flat connection at PAGE_SIZE, never a nested one that Linear would cap silently
+        # -- grouped by cycle in cycle order.
+        cycles_tree = selection_tree(linear.Q_ACTIVE_CYCLES)["query"]["cycles"]["nodes"]
+        members_tree = selection_tree(linear.Q_ACTIVE_CYCLE_ISSUES)["query"]["issues"]["nodes"]
+        c1 = {"id": "c1", "number": 7, "name": None, "startsAt": "2026-11-02T00:00:00Z",
+              "endsAt": "2026-11-16T00:00:00Z", "team": {"key": "HUB"}}
+        c2 = {"id": "c2", "number": 3, "name": "Sprint 3", "startsAt": "2026-11-01T00:00:00Z",
+              "endsAt": "2026-11-15T00:00:00Z", "team": {"key": "CORE"}}
+        members = [{"identifier": "HUB-1", "cycle": {"id": "c1"}}, {"identifier": "CORE-5", "cycle": {"id": "c2"}},
+                   {"identifier": "HUB-2", "cycle": {"id": "c1"}}]
+        for n in (c1, c2):
+            assert_within_selection(self, n, cycles_tree, n["id"])
+        for n in members:
+            assert_within_selection(self, n, members_tree, n["identifier"])
+        post = FakePost([
+            {"data": {"cycles": {"nodes": [c1], "pageInfo": {"hasNextPage": True, "endCursor": "k1"}}}},
+            {"data": {"cycles": {"nodes": [c2], "pageInfo": {"hasNextPage": False, "endCursor": None}}}},
+            {"data": {"issues": {"nodes": members[:2], "pageInfo": {"hasNextPage": True, "endCursor": "m1"}}}},
+            {"data": {"issues": {"nodes": members[2:], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}])
+        out = linear.LinearClient("k" * 20, post=post).active_cycles(["HUB", "CORE", "HUB"])
+        self.assertEqual(out, [{**c1, "issue_identifiers": ["HUB-1", "HUB-2"]}, {**c2, "issue_identifiers": ["CORE-5"]}])
+        self.assertEqual(post.calls[0]["variables"], {"keys": ["CORE", "HUB"], "after": None})
+        self.assertEqual(post.calls[1]["variables"]["after"], "k1")
+        self.assertEqual(post.calls[2]["variables"], {"keys": ["CORE", "HUB"], "after": None})
+        self.assertEqual(post.calls[3]["variables"]["after"], "m1")
+
+    def test_active_cycles_make_no_call_for_no_teams_and_no_issue_call_for_no_cycles(self):
+        post = FakePost([])
+        self.assertEqual(linear.LinearClient("k" * 20, post=post).active_cycles([]), [])
+        self.assertEqual(post.calls, [])
+        post = FakePost([{"data": {"cycles": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}])
+        self.assertEqual(linear.LinearClient("k" * 20, post=post).active_cycles(["HUB"]), [])
+        self.assertEqual(len(post.calls), 1)
+
+    def test_active_cycles_refuse_a_reply_the_filters_were_not_applied_to(self):
+        # The DO-754 lesson: a filter Linear silently drops turns a bounded read into a crawl of the
+        # org. A cycle of a team not asked for, or an issue outside the asked cycles, is refused at
+        # the first page rather than paged to the end.
+        foreign_cycle = {"id": "c9", "number": 1, "name": None, "startsAt": "s", "endsAt": "e", "team": {"key": "OPS"}}
+        page = lambda key, nodes, more: {"data": {key: {"nodes": nodes, "pageInfo": {"hasNextPage": more, "endCursor": "x" if more else None}}}}
+        with self.assertRaisesRegex(errors.RabotaError, "team filter was not applied"):
+            linear.LinearClient("k" * 20, post=FakePost([page("cycles", [foreign_cycle], False)])).active_cycles(["HUB"])
+        own_cycle = {**foreign_cycle, "id": "c1", "team": {"key": "HUB"}}
+        post = FakePost([page("cycles", [own_cycle], False), page("issues", [{"identifier": "OPS-3", "cycle": {"id": "c9"}}], True)])
+        with self.assertRaisesRegex(errors.RabotaError, "cycle filter was not applied"):
+            linear.LinearClient("k" * 20, post=post).active_cycles(["HUB"])
+        self.assertEqual(len(post.calls), 2)   # refused at the first page of issues, not paged to the end
+
+    def test_projects_by_id_refuse_a_reply_the_id_filter_was_not_applied_to(self):
+        stray = {"id": "p9", "name": "Stray", "status": None, "lead": None, "targetDate": None, "lastUpdate": None, "health": None}
+        post = FakePost([{"data": {"projects": {"nodes": [stray], "pageInfo": {"hasNextPage": True, "endCursor": "x"}}}}])
+        with self.assertRaisesRegex(errors.RabotaError, "id filter was not applied"):
+            linear.LinearClient("k" * 20, post=post).projects_by_id(["p1"])
+        self.assertEqual(len(post.calls), 1)
+
+    def test_projects_by_id_fetch_exactly_the_named_projects_flattened(self):
+        # DO-875: the projects the operator's issues belong to, by the ids the issue nodes carry;
+        # `lastUpdate { createdAt }` is flattened to `lastUpdateAt` so a reader has one key to read.
+        tree = selection_tree(linear.Q_PROJECTS)["query"]["projects"]["nodes"]
+        p1 = {"id": "p1", "name": "Alpha", "status": {"name": "In Progress", "type": "started"},
+              "lead": {"id": "u1", "displayName": "lead-one"}, "targetDate": "2026-12-15",
+              "lastUpdate": {"createdAt": "2026-10-30T09:00:00Z"}, "health": "onTrack"}
+        p2 = {"id": "p2", "name": "Beta", "status": {"name": "Planned", "type": "planned"}, "lead": None,
+              "targetDate": None, "lastUpdate": None, "health": None}
+        for n in (p1, p2):
+            assert_within_selection(self, n, tree, n["id"])
+        post = FakePost([{"data": {"projects": {"nodes": [p1, p2], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}])
+        out = linear.LinearClient("k" * 20, post=post).projects_by_id(["p2", "p1", "p2"])
+        self.assertEqual(out, [
+            {"id": "p1", "name": "Alpha", "status": {"name": "In Progress", "type": "started"},
+             "lead": {"id": "u1", "displayName": "lead-one"}, "targetDate": "2026-12-15",
+             "lastUpdateAt": "2026-10-30T09:00:00Z", "health": "onTrack"},
+            {"id": "p2", "name": "Beta", "status": {"name": "Planned", "type": "planned"}, "lead": None,
+             "targetDate": None, "lastUpdateAt": None, "health": None}])
+        self.assertEqual(post.calls[0]["variables"], {"ids": ["p1", "p2"], "after": None})
+
+    def test_projects_by_id_batch_at_the_page_size_and_make_no_call_for_no_ids(self):
+        post = FakePost([])
+        self.assertEqual(linear.LinearClient("k" * 20, post=post).projects_by_id([]), [])
+        self.assertEqual(post.calls, [])
+        empty = {"data": {"projects": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        post = FakePost([empty, empty])
+        linear.LinearClient("k" * 20, post=post).projects_by_id([f"p{n}" for n in range(linear.PAGE_SIZE + 1)])
+        self.assertEqual([len(c["variables"]["ids"]) for c in post.calls], [linear.PAGE_SIZE, 1])
+
+    def test_issue_fields_select_the_project_id_the_projects_fetch_keys_on(self):
+        paths = tree_paths(selection_tree(linear.ISSUE_FIELDS))
+        self.assertIn("project.id", paths)
+        self.assertIn("project.name", paths)
 
     def test_find_by_identifiers_filters_by_id_in_with_the_identifiers_in_one_call(self):
         # DO-754, corrected after a live read: an `or` of per-key {team, number} branches is

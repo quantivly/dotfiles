@@ -10,13 +10,30 @@ from tests.test_linear import COPIED, FakePost, Recording, _parse_selection, nod
 
 FIX = Path(__file__).parent / "fixtures" / "config"
 
+HUB_1 = {"id": "i1", "identifier": "HUB-1", "state": {"type": "backlog"}, "team": {"key": "HUB"},
+         "project": {"id": "p1", "name": "Alpha"}}
+HUB_2 = {"id": "i2", "identifier": "HUB-2", "state": {"type": "started"}, "team": {"key": "HUB"}, "project": None}
+CYCLE_7 = {"id": "c1", "number": 7, "name": None, "startsAt": "2026-11-02T00:00:00Z", "endsAt": "2026-11-16T00:00:00Z",
+           "team": {"key": "HUB"}, "issue_identifiers": ["HUB-2"]}
+PROJECT_ALPHA = {"id": "p1", "name": "Alpha", "status": {"name": "In Progress", "type": "started"}, "lead": None,
+                 "targetDate": None, "lastUpdateAt": None, "health": None}
+BLOCKER_CORE_1 = {"identifier": "CORE-1", "state": {"name": "Todo", "type": "unstarted"}}
+
 class FakeLin:
+    def __init__(self): self.asked = {}
     def viewer(self): return {"id": "v", "name": "z"}
-    def assigned_open(self, dead): return [{"id": "i1", "identifier": "HUB-1", "state": {"type": "backlog"}}]
-    def created_open(self, me, dead): return [{"id": "i1", "identifier": "HUB-1", "state": {"type": "backlog"}},
-                                              {"id": "i2", "identifier": "HUB-2", "state": {"type": "started"}}]
+    def assigned_open(self, dead): return [dict(HUB_1)]
+    def created_open(self, me, dead): return [dict(HUB_1), dict(HUB_2)]
     def inbox_notifications(self): return [{"id": "n1", "type": "issueDue", "issue": {"id": "i1"}}]
-    def relations(self, ids): return {"i1": {"blockedBy": ["CORE-1"], "blocks": []}}
+    def relations(self, ids): return linear.IssueRelations({"i1": {"blockedBy": ["CORE-1"], "blocks": []}}, [BLOCKER_CORE_1])
+    def active_cycles(self, team_keys):
+        self.asked["team_keys"] = team_keys; return [CYCLE_7]
+    def projects_by_id(self, project_ids):
+        self.asked["project_ids"] = project_ids; return [PROJECT_ALPHA]
+
+class LeakyLin(FakeLin):
+    """A project whose name carries the minted token: the snapshot write must refuse it whole."""
+    def projects_by_id(self, project_ids): return [{**PROJECT_ALPHA, "name": f"Alpha {MINTED}"}]
 
 class FakeGh:
     login = "work-login"
@@ -64,9 +81,35 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(lin["issues"][0]["blockedBy"], ["CORE-1"])
         self.assertTrue(lin["ok"]); self.assertIsNone(lin["error"]); self.assertIn("fetched_at", lin)
         self.assertEqual(rep["github"]["counts"]["review_requests"], 1)
-        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1})
+        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1})
         self.assertTrue(ctx.store.last_sync("quantivly", "linear")["ok"])
         self.assertEqual(ctx.store.last_sync("quantivly", "github")["path"], rep["github"]["path"])
+
+    def test_sync_linear_carries_the_picture_keyed_off_the_fetched_issues(self):
+        # DO-875: the teams' active cycles, the operator's projects and the blockers' states ride
+        # in the one snapshot, asked for by the fetched issues' team keys and project ids (distinct,
+        # sorted, None dropped) -- never a second walk of the workspace. The sections are verbatim.
+        ctx = self.ctx(); lin = FakeLin()
+        rep = sync.run_sync(ctx, ["linear"], lin=lin)
+        snap = snapshots.read(ctx.state_dir, "linear")
+        self.assertEqual(lin.asked, {"team_keys": ["HUB"], "project_ids": ["p1"]})
+        self.assertEqual(snap["cycles"], [CYCLE_7])
+        self.assertEqual(snap["projects"], [PROJECT_ALPHA])
+        self.assertEqual(snap["blockers"], [BLOCKER_CORE_1])
+        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1})
+
+    def test_a_secret_in_a_picture_section_is_refused_by_the_snapshot_write(self):
+        # DO-875: the new sections sit inside the payload `snapshots.write` already checks whole, so
+        # a token echoed into a project name costs the linear source (recorded, redacted), never a file.
+        secrets.register_value(MINTED); self.addCleanup(secrets.REGISTERED_VALUES.discard, MINTED)
+        ctx = self.ctx()
+        with self.assertRaises(errors.Partial) as cm:
+            sync.run_sync(ctx, ["linear"], lin=LeakyLin())
+        self.assertEqual(cm.exception.failed, ["linear"])
+        self.assertIsNone(snapshots.read(ctx.state_dir, "linear"))
+        self.assertEqual(ctx.store.last_sync("quantivly", "linear")["ok"], 0)
+        self.assertFalse(MINTED.encode() in db_bytes(ctx.state_dir), "rabota.db* carries the value in the clear")
+        self.assertNotIn(MINTED, str(cm.exception))
 
     def test_dry_run_sync_fetches_but_writes_nothing(self):
         # DO-753: the connector read still happens (FakeLin/FakeGh are still invoked and their
@@ -76,7 +119,7 @@ class SyncTests(unittest.TestCase):
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
         self.addCleanup(ctx.close)
         rep = sync.run_sync(ctx, ["linear", "github"], lin=FakeLin(), gh=FakeGh())
-        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1})
+        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1})
         self.assertIsNone(snapshots.read(ctx.state_dir, "linear"))
         self.assertIsNone(snapshots.read(ctx.state_dir, "github"))
         self.assertIsNone(ctx.store.last_sync("quantivly", "linear"))
@@ -109,7 +152,7 @@ class SyncTests(unittest.TestCase):
         real_write = snapshots.write
         with mock.patch.object(snapshots, "write", lambda sd, src, payload, **kw: real_write(sd, src, Recording.plain(payload), **kw)):
             rep = sync.sync_linear(ctx, linear.LinearClient("k" * 20, post=FakePost(pages)))
-        self.assertEqual(rep, {"issues": 0, "notifications": 2})
+        self.assertEqual(rep, {"issues": 0, "notifications": 2, "cycles": 0, "projects": 0, "blockers": 0})
         self.assertFalse([k for k in seen if k.endswith(COPIED)], f"a notification was copied to a plain dict: {sorted(seen)}")
         unrequested = sorted(k for k in seen if k not in tree_paths(tree))
         self.assertFalse(unrequested, f"sync reads notification fields the query never asks for: {unrequested}")
