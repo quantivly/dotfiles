@@ -23,8 +23,8 @@
 #               memory-matrix.tsv/.md (memory files per store, across homes).
 #
 # READ-ONLY. Nothing is changed on any host. Credentials, transcripts, caches and
-# plugin stores are excluded from what is copied (EXCLUDE_NAMES), and the only
-# thing written is the workspace.
+# plugin stores are excluded from what is copied (EXCLUDE_TOP_LEVEL_NAMES, EXCLUDE_NAMES),
+# and the only thing written is the workspace, one --collect at a time (COLLECT_LOCK_NAME).
 #
 # Usage:
 #   claude-config-audit.sh --collect [--workspace DIR] [--host NAME=ALIAS:CFGDIR]...
@@ -36,8 +36,9 @@
 #                                  ssh; CFGDIR is a dot-directory under that host's $HOME.
 #                                  --matrix reports on every host in hosts.tsv
 #
-# Exit: --collect  0 every host collected · 2 a host failed, or hosts.tsv cannot be parsed (nothing
-#                  is collected) · 130/143 interrupted (Ctrl-C/SIGTERM). Its rows are merged into
+# Exit: --collect  0 every host collected · 2 a host failed, or hosts.tsv cannot be parsed, or another
+#                  --collect holds the workspace lock (for either of the last two, nothing is
+#                  collected) · 130/143 interrupted (Ctrl-C/SIGTERM). Its rows are merged into
 #                  hosts.tsv: a host it did not collect keeps its row
 #       --matrix   0 every row identical · 1 drift · 2 a host in hosts.tsv has no facts.tsv or a
 #                  failed collect, a collect is not named in hosts.tsv (no report is written), or
@@ -72,14 +73,12 @@ CFGDIR_RE='^\.[A-Za-z0-9_-][A-Za-z0-9._-]*$'
 
 SSH_CMD="${CLAUDE_CONFIG_AUDIT_SSH:-ssh -o BatchMode=yes -o ConnectTimeout=30 -o ForwardAgent=no}"
 
-# Never copied: credentials, transcripts and caches, plugin stores that a host re-downloads,
-# and whole checkouts. Pruned at every depth of every collected tree (the config dir's paths,
-# memory dirs, repo .claude dirs): a bare name matches that name anywhere, a/b matches a
-# path ending in a/b.
-EXCLUDE_NAMES=(
-    '.credentials.json*'
-    '.claude.json*'
-    '*.jsonl'
+# Never copied, and each pruned path logged as EXCLUDED_TAG in collect.log. Claude Code's own
+# directories are pruned only directly under the config dir, where Claude Code writes them: a
+# skill or a repo dir that happens to share the name (a repo's .claude/skills/debug) is
+# collected. The include set never walks the config dir's top level, so these guard a wider
+# include set rather than prune anything today.
+EXCLUDE_TOP_LEVEL_NAMES=(
     'sessions'
     'shell-snapshots'
     'file-history'
@@ -90,6 +89,14 @@ EXCLUDE_NAMES=(
     'downloads'
     'telemetry'
     'security'
+)
+# Credentials, transcripts, plugin stores that a host re-downloads, and whole checkouts, pruned
+# at every depth of every collected tree (the config dir's paths, memory dirs, repo .claude
+# dirs): a bare name matches that name anywhere, a/b matches a path ending in a/b.
+EXCLUDE_NAMES=(
+    '.credentials.json*'
+    '.claude.json*'
+    '*.jsonl'
     '*.signature*'
     'plugins/cache'
     'plugins/marketplaces'
@@ -142,6 +149,7 @@ ACCOUNT_DIRS_LAYOUT_DIR='account-dirs'
 
 # collect.log lines are TAG<TAB>path, or TAG<TAB>seat for an account dir.
 ABSENT_TAG='absent'
+EXCLUDED_TAG='excluded'
 BINARY_SKIPPED_TAG='binary-skipped'
 ACCOUNT_DIR_LINK_TAG='account-dir-link'
 
@@ -152,6 +160,11 @@ COLLECT_SCRIPT_SHELL=(bash -s --)
 STAGING_PREFIX='.collecting-'
 UNPACK_ERRORS_SUFFIX='.unpack-errors'
 REDACTING_SUFFIX='.redacting'
+JSON_REDACTING_SUFFIX='.json-redacting'
+# One --collect per workspace: a second one's startup sweep would remove the first one's
+# staging dir and put its set-aside collect back mid-swap. Held with flock for the whole run;
+# the holder's pid is written into it for the refusal message.
+COLLECT_LOCK_NAME='.collect.lock'
 # An earlier collect being replaced is renamed aside to $STAGING_PREFIX<name>$REPLACED_SUFFIX
 # until the new one is in place, and is the only copy of it meanwhile. If the run dies between
 # the two renames, the traps put it back; after a SIGKILL, the next run's startup sweep puts
@@ -222,9 +235,14 @@ collect_this_host() {   # CFGDIR
         done
     done
 
-    # EXCLUDE_NAMES: a bare name matches at any depth, a/b matches that path's tail.
+    # EXCLUDE_TOP_LEVEL_NAMES match only directly under the config dir; EXCLUDE_NAMES: a bare
+    # name matches at any depth, a/b matches that path's tail.
     local excluded_name
     local -a prune_tests=()
+    for excluded_name in "${EXCLUDE_TOP_LEVEL_NAMES[@]}"; do
+        if (( ${#prune_tests[@]} )); then prune_tests+=(-o); fi
+        prune_tests+=(-path "$cfgdir/$excluded_name")
+    done
     for excluded_name in "${EXCLUDE_NAMES[@]}"; do
         if (( ${#prune_tests[@]} )); then prune_tests+=(-o); fi
         if [[ "$excluded_name" == */* ]]; then prune_tests+=(-path "*/$excluded_name")
@@ -259,8 +277,13 @@ collect_this_host() {   # CFGDIR
 
     # find with no start path would walk all of $HOME, so an empty include set lists nothing.
     if (( ${#include_starts[@]} )); then
-        find -L "${include_starts[@]}" \( "${prune_tests[@]}" \) -prune -o -type f -print0 \
-            > "$META_DIR/include.list"
+        find -L "${include_starts[@]}" \( "${prune_tests[@]}" \) -fprint "$META_DIR/excluded.list" -prune \
+            -o -type f -print0 > "$META_DIR/include.list"
+        # Every pruned path, by its layout path, so an exclusion is never silent.
+        local excluded_path
+        sed "${sed_layout_args[@]}" "$META_DIR/excluded.list" | while IFS= read -r excluded_path; do
+            printf '%s\t%s\n' "$EXCLUDED_TAG" "$excluded_path"
+        done >> "$META_DIR/collect.log"
         # -L reports a followed link's target as empty, so each link found is read again
         # without following it.
         local link_path
@@ -294,9 +317,10 @@ collect_this_host() {   # CFGDIR
 
 collect_this_host "$1"
 REMOTE
-REMOTE_CONSTANTS=$(declare -p EXCLUDE_NAMES CFG_INCLUDE_PATHS PROJECT_ROOTS \
+REMOTE_CONSTANTS=$(declare -p EXCLUDE_TOP_LEVEL_NAMES EXCLUDE_NAMES CFG_INCLUDE_PATHS PROJECT_ROOTS \
     HOME_REPO_CLAUDE_DIRS HOME_REPOS_LAYOUT_ROOT \
-    CLAUDE_BIN_RELATIVE CLAUDE_VERSION_FIELD HERDR_BIN_RELATIVE HERDR_VERSION_FIELD ABSENT_TAG)
+    CLAUDE_BIN_RELATIVE CLAUDE_VERSION_FIELD HERDR_BIN_RELATIVE HERDR_VERSION_FIELD \
+    ABSENT_TAG EXCLUDED_TAG)
 readonly remote_script="$REMOTE_CONSTANTS"$'\n'"$REMOTE_SCRIPT_BODY"
 
 # --- failure ------------------------------------------------------------------------------------
@@ -474,7 +498,7 @@ settle_set_aside_collect() {   # ASIDE_DIR HOST_DIR
     if path_exists "$host_dir" || ! is_earlier_collect "$aside_dir"; then
         remove_tree "$aside_dir" \
             || warn "could not remove $aside_dir, a replaced collect; the next --collect removes it"
-    elif ! mv "$aside_dir" "$host_dir"; then
+    elif ! mv -T "$aside_dir" "$host_dir"; then
         warn "the earlier collect of $host_dir is at $aside_dir; the next --collect puts it back"
     fi
 }
@@ -494,13 +518,67 @@ clean_up_current_collect() {
     if [[ -n "$CURRENT_HOSTS_TSV_TEMP" ]]; then rm -f "$CURRENT_HOSTS_TSV_TEMP"; fi
 }
 
-# Every text file under DIR is rewritten in place through the redactor; a file grep calls
-# binary (it holds a NUL) is deleted and logged, since the redactor cannot be trusted to see
-# into it. `^` rather than `.`, and the -s guard, keep empty and blank-line-only files as text.
-# The redactor runs under LC_ALL=C because in a UTF-8 locale its by-name rules stop at an
-# invalid byte and leave the value whole (measured: MY_TOKEN=\xe9… survives under C.UTF-8).
+# The redactor's by-name rules need `NAME=value` with real whitespace around it, so a
+# credential held by name in JSON ({"env":{"MY_API_TOKEN":"…"}}) passes it whole. In a *.json
+# file, every string value is replaced when a key on its path is `env` (a settings env block, or
+# an MCP server's) or is named like a credential: the redactor's name rules, case-insensitive,
+# with `-` allowed in a key (an x-api-key header) and no leading letter required (apiKey).
+JSON_REDACTED_VALUE='<REDACTED:json-name>'
+JSON_ENV_KEY='env'
+JSON_CREDENTIAL_KEY_RE='^[A-Z0-9_-]*(TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|CREDENTIAL)[A-Z0-9_-]*$'
+JSON_PAT_KEY_RE='_PAT$'
+# shellcheck disable=SC2016  # $names here are jq variables, bound by --arg
+JSON_CREDENTIAL_DEFINITIONS='
+def is_credential_name: ascii_upcase | test($credential_key_re) or test($pat_key_re);
+def holds_credential: any(.[]; type == "string" and (. == $env_key or is_credential_name));
+'
+# true when any value in the file holds a credential by name, else false; one line for the file.
+JSON_HAS_CREDENTIAL_PROGRAM="$JSON_CREDENTIAL_DEFINITIONS"'
+[inputs | any(paths(type == "string"); holds_credential)] | any'
+# shellcheck disable=SC2016  # $names here are jq variables, bound by --arg
+JSON_REDACT_PROGRAM="$JSON_CREDENTIAL_DEFINITIONS"'
+reduce paths(type == "string") as $string_path (.;
+    if ($string_path | holds_credential) then setpath($string_path; $redacted_value) else . end)'
+
+run_json_credential_program() {   # PROGRAM FILE [JQ_OPTION]...
+    local program="$1" json_path="$2"
+    shift 2
+    jq "$@" --arg credential_key_re "$JSON_CREDENTIAL_KEY_RE" --arg pat_key_re "$JSON_PAT_KEY_RE" \
+        --arg env_key "$JSON_ENV_KEY" --arg redacted_value "$JSON_REDACTED_VALUE" "$program" "$json_path"
+}
+
+# FILE → prints the path to read for the line redactor: FILE itself, or FILE$JSON_REDACTING_SUFFIX
+# holding FILE with its by-name credentials replaced. A file jq cannot parse is left to the line
+# redactor, as any other text; 1 when a file jq parsed could not be checked or rewritten.
+redact_json_names() {
+    local json_path="$1" holds_credential_answer
+    local json_redacted_path="$json_path$JSON_REDACTING_SUFFIX"
+    if ! jq empty "$json_path" >/dev/null 2>&1; then
+        printf '%s\n' "$json_path"
+        return 0
+    fi
+    holds_credential_answer=$(run_json_credential_program "$JSON_HAS_CREDENTIAL_PROGRAM" "$json_path" -n) \
+        || return 1
+    if [[ "$holds_credential_answer" == false ]]; then
+        printf '%s\n' "$json_path"
+        return 0
+    fi
+    [[ "$holds_credential_answer" == true ]] || return 1
+    if ! run_json_credential_program "$JSON_REDACT_PROGRAM" "$json_path" > "$json_redacted_path"; then
+        rm -f "$json_redacted_path"
+        return 1
+    fi
+    printf '%s\n' "$json_redacted_path"
+}
+
+# Every text file under DIR is rewritten in place through the redactor, a *.json file after
+# redact_json_names; a file grep calls binary (it holds a NUL) is deleted and logged, since the
+# redactor cannot be trusted to see into it. `^` rather than `.`, and the -s guard, keep empty
+# and blank-line-only files as text. The redactor runs under LC_ALL=C because in a UTF-8 locale
+# its by-name rules stop at an invalid byte and leave the value whole (measured:
+# MY_TOKEN=\xe9… survives under C.UTF-8).
 redact_tree() {   # DIR → 0 when every file was redacted or skipped, 1 when one could be neither
-    local tree_dir="$1" file_path relative_path redacting_path
+    local tree_dir="$1" file_path relative_path redacting_path redactor_input_path
     local -a tree_files=() binary_skipped_lines=()
     mapfile -d '' tree_files < <(find "$tree_dir" -type f -print0)
     for file_path in "${tree_files[@]}"; do
@@ -511,11 +589,16 @@ redact_tree() {   # DIR → 0 when every file was redacted or skipped, 1 when on
             binary_skipped_lines+=("$BINARY_SKIPPED_TAG"$'\t'"$relative_path")
             continue
         fi
+        redactor_input_path="$file_path"
+        if [[ "$file_path" == *.json ]]; then
+            redactor_input_path=$(redact_json_names "$file_path") || return 1
+        fi
         redacting_path="$file_path$REDACTING_SUFFIX"
-        if ! LC_ALL=C "$REDACTOR" < "$file_path" > "$redacting_path"; then
-            rm -f "$redacting_path"
+        if ! LC_ALL=C "$REDACTOR" < "$redactor_input_path" > "$redacting_path"; then
+            rm -f "$redacting_path" "$file_path$JSON_REDACTING_SUFFIX"
             return 1
         fi
+        rm -f "$file_path$JSON_REDACTING_SUFFIX"
         # The host's mtime, which tar restored, is kept: --matrix names the newest copy by it.
         touch -r "$file_path" "$redacting_path" || return 1
         mv -f "$redacting_path" "$file_path" || return 1
@@ -539,16 +622,17 @@ install_collect() {   # STAGING_DIR HOST_DIR ASIDE_DIR → 0 when STAGING_DIR is
     local staging_dir="$1" host_dir="$2" aside_dir="$3" install_status=0
     if path_exists "$host_dir"; then
         is_earlier_collect "$host_dir" || return 1
-        # mv onto an existing directory would move HOST_DIR inside it.
+        # A plain mv onto an existing directory moves the source inside it, with exit 0: every
+        # rename here is -T, which refuses a non-empty target instead.
         remove_tree "$aside_dir" || return 1
         CURRENT_ASIDE_DIR="$aside_dir"
         CURRENT_HOST_DIR="$host_dir"
-        if ! mv "$host_dir" "$aside_dir"; then
+        if ! mv -T "$host_dir" "$aside_dir"; then
             finish_current_swap
             return 1
         fi
     fi
-    mv "$staging_dir" "$host_dir" || install_status=1
+    mv -T "$staging_dir" "$host_dir" || install_status=1
     # Removes the earlier tree once the new one is in place, or puts it back if it is not.
     finish_current_swap
     return "$install_status"
@@ -565,7 +649,7 @@ collect_from_stream() {   # NAME STREAM_SOURCE ADD_TO_STAGING SCRIPT_RUNNER [ARG
     shift 3
     local host_dir="$WORKSPACE/$name"
     local aside_dir="$WORKSPACE/$STAGING_PREFIX$name$REPLACED_SUFFIX"
-    local staging_dir unpack_errors_path unpack_errors failure=""
+    local staging_dir unpack_errors_path unpack_errors unexpected_member failure=""
     local -a pipe_status=()
 
     if [[ -e "$host_dir" || -L "$host_dir" ]] && ! is_earlier_collect "$host_dir"; then
@@ -591,6 +675,12 @@ collect_from_stream() {   # NAME STREAM_SOURCE ADD_TO_STAGING SCRIPT_RUNNER [ARG
     elif (( pipe_status[1] != 0 )); then
         unpack_errors=$(<"$unpack_errors_path")
         failure="the stream did not unpack: $unpack_errors"
+    # The collect script dereferences every link, so a symlink, FIFO or device in the stream was
+    # not made by it: neither redacted nor safe to read, it fails the host before anything else.
+    elif ! unexpected_member=$(find "$staging_dir" ! -type f ! -type d -print -quit); then
+        failure="the unpacked stream could not be listed"
+    elif [[ -n "$unexpected_member" ]]; then
+        failure="the stream carried ${unexpected_member#"$staging_dir/"}, which is neither a regular file nor a directory"
     elif [[ ! -f "$staging_dir/facts.tsv" ]]; then
         failure="the stream carried no facts.tsv"
     elif ! "$add_to_staging" "$staging_dir"; then
@@ -691,11 +781,30 @@ write_merged_hosts_tsv() {
     CURRENT_HOSTS_TSV_TEMP=""
 }
 
+# Takes COLLECT_LOCK_NAME in the workspace for the rest of the run, or exits 2 naming the run
+# that holds it. The lock is on the open file, so it is released however this run ends.
+lock_workspace_for_collect() {
+    local lock_path="$WORKSPACE/$COLLECT_LOCK_NAME" lock_holder_pid collect_lock_fd
+    # Opened to append, so a refused run leaves the holder's pid as it was.
+    exec {collect_lock_fd}>>"$lock_path" || die "cannot open the workspace lock $lock_path"
+    if ! flock -n "$collect_lock_fd"; then
+        lock_holder_pid=$(head -n 1 "$lock_path" 2>/dev/null)
+        [[ "$lock_holder_pid" =~ ^[0-9]+$ ]] || lock_holder_pid=unknown
+        die "another --collect (pid $lock_holder_pid) holds $lock_path; nothing was collected, run it again once that one has finished"
+    fi
+    printf '%s\n' "$$" > "$lock_path" || die "cannot write this run's pid into the workspace lock $lock_path"
+}
+
 # Each host's row goes into hosts.tsv once every host is done: merged with the rows of hosts
 # this run did not collect, so re-collecting one host never drops the others from --matrix.
 collect_main() {
     [[ -x "$REDACTOR" ]] || die "the redactor $REDACTOR is missing; nothing is collected without it"
+    local required_tool
+    for required_tool in jq flock; do
+        command -v "$required_tool" >/dev/null || die "$required_tool is missing; nothing is collected without it"
+    done
     mkdir -p "$WORKSPACE" || die "cannot create the workspace $WORKSPACE"
+    lock_workspace_for_collect
     local hosts_tsv="$WORKSPACE/$HOSTS_TSV_NAME"
     read_hosts_tsv "$hosts_tsv" || die "cannot parse $hosts_tsv, which this collect would merge into; fix or remove it (nothing was collected)"
     trap clean_up_current_collect EXIT

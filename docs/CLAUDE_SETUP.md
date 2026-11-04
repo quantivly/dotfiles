@@ -124,7 +124,7 @@ is rendered from, or synced to, a shared source before this answer exists.
 
 | verb | exit |
 |---|---|
-| `--collect` | 0 every host collected · 2 a host failed (the others are still collected), or `hosts.tsv` cannot be parsed (nothing is collected) · 130/143 interrupted |
+| `--collect` | 0 every host collected · 2 a host failed (the others are still collected), or `hosts.tsv` cannot be parsed, or another `--collect` holds the workspace lock (for those two, nothing is collected) · 130/143 interrupted |
 | `--matrix` | 0 every row identical · 1 drift · 2 a host in `hosts.tsv` failed or has no `facts.tsv`, or a collect is not named in `hosts.tsv` (no report is written), or a report cannot be written |
 
 Both exit 64 on a usage error.
@@ -141,18 +141,27 @@ and after.
 registries; under `projects/`, only `*/memory/`. Then each root `CLAUDE.md` and each repo's
 `.claude/`, one level deep, in `~/quantivly`, `~/Projects` and `~/toysim`, and `~/.dotfiles/.claude`
 (as `repos/home/.dotfiles/.claude/`). Symlinks are dereferenced and recorded in `links.tsv`, so a
-link is never read as a second copy. Pruned at every depth (`EXCLUDE_NAMES`): `.credentials.json*`,
-`.claude.json*`, `*.jsonl`, `sessions`, `shell-snapshots`, `file-history`, `paste-cache`, `debug`,
-`cache`, `backups`, `downloads`, `telemetry`, `security`, `*.signature*`,
-`plugins/{cache,marketplaces,repos,data,store,synced}`, `skills/synced` and `worktrees`. Every
-file then goes through `scripts/redact-secrets.sh`; a binary file is dropped and named in
-`collect.log`, and a missing path is logged as absent, never a failure.
+link is never read as a second copy. Pruned by name at every depth (`EXCLUDE_NAMES`):
+`.credentials.json*`, `.claude.json*`, `*.jsonl`, `*.signature*`,
+`plugins/{cache,marketplaces,repos,data,store,synced}`, `skills/synced` and `worktrees`. Claude
+Code's own directories (`EXCLUDE_TOP_LEVEL_NAMES`: `sessions`, `shell-snapshots`, `file-history`,
+`paste-cache`, `debug`, `cache`, `backups`, `downloads`, `telemetry`, `security`) are pruned only
+directly under the config dir, so a skill or repo directory that shares one of those names is
+still collected; the include set never walks that level, so today those rules guard rather than
+prune. Every pruned path is logged as `excluded` in `collect.log`. Every file then goes through
+`scripts/redact-secrets.sh`, a `*.json` file first through a jq pass: a string under an `env`
+object, or under a key named like a credential (the redactor's name rules, case-insensitive),
+becomes `<REDACTED:json-name>`, since the line redactor cannot see a name inside JSON; a file jq
+cannot parse gets the line redactor alone. A binary file is dropped and named in `collect.log`, a
+stream member that is neither a file nor a directory fails the host, and a missing path is logged
+as absent, never a failure.
 
 ```
 <ws>/hosts.tsv                      name  alias  cfgdir  collected_at  status
+<ws>/.collect.lock                  held by the running --collect, its pid inside
 <ws>/<host>/facts.tsv               key<TAB>value: hostname user home cfgdir claude_version herdr_version collected_at
 <ws>/<host>/links.tsv               path<TAB>target, every symlink in the include set
-<ws>/<host>/collect.log             skipped binaries, absent paths
+<ws>/<host>/collect.log             excluded paths, skipped binaries, absent paths
 <ws>/<host>/cfg/…                   CLAUDE.md settings.json settings.local.json keybindings.json hooks/ skills/ agents/ commands/ rules/ plugins/{known_marketplaces,installed_plugins}.json
 <ws>/<host>/memory/<projects-key>/  each projects/*/memory/ dir, named by its projects/ entry
 <ws>/<host>/roots/<name>.CLAUDE.md  ~/quantivly ~/Projects ~/toysim root files, by basename of the root
@@ -182,8 +191,9 @@ replaces them: `ALIAS` is an ssh alias or `local`, `CFGDIR` a dot-directory unde
 
 **Known limits.**
 
-- **No workspace lock.** Never run two `--collect`s on one workspace at once: each sweeps the
-  other's staging directories.
+- **One `--collect` per workspace at a time.** A second one exits 2 at once, naming the pid that
+  holds `.collect.lock`; each would otherwise sweep the other's staging directories. `--matrix`
+  takes no lock, so do not run it while a `--collect` is replacing hosts.
 - **A workspace path containing a backslash breaks `--collect`.** The default has none.
 - **`--matrix` takes tens of seconds** on a laptop-sized workspace; it hashes every collected file
   on every run.

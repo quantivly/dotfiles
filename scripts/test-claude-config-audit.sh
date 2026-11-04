@@ -89,7 +89,9 @@ mkdir -p "$REMOTE_TMPDIR"
 # Every stub ssh call, one line each: the local-collect row asserts it made none.
 SSH_CALLS="$TMPROOT/ssh-calls"
 export AUDIT_FIXTURE_HOSTS="$FIXTURE_HOSTS" AUDIT_REMOTE_TMPDIR="$REMOTE_TMPDIR" AUDIT_SSH_CALLS="$SSH_CALLS"
-export CLAUDE_CONFIG_AUDIT_SSH="$STUB_BIN/ssh"
+# With an option, as the SUT's own default has three: SSH_CMD is word-split on purpose, and a
+# quoted "$SSH_CMD" would run a command named "<stub> -o StubOption=yes" and fail every host.
+export CLAUDE_CONFIG_AUDIT_SSH="$STUB_BIN/ssh -o StubOption=yes"
 
 # A recording rm, put first on PATH for one run: each argument it is given, one per line, then
 # the real rm. The re-collect row reads it to show the earlier tree is never removed in place.
@@ -124,10 +126,32 @@ chmod +x "$MV_INTERRUPTER_BIN/mv"
 AUDIT_REAL_MV=$(type -P mv) || fatal "mv is not on PATH"
 export AUDIT_REAL_MV
 
+# A restoring mv, put first on PATH for one run: it makes the move, then moves it straight back
+# when the source was AUDIT_RESTORE_AFTER_MOVING, as a second --collect's startup sweep would put
+# back an aside it found mid-swap. The host dir is then there again when the new collect lands.
+MV_RESTORER_BIN="$TMPROOT/mv-restorer"
+mkdir -p "$MV_RESTORER_BIN"
+cat > "$MV_RESTORER_BIN/mv" <<'MV_RESTORER'
+#!/usr/bin/env bash
+mv_arguments=("$@")
+"$AUDIT_REAL_MV" "$@"
+move_status=$?
+if (( move_status == 0 && $# >= 2 )) && [[ "${mv_arguments[$# - 2]}" == "$AUDIT_RESTORE_AFTER_MOVING" ]]; then
+    "$AUDIT_REAL_MV" -T "${mv_arguments[$# - 1]}" "${mv_arguments[$# - 2]}"
+fi
+exit "$move_status"
+MV_RESTORER
+chmod +x "$MV_RESTORER_BIN/mv"
+
 # Built at runtime so the repo's gitleaks hook never sees a credential-shaped literal.
 FIXTURE_LINEAR_KEY="lin_api_""FIXTUREVALUE0123456789abcdefXYZ"
 FIXTURE_NAMED_SECRET="fixture-named-""secret-value"
 FIXTURE_CREDENTIAL='FIXTURE-CRED'
+# Held by name in JSON and shaped like no credential, so only the collect's JSON pass can find
+# them: the line redactor needs NAME=value with real whitespace around it.
+FIXTURE_JSON_ENV_VALUE="json-held-env-""value-0123"
+FIXTURE_JSON_NAMED_VALUE="json-held-named-""value-4567"
+JSON_REDACTED_VALUE='<REDACTED:json-name>'
 # A UTF-8 locale on every host, so the redaction row holds whatever locale CI runs in.
 UTF8_LOCALE='C.UTF-8'
 
@@ -164,19 +188,23 @@ make_host() {   # ALIAS → a fixture HOME at $FIXTURE_HOSTS/ALIAS
     printf '# quantivly root\n' > "$host_home/quantivly/CLAUDE.md"
     printf '{"hub":true}\n' > "$host_home/quantivly/hub/.claude/settings.json"
     # Inside the trees collected whole, only the EXCLUDE_NAMES prunes stand between these and
-    # the workspace: one path per prune, each holding the credential literal.
-    local repo_claude="$host_home/quantivly/hub/.claude" excluded_path
+    # the workspace: one path per by-name prune, each holding the credential literal.
+    local repo_claude="$host_home/quantivly/hub/.claude" excluded_path top_level_name
     for excluded_path in "$cfg/skills/rabota/.credentials.json" "$cfg/skills/rabota/.claude.json.backup" \
             "$repo_claude/.credentials.json" "$repo_claude/.claude.json.backup" "$repo_claude/old.jsonl" \
-            "$repo_claude/sessions/s" "$repo_claude/shell-snapshots/s" "$repo_claude/file-history/f" \
-            "$repo_claude/paste-cache/p" "$repo_claude/debug/d" "$repo_claude/cache/x" \
-            "$repo_claude/backups/b" "$repo_claude/downloads/d" "$repo_claude/telemetry/t" \
-            "$repo_claude/security/s" "$repo_claude/hook.signature" "$repo_claude/plugins/cache/c" \
+            "$repo_claude/hook.signature" "$repo_claude/plugins/cache/c" \
             "$repo_claude/plugins/marketplaces/m" "$repo_claude/plugins/repos/r" \
             "$repo_claude/plugins/data/d" "$repo_claude/plugins/store/s" "$repo_claude/plugins/synced/s" \
             "$repo_claude/skills/synced/SKILL.md" "$repo_claude/worktrees/w/CLAUDE.md"; do
         mkdir -p "$(dirname "$excluded_path")"
         printf '%s\n' "$FIXTURE_CREDENTIAL" > "$excluded_path"
+    done
+    # Claude Code's own dirs, where it writes them: directly under the config dir. The include set
+    # never walks that level, and EXCLUDE_TOP_LEVEL_NAMES would prune them there if it did.
+    for top_level_name in sessions shell-snapshots file-history paste-cache debug cache backups \
+            downloads telemetry security; do
+        mkdir -p "$cfg/$top_level_name"
+        printf '%s\n' "$FIXTURE_CREDENTIAL" > "$cfg/$top_level_name/f"
     done
     printf '#!/bin/sh\necho "2.1.300 (Claude Code)"\n' > "$host_home/.local/bin/claude"
     printf '#!/bin/sh\necho "herdr 0.9.5"\n' > "$host_home/.local/bin/herdr"
@@ -250,6 +278,15 @@ printf '\n\n' > "$H1/.claude/hooks/blank.sh"
 # The dotfiles checkout's own .claude: dot-named, so no ROOT/*/.claude glob reaches it.
 mkdir -p "$H1/.dotfiles/.claude/skills/x"
 printf -- '---\nname: x\n---\n' > "$H1/.dotfiles/.claude/skills/x/SKILL.md"
+# A repo skill named like one of Claude Code's own dirs, which only a top-level prune leaves alone.
+H1_DEBUG_SKILL="$H1/quantivly/hub/.claude/skills/debug/SKILL.md"
+mkdir -p "$(dirname "$H1_DEBUG_SKILL")"
+printf -- '---\nname: debug\n---\n' > "$H1_DEBUG_SKILL"
+# Credentials held by name in JSON: in the settings env block, and under a key deeper in a repo's.
+jq -n --arg env_value "$FIXTURE_JSON_ENV_VALUE" \
+    '{permissions: {allow: ["Bash(ls)"]}, model: "opus", env: {MY_API_TOKEN: $env_value}}' > "$H1/.claude/settings.json"
+jq -n --arg named_value "$FIXTURE_JSON_NAMED_VALUE" \
+    '{hub: true, mcp: {SOME_SECRET: $named_value}}' > "$H1/quantivly/hub/.claude/settings.json"
 H1_TREE_BEFORE=$(host_tree_listing "$H1")
 
 W="$TMPROOT/ws"
@@ -280,6 +317,24 @@ excluded_entries=$(find "$W/h1" \( -name '*.jsonl' -o -name sessions -o -path '*
 check "excluded: nothing credential, transcript or cache-shaped collected" \
     "$h1_collected|$credential_files|$excluded_entries" "yes||"
 
+printf 'collect: every pruned path is named in collect.log\n'
+missing_excluded_lines=""
+for expected_excluded_path in cfg/skills/rabota/.credentials.json repos/quantivly/hub/.claude/plugins/cache \
+        memory/-home-h1-quantivly-hub/stray.jsonl; do
+    [[ $(has_line "$W/h1/collect.log" "excluded${TAB}$expected_excluded_path") == yes ]] \
+        || missing_excluded_lines+=" (missing: $expected_excluded_path)"
+done
+excluded_lines_logged=yes; [[ -z "$missing_excluded_lines" ]] || excluded_lines_logged="no$missing_excluded_lines"
+check "excluded log: a by-name prune in cfg/, repos/ and memory/ each logged by layout path" \
+    "$excluded_lines_logged" "yes"
+
+printf "collect: a repo skill named like one of Claude Code's own dirs is collected\n"
+debug_skill_state=absent
+cmp -s "$H1_DEBUG_SKILL" "$W/h1/repos/quantivly/hub/.claude/skills/debug/SKILL.md" && debug_skill_state=copied
+debug_skill_logged=$(has_line "$W/h1/collect.log" "excluded${TAB}repos/quantivly/hub/.claude/skills/debug")
+check "top-level prunes: repos/.../.claude/skills/debug/SKILL.md copied, not logged as excluded" \
+    "$debug_skill_state $debug_skill_logged" "copied no"
+
 printf 'collect: a credential-shaped string in a collected file is redacted\n'
 redacted_count=$(grep -c REDACTED "$W/h1/cfg/CLAUDE.md" 2>/dev/null)
 literal_present=no
@@ -288,6 +343,22 @@ for fixture_secret in "$FIXTURE_LINEAR_KEY" "$FIXTURE_NAMED_SECRET"; do
 done
 check "redacted: by shape and by name after an invalid byte, in a UTF-8 locale" \
     "$redacted_count $literal_present" "2 no"
+
+printf 'collect: a credential held by name in JSON is redacted\n'
+json_literals_left=$(grep -rlF -e "$FIXTURE_JSON_ENV_VALUE" -e "$FIXTURE_JSON_NAMED_VALUE" "$W" 2>/dev/null)
+env_value_now=$(jq -r '.env.MY_API_TOKEN' "$W/h1/cfg/settings.json" 2>/dev/null)
+model_value_now=$(jq -r '.model' "$W/h1/cfg/settings.json" 2>/dev/null)
+named_value_now=$(jq -r '.mcp.SOME_SECRET' "$W/h1/repos/quantivly/hub/.claude/settings.json" 2>/dev/null)
+# The fixtures must be ones the line redactor passes whole, or this row would not reach the JSON pass.
+line_redactor_misses=no
+if "$DOTFILES/scripts/redact-secrets.sh" < "$H1/.claude/settings.json" | grep -qF -- "$FIXTURE_JSON_ENV_VALUE" \
+   && "$DOTFILES/scripts/redact-secrets.sh" < "$H1/quantivly/hub/.claude/settings.json" \
+        | grep -qF -- "$FIXTURE_JSON_NAMED_VALUE"; then
+    line_redactor_misses=yes
+fi
+check "JSON names: the env value and a SOME_SECRET value replaced, nowhere in the workspace; model kept" \
+    "$line_redactor_misses|$json_literals_left|$env_value_now $named_value_now $model_value_now" \
+    "yes||$JSON_REDACTED_VALUE $JSON_REDACTED_VALUE opus"
 
 printf 'collect: binary file is skipped and logged\n'
 blob_state=absent; [[ -e $W/h1/cfg/hooks/blob.bin ]] && blob_state=present
@@ -476,6 +547,73 @@ kept_intact=no; [[ -f $W_KILLED_SWAP/kept/facts.tsv ]] && kept_intact=yes
 killed_swap_leftovers=$(find "$W_KILLED_SWAP" -name '.collecting-*' -print)
 check "killed mid-swap: the next run puts lost/ back, keeps kept/, and leaves no aside anywhere" \
     "$rc $lost_restored $kept_intact|$killed_swap_leftovers" "2 yes yes|"
+
+printf 'collect: a second --collect on a locked workspace exits 2 and names the run holding the lock\n'
+W_LOCKED="$TMPROOT/ws-locked"
+mkdir -p "$W_LOCKED"
+LOCKED_WORKSPACE_LOCK="$W_LOCKED/.collect.lock"
+LOCK_HOLDER_READY="$TMPROOT/lock-holder-ready"
+# What a running --collect holds: the lock, its pid written in. exec keeps the pid and the lock.
+( exec 9>>"$LOCKED_WORKSPACE_LOCK"
+  flock -n 9 || exit 1
+  printf '%s\n' "$BASHPID" > "$LOCKED_WORKSPACE_LOCK"
+  : > "$LOCK_HOLDER_READY"
+  exec sleep 60 ) &
+lock_holder_pid=$!
+LOCK_HOLDER_WAIT_TENTHS=100
+for (( waited_tenths = 0; waited_tenths < LOCK_HOLDER_WAIT_TENTHS; waited_tenths++ )); do
+    [[ -e $LOCK_HOLDER_READY ]] && break
+    sleep 0.1
+done
+[[ -e $LOCK_HOLDER_READY ]] || fatal "the lock holder never took $LOCKED_WORKSPACE_LOCK; the lock row would be hollow"
+err=$("$SUT" --collect --workspace "$W_LOCKED" --host h1=h1:.claude 2>&1 >/dev/null); rc=$?
+kill "$lock_holder_pid" 2>/dev/null
+wait "$lock_holder_pid" 2>/dev/null
+names_lock_holder=no
+[[ "$err" == *"another --collect (pid $lock_holder_pid) holds $LOCKED_WORKSPACE_LOCK"* ]] && names_lock_holder=yes
+locked_host_collected=no; [[ -e $W_LOCKED/h1 ]] && locked_host_collected=yes
+check "lock: exit 2, the lock and its holder's pid named, nothing collected" \
+    "$rc $names_lock_holder $locked_host_collected" "2 yes no"
+
+printf 'collect: a host dir that reappears mid-swap is never installed into\n'
+make_host nest
+W_NEST="$TMPROOT/ws-nest"
+"$SUT" --collect --workspace "$W_NEST" --host nest=nest:.claude >/dev/null 2>&1
+# Only the new collect would carry this file.
+printf -- '---\nname: new\n---\n' > "$FIXTURE_HOSTS/nest/.claude/agents/new.md"
+err=$(PATH="$MV_RESTORER_BIN:$PATH" AUDIT_RESTORE_AFTER_MOVING="$W_NEST/nest" \
+    "$SUT" --collect --workspace "$W_NEST" --host nest=nest:.claude 2>&1 >/dev/null); rc=$?
+names_nest=no; [[ "$err" == *"cannot replace $W_NEST/nest"* ]] && names_nest=yes
+nest_tree_state=missing
+if [[ -f $W_NEST/nest/facts.tsv ]]; then
+    nest_tree_state=earlier
+    [[ -e $W_NEST/nest/cfg/agents/new.md ]] && nest_tree_state=new
+fi
+# A plain mv would have put the new collect inside the host dir under its staging name.
+nest_leftovers=$(find "$W_NEST" -name '.collecting-*' -print)
+nest_status=$(cut -f1,5 "$W_NEST/hosts.tsv" 2>/dev/null | tr '\n' '|')
+check "reappeared host dir: exit 2, named, the earlier tree whole with nothing nested in it, status failed" \
+    "$rc $names_nest $nest_tree_state|$nest_leftovers|$nest_status" "2 yes earlier||nest${TAB}failed|"
+
+printf 'collect: a stream member that is neither a file nor a directory fails the host\n'
+LINK_MEMBER_STREAM="$FIXTURE_HOSTS/linkmember/canned-stream"
+mkdir -p "$LINK_MEMBER_STREAM/cfg"
+printf 'hostname\tlinkmember\n' > "$LINK_MEMBER_STREAM/facts.tsv"
+: > "$LINK_MEMBER_STREAM/links.tsv"
+: > "$LINK_MEMBER_STREAM/collect.log"
+printf '# instructions\n' > "$LINK_MEMBER_STREAM/cfg/CLAUDE.md"
+LINK_MEMBER_TARGET="$TMPROOT/outside-the-stream"
+printf 'outside\n' > "$LINK_MEMBER_TARGET"
+ln -s "$LINK_MEMBER_TARGET" "$LINK_MEMBER_STREAM/cfg/link-out"
+W_LINK_MEMBER="$TMPROOT/ws-link-member"
+err=$("$SUT" --collect --workspace "$W_LINK_MEMBER" --host linkmember=linkmember:.claude 2>&1 >/dev/null); rc=$?
+names_link_member=no
+[[ "$err" == *"collect of linkmember failed: the stream carried cfg/link-out, which is neither a regular file nor a directory"* ]] \
+    && names_link_member=yes
+link_member_installed=no; [[ -e $W_LINK_MEMBER/linkmember ]] && link_member_installed=yes
+link_member_leftovers=$(find "$W_LINK_MEMBER" -name '.collecting-*' -print)
+check "member type: a symlink member exits 2, host and member named, nothing installed or staged" \
+    "$rc $names_link_member $link_member_installed|$link_member_leftovers" "2 yes no|"
 
 # ---------------------------------------------------------------------------------------------
 # --collect on this machine (alias `local`)
@@ -897,7 +1035,7 @@ check "sections: cfg/ 6 of 12 and quantivly-hub 6 of 7 in their headings, rows n
     "$cfg_heading $cfg_shape|$store_heading $store_shape" "yes DDDDDDIIIIII|yes DDDDDDI"
 
 printf '\n'
-EXPECTED_ROWS=45
+EXPECTED_ROWS=51
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

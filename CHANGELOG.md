@@ -18,13 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registries, every `projects/*/memory/`, tenant-root `CLAUDE.md` files, repo `.claude/` dirs, and
   the laptop's account-dir `settings.json` copies. Each host runs only `find`, `sed`, `tar`,
   `date`, `hostname`, `id` and two `--version` calls; credentials, transcripts, caches and plugin
-  stores are pruned, every file is redacted, binaries are dropped, symlinks are recorded in
-  `links.tsv`. A host's earlier collect is replaced only once the new one is whole, and
-  `hosts.tsv` is merged per run. `--matrix` reads the workspace only and writes five reports:
+  stores are pruned and each pruned path logged, every file is redacted (a `*.json` file's
+  credentials by key name too), binaries are dropped, symlinks are recorded in `links.tsv`. A
+  host's earlier collect is replaced only once the new one is whole, `hosts.tsv` is merged per
+  run, and a workspace lock refuses a second concurrent `--collect`. `--matrix` reads the workspace only and writes five reports:
   every file by layout path (`identical`, `only-on`, `missing-on`, `differs newest:`),
   `settings.json` key by key, and memory per store across homes; it exits 1 on drift and 2 on a
   collect `hosts.tsv` does not vouch for. Guide: `docs/CLAUDE_SETUP.md` ("Auditing the hosts").
-  State table: `scripts/test-claude-config-audit.sh` (45 rows, hermetic: stub ssh, fixture
+  State table: `scripts/test-claude-config-audit.sh` (51 rows, hermetic: stub ssh, fixture
   `HOME`; CI `claude-config-audit-test`).
 
 - **`rabota show` prints the current sequence and inbox plan, read-only (DO-872).** The one
