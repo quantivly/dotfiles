@@ -102,15 +102,20 @@ EXIT_TERMINATED=143
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REDACTOR="$DOTFILES/scripts/redact-secrets.sh"
 
-# The include set: these paths under the config dir, each projects/*/memory/ dir, and for each
-# project root under $HOME its CLAUDE.md and its repos' .claude dirs, one level deep. A missing
-# one is logged as absent, never a failure.
+# The include set: these paths under the config dir, each projects/*/memory/ dir, for each
+# project root under $HOME its CLAUDE.md and its repos' .claude dirs, one level deep, and the
+# HOME_REPO_CLAUDE_DIRS. A missing one is logged as absent, never a failure.
 CFG_INCLUDE_PATHS=(
     CLAUDE.md settings.json settings.local.json keybindings.json
     hooks skills agents commands rules
     plugins/known_marketplaces.json plugins/installed_plugins.json
 )
 PROJECT_ROOTS=(quantivly Projects toysim)
+# Repo .claude dirs directly under $HOME, which no ROOT/*/.claude glob reaches because the
+# checkout is dot-named: the dotfiles repo's own .claude holds the claude-accounts project
+# skill on the laptop and on dev. Laid out as repos/home/<path>.
+HOME_REPO_CLAUDE_DIRS=(.dotfiles/.claude)
+HOME_REPOS_LAYOUT_ROOT='repos/home'
 
 # Read by absolute path: dev's non-interactive ssh has no ~/.local/bin on PATH. The field is
 # the whitespace-separated word of `--version` holding the version: `2.1.300 (Claude Code)`
@@ -120,22 +125,35 @@ CLAUDE_VERSION_FIELD=0
 HERDR_BIN_RELATIVE='.local/bin/herdr'
 HERDR_VERSION_FIELD=1
 
-# collect.log lines are TAG<TAB>path.
+# The laptop's per-seat account dirs, each holding its own copy of settings.json (made by the
+# account-dir builder at launch, so a copy can drift from ~/.claude/settings.json). Collected
+# for `local` only, as account-dirs/<seat>/settings.json.
+ACCOUNT_DIRS_RELATIVE='.local/state/claude-account-dirs'
+ACCOUNT_DIR_SETTINGS_NAME='settings.json'
+ACCOUNT_DIRS_LAYOUT_DIR='account-dirs'
+
+# collect.log lines are TAG<TAB>path, or TAG<TAB>seat for an account dir.
 ABSENT_TAG='absent'
 BINARY_SKIPPED_TAG='binary-skipped'
+ACCOUNT_DIR_LINK_TAG='account-dir-link'
 
 LOCAL_ALIAS='local'
-REMOTE_SHELL_COMMAND='bash -s --'
+# How every host runs remote_script, given CFGDIR as $1: over ssh, or directly for `local`.
+COLLECT_SCRIPT_SHELL=(bash -s --)
 STAGING_PREFIX='.collecting-'
 UNPACK_ERRORS_SUFFIX='.unpack-errors'
 REDACTING_SUFFIX='.redacting'
+# An earlier collect being replaced is renamed to $STAGING_PREFIX<name>$REPLACED_SUFFIX, a name
+# the startup sweep removes if a run dies before it does.
+REPLACED_SUFFIX='.replaced'
 
 # --- the remote collect -------------------------------------------------------------------------
 #
-# Sent on stdin to `bash -s -- CFGDIR` on the host, with the include-set constants above
-# prepended by declare -p, so the host and this script share one definition of them. It
-# prints one tar stream: facts.tsv, links.tsv, collect.log, and the include set renamed into
-# the workspace layout (cfg/, memory/<key>/, roots/<root>.CLAUDE.md, repos/<root>/<repo>/.claude/)
+# Sent on stdin to `bash -s -- CFGDIR` (COLLECT_SCRIPT_SHELL) on the host — over ssh, or run
+# directly for `local` — with the include-set constants above prepended by declare -p, so the
+# host and this script share one definition of them. It prints one tar stream: facts.tsv,
+# links.tsv, collect.log, and the include set renamed into the workspace layout (cfg/,
+# memory/<key>/, roots/<root>.CLAUDE.md, repos/<root>/<repo>/.claude/, repos/home/<repo>/.claude/)
 # with every symlink dereferenced. It reads only: the one write is its own mktemp -d holding
 # those three metadata files and the file list, removed on exit. Everything runs inside a
 # function so bash has read the whole script before any command can consume stdin.
@@ -169,11 +187,15 @@ collect_this_host() {   # CFGDIR
     trap 'rm -rf "$META_DIR"' EXIT
     : > "$META_DIR/collect.log"; : > "$META_DIR/include.list"; : > "$META_DIR/links.tsv"
 
-    local include_path memory_dir root repo_claude_dir memory_found=no
+    local include_path memory_dir root repo_claude_dir home_repo_claude_dir memory_found=no
     local -a include_starts=()
     for include_path in "${CFG_INCLUDE_PATHS[@]}"; do
         if is_present "$cfgdir/$include_path"; then include_starts+=("$cfgdir/$include_path")
         else note_absent "$include_path"; fi
+    done
+    for home_repo_claude_dir in "${HOME_REPO_CLAUDE_DIRS[@]}"; do
+        if is_present "$home_repo_claude_dir"; then include_starts+=("$home_repo_claude_dir")
+        else note_absent "$home_repo_claude_dir"; fi
     done
     for memory_dir in "$cfgdir"/projects/*/memory; do
         is_present "$memory_dir" || continue
@@ -199,10 +221,15 @@ collect_this_host() {   # CFGDIR
     done
 
     # The workspace layout as sed s-expressions, applied in order by tar to every member and by
-    # sed to every links.tsv path. The memory rule must come first: the cfg/ rule matches the
-    # memory dirs too. No rule matches another's output.
+    # sed to every links.tsv path. The home-repo and memory rules must precede the cfg/ rule,
+    # which would also match their paths: the memory dirs' always, a home repo's when the config
+    # dir is its parent (.dotfiles). No rule matches another's output.
     local cfgdir_pattern="${cfgdir//./\\.}"
-    local -a layout_rules=(
+    local -a layout_rules=()
+    for home_repo_claude_dir in "${HOME_REPO_CLAUDE_DIRS[@]}"; do
+        layout_rules+=("s,^${home_repo_claude_dir//./\\.},$HOME_REPOS_LAYOUT_ROOT/$home_repo_claude_dir,")
+    done
+    layout_rules+=(
         "s,^$cfgdir_pattern/projects/\([^/]*\)/memory,memory/\1,"
         "s,^$cfgdir_pattern/,cfg/,"
     )
@@ -257,6 +284,7 @@ collect_this_host() {   # CFGDIR
 collect_this_host "$1"
 REMOTE
 REMOTE_CONSTANTS=$(declare -p EXCLUDE_NAMES CFG_INCLUDE_PATHS PROJECT_ROOTS \
+    HOME_REPO_CLAUDE_DIRS HOME_REPOS_LAYOUT_ROOT \
     CLAUDE_BIN_RELATIVE CLAUDE_VERSION_FIELD HERDR_BIN_RELATIVE HERDR_VERSION_FIELD ABSENT_TAG)
 readonly remote_script="$REMOTE_CONSTANTS"$'\n'"$REMOTE_SCRIPT_BODY"
 
@@ -386,20 +414,42 @@ redact_tree() {   # DIR → 0 when every file was redacted or skipped, 1 when on
 is_earlier_collect() { [[ -d "$1" && ! -L "$1" && -f "$1/facts.tsv" ]]; }
 
 # The new collect replaces the earlier one only once it is complete and redacted, so a failed
-# re-collect (an ssh drop) leaves the earlier tree whole; hosts.tsv says which is current.
-install_collect() {   # STAGING_DIR HOST_DIR → 0 when STAGING_DIR is now HOST_DIR
-    local staging_dir="$1" host_dir="$2"
+# re-collect (an ssh drop) leaves the earlier tree whole; hosts.tsv says which is current. The
+# swap is two renames, never a removal in place: an interrupt inside an rm of HOST_DIR would
+# leave a partial tree there that still holds facts.tsv and so passes for a collect. The
+# earlier tree waits at ASIDE_DIR, under the staging prefix, until the new one is in place.
+install_collect() {   # STAGING_DIR HOST_DIR ASIDE_DIR → 0 when STAGING_DIR is now HOST_DIR
+    local staging_dir="$1" host_dir="$2" aside_dir="$3" earlier_set_aside=no
     if [[ -e "$host_dir" || -L "$host_dir" ]]; then
         is_earlier_collect "$host_dir" || return 1
-        remove_tree "$host_dir" || return 1
+        # mv onto an existing directory would move HOST_DIR inside it.
+        remove_tree "$aside_dir" || return 1
+        mv "$host_dir" "$aside_dir" || return 1
+        earlier_set_aside=yes
     fi
-    mv "$staging_dir" "$host_dir"
+    if ! mv "$staging_dir" "$host_dir"; then
+        if [[ "$earlier_set_aside" == yes ]] && ! mv "$aside_dir" "$host_dir"; then
+            warn "the earlier collect is at $aside_dir; the next --collect removes it"
+        fi
+        return 1
+    fi
+    if [[ "$earlier_set_aside" == yes ]] && ! remove_tree "$aside_dir"; then
+        warn "could not remove $aside_dir, the replaced collect; the next --collect removes it"
+    fi
+    return 0
 }
 
-collect_remote() {   # NAME ALIAS CFGDIR → 0 collected into $WORKSPACE/NAME, 1 failed (why, on stderr)
-    local name="$1" alias_name="$2" cfgdir="$3"
+# The one path every host's content takes: SCRIPT_RUNNER is the command that runs remote_script
+# from stdin (ssh to the host, or bash here) and prints its tar stream, which is unpacked into a
+# staging dir, given ADD_TO_STAGING's extra files, redacted, and only then installed at
+# $WORKSPACE/NAME. STREAM_SOURCE names the runner in a failure message. The runner is a plain
+# command, never a function: a function in a pipeline runs in a forked subshell, so a signal
+# meant for this collect would reach ssh's parent subshell instead.
+collect_from_stream() {   # NAME STREAM_SOURCE ADD_TO_STAGING SCRIPT_RUNNER [ARG]... → 0 collected, 1 failed
+    local name="$1" stream_source="$2" add_to_staging="$3"
+    shift 3
     local host_dir="$WORKSPACE/$name"
-    local remote_command="$REMOTE_SHELL_COMMAND $cfgdir"
+    local aside_dir="$WORKSPACE/$STAGING_PREFIX$name$REPLACED_SUFFIX"
     local staging_dir unpack_errors_path unpack_errors failure=""
     local -a pipe_status=()
 
@@ -414,24 +464,25 @@ collect_remote() {   # NAME ALIAS CFGDIR → 0 collected into $WORKSPACE/NAME, 1
     CURRENT_STAGING_DIR="$staging_dir"
     unpack_errors_path="$staging_dir$UNPACK_ERRORS_SUFFIX"
 
-    # SSH_CMD is a command with its options, word-split on purpose. CFGDIR matched CFGDIR_RE,
-    # so remote_command holds nothing a remote shell would expand.
-    # shellcheck disable=SC2086
-    $SSH_CMD "$alias_name" "$remote_command" <<<"$remote_script" \
-        | tar -x -f - -C "$staging_dir" 2>"$unpack_errors_path"
+    "$@" <<<"$remote_script" | tar -x -f - -C "$staging_dir" 2>"$unpack_errors_path"
     pipe_status=("${PIPESTATUS[@]}")
+    # A `./` member in the stream gives the staging dir the host's mode for it, which may let
+    # others read what is not yet redacted; mktemp's 700 is put back before anything else.
+    chmod 700 "$staging_dir"
     make_tree_owner_writable "$staging_dir"
 
     if (( pipe_status[0] != 0 )); then
-        failure="the ssh session exited ${pipe_status[0]}"
+        failure="$stream_source exited ${pipe_status[0]}"
     elif (( pipe_status[1] != 0 )); then
         unpack_errors=$(<"$unpack_errors_path")
         failure="the stream did not unpack: $unpack_errors"
     elif [[ ! -f "$staging_dir/facts.tsv" ]]; then
         failure="the stream carried no facts.tsv"
+    elif ! "$add_to_staging" "$staging_dir"; then
+        failure="a file beside the stream could not be copied"
     elif ! redact_tree "$staging_dir"; then
         failure="a collected file could be neither redacted nor removed, so nothing from this host is kept"
-    elif ! install_collect "$staging_dir" "$host_dir"; then
+    elif ! install_collect "$staging_dir" "$host_dir" "$aside_dir"; then
         failure="cannot replace $host_dir with the new collect"
     fi
     rm -f "$unpack_errors_path"
@@ -443,12 +494,62 @@ collect_remote() {   # NAME ALIAS CFGDIR → 0 collected into $WORKSPACE/NAME, 1
     CURRENT_STAGING_DIR=""
 }
 
+add_nothing_to_staging() { :; }   # STAGING_DIR: a remote host's stream is its whole collect
+
+# Each account dir's settings.json, copied into STAGING_DIR/account-dirs/<seat>/ so it is
+# redacted and installed with the rest. Only a regular file reached through no symlink is a copy
+# that can drift: a settings.json that is a link, or one in a seat dir that is a link
+# (personal -> personal-0), is the linked file itself, so it is logged instead of copied.
+add_account_dir_settings() {   # STAGING_DIR → 0, or 1 when a copy failed
+    local staging_dir="$1" settings_path seat_dir seat seat_layout_dir found_any=no
+    local collect_log="$staging_dir/collect.log"
+    for settings_path in "$HOME/$ACCOUNT_DIRS_RELATIVE"/*/"$ACCOUNT_DIR_SETTINGS_NAME"; do
+        [[ -e "$settings_path" || -L "$settings_path" ]] || continue
+        found_any=yes
+        seat_dir="${settings_path%/*}"
+        seat="${seat_dir##*/}"
+        if [[ -L "$seat_dir" || -L "$settings_path" ]]; then
+            printf '%s\t%s\n' "$ACCOUNT_DIR_LINK_TAG" "$seat" >> "$collect_log" || return 1
+            continue
+        fi
+        # A directory or a FIFO by that name is no settings copy, and cp would fail or block on it.
+        [[ -f "$settings_path" ]] || continue
+        seat_layout_dir="$staging_dir/$ACCOUNT_DIRS_LAYOUT_DIR/$seat"
+        mkdir -p "$seat_layout_dir" || return 1
+        cp -- "$settings_path" "$seat_layout_dir/$ACCOUNT_DIR_SETTINGS_NAME" || return 1
+    done
+    if [[ "$found_any" == no ]]; then
+        printf '%s\t%s\n' "$ABSENT_TAG" "$ACCOUNT_DIRS_RELATIVE/*/$ACCOUNT_DIR_SETTINGS_NAME" >> "$collect_log" \
+            || return 1
+    fi
+    return 0
+}
+
+collect_remote() {   # NAME ALIAS CFGDIR → 0 collected into $WORKSPACE/NAME, 1 failed (why, on stderr)
+    local name="$1" alias_name="$2" cfgdir="$3"
+    # One string, as ssh hands the remote shell one. CFGDIR matched CFGDIR_RE, so it holds
+    # nothing a remote shell would expand.
+    local remote_command="${COLLECT_SCRIPT_SHELL[*]} $cfgdir"
+    # SSH_CMD is a command with its options, word-split on purpose.
+    # shellcheck disable=SC2086
+    collect_from_stream "$name" 'the ssh session' add_nothing_to_staging \
+        $SSH_CMD "$alias_name" "$remote_command"
+}
+
+# The laptop: the same remote_script, run here under $HOME with no ssh, plus the account dirs'
+# settings copies.
+collect_local() {   # NAME CFGDIR → 0 collected into $WORKSPACE/NAME, 1 failed (why, on stderr)
+    local name="$1" cfgdir="$2"
+    collect_from_stream "$name" 'the local collect script' add_account_dir_settings \
+        "${COLLECT_SCRIPT_SHELL[@]}" "$cfgdir"
+}
+
 collect_host() {   # NAME ALIAS CFGDIR → 0 collected, 1 failed
     if [[ "$2" == "$LOCAL_ALIAS" ]]; then
-        warn "collect of $1 failed: collecting this machine (alias $LOCAL_ALIAS) is not implemented yet"
-        return 1
+        collect_local "$1" "$3"
+    else
+        collect_remote "$@"
     fi
-    collect_remote "$@"
 }
 
 # hosts.tsv (name, alias, cfgdir, collected_at, status) is written once, after every host,

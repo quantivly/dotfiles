@@ -7,8 +7,9 @@
 # Claude Code configuration into one workspace, and reporting where hosts agree.
 #
 # HERMETIC. Every row runs against a workspace under mktemp -d. Nothing here
-# reaches a real host: ssh is replaced through CLAUDE_CONFIG_AUDIT_SSH where a row
-# needs it, and the argument-validation rows below stop before any ssh happens.
+# reaches a real host or the real $HOME: ssh is replaced through CLAUDE_CONFIG_AUDIT_SSH
+# where a row needs it, the local-collect rows run under a fixture HOME, and the
+# argument-validation rows below stop before any ssh happens.
 # Requires: bash, jq, tar, sha256sum.
 
 set -uo pipefail
@@ -46,8 +47,9 @@ STUB_BIN="$TMPROOT/bin"
 mkdir -p "$FIXTURE_HOSTS" "$STUB_BIN"
 cat > "$STUB_BIN/ssh" <<'STUB'
 #!/usr/bin/env bash
-# Stub ssh: skip `-o VALUE` pairs, take the next argument as the alias and the rest as the
-# remote command, run it under the alias's fixture HOME with stdin passed through.
+# Stub ssh: record the call, skip `-o VALUE` pairs, take the next argument as the alias and
+# the rest as the remote command, run it under the alias's fixture HOME with stdin passed through.
+printf '%s\n' "$*" >> "$AUDIT_SSH_CALLS"
 while [[ "${1:-}" == -o ]]; do shift 2; done
 alias_name="$1"; shift
 fixture_home="$AUDIT_FIXTURE_HOSTS/$alias_name"
@@ -75,8 +77,24 @@ chmod +x "$STUB_BIN/ssh"
 # the read-only row asserts is empty again afterwards.
 REMOTE_TMPDIR="$TMPROOT/remote-tmp"
 mkdir -p "$REMOTE_TMPDIR"
-export AUDIT_FIXTURE_HOSTS="$FIXTURE_HOSTS" AUDIT_REMOTE_TMPDIR="$REMOTE_TMPDIR"
+# Every stub ssh call, one line each: the local-collect row asserts it made none.
+SSH_CALLS="$TMPROOT/ssh-calls"
+export AUDIT_FIXTURE_HOSTS="$FIXTURE_HOSTS" AUDIT_REMOTE_TMPDIR="$REMOTE_TMPDIR" AUDIT_SSH_CALLS="$SSH_CALLS"
 export CLAUDE_CONFIG_AUDIT_SSH="$STUB_BIN/ssh"
+
+# A recording rm, put first on PATH for one run: each argument it is given, one per line, then
+# the real rm. The re-collect row reads it to show the earlier tree is never removed in place.
+RM_RECORDER_BIN="$TMPROOT/rm-recorder"
+mkdir -p "$RM_RECORDER_BIN"
+cat > "$RM_RECORDER_BIN/rm" <<'RM_RECORDER'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$AUDIT_RM_CALLS"
+exec "$AUDIT_REAL_RM" "$@"
+RM_RECORDER
+chmod +x "$RM_RECORDER_BIN/rm"
+RM_CALLS="$TMPROOT/rm-calls"
+AUDIT_REAL_RM=$(type -P rm) || fatal "rm is not on PATH"
+export AUDIT_RM_CALLS="$RM_CALLS" AUDIT_REAL_RM
 
 # Built at runtime so the repo's gitleaks hook never sees a credential-shaped literal.
 FIXTURE_LINEAR_KEY="lin_api_""FIXTUREVALUE0123456789abcdefXYZ"
@@ -201,6 +219,9 @@ printf 'BLOB\0BINARY\n' > "$H1/.claude/hooks/blob.bin"
 # Text with no character on any line: `grep -Iq .` would call these binary.
 : > "$H1/.claude/hooks/empty.sh"
 printf '\n\n' > "$H1/.claude/hooks/blank.sh"
+# The dotfiles checkout's own .claude: dot-named, so no ROOT/*/.claude glob reaches it.
+mkdir -p "$H1/.dotfiles/.claude/skills/x"
+printf -- '---\nname: x\n---\n' > "$H1/.dotfiles/.claude/skills/x/SKILL.md"
 H1_TREE_BEFORE=$(host_tree_listing "$H1")
 
 W="$TMPROOT/ws"
@@ -216,6 +237,12 @@ if [[ -f $W/h1/cfg/CLAUDE.md && -f $W/h1/cfg/hooks/a.sh && -f $W/h1/cfg/skills/r
     layout_complete=yes
 fi
 check "include set: exit 0 and every layout path present" "$H1_COLLECT_RC $layout_complete" "0 yes"
+
+printf "collect: the dotfiles checkout's own .claude is collected\n"
+dotfiles_skill_state=absent
+cmp -s "$H1/.dotfiles/.claude/skills/x/SKILL.md" "$W/h1/repos/home/.dotfiles/.claude/skills/x/SKILL.md" \
+    && dotfiles_skill_state=copied
+check "dotfiles .claude: its skill lands under repos/home/.dotfiles/.claude/" "$dotfiles_skill_state" "copied"
 
 printf 'collect: credentials, .claude.json, transcripts, sessions, plugin cache and synced skills are never copied\n'
 h1_collected=no; [[ -f $W/h1/facts.tsv ]] && h1_collected=yes
@@ -279,7 +306,9 @@ W_NOAGENTS="$TMPROOT/ws-noagents"
 "$SUT" --collect --workspace "$W_NOAGENTS" --host noagents=noagents:.claude >/dev/null 2>&1; rc=$?
 agents_absent=$(has_line "$W_NOAGENTS/noagents/collect.log" "absent${TAB}agents")
 toysim_absent=$(has_line "$W_NOAGENTS/noagents/collect.log" "absent${TAB}toysim")
-check "no agents/, no ~/toysim: exit 0, both logged absent" "$rc $agents_absent $toysim_absent" "0 yes yes"
+dotfiles_claude_absent=$(has_line "$W_NOAGENTS/noagents/collect.log" "absent${TAB}.dotfiles/.claude")
+check "no agents/, no ~/toysim, no ~/.dotfiles/.claude: exit 0, each logged absent" \
+    "$rc $agents_absent $toysim_absent $dotfiles_claude_absent" "0 yes yes yes"
 
 printf 'collect: an unreachable host exits 2, names it, and the reachable host is still collected\n'
 W_DOWN="$TMPROOT/ws-down"
@@ -296,16 +325,24 @@ make_host rerun
 W_RERUN="$TMPROOT/ws-rerun"
 "$SUT" --collect --workspace "$W_RERUN" --host rerun=rerun:.claude >/dev/null 2>&1
 rm "$FIXTURE_HOSTS/rerun/.claude/agents/x.md"
-"$SUT" --collect --workspace "$W_RERUN" --host rerun=rerun:.claude >/dev/null 2>&1; rerun_rc=$?
+# The replacing collect runs with the recording rm: an interrupt inside an rm of the earlier
+# tree would leave a partial tree that still looks like a collect, so it is renamed aside instead.
+rm -f "$RM_CALLS"
+PATH="$RM_RECORDER_BIN:$PATH" "$SUT" --collect --workspace "$W_RERUN" --host rerun=rerun:.claude \
+    >/dev/null 2>&1; rerun_rc=$?
+rm_recorder_live=no; [[ -s $RM_CALLS ]] && rm_recorder_live=yes
+earlier_removed_in_place=$(has_line "$RM_CALLS" "$W_RERUN/rerun")
+# ...and the earlier tree, once set aside, is removed by the run that replaced it.
+aside_left=$(find "$W_RERUN" -name '.collecting-*' -print)
 stale_agent=absent; [[ -e $W_RERUN/rerun/cfg/agents/x.md ]] && stale_agent=present
 rerun_rows=$(wc -l 2>/dev/null < "$W_RERUN/hosts.tsv")
 "$SUT" --collect --workspace "$W_RERUN" --host rerun=down:.claude >/dev/null 2>&1; failed_rc=$?
 earlier_tree_kept=no
 [[ -f $W_RERUN/rerun/facts.tsv && -f $W_RERUN/rerun/cfg/CLAUDE.md ]] && earlier_tree_kept=yes
 failed_status=$(cut -f1,2,5 "$W_RERUN/hosts.tsv" 2>/dev/null | tr '\n' '|')
-check "re-collect: stale file gone, one hosts.tsv row; a failed one keeps the earlier tree, hosts.tsv says failed" \
-    "$rerun_rc $stale_agent $rerun_rows $failed_rc $earlier_tree_kept $failed_status" \
-    "0 absent 1 2 yes rerun${TAB}down${TAB}failed|"
+check "re-collect: stale file gone, earlier tree swapped out not rm'd, one hosts.tsv row; a failed one keeps the earlier tree" \
+    "$rerun_rc $stale_agent $rm_recorder_live $earlier_removed_in_place|$aside_left|$rerun_rows $failed_rc $earlier_tree_kept $failed_status" \
+    "0 absent yes no||1 2 yes rerun${TAB}down${TAB}failed|"
 
 printf 'collect: a workspace entry that is not an earlier collect is never replaced\n'
 W_FOREIGN="$TMPROOT/ws-foreign"
@@ -346,6 +383,8 @@ printf 'hostname\trodir\n' > "$FIXTURE_HOSTS/rodir/canned-stream/facts.tsv"
 printf 'linear key: %s\n' "$FIXTURE_LINEAR_KEY" > "$canned_locked/text.sh"
 printf 'BLOB\0BINARY\n' > "$canned_locked/blob.bin"
 chmod 555 "$canned_locked"
+# Set, not left to the umask: under a 077 umask the stream's `./` would be 700 anyway.
+chmod 755 "$FIXTURE_HOSTS/rodir/canned-stream"
 "$SUT" --collect --workspace "$W_READONLY" --host rotree=rotree:.claude --host rodir=rodir:.claude \
     >/dev/null 2>&1; rc=$?
 staging_left=$(find "$W_READONLY" -name '.collecting-*' -print)
@@ -353,8 +392,11 @@ unredacted_left=$(grep -rlF -- "$FIXTURE_LINEAR_KEY" "$W_READONLY" 2>/dev/null)
 binaries_left=$(find "$W_READONLY" -name blob.bin -print)
 both_collected=no; [[ -f $W_READONLY/rotree/cfg/hooks/locked/text.sh && -f $W_READONLY/rodir/cfg/locked/text.sh ]] \
     && both_collected=yes
-check "read-only dirs: both hosts collected; no staging dir, unredacted literal or binary left" \
-    "$rc $both_collected|$staging_left|$unredacted_left|$binaries_left" "0 yes|||"
+# The canned stream's `./` member carries canned-stream's own mode (mkdir's, not 700): unpacked
+# as-is it would open the staging dir, unredacted content and all, to other users.
+rodir_mode=$(find "$W_READONLY/rodir" -maxdepth 0 -printf '%m' 2>/dev/null)
+check "read-only dirs: both hosts collected, rodir's dir 700; no staging dir, unredacted literal or binary left" \
+    "$rc $both_collected $rodir_mode|$staging_left|$unredacted_left|$binaries_left" "0 yes 700|||"
 
 printf 'collect: an interrupted collect leaves no staging directory\n'
 make_host interrupt
@@ -367,18 +409,66 @@ interrupted_host_installed=no; [[ -e $W_INTERRUPT/interrupt ]] && interrupted_ho
 check "interrupt: exit 143, nothing staged or unredacted left, host not installed" \
     "$rc $interrupted_host_installed|$staging_left|$unredacted_left" "143 no||"
 
+# ---------------------------------------------------------------------------------------------
+# --collect on this machine (alias `local`)
+# ---------------------------------------------------------------------------------------------
+#
+# The laptop is collected without ssh, under the caller's HOME — here the fixture `lap`. Its
+# account dirs each hold a settings.json: q1 a real copy holding a credential, q2 a symlink to
+# ~/.claude/settings.json, and q3 a symlinked seat dir (as personal -> personal-0 is).
+
+make_host lap
+LAP="$FIXTURE_HOSTS/lap"
+LAP_ACCOUNT_DIRS="$LAP/.local/state/claude-account-dirs"
+mkdir -p "$LAP_ACCOUNT_DIRS/q1" "$LAP_ACCOUNT_DIRS/q2"
+printf '{"env":{"LINEAR_API_KEY":"%s"}}\n' "$FIXTURE_LINEAR_KEY" > "$LAP_ACCOUNT_DIRS/q1/settings.json"
+ln -s "$LAP/.claude/settings.json" "$LAP_ACCOUNT_DIRS/q2/settings.json"
+ln -s q1 "$LAP_ACCOUNT_DIRS/q3"
+LAP_TREE_BEFORE=$(host_tree_listing "$LAP")
+W_LAPTOP="$TMPROOT/ws-laptop"
+ssh_recorder_live=no; [[ -s $SSH_CALLS ]] && ssh_recorder_live=yes
+rm -f "$SSH_CALLS"
+# The collect script's one write is its own mktemp -d, on whichever machine runs it.
+HOME="$LAP" TMPDIR="$REMOTE_TMPDIR" "$SUT" --collect --workspace "$W_LAPTOP" --host laptop=local:.claude \
+    >/dev/null 2>&1; LAPTOP_COLLECT_RC=$?
+
+printf 'collect: local host uses no ssh\n'
+ssh_calls_made=none; [[ -s $SSH_CALLS ]] && ssh_calls_made=some
+laptop_cfg_collected=no; [[ -f $W_LAPTOP/laptop/cfg/CLAUDE.md ]] && laptop_cfg_collected=yes
+laptop_home_fact=$(has_line "$W_LAPTOP/laptop/facts.tsv" "home${TAB}$LAP")
+check "local: exit 0, no ssh call (the stub recorded the earlier ones), cfg/ collected from the caller's HOME" \
+    "$LAPTOP_COLLECT_RC $ssh_recorder_live $ssh_calls_made $laptop_cfg_collected $laptop_home_fact" \
+    "0 yes none yes yes"
+
+printf 'collect: account-dir copies are collected and compared\n'
+q1_state=absent; [[ -f $W_LAPTOP/laptop/account-dirs/q1/settings.json ]] && q1_state=present
+linked_seats_state=absent
+[[ -e $W_LAPTOP/laptop/account-dirs/q2 || -e $W_LAPTOP/laptop/account-dirs/q3 ]] && linked_seats_state=present
+q2_logged=$(has_line "$W_LAPTOP/laptop/collect.log" "account-dir-link${TAB}q2")
+q3_logged=$(has_line "$W_LAPTOP/laptop/collect.log" "account-dir-link${TAB}q3")
+check "account dirs: q1's real copy collected; q2 (linked file) and q3 (linked seat) absent and logged" \
+    "$q1_state $linked_seats_state $q2_logged $q3_logged" "present absent yes yes"
+
+printf 'collect: local collect redacts too\n'
+q1_redacted=no; grep -qF REDACTED "$W_LAPTOP/laptop/account-dirs/q1/settings.json" 2>/dev/null && q1_redacted=yes
+laptop_unredacted=$(grep -rlF -- "$FIXTURE_LINEAR_KEY" "$W_LAPTOP" 2>/dev/null)
+check "local redaction: q1's credential is REDACTED, the literal nowhere in the workspace" \
+    "$q1_redacted|$laptop_unredacted" "yes|"
+
 printf 'collect: the host tree is unchanged\n'
 H1_TREE_AFTER=$(host_tree_listing "$H1")
+LAP_TREE_AFTER=$(host_tree_listing "$LAP")
 tree_listing_size=$(wc -l <<<"$H1_TREE_BEFORE")
 tree_unchanged=no; [[ "$H1_TREE_BEFORE" == "$H1_TREE_AFTER" ]] && tree_unchanged=yes
+lap_tree_unchanged=no; [[ "$LAP_TREE_BEFORE" == "$LAP_TREE_AFTER" ]] && lap_tree_unchanged=yes
 # The listing must cover the fixture (>20 entries), or "unchanged" compares two empty strings.
 listing_covers_fixture=no; (( tree_listing_size > 20 )) && listing_covers_fixture=yes
 remote_tmp_leftovers=$(find "$REMOTE_TMPDIR" -mindepth 1 -print)
-check "read-only: h1's tree identical after every collect above, remote temp dir removed" \
-    "$tree_unchanged $listing_covers_fixture|$remote_tmp_leftovers" "yes yes|"
+check "read-only: h1's and lap's trees identical after every collect above, the collect script's temp dir removed" \
+    "$tree_unchanged $lap_tree_unchanged $listing_covers_fixture|$remote_tmp_leftovers" "yes yes yes|"
 
 printf '\n'
-EXPECTED_ROWS=20
+EXPECTED_ROWS=24
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
