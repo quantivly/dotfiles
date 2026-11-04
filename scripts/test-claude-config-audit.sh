@@ -372,7 +372,7 @@ earlier_tree_kept=no
 failed_status=$(cut -f1,2,5 "$W_RERUN/hosts.tsv" 2>/dev/null | tr '\n' '|')
 check "re-collect: stale file gone, earlier trees swapped out not rm'd, one hosts.tsv row per host; a failed one keeps the earlier tree" \
     "$rerun_rc $stale_agent $rm_recorder_live $earlier_removed_in_place|$aside_left|$rerun_rows $failed_rc $earlier_tree_kept $failed_status" \
-    "0 absent yes no||2 2 yes rerun${TAB}down${TAB}failed|"
+    "0 absent yes no||2 2 yes rerun${TAB}down${TAB}failed|rerun2${TAB}rerun${TAB}ok|"
 
 printf 'collect: a workspace entry that is not an earlier collect is never replaced\n'
 W_FOREIGN="$TMPROOT/ws-foreign"
@@ -609,10 +609,12 @@ cat > "$MH1/.claude/settings.json" <<'JSON'
  "enabledPlugins": {"tool@market": true},
  "extraKnownMarketplaces": {"market": {"source": {"source": "github", "repo": "owner/repo"}}},
  "statusLine": {"type": "command", "command": "status-line"},
+ "autoMode": {"environment": "org-wide notes, long enough to print as a label"},
  "model": "opus", "theme": "dark"}
 JSON
 cat > "$MH2/.claude/settings.json" <<'JSON'
 {"theme": "light", "model": "opus", "statusLine": {"command": "status-line", "type": "command"},
+ "autoMode": {"environment": "laptop notes written against the home directory"},
  "permissions": {"defaultMode": "auto", "allow": ["Bash(rule-b)", "Bash(rule-c)", "Bash(rule-d)"]},
  "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
    {"type": "command", "command": "f=\"$HOME/.claude/hooks/x.sh\"; [ -r \"$f\" ] && exec bash \"$f\"; exit 0"},
@@ -625,6 +627,7 @@ cat > "$MH3/.claude/settings.json" <<'JSON'
  "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/home/h3/.claude/hooks/x.sh"}]}]},
  "enabledPlugins": {"tool@market": true},
  "statusLine": {"type": "command", "command": "status-line"},
+ "autoMode": {"environment": "org-wide notes, long enough to print as a label"},
  "model": "opus", "theme": "dark"}
 JSON
 
@@ -645,8 +648,13 @@ set_fact_user "$W_MATRIX/h3" "$H3_USER"
 # Copies made before the matrix runs, so no report is in them yet.
 W_MATRIX_NO_FACTS="$TMPROOT/ws-matrix-no-facts"
 W_MATRIX_FAILED_HOST="$TMPROOT/ws-matrix-failed-host"
-cp -R "$W_MATRIX" "$W_MATRIX_NO_FACTS"
-cp -R "$W_MATRIX" "$W_MATRIX_FAILED_HOST"
+W_MATRIX_READ_ONLY="$TMPROOT/ws-matrix-read-only"
+W_MATRIX_UNNAMED="$TMPROOT/ws-matrix-unnamed"
+W_MATRIX_EMPTY_FIELD="$TMPROOT/ws-matrix-empty-field"
+for matrix_workspace_copy in "$W_MATRIX_NO_FACTS" "$W_MATRIX_FAILED_HOST" "$W_MATRIX_READ_ONLY" \
+        "$W_MATRIX_UNNAMED" "$W_MATRIX_EMPTY_FIELD"; do
+    cp -R "$W_MATRIX" "$matrix_workspace_copy"
+done
 
 MATRIX_REPORTS=(matrix.tsv matrix.md settings-matrix.md memory-matrix.tsv memory-matrix.md)
 workspace_listing() { find "$1" -mindepth 1 -printf '%y %T@ %P\n' | LC_ALL=C sort; }   # DIR
@@ -713,12 +721,13 @@ check "no facts.tsv, or hosts.tsv status failed: exit 2, the host named, no repo
     "$no_facts_rc $names_h2|$no_facts_reports|$failed_host_rc $names_h3|$failed_host_reports" "2 yes||2 yes|"
 
 printf 'matrix: settings permissions.allow is reported as set differences\n'
-allow_lines_present=yes
+missing_allow_lines=""
 # shellcheck disable=SC2016  # the backticks are Markdown code spans, not command substitutions
 for expected_line in '| `Bash(rule-a)` | only h1 | — | ✓ | — |' '| `Bash(rule-b)` | same | ✓ | ✓ | ✓ |' \
         '| `Bash(rule-c)` | only h2 | — | — | ✓ |' '| `Bash(rule-d)` | missing on h3 | — | ✓ | ✓ |'; do
-    [[ $(has_line "$M_SETTINGS" "$expected_line") == yes ]] || allow_lines_present+=" (missing: $expected_line)"
+    [[ $(has_line "$M_SETTINGS" "$expected_line") == yes ]] || missing_allow_lines+=" (missing: $expected_line)"
 done
+allow_lines_present=yes; [[ -z "$missing_allow_lines" ]] || allow_lines_present="no$missing_allow_lines"
 check "allow: rule-a only h1, rule-b same, rule-c only h2, rule-d missing on h3" "$allow_lines_present" "yes"
 
 printf 'matrix: settings hooks are compared by basename\n'
@@ -729,14 +738,23 @@ y_hook_only_h2=$(has_line "$M_SETTINGS" '| `PreToolUse y.sh` | only h2 | — | �
 check "hooks: x.sh same though each host runs it differently, y.sh only h2" "$x_hook_same $y_hook_only_h2" "yes yes"
 
 printf 'matrix: settings enabledPlugins, extraKnownMarketplaces and the other keys are compared by value\n'
-other_settings_present=yes
+# A value of 40 characters or more prints as a label and the first 8 characters of the sha256 of
+# its JSON, object keys sorted.
+canonical_json_digest() { printf '%s' "$(jq -cS . <<<"$1")" | sha256sum | cut -c1-8; }   # JSON
+status_line_digest=$(canonical_json_digest '{"type": "command", "command": "status-line"}')
+org_notes_digest=$(canonical_json_digest '{"environment": "org-wide notes, long enough to print as a label"}')
+laptop_notes_digest=$(canonical_json_digest '{"environment": "laptop notes written against the home directory"}')
+missing_other_settings_lines=""
 # shellcheck disable=SC2016  # the backticks are Markdown code spans, not command substitutions
 for expected_line in '| `tool@market` | differs | true | true | false |' '| `market` | differs | — | github | directory |' \
-        '| `model` | same | v1 | v1 | v1 |' '| `theme` | differs | v1 | v1 | v2 |' \
-        '| `permissions.defaultMode` | same | v1 | v1 | v1 |' '| `statusLine` | same | v1 | v1 | v1 |'; do
-    [[ $(has_line "$M_SETTINGS" "$expected_line") == yes ]] || other_settings_present+=" (missing: $expected_line)"
+        '| `model` | same | "opus" | "opus" | "opus" |' '| `theme` | differs | "dark" | "dark" | "light" |' \
+        '| `permissions.defaultMode` | same | "auto" | "auto" | "auto" |' \
+        "| \`statusLine\` | same | v1 ($status_line_digest) | v1 ($status_line_digest) | v1 ($status_line_digest) |" \
+        "| \`autoMode\` | differs | v1 ($org_notes_digest) | v1 ($org_notes_digest) | v2 ($laptop_notes_digest) |"; do
+    [[ $(has_line "$M_SETTINGS" "$expected_line") == yes ]] || missing_other_settings_lines+=" (missing: $expected_line)"
 done
-check "settings: plugin boolean differs, marketplace source differs, model same, theme differs, key order ignored" \
+other_settings_present=yes; [[ -z "$missing_other_settings_lines" ]] || other_settings_present="no$missing_other_settings_lines"
+check "settings: plugin boolean differs, marketplace source differs; short values printed, long ones labelled, key order ignored" \
     "$other_settings_present" "yes"
 
 printf 'matrix: memory stores meet across homes\n'
@@ -775,13 +793,18 @@ printf 'matrix: exit 0 when every artifact is identical, 1 when any row is not\n
 make_host msame
 mkdir -p "$FIXTURE_HOSTS/msame/.local/state/claude-account-dirs/q1"
 cp "$FIXTURE_HOSTS/msame/.claude/settings.json" "$FIXTURE_HOSTS/msame/.local/state/claude-account-dirs/q1/settings.json"
-W_MATRIX_SAME="$TMPROOT/ws-matrix-same"
-HOME="$FIXTURE_HOSTS/msame" TMPDIR="$REMOTE_TMPDIR" "$SUT" --collect --workspace "$W_MATRIX_SAME" \
+W_MATRIX_SAME_COLLECT="$TMPROOT/ws-matrix-same-collect"
+HOME="$FIXTURE_HOSTS/msame" TMPDIR="$REMOTE_TMPDIR" "$SUT" --collect --workspace "$W_MATRIX_SAME_COLLECT" \
     --host a=local:.claude --host b=local:.claude >/dev/null 2>&1
+# The identical copy sits at a path with a backslash followed by n: awk -v would turn that into a
+# newline, so a check comparing FILENAME with a -v copy of the path would never match it. (The
+# collect is made at a plain path: tar -C reads the same escape.)
+W_MATRIX_SAME="$TMPROOT/"'ws-matrix\new-same'
 W_MATRIX_CFG_DRIFT="$TMPROOT/ws-matrix-cfg-drift"
 W_MATRIX_MEMORY_DRIFT="$TMPROOT/ws-matrix-memory-drift"
-cp -R "$W_MATRIX_SAME" "$W_MATRIX_CFG_DRIFT"
-cp -R "$W_MATRIX_SAME" "$W_MATRIX_MEMORY_DRIFT"
+for matrix_workspace_copy in "$W_MATRIX_SAME" "$W_MATRIX_CFG_DRIFT" "$W_MATRIX_MEMORY_DRIFT"; do
+    cp -R "$W_MATRIX_SAME_COLLECT" "$matrix_workspace_copy"
+done
 "$SUT" --matrix --workspace "$W_MATRIX_SAME" >/dev/null 2>&1; identical_rc=$?
 same_row_count=$(awk 'NR > 1' "$W_MATRIX_SAME/matrix.tsv" 2>/dev/null | wc -l)
 same_has_rows=no; (( same_row_count > MIN_FIXTURE_ARTIFACTS )) && same_has_rows=yes
@@ -810,8 +833,71 @@ err=$("$SUT" --matrix --workspace "$W_MATRIX" --host h1=mh1:.claude 2>&1 >/dev/n
 names_collect_only=no; [[ "$err" == *"--host applies to --collect only"* ]] && names_collect_only=yes
 check "--matrix --host: exit 64, says --host is for --collect" "$rc $names_collect_only" "64 yes"
 
+printf 'matrix: an unwritable workspace exits 2 and claims no report\n'
+chmod 555 "$W_MATRIX_READ_ONLY"
+"$SUT" --matrix --workspace "$W_MATRIX_READ_ONLY" >"$TMPROOT/read-only.out" 2>"$TMPROOT/read-only.err"; read_only_rc=$?
+chmod 755 "$W_MATRIX_READ_ONLY"
+read_only_stdout=$(<"$TMPROOT/read-only.out")
+names_unwritable_report=no
+[[ $(<"$TMPROOT/read-only.err") == *"cannot write $W_MATRIX_READ_ONLY/matrix.tsv"* ]] && names_unwritable_report=yes
+check "unwritable: exit 2, the report it could not write named, no 'reports in' line on stdout" \
+    "$read_only_rc $names_unwritable_report|$read_only_stdout" "2 yes|"
+
+printf 'matrix: a collect in the workspace that hosts.tsv does not name exits 2 and names it\n'
+cp -R "$W_MATRIX_UNNAMED/h1" "$W_MATRIX_UNNAMED/h4"
+err=$("$SUT" --matrix --workspace "$W_MATRIX_UNNAMED" 2>&1 >/dev/null); unnamed_rc=$?
+names_h4=no; [[ "$err" == *"$W_MATRIX_UNNAMED/h4 holds a collect that hosts.tsv does not name"* ]] && names_h4=yes
+unnamed_reports=$(cd "$W_MATRIX_UNNAMED" && ls "${MATRIX_REPORTS[@]}" 2>/dev/null)
+check "unnamed collect: exit 2, h4 named, no report written" "$unnamed_rc $names_h4|$unnamed_reports" "2 yes|"
+
+printf 'matrix: hosts.tsv is split by field, so an empty field keeps its place; a short row is refused\n'
+# A row with an empty alias: read through a tab IFS, the fields after it would shift left and
+# the status read would be the empty last one, a "failed" collect.
+awk -F'\t' -v OFS='\t' '$1 == "h1" { $2 = "" } 1' "$W_MATRIX_EMPTY_FIELD/hosts.tsv" \
+    > "$W_MATRIX_EMPTY_FIELD/hosts.tsv.new" && mv "$W_MATRIX_EMPTY_FIELD/hosts.tsv.new" "$W_MATRIX_EMPTY_FIELD/hosts.tsv"
+"$SUT" --matrix --workspace "$W_MATRIX_EMPTY_FIELD" >/dev/null 2>&1; empty_field_rc=$?
+# A row of four fields stops --collect before any host is collected, and the file is left alone.
+W_SHORT_ROW="$TMPROOT/ws-short-row"
+mkdir -p "$W_SHORT_ROW"
+printf 'h1\tmh1\t.claude\tok\n' > "$W_SHORT_ROW/hosts.tsv"
+short_row_before=$(<"$W_SHORT_ROW/hosts.tsv")
+err=$("$SUT" --collect --workspace "$W_SHORT_ROW" --host h2=mh2:.claude 2>&1 >/dev/null); short_row_rc=$?
+names_unparseable=no; [[ "$err" == *"cannot parse $W_SHORT_ROW/hosts.tsv"* ]] && names_unparseable=yes
+short_row_collected=no; [[ -e $W_SHORT_ROW/h2 ]] && short_row_collected=yes
+short_row_kept=no; [[ "$(<"$W_SHORT_ROW/hosts.tsv")" == "$short_row_before" ]] && short_row_kept=yes
+check "hosts.tsv fields: an empty alias still reads status ok (exit 1, drift); a 4-field row stops --collect, nothing collected" \
+    "$empty_field_rc|$short_row_rc $names_unparseable $short_row_collected $short_row_kept" "1|2 yes no yes"
+
+printf "collect: hosts.tsv is merged, so re-collecting one host keeps every other host's row\n"
+W_MERGE="$TMPROOT/ws-merge"
+"$SUT" --collect --workspace "$W_MERGE" --host h1=mh1:.claude --host h2=mh2:.claude --host h3=down:.claude \
+    >/dev/null 2>&1; first_merge_rc=$?
+merge_rows_before=$(head -n 2 "$W_MERGE/hosts.tsv" 2>/dev/null)
+"$SUT" --collect --workspace "$W_MERGE" --host h3=mh3:.claude >/dev/null 2>&1; second_merge_rc=$?
+merged_hosts=$(cut -f1,2,3,5 "$W_MERGE/hosts.tsv" 2>/dev/null | tr '\n' '|')
+earlier_rows_kept=no; [[ -n "$merge_rows_before" && "$(head -n 2 "$W_MERGE/hosts.tsv")" == "$merge_rows_before" ]] \
+    && earlier_rows_kept=yes
+merge_leftovers=$(find "$W_MERGE" -maxdepth 1 -name '.collecting-*' -print)
+check "merge: h3 failed then re-collected alone; h1 and h2 rows kept as they were, h3 now ok, no temp file left" \
+    "$first_merge_rc $second_merge_rc $earlier_rows_kept|$merged_hosts|$merge_leftovers" \
+    "2 0 yes|h1${TAB}mh1${TAB}.claude${TAB}ok|h2${TAB}mh2${TAB}.claude${TAB}ok|h3${TAB}mh3${TAB}.claude${TAB}ok||"
+
+printf 'matrix: each Markdown section names its count of rows not identical, and lists them first\n'
+markdown_section_shape() {   # FILE HEADING_PREFIX → one letter per table row of that section: D not identical, I identical
+    awk -F'|' -v heading_prefix="$2" '
+        index($0, "## ") == 1 { in_section = (index($0, heading_prefix) == 1); next }
+        in_section && index($0, "| `") == 1 { row_status = $3; gsub(/ /, "", row_status); printf "%s", (row_status == "identical" ? "I" : "D") }
+    ' "$1" 2>/dev/null
+}
+cfg_heading=$(has_line "$W_MATRIX/matrix.md" '## cfg/ (6 of 12 not identical)')
+cfg_shape=$(markdown_section_shape "$W_MATRIX/matrix.md" '## cfg/ (')
+store_heading=$(has_line "$W_MATRIX/memory-matrix.md" "## $MATRIX_STORE (6 of 7 not identical)")
+store_shape=$(markdown_section_shape "$W_MATRIX/memory-matrix.md" "## $MATRIX_STORE (")
+check "sections: cfg/ 6 of 12 and quantivly-hub 6 of 7 in their headings, rows not identical first" \
+    "$cfg_heading $cfg_shape|$store_heading $store_shape" "yes DDDDDDIIIIII|yes DDDDDDI"
+
 printf '\n'
-EXPECTED_ROWS=40
+EXPECTED_ROWS=45
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
