@@ -726,16 +726,17 @@ class LinearClientTests(unittest.TestCase):
         rec.setdefault("a", {}).get("b"); dict(rec).get("zz"); rec["new"] = 1; rec["new"]
         self.assertEqual(s, {"a", "a.b", COPIED})
 
-    def test_relations_map_blocks_and_blocked_by_and_carry_each_blocker_state_once(self):
+    def test_relations_map_blocks_and_blocked_by_and_carry_each_related_state_once(self):
         # DO-875: a blocker's state rides on the relation query that already names it (two more
         # fields on the same request, never a second one), so "unblocked" is a fact of the snapshot.
-        # A blocker two own issues share is one row; the rows are in identifier order.
+        # DO-878: the blocked side's state too, so "blocks N open issues" is one as well. A related
+        # issue two own issues share is one row; the rows are in identifier order.
         tree = selection_tree(linear.Q_RELATIONS)["query"]["issues"]["nodes"]
         started = {"name": "In Progress", "type": "started"}
         done = {"name": "Done", "type": "completed"}
         nodes = [
-            {"id": "a", "relations": {"nodes": [{"type": "blocks", "relatedIssue": {"identifier": "HUB-2"}},
-                                                {"type": "related", "relatedIssue": {"identifier": "HUB-3"}}]},
+            {"id": "a", "relations": {"nodes": [{"type": "blocks", "relatedIssue": {"identifier": "HUB-2", "state": started}},
+                                                {"type": "related", "relatedIssue": {"identifier": "HUB-3", "state": done}}]},
                         "inverseRelations": {"nodes": [{"type": "blocks", "issue": {"identifier": "CORE-1", "state": started}}]}},
             {"id": "b", "relations": {"nodes": []},
                         "inverseRelations": {"nodes": [{"type": "blocks", "issue": {"identifier": "CORE-2", "state": done}},
@@ -749,10 +750,11 @@ class LinearClientTests(unittest.TestCase):
                                         "b": {"blockedBy": ["CORE-2", "CORE-1"], "blocks": []}})
         self.assertEqual(rel.blockers, [{"identifier": "CORE-1", "state": started},
                                         {"identifier": "CORE-2", "state": done}])
+        self.assertEqual(rel.blocked, [{"identifier": "HUB-2", "state": started}])
 
     def test_relations_of_no_issues_make_no_call(self):
         post = FakePost([])
-        self.assertEqual(linear.LinearClient("k" * 20, post=post).relations([]), linear.IssueRelations({}, []))
+        self.assertEqual(linear.LinearClient("k" * 20, post=post).relations([]), linear.IssueRelations({}, [], []))
         self.assertEqual(post.calls, [])
 
     def test_active_cycles_are_the_named_teams_active_cycles_with_every_issue_identifier_in_them(self):

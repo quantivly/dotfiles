@@ -14,6 +14,7 @@ from rabota.store import now
 
 BATCH_MIN_CLUSTER = 5
 NEW_WORK_CAP = 3
+BLOCKS_ORDERED_BUCKETS = (3, 4)   # DO-878: where "blocks N open issues" orders rows; never a decision or bucket 5
 HOT_PRIORITIES = ("Urgent", "High")
 ISSUE_KEY = re.compile(r"\b([A-Z]{2,6})-?(\d{1,5})\b", re.I)
 PR_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)")
@@ -138,7 +139,28 @@ def _bucket_2(pins: list[dict]) -> list[dict]:
             for p in pins if p.get("bucket") == 2]
 
 
-def _hot_issues(own: list[dict], batch: set[str], flight: set[str], decisions: list[dict]) -> list[dict]:
+def open_blocks_count(own: list[dict], lin: dict, dead_types: set[str]) -> dict[str, int]:
+    """Own identifier → how many of the issues it blocks are open (DO-878), read from the snapshot's
+    ``blocked[]`` (DO-875/878: one row per issue the operator's issues block, with its state). An
+    identifier the section does not carry -- a snapshot older than the section, or a target the
+    relation read never saw -- counts as nobody waiting, so the rank never invents a reason."""
+    is_open = {}
+    for row in lin.get("blocked") or []:
+        state_type = (row.get("state") or {}).get("type")
+        is_open[row["identifier"]] = state_type is not None and state_type not in dead_types
+    return {i["identifier"]: sum(1 for key in i.get("blocks") or [] if is_open.get(key)) for i in own}
+
+
+def _blocks_why_now(count: int, why_now: str) -> str:
+    """``why_now`` led by "blocks N open issue(s) · " when ``count`` is positive (DO-878), else unchanged."""
+    if not count:
+        return why_now
+    noun = "issue" if count == 1 else "issues"
+    return f"blocks {count} open {noun} · {why_now}"
+
+
+def _hot_issues(own: list[dict], batch: set[str], flight: set[str], decisions: list[dict],
+                blocks_open: dict[str, int]) -> list[dict]:
     """Bucket 3 (a real date or none) and the in-flight demotions; Backlog P0/P1 become decisions instead."""
     items = []
     for i in own:
@@ -150,24 +172,26 @@ def _hot_issues(own: list[dict], batch: set[str], flight: set[str], decisions: l
         elif state in ("unstarted", "started"):
             if i.get("dueDate") in batch:
                 continue   # batch artifact, not a deadline
+            blocking = blocks_open.get(i["identifier"], 0)
             if i["identifier"] in flight:
-                items.append(_item(4, i["identifier"], i["title"], "", "already running",
+                items.append(_item(4, i["identifier"], i["title"], "", _blocks_why_now(blocking, "already running"),
                                    "in flight per census; not scheduled", i["url"], "linear"))
                 continue
             due = f"due {i['dueDate']}" if i.get("dueDate") else "no date"
-            items.append(_item(3, i["identifier"], i["title"], "", due,
+            items.append(_item(3, i["identifier"], i["title"], "", _blocks_why_now(blocking, due),
                                f"bucket 3: {prio} {i['state']['name']} with a real date", i["url"], "linear"))
     return items
 
 
-def _bucket_4(own_prs: list[dict], own: list[dict], placed: set[str]) -> list[dict]:
+def _bucket_4(own_prs: list[dict], own: list[dict], placed: set[str], blocks_open: dict[str, int]) -> list[dict]:
     """Approved, non-draft own PRs (authors merge their own) and started issues not already placed."""
     items = [_item(4, f"{pr['repo']}#{pr['number']}", pr["title"], "", "approved — you merge your own",
                    "bucket 4: approved own PR, authors merge", pr["url"], "github")
              for pr in own_prs if pr.get("reviewDecision") == "APPROVED" and not pr.get("isDraft")]
     for i in own:
         if i["state"]["type"] == "started" and i["identifier"] not in placed:
-            items.append(_item(4, i["identifier"], i["title"], "", f"in progress since {i['updatedAt'][:10]}",
+            since = f"in progress since {i['updatedAt'][:10]}"
+            items.append(_item(4, i["identifier"], i["title"], "", _blocks_why_now(blocks_open.get(i["identifier"], 0), since),
                                "bucket 4: own in-flight", i["url"], "linear"))
     return items
 
@@ -205,15 +229,18 @@ def rank(inp: RankInputs) -> dict:
     own = [i for i in lin.get("issues", []) if (i.get("assignee") or {}).get("id") == me]
     batch = batch_due_dates(own)
     flight = in_flight_keys(inp.census)
+    blocks_open = open_blocks_count(own, lin, set(inp.tenant.linear.dead_state_types))
     triage: list[dict] = []
     decisions: list[dict] = []
 
     items = _bucket_1(inp, gh.get("review_requests", []), triage)
     items += _bucket_2(inp.pins)
-    items += _hot_issues(own, batch, flight, decisions)
-    items += _bucket_4(gh.get("own_prs", []), own, {x["key"] for x in items})
+    items += _hot_issues(own, batch, flight, decisions, blocks_open)
+    items += _bucket_4(gh.get("own_prs", []), own, {x["key"] for x in items}, blocks_open)
     items += _bucket_5(own, flight, {x["key"] for x in items})
-    items.sort(key=lambda i: i["bucket"])   # stable: order within a bucket is the order built above
+    # Stable: within a bucket the order is the order built above, except that in BLOCKS_ORDERED_BUCKETS
+    # a row blocking more open issues comes first (DO-878).
+    items.sort(key=lambda i: (i["bucket"], -blocks_open.get(i["key"], 0) if i["bucket"] in BLOCKS_ORDERED_BUCKETS else 0))
     items = _drop_snoozed(items, inp.snoozes, decisions)
     return {"generated_at": now(), "tenant": inp.tenant.name, "failed_sources": [],
             "items": items, "triage": triage, "decisions": decisions}

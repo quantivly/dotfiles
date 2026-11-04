@@ -103,7 +103,8 @@ def sync_linear(ctx: Context, lin) -> dict:
     """Assigned-open ∪ created-by-me-open (deduped by id) with relations, every non-archived
     notification, and the picture around the issues (DO-875): ``cycles`` (the active cycle of each
     team an issue sits in, with its issue identifiers), ``projects`` (the ones the issues belong to)
-    and ``blockers`` (the state of every issue that blocks one of them).
+    and ``blockers`` (the state of every issue that blocks one of them); DO-878 adds ``blocked``
+    (the state of every issue one of them blocks).
 
     The three are keyed off the fetched issues -- their team keys, project ids and relations --
     never a second walk of the workspace, and they ride in the one payload ``snapshots.write``
@@ -123,10 +124,10 @@ def sync_linear(ctx: Context, lin) -> dict:
     notifications = lin.inbox_notifications()
     payload = {"ok": True, "error": None, "viewer": viewer, "issues": list(issues.values()),
                "notifications": notifications, "cycles": cycles, "projects": projects,
-               "blockers": related.blockers}
+               "blockers": related.blockers, "blocked": related.blocked}
     snapshots.write(ctx.state_dir, "linear", payload, dry_run=ctx.dry_run)
     return {"issues": len(issues), "notifications": len(notifications), "cycles": len(cycles),
-            "projects": len(projects), "blockers": len(related.blockers)}
+            "projects": len(projects), "blockers": len(related.blockers), "blocked": len(related.blocked)}
 
 
 def _distinct_sorted(values) -> list:

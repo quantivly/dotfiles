@@ -18,6 +18,7 @@ CYCLE_7 = {"id": "c1", "number": 7, "name": None, "startsAt": "2026-11-02T00:00:
 PROJECT_ALPHA = {"id": "p1", "name": "Alpha", "status": {"name": "In Progress", "type": "started"}, "lead": None,
                  "targetDate": None, "lastUpdateAt": None, "health": None}
 BLOCKER_CORE_1 = {"identifier": "CORE-1", "state": {"name": "Todo", "type": "unstarted"}}
+BLOCKED_CORE_7 = {"identifier": "CORE-7", "state": {"name": "In Progress", "type": "started"}}
 
 class FakeLin:
     def __init__(self): self.asked = {}
@@ -25,7 +26,7 @@ class FakeLin:
     def assigned_open(self, dead): return [dict(HUB_1)]
     def created_open(self, me, dead): return [dict(HUB_1), dict(HUB_2)]
     def inbox_notifications(self): return [{"id": "n1", "type": "issueDue", "issue": {"id": "i1"}}]
-    def relations(self, ids): return linear.IssueRelations({"i1": {"blockedBy": ["CORE-1"], "blocks": []}}, [BLOCKER_CORE_1])
+    def relations(self, ids): return linear.IssueRelations({"i1": {"blockedBy": ["CORE-1"], "blocks": ["CORE-7"]}}, [BLOCKER_CORE_1], [BLOCKED_CORE_7])
     def active_cycles(self, team_keys):
         self.asked["team_keys"] = team_keys; return [CYCLE_7]
     def projects_by_id(self, project_ids):
@@ -81,7 +82,7 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(lin["issues"][0]["blockedBy"], ["CORE-1"])
         self.assertTrue(lin["ok"]); self.assertIsNone(lin["error"]); self.assertIn("fetched_at", lin)
         self.assertEqual(rep["github"]["counts"]["review_requests"], 1)
-        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1})
+        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1, "blocked": 1})
         self.assertTrue(ctx.store.last_sync("quantivly", "linear")["ok"])
         self.assertEqual(ctx.store.last_sync("quantivly", "github")["path"], rep["github"]["path"])
 
@@ -96,7 +97,8 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(snap["cycles"], [CYCLE_7])
         self.assertEqual(snap["projects"], [PROJECT_ALPHA])
         self.assertEqual(snap["blockers"], [BLOCKER_CORE_1])
-        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1})
+        self.assertEqual(snap["blocked"], [BLOCKED_CORE_7])
+        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1, "blocked": 1})
 
     def test_a_secret_in_a_picture_section_is_refused_by_the_snapshot_write(self):
         # DO-875: the new sections sit inside the payload `snapshots.write` already checks whole, so
@@ -119,7 +121,7 @@ class SyncTests(unittest.TestCase):
         ctx = context.Context.from_namespace(ns, cfg_base=FIX, runner=FakeRunner([]), env={"PATH": "/bin"}, cwd=Path("/"))
         self.addCleanup(ctx.close)
         rep = sync.run_sync(ctx, ["linear", "github"], lin=FakeLin(), gh=FakeGh())
-        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1})
+        self.assertEqual(rep["linear"]["counts"], {"issues": 2, "notifications": 1, "cycles": 1, "projects": 1, "blockers": 1, "blocked": 1})
         self.assertIsNone(snapshots.read(ctx.state_dir, "linear"))
         self.assertIsNone(snapshots.read(ctx.state_dir, "github"))
         self.assertIsNone(ctx.store.last_sync("quantivly", "linear"))
@@ -152,7 +154,7 @@ class SyncTests(unittest.TestCase):
         real_write = snapshots.write
         with mock.patch.object(snapshots, "write", lambda sd, src, payload, **kw: real_write(sd, src, Recording.plain(payload), **kw)):
             rep = sync.sync_linear(ctx, linear.LinearClient("k" * 20, post=FakePost(pages)))
-        self.assertEqual(rep, {"issues": 0, "notifications": 2, "cycles": 0, "projects": 0, "blockers": 0})
+        self.assertEqual(rep, {"issues": 0, "notifications": 2, "cycles": 0, "projects": 0, "blockers": 0, "blocked": 0})
         self.assertFalse([k for k in seen if k.endswith(COPIED)], f"a notification was copied to a plain dict: {sorted(seen)}")
         unrequested = sorted(k for k in seen if k not in tree_paths(tree))
         self.assertFalse(unrequested, f"sync reads notification fields the query never asks for: {unrequested}")
