@@ -8,8 +8,9 @@
 #
 # HERMETIC. Every row runs against a workspace under mktemp -d. Nothing here
 # reaches a real host or the real $HOME: ssh is replaced through CLAUDE_CONFIG_AUDIT_SSH
-# where a row needs it, the local-collect rows run under a fixture HOME, and the
-# argument-validation rows below stop before any ssh happens.
+# where a row needs it, the whole table runs under an empty fixture HOME (the local-collect
+# rows under fixtures of their own), and the argument-validation rows below stop before any
+# ssh happens.
 # Requires: bash, jq, tar, sha256sum.
 
 set -uo pipefail
@@ -19,6 +20,14 @@ SUT="$DOTFILES/scripts/claude-config-audit.sh"
 TMPROOT="$(mktemp -d)"
 # Some fixtures hold read-only (555) directories, which rm -rf alone cannot empty.
 trap 'find "$TMPROOT" -type d -exec chmod u+rwx {} + 2>/dev/null; rm -rf "$TMPROOT"' EXIT
+
+# The SUT's default hosts lead with this machine (laptop=local) and its default workspace is
+# under $HOME, so a row that leaves out --host or --workspace would read and write the real
+# home. An empty fixture HOME for the whole table makes that impossible; rows that need a
+# particular home set their own.
+HOME="$TMPROOT/home"
+mkdir -p "$HOME"
+export HOME
 
 PASS=0; FAIL=0
 ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
@@ -95,6 +104,25 @@ chmod +x "$RM_RECORDER_BIN/rm"
 RM_CALLS="$TMPROOT/rm-calls"
 AUDIT_REAL_RM=$(type -P rm) || fatal "rm is not on PATH"
 export AUDIT_RM_CALLS="$RM_CALLS" AUDIT_REAL_RM
+
+# An interrupting mv, put first on PATH for one run: it makes the move, then SIGTERMs the
+# collect (its parent) when the source was AUDIT_INTERRUPT_AFTER_MOVING, as a Ctrl-C landing
+# between install_collect's two renames would.
+MV_INTERRUPTER_BIN="$TMPROOT/mv-interrupter"
+mkdir -p "$MV_INTERRUPTER_BIN"
+cat > "$MV_INTERRUPTER_BIN/mv" <<'MV_INTERRUPTER'
+#!/usr/bin/env bash
+mv_arguments=("$@")
+"$AUDIT_REAL_MV" "$@"
+move_status=$?
+if (( $# >= 2 )) && [[ "${mv_arguments[$# - 2]}" == "$AUDIT_INTERRUPT_AFTER_MOVING" ]]; then
+    kill -TERM "$PPID"
+fi
+exit "$move_status"
+MV_INTERRUPTER
+chmod +x "$MV_INTERRUPTER_BIN/mv"
+AUDIT_REAL_MV=$(type -P mv) || fatal "mv is not on PATH"
+export AUDIT_REAL_MV
 
 # Built at runtime so the repo's gitleaks hook never sees a credential-shaped literal.
 FIXTURE_LINEAR_KEY="lin_api_""FIXTUREVALUE0123456789abcdefXYZ"
@@ -323,16 +351,18 @@ check "unreachable: exit 2, named, h1 collected, hosts.tsv says failed then ok" 
 printf 'collect: a re-collect replaces the earlier one on success and keeps it on failure\n'
 make_host rerun
 W_RERUN="$TMPROOT/ws-rerun"
-"$SUT" --collect --workspace "$W_RERUN" --host rerun=rerun:.claude >/dev/null 2>&1
+# Two hosts, so the two re-collects below swap twice in one run.
+"$SUT" --collect --workspace "$W_RERUN" --host rerun=rerun:.claude --host rerun2=rerun:.claude >/dev/null 2>&1
 rm "$FIXTURE_HOSTS/rerun/.claude/agents/x.md"
 # The replacing collect runs with the recording rm: an interrupt inside an rm of the earlier
 # tree would leave a partial tree that still looks like a collect, so it is renamed aside instead.
 rm -f "$RM_CALLS"
 PATH="$RM_RECORDER_BIN:$PATH" "$SUT" --collect --workspace "$W_RERUN" --host rerun=rerun:.claude \
-    >/dev/null 2>&1; rerun_rc=$?
+    --host rerun2=rerun:.claude >/dev/null 2>&1; rerun_rc=$?
 rm_recorder_live=no; [[ -s $RM_CALLS ]] && rm_recorder_live=yes
 earlier_removed_in_place=$(has_line "$RM_CALLS" "$W_RERUN/rerun")
-# ...and the earlier tree, once set aside, is removed by the run that replaced it.
+# ...and each earlier tree, once set aside, is removed by the swap that replaced it, not left to
+# the exit trap (which knows only the last swap of the run).
 aside_left=$(find "$W_RERUN" -name '.collecting-*' -print)
 stale_agent=absent; [[ -e $W_RERUN/rerun/cfg/agents/x.md ]] && stale_agent=present
 rerun_rows=$(wc -l 2>/dev/null < "$W_RERUN/hosts.tsv")
@@ -340,9 +370,9 @@ rerun_rows=$(wc -l 2>/dev/null < "$W_RERUN/hosts.tsv")
 earlier_tree_kept=no
 [[ -f $W_RERUN/rerun/facts.tsv && -f $W_RERUN/rerun/cfg/CLAUDE.md ]] && earlier_tree_kept=yes
 failed_status=$(cut -f1,2,5 "$W_RERUN/hosts.tsv" 2>/dev/null | tr '\n' '|')
-check "re-collect: stale file gone, earlier tree swapped out not rm'd, one hosts.tsv row; a failed one keeps the earlier tree" \
+check "re-collect: stale file gone, earlier trees swapped out not rm'd, one hosts.tsv row per host; a failed one keeps the earlier tree" \
     "$rerun_rc $stale_agent $rm_recorder_live $earlier_removed_in_place|$aside_left|$rerun_rows $failed_rc $earlier_tree_kept $failed_status" \
-    "0 absent yes no||1 2 yes rerun${TAB}down${TAB}failed|"
+    "0 absent yes no||2 2 yes rerun${TAB}down${TAB}failed|"
 
 printf 'collect: a workspace entry that is not an earlier collect is never replaced\n'
 W_FOREIGN="$TMPROOT/ws-foreign"
@@ -383,17 +413,22 @@ printf 'hostname\trodir\n' > "$FIXTURE_HOSTS/rodir/canned-stream/facts.tsv"
 printf 'linear key: %s\n' "$FIXTURE_LINEAR_KEY" > "$canned_locked/text.sh"
 printf 'BLOB\0BINARY\n' > "$canned_locked/blob.bin"
 chmod 555 "$canned_locked"
-# Set, not left to the umask: under a 077 umask the stream's `./` would be 700 anyway.
+# The stream's `./` member gets this mode, set rather than left to mkdir's umask...
 chmod 755 "$FIXTURE_HOSTS/rodir/canned-stream"
-"$SUT" --collect --workspace "$W_READONLY" --host rotree=rotree:.claude --host rodir=rodir:.claude \
+# ...and the collect runs under a pinned permissive umask, because GNU tar run by a non-root
+# user applies the umask when it extracts a member: under 077 the staging dir would come out
+# 700 with or without the collect's own chmod, and the mode check below would prove nothing.
+PERMISSIVE_UMASK=022
+( umask "$PERMISSIVE_UMASK"
+  "$SUT" --collect --workspace "$W_READONLY" --host rotree=rotree:.claude --host rodir=rodir:.claude ) \
     >/dev/null 2>&1; rc=$?
 staging_left=$(find "$W_READONLY" -name '.collecting-*' -print)
 unredacted_left=$(grep -rlF -- "$FIXTURE_LINEAR_KEY" "$W_READONLY" 2>/dev/null)
 binaries_left=$(find "$W_READONLY" -name blob.bin -print)
 both_collected=no; [[ -f $W_READONLY/rotree/cfg/hooks/locked/text.sh && -f $W_READONLY/rodir/cfg/locked/text.sh ]] \
     && both_collected=yes
-# The canned stream's `./` member carries canned-stream's own mode (mkdir's, not 700): unpacked
-# as-is it would open the staging dir, unredacted content and all, to other users.
+# The canned stream's `./` member is 755, which tar extracts as 755 under the umask above: kept,
+# it would open the staging dir, unredacted content and all, to other users.
 rodir_mode=$(find "$W_READONLY/rodir" -maxdepth 0 -printf '%m' 2>/dev/null)
 check "read-only dirs: both hosts collected, rodir's dir 700; no staging dir, unredacted literal or binary left" \
     "$rc $both_collected $rodir_mode|$staging_left|$unredacted_left|$binaries_left" "0 yes 700|||"
@@ -408,6 +443,39 @@ unredacted_left=$(grep -rlF -- "$FIXTURE_LINEAR_KEY" "$W_INTERRUPT" 2>/dev/null)
 interrupted_host_installed=no; [[ -e $W_INTERRUPT/interrupt ]] && interrupted_host_installed=yes
 check "interrupt: exit 143, nothing staged or unredacted left, host not installed" \
     "$rc $interrupted_host_installed|$staging_left|$unredacted_left" "143 no||"
+
+printf 'collect: an interrupt between the two renames puts the earlier collect back\n'
+make_host swap
+W_SWAP="$TMPROOT/ws-swap"
+"$SUT" --collect --workspace "$W_SWAP" --host swap=swap:.claude >/dev/null 2>&1
+# Only the new collect would carry this file, so its absence says the tree in place is the earlier one.
+printf -- '---\nname: new\n---\n' > "$FIXTURE_HOSTS/swap/.claude/agents/new.md"
+PATH="$MV_INTERRUPTER_BIN:$PATH" AUDIT_INTERRUPT_AFTER_MOVING="$W_SWAP/swap" \
+    "$SUT" --collect --workspace "$W_SWAP" --host swap=swap:.claude >/dev/null 2>&1; rc=$?
+earlier_collect_state=missing
+if [[ -f $W_SWAP/swap/facts.tsv && -f $W_SWAP/swap/cfg/agents/x.md ]]; then
+    earlier_collect_state=earlier
+    [[ -e $W_SWAP/swap/cfg/agents/new.md ]] && earlier_collect_state=new
+fi
+swap_leftovers=$(find "$W_SWAP" -name '.collecting-*' -print)
+check "mid-swap interrupt: exit 143, the earlier collect back in place, no staging or aside left" \
+    "$rc $earlier_collect_state|$swap_leftovers" "143 earlier|"
+
+printf "collect: a killed run's set-aside collect is put back if its host dir is missing, else removed\n"
+W_KILLED_SWAP="$TMPROOT/ws-killed-swap"
+"$SUT" --collect --workspace "$W_KILLED_SWAP" --host lost=h1:.claude --host kept=h1:.claude >/dev/null 2>&1
+# What a SIGKILL leaves: between the two renames, the host dir gone and its collect aside...
+mv "$W_KILLED_SWAP/lost" "$W_KILLED_SWAP/.collecting-lost.replaced"
+# ...and after them, the new collect in place with the earlier one still aside.
+cp -R "$W_KILLED_SWAP/kept" "$W_KILLED_SWAP/.collecting-kept.replaced"
+# Any run's startup sweep settles them; this one's own host is unreachable.
+"$SUT" --collect --workspace "$W_KILLED_SWAP" --host down=down:.claude >/dev/null 2>&1; rc=$?
+lost_restored=no; [[ -f $W_KILLED_SWAP/lost/facts.tsv && -f $W_KILLED_SWAP/lost/cfg/CLAUDE.md ]] && lost_restored=yes
+kept_intact=no; [[ -f $W_KILLED_SWAP/kept/facts.tsv ]] && kept_intact=yes
+# An aside moved onto an existing host dir would land inside it, so this searches the whole workspace.
+killed_swap_leftovers=$(find "$W_KILLED_SWAP" -name '.collecting-*' -print)
+check "killed mid-swap: the next run puts lost/ back, keeps kept/, and leaves no aside anywhere" \
+    "$rc $lost_restored $kept_intact|$killed_swap_leftovers" "2 yes yes|"
 
 # ---------------------------------------------------------------------------------------------
 # --collect on this machine (alias `local`)
@@ -455,6 +523,17 @@ laptop_unredacted=$(grep -rlF -- "$FIXTURE_LINEAR_KEY" "$W_LAPTOP" 2>/dev/null)
 check "local redaction: q1's credential is REDACTED, the literal nowhere in the workspace" \
     "$q1_redacted|$laptop_unredacted" "yes|"
 
+printf 'collect: a machine with no account dirs logs them absent\n'
+make_host noseats
+W_NOSEATS="$TMPROOT/ws-noseats"
+HOME="$FIXTURE_HOSTS/noseats" TMPDIR="$REMOTE_TMPDIR" "$SUT" --collect --workspace "$W_NOSEATS" \
+    --host laptop=local:.claude >/dev/null 2>&1; rc=$?
+account_dirs_absent=$(has_line "$W_NOSEATS/laptop/collect.log" \
+    "absent${TAB}.local/state/claude-account-dirs/*/settings.json")
+account_dirs_layout=absent; [[ -e $W_NOSEATS/laptop/account-dirs ]] && account_dirs_layout=present
+check "no ~/.local/state/claude-account-dirs: exit 0, logged absent, no account-dirs/ in the collect" \
+    "$rc $account_dirs_absent $account_dirs_layout" "0 yes absent"
+
 printf 'collect: the host tree is unchanged\n'
 H1_TREE_AFTER=$(host_tree_listing "$H1")
 LAP_TREE_AFTER=$(host_tree_listing "$LAP")
@@ -468,7 +547,7 @@ check "read-only: h1's and lap's trees identical after every collect above, the 
     "$tree_unchanged $lap_tree_unchanged $listing_covers_fixture|$remote_tmp_leftovers" "yes yes yes|"
 
 printf '\n'
-EXPECTED_ROWS=24
+EXPECTED_ROWS=27
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

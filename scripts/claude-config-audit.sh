@@ -143,8 +143,10 @@ COLLECT_SCRIPT_SHELL=(bash -s --)
 STAGING_PREFIX='.collecting-'
 UNPACK_ERRORS_SUFFIX='.unpack-errors'
 REDACTING_SUFFIX='.redacting'
-# An earlier collect being replaced is renamed to $STAGING_PREFIX<name>$REPLACED_SUFFIX, a name
-# the startup sweep removes if a run dies before it does.
+# An earlier collect being replaced is renamed aside to $STAGING_PREFIX<name>$REPLACED_SUFFIX
+# until the new one is in place, and is the only copy of it meanwhile. If the run dies between
+# the two renames, the traps put it back; after a SIGKILL, the next run's startup sweep puts
+# back any aside whose host dir is missing, and removes it only when the host dir is there.
 REPLACED_SUFFIX='.replaced'
 
 # --- the remote collect -------------------------------------------------------------------------
@@ -353,6 +355,10 @@ parse_args() {
 # SIGTERM, and collect_main sweeps any a SIGKILLed run left behind. bash runs the EXIT trap on
 # a fatal SIGTERM too (measured); INT and TERM are trapped anyway for an explicit exit status.
 CURRENT_STAGING_DIR=""
+# Set while install_collect swaps an earlier collect out: where it was set aside, and the host
+# dir it came from, so the traps can put it back (see REPLACED_SUFFIX).
+CURRENT_ASIDE_DIR=""
+CURRENT_HOST_DIR=""
 
 # Owner rwx on every directory and rw on every file, so a read-only directory in a stream
 # (GNU tar unpacks a 555 directory member as 555) can stop neither a redaction nor a removal.
@@ -378,6 +384,36 @@ remove_current_staging() {
         warn "could not remove $CURRENT_STAGING_DIR, which may hold UNREDACTED host content; remove it by hand"
     fi
     CURRENT_STAGING_DIR=""
+}
+
+path_exists() { [[ -e "$1" || -L "$1" ]]; }
+
+# An earlier collect set aside at ASIDE_DIR is put back at HOST_DIR when nothing is there (the
+# swap never completed), and removed when something is (normally the new collect). A partial
+# aside, whose removal was cut short and so lacks facts.tsv, is removed and never put back.
+settle_set_aside_collect() {   # ASIDE_DIR HOST_DIR
+    local aside_dir="$1" host_dir="$2"
+    path_exists "$aside_dir" || return 0
+    if path_exists "$host_dir" || ! is_earlier_collect "$aside_dir"; then
+        remove_tree "$aside_dir" \
+            || warn "could not remove $aside_dir, a replaced collect; the next --collect removes it"
+    elif ! mv "$aside_dir" "$host_dir"; then
+        warn "the earlier collect of $host_dir is at $aside_dir; the next --collect puts it back"
+    fi
+}
+
+finish_current_swap() {
+    [[ -n "$CURRENT_ASIDE_DIR" ]] || return 0
+    settle_set_aside_collect "$CURRENT_ASIDE_DIR" "$CURRENT_HOST_DIR"
+    CURRENT_ASIDE_DIR=""
+    CURRENT_HOST_DIR=""
+}
+
+# What the traps run: an earlier collect a swap had set aside is settled first, since it may be
+# the only copy, then the staging dir is removed.
+clean_up_current_collect() {
+    finish_current_swap
+    remove_current_staging
 }
 
 # Every text file under DIR is rewritten in place through the redactor; a file grep calls
@@ -417,26 +453,25 @@ is_earlier_collect() { [[ -d "$1" && ! -L "$1" && -f "$1/facts.tsv" ]]; }
 # re-collect (an ssh drop) leaves the earlier tree whole; hosts.tsv says which is current. The
 # swap is two renames, never a removal in place: an interrupt inside an rm of HOST_DIR would
 # leave a partial tree there that still holds facts.tsv and so passes for a collect. The
-# earlier tree waits at ASIDE_DIR, under the staging prefix, until the new one is in place.
+# earlier tree waits at ASIDE_DIR, under the staging prefix, until the new one is in place,
+# and the swap is recorded first so the traps can put it back if the run dies in between.
 install_collect() {   # STAGING_DIR HOST_DIR ASIDE_DIR → 0 when STAGING_DIR is now HOST_DIR
-    local staging_dir="$1" host_dir="$2" aside_dir="$3" earlier_set_aside=no
-    if [[ -e "$host_dir" || -L "$host_dir" ]]; then
+    local staging_dir="$1" host_dir="$2" aside_dir="$3" install_status=0
+    if path_exists "$host_dir"; then
         is_earlier_collect "$host_dir" || return 1
         # mv onto an existing directory would move HOST_DIR inside it.
         remove_tree "$aside_dir" || return 1
-        mv "$host_dir" "$aside_dir" || return 1
-        earlier_set_aside=yes
-    fi
-    if ! mv "$staging_dir" "$host_dir"; then
-        if [[ "$earlier_set_aside" == yes ]] && ! mv "$aside_dir" "$host_dir"; then
-            warn "the earlier collect is at $aside_dir; the next --collect removes it"
+        CURRENT_ASIDE_DIR="$aside_dir"
+        CURRENT_HOST_DIR="$host_dir"
+        if ! mv "$host_dir" "$aside_dir"; then
+            finish_current_swap
+            return 1
         fi
-        return 1
     fi
-    if [[ "$earlier_set_aside" == yes ]] && ! remove_tree "$aside_dir"; then
-        warn "could not remove $aside_dir, the replaced collect; the next --collect removes it"
-    fi
-    return 0
+    mv "$staging_dir" "$host_dir" || install_status=1
+    # Removes the earlier tree once the new one is in place, or puts it back if it is not.
+    finish_current_swap
+    return "$install_status"
 }
 
 # The one path every host's content takes: SCRIPT_RUNNER is the command that runs remote_script
@@ -557,13 +592,21 @@ collect_host() {   # NAME ALIAS CFGDIR → 0 collected, 1 failed
 collect_main() {
     [[ -x "$REDACTOR" ]] || die "the redactor $REDACTOR is missing; nothing is collected without it"
     mkdir -p "$WORKSPACE" || die "cannot create the workspace $WORKSPACE"
-    trap remove_current_staging EXIT
-    trap 'remove_current_staging; exit "$EXIT_INTERRUPTED"' INT
-    trap 'remove_current_staging; exit "$EXIT_TERMINATED"' TERM
-    local stale_staging
-    for stale_staging in "$WORKSPACE/$STAGING_PREFIX"*; do
-        remove_tree "$stale_staging" \
-            || die "cannot remove $stale_staging, left by an earlier run; it may hold UNREDACTED host content"
+    trap clean_up_current_collect EXIT
+    trap 'clean_up_current_collect; exit "$EXIT_INTERRUPTED"' INT
+    trap 'clean_up_current_collect; exit "$EXIT_TERMINATED"' TERM
+    # What a SIGKILLed run left: a staging dir is removed; an earlier collect it had set aside
+    # is put back if its host dir is missing (settle_set_aside_collect).
+    local stale_entry stale_host_name
+    for stale_entry in "$WORKSPACE/$STAGING_PREFIX"*; do
+        if [[ "$stale_entry" == *"$REPLACED_SUFFIX" ]]; then
+            stale_host_name="${stale_entry#"$WORKSPACE/$STAGING_PREFIX"}"
+            stale_host_name="${stale_host_name%"$REPLACED_SUFFIX"}"
+            settle_set_aside_collect "$stale_entry" "$WORKSPACE/$stale_host_name"
+            continue
+        fi
+        remove_tree "$stale_entry" \
+            || die "cannot remove $stale_entry, left by an earlier run; it may hold UNREDACTED host content"
     done
     local spec attempted_at host_status host_row
     local -a host_rows=() failed_names=()
