@@ -109,3 +109,84 @@ What was measured on Claude Code 2.1.289, and why the setup is shaped this way:
 **The key itself** can be narrowed: Linear lets a personal API key be limited to Read, Write,
 Admin, Create issues or Create comments, and to specific teams (Settings → Account → Security &
 Access). It is the same key rabota writes with, so it needs Read and Write, and never Admin.
+
+## Auditing the hosts (DO-880)
+
+The laptop, dev, sol-build and nanoclaw each grew their own config dir by hand, so no one can say
+which skills, hooks, memory and settings a host has, or which copy is the reference.
+`scripts/claude-config-audit.sh` copies each host's configuration into one workspace on the laptop
+and reports, one column per host, where they agree. It is step 1 of the
+[shared-configuration design](superpowers/specs/2026-11-04-shared-claude-config-design.md): no host
+is rendered from, or synced to, a shared source before this answer exists.
+
+    scripts/claude-config-audit.sh --collect   # every default host into the workspace
+    scripts/claude-config-audit.sh --matrix    # reads the workspace only; writes the five reports
+
+| verb | exit |
+|---|---|
+| `--collect` | 0 every host collected · 2 a host failed (the others are still collected), or `hosts.tsv` cannot be parsed (nothing is collected) · 130/143 interrupted |
+| `--matrix` | 0 every row identical · 1 drift · 2 a host in `hosts.tsv` failed or has no `facts.tsv`, or a collect is not named in `hosts.tsv` (no report is written), or a report cannot be written |
+
+Both exit 64 on a usage error.
+
+**Read-only on every host.** Each host runs one `bash -s` over ssh (`BatchMode`, no agent
+forwarding), and that script runs only `find`, `sed`, `tar`, `date`, `hostname` (or `uname -n`),
+`id -un`, and `--version` of `~/.local/bin/claude` and `~/.local/bin/herdr`. Its one write is its
+own `mktemp -d` for the file list and the facts, removed on exit. The laptop (`local`) runs the
+same script without ssh. The state table asserts a fixture host's tree is byte-identical before
+and after.
+
+**What is copied.** From the config dir: `CLAUDE.md`, `settings.json`, `settings.local.json`,
+`keybindings.json`, `hooks/`, `skills/`, `agents/`, `commands/`, `rules/` and the two plugin
+registries; under `projects/`, only `*/memory/`. Then each root `CLAUDE.md` and each repo's
+`.claude/`, one level deep, in `~/quantivly`, `~/Projects` and `~/toysim`, and `~/.dotfiles/.claude`
+(as `repos/home/.dotfiles/.claude/`). Symlinks are dereferenced and recorded in `links.tsv`, so a
+link is never read as a second copy. Pruned at every depth (`EXCLUDE_NAMES`): `.credentials.json*`,
+`.claude.json*`, `*.jsonl`, `sessions`, `shell-snapshots`, `file-history`, `paste-cache`, `debug`,
+`cache`, `backups`, `downloads`, `telemetry`, `security`, `*.signature*`,
+`plugins/{cache,marketplaces,repos,data,store,synced}`, `skills/synced` and `worktrees`. Every
+file then goes through `scripts/redact-secrets.sh`; a binary file is dropped and named in
+`collect.log`, and a missing path is logged as absent, never a failure.
+
+```
+<ws>/hosts.tsv                      name  alias  cfgdir  collected_at  status
+<ws>/<host>/facts.tsv               key<TAB>value: hostname user home cfgdir claude_version herdr_version collected_at
+<ws>/<host>/links.tsv               path<TAB>target, every symlink in the include set
+<ws>/<host>/collect.log             skipped binaries, absent paths
+<ws>/<host>/cfg/…                   CLAUDE.md settings.json settings.local.json keybindings.json hooks/ skills/ agents/ commands/ rules/ plugins/{known_marketplaces,installed_plugins}.json
+<ws>/<host>/memory/<projects-key>/  each projects/*/memory/ dir, named by its projects/ entry
+<ws>/<host>/roots/<name>.CLAUDE.md  ~/quantivly ~/Projects ~/toysim root files, by basename of the root
+<ws>/<host>/repos/<root>/<repo>/.claude/…   repo-local .claude dirs under those roots
+<ws>/<host>/account-dirs/<seat>/settings.json   laptop only: each account dir's real settings copy
+<ws>/matrix.tsv  matrix.md  settings-matrix.md  memory-matrix.tsv  memory-matrix.md
+```
+
+`matrix.*` has every collected file by layout path: `identical`, `only-on:H`, `missing-on:H,…` or
+`differs newest:H`. `settings-matrix.md` compares `settings.json` key by key: `permissions.allow`
+as set differences, hooks by script basename, plugins and marketplaces by name. `memory-matrix.*`
+compares memory files per store, the key stripped of `-home-USER-` so stores meet across homes.
+
+**`hosts.tsv` is the authority on which collects are valid.** Each `--collect` merges its rows in:
+a host it did not collect keeps its row, so re-collecting one host never drops the others, and a
+host's earlier collect is replaced only once the new one is whole. `--matrix` reports on every
+host the file names and refuses a collect directory it does not name. A host is retired by
+deleting its row and its directory.
+
+Default hosts: `laptop=local:.claude`, `dev=dev:.claude`, `sol-build=sol-build:.claude`,
+`nanoclaw=nanoclaw:.claude-herdr`. `--host NAME=ALIAS:CFGDIR` (repeatable, `--collect` only)
+replaces them: `ALIAS` is an ssh alias or `local`, `CFGDIR` a dot-directory under that host's
+`$HOME`. The default workspace is `~/Projects/handoffs/2026-11-claude-config-audit`
+(`--workspace DIR`). `CLAUDE_CONFIG_AUDIT_WORKSPACE` overrides that default and
+`CLAUDE_CONFIG_AUDIT_SSH` the ssh command; the state table,
+`scripts/test-claude-config-audit.sh`, uses both.
+
+**Known limits.**
+
+- **No workspace lock.** Never run two `--collect`s on one workspace at once: each sweeps the
+  other's staging directories.
+- **A workspace path containing a backslash breaks `--collect`.** The default has none.
+- **`--matrix` takes tens of seconds** on a laptop-sized workspace; it hashes every collected file
+  on every run.
+- **A host whose shell startup prints to stdout fails its collect**: the stream does not unpack,
+  so nothing partial lands.
+- **Untested against AL2-era hosts** (bash 4.2, tar 1.26); every default host runs Ubuntu.

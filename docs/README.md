@@ -39,7 +39,7 @@ Two audiences run through the whole tree, and mixing them is what made `CLAUDE.m
 | page | what it is | for |
 |---|---|---|
 | [CLAUDE_ACCOUNT_MCP.md](CLAUDE_ACCOUNT_MCP.md) | what to run and what to click to fix a logout or a dropped MCP server | guide |
-| [CLAUDE_SETUP.md](CLAUDE_SETUP.md) | which plugins are enabled at user scope vs per project (neither file is in this repo, so this page is the record) | record |
+| [CLAUDE_SETUP.md](CLAUDE_SETUP.md) | which plugins are enabled at user scope vs per project (neither file is in this repo, so this page is the record) — **plus** auditing every host's Claude Code configuration, read-only, with `claude-config-audit.sh` | record + guide |
 | [CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md) | the account-dir mechanism and every credential incident behind it: the race, clauth's writes, suspend storms, `auth_broken` | record |
 | [CLAUDE_ACCOUNT_PICKER.md](CLAUDE_ACCOUNT_PICKER.md) | how a directory's account is chosen, and how the ranking has been wrong | record |
 
