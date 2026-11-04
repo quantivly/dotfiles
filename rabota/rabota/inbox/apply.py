@@ -20,21 +20,65 @@ def new_batch_id(prefix: str) -> str:
 def apply_auto(plan: dict, client, store, tenant, dry_run: bool = False) -> dict:
     batch = new_batch_id("auto")
     todo = [i for b in AUTO_BUCKETS for i in plan["buckets"].get(b, []) if i["tier"] == "auto"]
-    rep = {"batch_id": batch, "archived": 0, "by_bucket": {}, "verified": 0, "failed": []}
     if dry_run:
-        rep["would_archive"] = [i["notification_id"] for i in todo]; return rep
-    for i in todo:
-        store.record_decision(batch, tenant.name, "auto", i["bucket"], "notification", i["notification_id"], "archive", {"archivedAt": None})
+        return {"batch_id": batch, "archived": 0, "by_bucket": {}, "verified": 0, "failed": [],
+                "would_archive": [i["notification_id"] for i in todo]}
+    return archive_notifications(batch, "auto", [(i["bucket"], i["notification_id"]) for i in todo], client, store, tenant)
+
+
+def archive_notifications(batch: str, tier: str, rows: list[tuple[str, str]], client, store, tenant) -> dict:
+    """Archive each ``(bucket, notification id)``: a rollback row before every write, one re-fetch
+    after the batch to verify. The auto tier's archive and DO-877's dismissal share it."""
+    rep = {"batch_id": batch, "archived": 0, "by_bucket": {}, "verified": 0, "failed": []}
+    for bucket, nid in rows:
+        store.record_decision(batch, tenant.name, tier, bucket, "notification", nid, "archive", {"archivedAt": None})
         try:
-            r = client.archive_notification(i["notification_id"])
+            r = client.archive_notification(nid)
             if not r.get("success"): raise errors.RabotaError("success=false")
-            rep["archived"] += 1; rep["by_bucket"][i["bucket"]] = rep["by_bucket"].get(i["bucket"], 0) + 1
+            rep["archived"] += 1; rep["by_bucket"][bucket] = rep["by_bucket"].get(bucket, 0) + 1
         except errors.RabotaError as e:
-            rep["failed"].append({"id": i["notification_id"], "error": str(e)})
+            rep["failed"].append({"id": nid, "error": str(e)})
     still_inbox = {n["id"] for n in client.inbox_notifications()}
-    for i in todo:
-        if i["notification_id"] not in still_inbox and not any(f["id"] == i["notification_id"] for f in rep["failed"]):
-            store.mark_verified(batch, i["notification_id"]); rep["verified"] += 1
+    failed = {f["id"] for f in rep["failed"]}
+    for _bucket, nid in rows:
+        if nid not in still_inbox and nid not in failed:
+            store.mark_verified(batch, nid); rep["verified"] += 1
+    return rep
+
+
+# The answer kinds `inbox answer` records (DO-877); each names the write the tick makes for it.
+ANSWER_DUE_POLICY = "due_policy"
+ANSWER_PROJECT_PROMPT = "project_prompt"
+ANSWER_KINDS = (ANSWER_DUE_POLICY, ANSWER_PROJECT_PROMPT)
+
+
+def apply_answers(plan: dict, client, store, tenant, dry_run: bool = False) -> dict:
+    """DO-877: apply every pending answer recorded from Sol through the writes the typed commands
+    make -- a ``due_policy`` confirmation clears the due dates of the issues it covered that are
+    STILL in the batch (the propose tier's clear, a rollback row per issue; an issue that joined
+    the batch after the phone saw it is not touched), and a ``project_prompt`` dismissal archives
+    each listed notification (a rollback row per id, one re-fetch verify). A row is stamped
+    applied with its batch once attempted, so no tick applies it twice; its outcome is the batch's
+    decision rows and ``rollback <batch_id>`` undoes either. Dry run: names what it would apply
+    and stamps nothing."""
+    pending = store.pending_inbox_answers(tenant.name)
+    if dry_run:
+        return {"applied": [], "would_apply": [{"id": a["id"], "kind": a["kind"], "ids": a["ids"]} for a in pending]}
+    rep = {"applied": []}
+    for answer in pending:
+        if answer["kind"] == ANSWER_DUE_POLICY:
+            covered = set(answer["ids"])
+            issues = [i for i in plan["batches"]["due_policy"]["issues"] if i["identifier"] in covered]
+            outcome = (apply_due_policy({"batches": {"due_policy": {"issues": issues}}}, client, store, tenant, confirmed=True)
+                       if issues else None)
+        elif answer["kind"] == ANSWER_PROJECT_PROMPT:
+            outcome = archive_notifications(new_batch_id("dismiss"), "decision",
+                                            [(ANSWER_PROJECT_PROMPT, nid) for nid in answer["ids"]], client, store, tenant)
+        else:
+            continue   # a kind this rabota does not apply: left pending, never stamped as done
+        batch = outcome["batch_id"] if outcome else None
+        store.mark_inbox_answer_applied(answer["id"], batch)
+        rep["applied"].append({"id": answer["id"], "kind": answer["kind"], "batch_id": batch, "outcome": outcome})
     return rep
 
 

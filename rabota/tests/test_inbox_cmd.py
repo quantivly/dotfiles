@@ -106,6 +106,59 @@ class InboxCmdTests(unittest.TestCase):
         with self.assertRaises(errors.Refused):
             cmd.run_plan(ctx)
 
+    # DO-877: `inbox answer` records; the auto tick applies.
+
+    def test_answer_writes_the_row_and_nothing_else(self):
+        # ctx.env carries no Linear key: a client built here would Refuse, so a row and no error
+        # proves none was built. No file in the state dir changes and no decision row is written.
+        ctx = self.ctx(); cmd.run_plan(ctx)
+        # The store's own files (rabota.db and its WAL pair) are the one thing allowed to change.
+        def files(): return {p.name: p.stat().st_mtime_ns for p in ctx.state_dir.rglob("*") if p.is_file() and not p.name.startswith("rabota.db")}
+        before = files()
+        due = cmd.run_answer(ctx, "due_policy", None, [], True, False)
+        prompt = cmd.run_answer(ctx, None, "project_prompt", ["n-a", "n-b"], False, True)
+        self.assertEqual((due["kind"], sorted(due["ids"]), due["duplicate"]), ("due_policy", ["HUB-11", "HUB-12", "HUB-13", "HUB-14", "HUB-15"], False))
+        self.assertEqual((prompt["kind"], prompt["ids"], prompt["duplicate"]), ("project_prompt", ["n-a", "n-b"], False))
+        self.assertTrue(cmd.run_answer(ctx, None, "project_prompt", ["n-a", "n-b"], False, True)["duplicate"])
+        self.assertEqual(len(ctx.store.pending_inbox_answers("quantivly")), 2)
+        self.assertEqual(ctx.store._rows("SELECT COUNT(*) AS n FROM inbox_decisions")[0]["n"], 0)
+        self.assertEqual(files(), before)
+
+    def test_answer_refuses_what_it_cannot_record(self):
+        ctx = self.ctx()
+        with self.assertRaises(errors.Refused): cmd.run_answer(ctx, "due_policy", None, [], False, False)   # not confirmed
+        with self.assertRaises(errors.Refused): cmd.run_answer(ctx, "due_policy", None, [], True, False)    # no plan yet
+        with self.assertRaises(errors.Usage): cmd.run_answer(ctx, None, "project_prompt", ["n-a"], False, False)   # no --dismiss
+        with self.assertRaises(errors.Usage): cmd.run_answer(ctx, None, "project_prompt", [], False, True)        # no ids
+        with self.assertRaises(errors.Usage): cmd.run_answer(ctx, "due_policy", "project_prompt", [], True, True)  # both
+        with self.assertRaises(errors.Usage): cmd.run_answer(ctx, None, None, [], False, False)
+        self.assertEqual(ctx.store.pending_inbox_answers("quantivly"), [])
+        self.assertEqual(cmd.split_ids(" n-a, n-b ,,"), ["n-a", "n-b"]); self.assertEqual(cmd.split_ids(None), [])
+
+    def test_answer_dry_run_writes_nothing(self):
+        ctx = self.ctx(); cmd.run_plan(ctx); ctx.dry_run = True
+        out = cmd.run_answer(ctx, None, "project_prompt", ["n-a"], False, True)
+        self.assertEqual(out["dry_run"], "nothing written (inbox_answers row)")
+        self.assertEqual(ctx.store.pending_inbox_answers("quantivly"), [])
+
+    def test_the_auto_tick_applies_exactly_the_pending_answers_once(self):
+        ctx = self.ctx(); cmd.run_plan(ctx)
+        lin = json.loads((FIX / "inbox" / "linear.json").read_text())
+        client = FakeClient(lin["notifications"], lin["issues"])
+        cmd.run_answer(ctx, "due_policy", None, [], True, False)
+        cmd.run_answer(ctx, None, "project_prompt", ["n7"], False, True)
+        rep = cmd.run_apply(ctx, tier="auto", batch=None, confirmed=False, client=client)
+        self.assertEqual([(a["kind"], a["outcome"]["cleared"] if a["kind"] == "due_policy" else a["outcome"]["archived"]) for a in rep["answers"]["applied"]],
+                         [("due_policy", 5), ("project_prompt", 1)])
+        self.assertEqual(ctx.store.pending_inbox_answers("quantivly"), [])
+        self.assertEqual([r["kind"] for r in ctx.store.applied_inbox_answers("quantivly", 25)], ["project_prompt", "due_policy"])
+        # A second tick re-runs the auto tier over the same plan file (the real tick re-plans first), so
+        # only the answer-driven writes are compared: no due date cleared again, n7 archived once.
+        def answer_writes(): return [c for c in client.calls if c[0] == "due" or c == ("archive", "n7")]
+        writes = answer_writes()
+        self.assertEqual(cmd.run_apply(ctx, tier="auto", batch=None, confirmed=False, client=client)["answers"], {"applied": []})
+        self.assertEqual(answer_writes(), writes)
+
     def test_dry_run_apply_needs_no_credentials(self):
         ctx = self.ctx(); cmd.run_plan(ctx)  # ctx.env carries no Linear key
         rep = cmd.run_apply(ctx, tier="auto", batch=None, confirmed=False, dry_run=True)

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rabota inbox answer` records an answer from Sol; the tick applies it with its rollback rows
+  (DO-877).** `--batch due_policy --confirmed` and `--bucket project_prompt --ids <id,…> --dismiss`
+  each write one `inbox_answers` row (tenant, kind, ids, recorded_at, applied_at, batch_id) and
+  nothing else: no Linear client, no file; a repeat of a still-pending answer is the same row.
+  Precompute's `auto` step then applies every pending row through the existing apply — a
+  confirmation clears the due dates of the issues it covered that are still in the batch (the
+  propose tier's clear, rollback row per issue), a dismissal archives each notification (rollback
+  row per id, one re-fetch verify) — stamps `applied_at` and the `batch_id`, and `inbox rollback
+  <batch_id>` undoes either. `show` carries `answers.pending` and `answers.applied`. Schema v7.
+
 - **`rabota snooze <key> --until <when>` and `rabota unsnooze <key>` (DO-874).** A snooze is a
   `snoozes` row (tenant, key, `until`, `ts`; one per key, a second snooze replaces the first), and
   `rank` drops the key from every bucket while `until` is ahead of the clock, saying so in

@@ -63,6 +63,8 @@ def run_apply(ctx: Context, tier: str, batch: str | None, confirmed: bool, clien
     if tier == "auto":
         if client is None and not dry_run: client = LinearClient.from_context(ctx)
         rep = apply.apply_auto(plan, client, ctx.store, ctx.tenant, dry_run=dry_run)
+        # DO-877: the answers Sol recorded ride the same tick, after the auto tier, with the same client.
+        rep["answers"] = apply.apply_answers(plan, client, ctx.store, ctx.tenant, dry_run=dry_run)
         emit.write_file(_summary_path(ctx), buckets.summary_line(plan, rep) + "\n", dry_run=dry_run)
         return rep
     if tier == "propose":
@@ -76,6 +78,47 @@ def run_apply(ctx: Context, tier: str, batch: str | None, confirmed: bool, clien
             raise errors.Refused("stale_backlog: cancel is not automated in v2.0; identifiers: " + " ".join(ids))
         raise errors.Usage("--batch must be due_policy or stale_backlog")
     raise errors.Usage("--tier must be auto or propose")
+
+
+def run_answer(ctx: Context, batch: str | None, bucket: str | None, ids: list[str], confirmed: bool,
+               dismiss: bool) -> dict:
+    """DO-877: record an answer from Sol for the tick to apply. It writes the ``inbox_answers`` row
+    and nothing else: no Linear client is built (the fleet agent that runs this holds no rabota
+    secret), no file is written, and the plan is only READ -- to name the issues a ``due_policy``
+    confirmation covers, so the tick clears exactly those and nothing that joined the batch later.
+    A repeat of a still-pending answer is the same row, reported ``duplicate``."""
+    if batch == apply.ANSWER_DUE_POLICY:
+        if bucket or ids or dismiss:
+            raise errors.Usage("--batch due_policy takes --confirmed and nothing else")
+        if confirmed is not True:
+            raise errors.Refused("due_policy is a propose-tier batch; pass --confirmed after the user's OK")
+        if not _plan_path(ctx).exists():
+            raise errors.Refused("no inbox-plan.json to confirm against; the precompute tick writes it")
+        plan = json.loads(_plan_path(ctx).read_text())
+        covered = [i["identifier"] for i in plan["batches"]["due_policy"]["issues"]]
+        if not covered:
+            raise errors.Refused("the due_policy batch is empty; nothing to confirm")
+        kind = apply.ANSWER_DUE_POLICY
+    elif bucket == apply.ANSWER_PROJECT_PROMPT:
+        if batch or confirmed:
+            raise errors.Usage("--bucket project_prompt takes --ids and --dismiss and nothing else")
+        if not dismiss:
+            raise errors.Usage("--bucket project_prompt needs --dismiss; dismissal is its one answer")
+        if not ids:
+            raise errors.Usage("--ids must name at least one notification id")
+        covered, kind = list(ids), apply.ANSWER_PROJECT_PROMPT
+    else:
+        raise errors.Usage("pass --batch due_policy --confirmed, or --bucket project_prompt --ids <id,...> --dismiss")
+    if ctx.dry_run:
+        return {"kind": kind, "ids": covered, "dry_run": "nothing written (inbox_answers row)"}
+    row = ctx.store.record_inbox_answer(ctx.tenant.name, kind, covered)
+    return {"id": row["id"], "kind": row["kind"], "ids": row["ids"], "recorded_at": row["recorded_at"],
+            "duplicate": row["duplicate"]}
+
+
+def split_ids(text: str | None) -> list[str]:
+    """``--ids a,b, c`` → ``["a", "b", "c"]``; an empty flag is no ids."""
+    return [i.strip() for i in (text or "").split(",") if i.strip()]
 
 
 def run_rollback(ctx: Context, batch_id: str, client=None, dry_run: bool = False) -> dict:
@@ -94,6 +137,10 @@ def _build(sub):
     ap.add_argument("--batch", choices=["due_policy", "stale_backlog"]); ap.add_argument("--confirmed", action="store_true")
     rb = s.add_parser("rollback"); rb.add_argument("batch_id")
     s.add_parser("summary")
+    an = s.add_parser("answer", help="record an answer from Sol for the tick to apply (writes the row only)")
+    an.add_argument("--batch", choices=[apply.ANSWER_DUE_POLICY]); an.add_argument("--confirmed", action="store_true")
+    an.add_argument("--bucket", choices=[apply.ANSWER_PROJECT_PROMPT]); an.add_argument("--ids", help="comma-separated notification ids")
+    an.add_argument("--dismiss", action="store_true")
 
 
 def _run(ns):
@@ -101,6 +148,8 @@ def _run(ns):
     if ns.inbox_command == "plan": return run_plan(ctx, ns.allow_stale)
     if ns.inbox_command == "apply": return run_apply(ctx, ns.tier, ns.batch, ns.confirmed, dry_run=ns.dry_run)
     if ns.inbox_command == "rollback": return run_rollback(ctx, ns.batch_id, dry_run=ns.dry_run)
+    if ns.inbox_command == "answer":
+        return run_answer(ctx, ns.batch, ns.bucket, split_ids(ns.ids), ns.confirmed, ns.dismiss)
     if ns.inbox_command == "summary":
         p = _summary_path(ctx); return [p.read_text().strip()] if p.exists() else ["inbox: no plan yet"]
 

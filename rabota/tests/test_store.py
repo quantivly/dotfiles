@@ -112,6 +112,40 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(s.snoozes("quantivly"), [])
         s.close()
 
+    def test_inbox_answers_record_once_per_pending_kind_and_ids_then_stamp(self):
+        # DO-877: a repeat of a still-pending answer is the same row (`duplicate`), per tenant;
+        # once stamped applied the same answer may be recorded again, as a new row.
+        s = self.store
+        first = s.record_inbox_answer("quantivly", "due_policy", ["HUB-11", "HUB-12"])
+        again = s.record_inbox_answer("quantivly", "due_policy", ["HUB-11", "HUB-12"])
+        other = s.record_inbox_answer("quantivly", "project_prompt", ["n-1"])
+        s.record_inbox_answer("toysim", "due_policy", ["HUB-11", "HUB-12"])
+        self.assertEqual((first["duplicate"], again["duplicate"], other["duplicate"]), (False, True, False))
+        self.assertEqual(again["id"], first["id"])
+        self.assertEqual([(r["id"], r["kind"], r["ids"]) for r in s.pending_inbox_answers("quantivly")],
+                         [(first["id"], "due_policy", ["HUB-11", "HUB-12"]), (other["id"], "project_prompt", ["n-1"])])
+        self.assertEqual(s.applied_inbox_answers("quantivly", 25), [])
+        s.mark_inbox_answer_applied(first["id"], "due-20261104-120000")
+        self.assertEqual([r["id"] for r in s.pending_inbox_answers("quantivly")], [other["id"]])
+        applied = s.applied_inbox_answers("quantivly", 25)
+        self.assertEqual([(r["id"], r["batch_id"]) for r in applied], [(first["id"], "due-20261104-120000")])
+        self.assertRegex(applied[0]["applied_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertFalse(s.record_inbox_answer("quantivly", "due_policy", ["HUB-11", "HUB-12"])["duplicate"])
+        self.assertEqual(len(s.pending_inbox_answers("toysim")), 1)
+
+    def test_migrate_v6_to_v7_adds_inbox_answers_on_a_v6_shaped_store(self):
+        from rabota.store import Store, SCHEMA_VERSION
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        conn = sqlite3.connect(Path(tmp.name) / "rabota.db", isolation_level=None)
+        conn.executescript("CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES (6);")
+        conn.close()
+        s = Store.open(Path(tmp.name))
+        self.assertEqual(s.schema_version(), SCHEMA_VERSION)
+        self.assertEqual({r[1] for r in s.conn.execute("PRAGMA table_info(inbox_answers)")},
+                         {"id", "tenant", "kind", "ids", "recorded_at", "applied_at", "batch_id"})
+        self.assertEqual(s.pending_inbox_answers("quantivly"), [])
+        s.close()
+
     def test_newer_on_disk_schema_is_refused_and_left_alone(self):
         # A DB written by a future rabota: this code cannot know its semantics, so it must not write.
         self.store.conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION + 1,))
