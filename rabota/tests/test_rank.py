@@ -24,6 +24,8 @@ class RankTests(unittest.TestCase):
         linear = {"viewer": {"id": "me"}, "issues": over.get("issues", []), "notifications": []}
         if "blocked" in over:                       # DO-878: the snapshot section; absent on a snapshot older than DO-875/878
             linear["blocked"] = over["blocked"]
+        if "cycles" in over:                        # DO-879: DO-875's section; absent on an older snapshot
+            linear["cycles"] = over["cycles"]
         github = {"login": "work-login", "review_requests": over.get("rr", []), "own_prs": over.get("prs", []), "merged_recent": []}
         return rank.RankInputs(linear=linear, github=github, slack=None, inbox_plan=over.get("plan"),
                                census=over.get("census"), pins=over.get("pins", []), tenant=T, today=date(2026, 9, 16))
@@ -182,6 +184,53 @@ class RankTests(unittest.TestCase):
         for inputs in (self.base(issues=issues, blocked=blocked), self.base(issues=issues)):
             seq = rank.rank(inputs)
             self.assertEqual(seq["items"][0]["why_now"], "due 2026-09-22")
+
+    def test_bucket_3_and_4_issues_in_their_teams_active_cycle_say_so_and_order_before_the_rest(self):
+        # DO-879: cycle membership is the team's schedule. An own unstarted or started issue in its
+        # team's active cycle (DO-875's `cycles[].issue_identifiers`) says "in the active cycle ·
+        # ends in N days" before its own line and orders before non-cycle rows within buckets 3 and 4.
+        # The non-cycle rows come FIRST in the issue list, so the expected order is the rule's doing, not the build order's.
+        issues = [issue("HUB-2", "unstarted", "High", due="2026-09-18"), issue("HUB-1", "unstarted", "High", due="2026-09-22"),
+                  issue("HUB-4", "started", "Medium", updated="2026-09-12T00:00:00Z"),
+                  issue("HUB-3", "started", "Medium", updated="2026-09-10T00:00:00Z")]
+        cycles = [{"id": "c1", "number": 7, "name": None, "startsAt": "2026-09-14T00:00:00Z", "endsAt": "2026-09-28T00:00:00Z",
+                   "team": {"key": "HUB"}, "issue_identifiers": ["HUB-1", "HUB-3", "HUB-9"]}]
+        seq = rank.rank(self.base(issues=issues, cycles=cycles))
+        rows = {i["key"]: i for i in seq["items"]}
+        self.assertEqual([i["key"] for i in seq["items"] if i["bucket"] == 3], ["HUB-1", "HUB-2"])   # HUB-2's date is sooner and it was built first
+        self.assertEqual(rows["HUB-1"]["why_now"], "in the active cycle · ends in 12 days · due 2026-09-22")
+        self.assertEqual(rows["HUB-2"]["why_now"], "due 2026-09-18")
+        self.assertEqual([i["key"] for i in seq["items"] if i["bucket"] == 4], ["HUB-3", "HUB-4"])
+        self.assertEqual(rows["HUB-3"]["why_now"], "in the active cycle · ends in 12 days · in progress since 2026-09-10")
+
+    def test_a_cycle_ending_today_says_so_and_a_blocking_row_still_orders_before_a_cycle_row(self):
+        # DO-879 beside DO-878: people waiting outrank the schedule, a cycle row outranks a plain one, and both reasons
+        # ride on one row in that order. Built in the reverse of the expected order so the sort is what is tested.
+        issues = [issue("HUB-6", "unstarted", "High", due="2026-09-18"), issue("HUB-5", "unstarted", "High", due="2026-09-22"),
+                  issue("HUB-7", "unstarted", "High", due="2026-09-24")]
+        issues[1]["blocks"] = ["CORE-1"]; issues[2]["blocks"] = ["CORE-1"]
+        blocked = [{"identifier": "CORE-1", "state": {"name": "Todo", "type": "unstarted"}}]
+        cycles = [{"id": "c1", "number": 7, "name": None, "startsAt": "2026-09-02T00:00:00Z", "endsAt": "2026-09-16T00:00:00Z",
+                   "team": {"key": "HUB"}, "issue_identifiers": ["HUB-6", "HUB-7"]}]
+        seq = rank.rank(self.base(issues=issues, blocked=blocked, cycles=cycles))
+        self.assertEqual([i["key"] for i in seq["items"]], ["HUB-7", "HUB-5", "HUB-6"])
+        self.assertEqual(seq["items"][0]["why_now"], "blocks 1 open issue · in the active cycle · ends today · due 2026-09-24")
+        self.assertEqual(seq["items"][1]["why_now"], "blocks 1 open issue · due 2026-09-22")
+        self.assertEqual(seq["items"][2]["why_now"], "in the active cycle · ends today · due 2026-09-18")
+
+    def test_the_batch_date_rule_still_wins_over_a_cycle_and_a_backlog_p0_in_a_cycle_stays_a_decision(self):
+        # DO-879: the standing corrections are not weakened by the new input.
+        issues = [issue(f"HUB-{i}", "unstarted", "High", due="2026-09-04") for i in range(5)] + [issue("DO-9", "backlog", "Urgent")]
+        cycles = [{"id": "c1", "number": 7, "name": None, "startsAt": "2026-09-02T00:00:00Z", "endsAt": "2026-09-30T00:00:00Z",
+                   "team": {"key": "HUB"}, "issue_identifiers": ["HUB-0", "HUB-1", "DO-9"]}]
+        seq = rank.rank(self.base(issues=issues, cycles=cycles))
+        self.assertFalse(any(i["bucket"] == 3 for i in seq["items"]))            # the batch date is discounted, cycle or not
+        self.assertEqual([d["key"] for d in seq["decisions"]], ["DO-9"])
+        self.assertEqual({i["why_now"] for i in seq["items"]}, {"Todo with a project"})   # bucket 5 carries no cycle line
+
+    def test_a_snapshot_without_cycles_ranks_as_before(self):
+        seq = rank.rank(self.base(issues=[issue("HUB-7", "unstarted", "High", due="2026-09-20")]))
+        self.assertEqual(seq["items"][0]["why_now"], "due 2026-09-20")
 
     def test_snoozed_key_leaves_every_bucket_and_is_a_decision_once(self):
         # DO-874: a snoozed key is dropped wherever a bucket placed it (1 by a notification, 2 by a
