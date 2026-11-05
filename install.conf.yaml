@@ -202,6 +202,14 @@
 
 - shell:
     - [git submodule update --init --recursive, Installing submodules]
+    # DO-884. Render ~/.claude/settings.json from claude/settings/base.json and the
+    # private overlays the host profile names (~/.config/claude-host-profile, written
+    # by ~/.dotfiles-local's install). A host with no profile, a teammate's box and
+    # CI included, gets a one-line note and exit 0, before the script even looks
+    # for jq. A host WITH one fails the install loudly when it cannot render: a
+    # half-rendered settings.json is worse than an install that says so. Backups of
+    # the previous file: ~/.local/state/claude-settings-render/ (docs/CLAUDE_SETUP.md).
+    - ['scripts/claude-settings-render.sh --apply', 'render ~/.claude/settings.json where a host profile exists']
     - |
       # Create ~/.zshrc.local if it doesn't exist
       if [ ! -f ~/.zshrc.local ]; then
