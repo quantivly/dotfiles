@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exists (and writes `refreshInterval` 120 everywhere else); `claude-doctor` gains a "Rendered
   settings" section (✓ rendered, ✗ drifted, ⚠ could not run). Guide: `docs/CLAUDE_SETUP.md`
   ("Rendered settings"). State table: `scripts/test-claude-settings-render.sh` (33 rows,
-  hermetic; CI `claude-settings-render-test`), and seven rows in `scripts/test-claude-doctor.sh`.
+  hermetic; CI `claude-settings-render-test`), and eight rows in `scripts/test-claude-doctor.sh`.
 
 - **`scripts/claude-config-audit.sh` audits every host's Claude Code configuration, read-only
   (DO-880).** Step 1 of the shared-configuration design
