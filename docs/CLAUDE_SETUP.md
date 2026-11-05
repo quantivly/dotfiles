@@ -234,9 +234,10 @@ The fragments are folded, in order, into the live settings file (absent: {}).
   - Hooks, per event: an entry is keyed by the basename of the first script path in its command
     (`$HOME/…`, `${HOME}/…`, `~/…` or `/…`, quoted or not, redirections ignored), or else by its
     executable (the first word that is not `command`, `exec`, `[`, `]`, `&&`, `||` or an
-    option). A fragment entry replaces the live entry with its key, in place, and any second one
-    (the same script under another path); a new key is appended. An event no fragment declares
-    is left as found.
+    option). A fragment entry replaces the live entry with its key, in place, and drops any other
+    (the same script under another path or matcher); a new key is appended. The key is the
+    script basename or executable alone, matcher excluded, so a fragment that declares one key
+    twice under one event is refused (exit 2). An event no fragment declares is left as found.
   - autoMode.environment: the fragment's lines replace the live lines from `### Org-wide` up to,
     not including, `### User-specific` (or to the end). With no live `### Org-wide`, they go
     first, then `### User-specific` (moved up, or added), then the other live lines. A fragment
@@ -246,7 +247,9 @@ The fragments are folded, in order, into the live settings file (absent: {}).
 ```
 
 **The verbs.** The render and the live file are compared in one canonical form
-(`jq -S --indent 2`), so formatting and key order are never drift.
+(`jq -S --indent 2`), so formatting and key order are never drift. `--check` diffs and prints only
+the top-level keys some fragment declares, so an undeclared value (clauth's `env`) is never shown;
+`--print` emits the whole render, what `--apply` would write.
 
     scripts/claude-settings-render.sh --check            # the diff, live → rendered; writes nothing
     scripts/claude-settings-render.sh --print            # the render on stdout; writes nothing
@@ -257,7 +260,7 @@ The fragments are folded, in order, into the live settings file (absent: {}).
 |---|---|
 | 0 | rendered, already level, or no host profile here (nothing to render) |
 | 1 | `--check` found drift |
-| 2 | could not run: no jq, a bad marker or profile, a fragment missing or not an object, a fragment auto-mode block that is not an org-wide block, a settings file that is a symlink or not one JSON object, a failed write or backup |
+| 2 | could not run: no jq, a bad marker or profile, a fragment missing or not an object, a fragment auto-mode block that is not an org-wide block, a fragment declaring one hook key twice under one event, a settings file that is a symlink or not one JSON object, a failed write or backup |
 | 64 | usage |
 
 `--settings PATH` renders another file; `CLAUDE_SETTINGS_RENDER_MARKER` and

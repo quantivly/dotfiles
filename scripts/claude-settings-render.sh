@@ -31,9 +31,10 @@
 #   - Hooks, per event: an entry is keyed by the basename of the first script path in its command
 #     (`$HOME/…`, `${HOME}/…`, `~/…` or `/…`, quoted or not, redirections ignored), or else by its
 #     executable (the first word that is not `command`, `exec`, `[`, `]`, `&&`, `||` or an
-#     option). A fragment entry replaces the live entry with its key, in place, and any second one
-#     (the same script under another path); a new key is appended. An event no fragment declares
-#     is left as found.
+#     option). A fragment entry replaces the live entry with its key, in place, and drops any other
+#     (the same script under another path or matcher); a new key is appended. The key is the
+#     script basename or executable alone, matcher excluded, so a fragment that declares one key
+#     twice under one event is refused (exit 2). An event no fragment declares is left as found.
 #   - autoMode.environment: the fragment's lines replace the live lines from `### Org-wide` up to,
 #     not including, `### User-specific` (or to the end). With no live `### Org-wide`, they go
 #     first, then `### User-specific` (moved up, or added), then the other live lines. A fragment
@@ -44,9 +45,11 @@
 # WRITER. Every verb that reads the settings path (--check, --print and --apply) refuses it
 # (exit 2) when it is a symlink, even a dangling one, or a file that is not one JSON object (an
 # empty file included); an absent path renders from {}. The render and the live file are compared
-# in one canonical form (jq -S --indent 2), so formatting and key order are never drift. --apply
-# writes only when they differ: the render goes to a temp file beside the settings file and takes
-# its mode (600 for a new file), the previous file is copied to
+# in one canonical form (jq -S --indent 2), so formatting and key order are never drift. --print
+# emits the whole render, undeclared keys included (it is what --apply would write); --check diffs
+# and prints only the top-level keys some fragment declares, so an undeclared value is never shown.
+# --apply writes only when they differ: the render goes to a temp file beside the settings file
+# and takes its mode (600 for a new file), the previous file is copied to
 # ~/.local/state/claude-settings-render/settings.json.before-<UTC stamp>, and the temp file is
 # renamed over the settings file. A backup is always mode 600, whatever the live file's mode; a
 # second backup within one UTC second gets a `.NNN` counter (`…Z.001`, `…Z.002`), so the names
@@ -260,7 +263,8 @@ def entry_key:
 
 # merge_hook_entries($fragment_entries): fold each fragment entry into the input (one event's
 # entries). It replaces the first entry with the same key, in that entry's place, and drops any
-# later one (the same script under another path); an entry with a new key is appended.
+# later one (the same script under another path or matcher); an entry with a new key is appended.
+# A fragment's own keys are distinct per event (JQ_REPEATED_HOOK_KEY), so none replaces another.
 # merge_hooks($fragment_hooks): do that for each event the fragment declares; an event it does not
 # declare is left exactly as found.
 # shellcheck disable=SC2016  # jq's own $variables, not the shell's
@@ -314,6 +318,22 @@ else .autoMode.environment as $lines
     else empty end
 end'
 
+# What is wrong with one fragment's hooks, or nothing: per event, the first key two of its entries
+# share. The key ignores the matcher, so the merge would keep only the last of them.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_REPEATED_HOOK_KEY="$JQ_HOOK_KEY"'
+def key_text: if type == "string" then . else tojson end;
+if (.hooks | type) != "object" then empty
+else .hooks | to_entries[] | select(.value | type == "array")
+  | .key as $event
+  | [.value[] | entry_key] | group_by(.) | map(select(length > 1) | first)[]
+  | "hooks.\($event) has two entries keyed '\''\(key_text)'\''"
+end'
+
+# The jq arguments hook_key reads: the redirection and script-path patterns and the wrapper words.
+HOOK_KEY_JQ_ARGUMENTS=(--arg redirection_re "$HOOK_REDIRECTION_RE" --arg script_path_re "$HOOK_SCRIPT_PATH_RE"
+    --argjson wrapper_words "$HOOK_WRAPPER_WORDS_JSON")
+
 # merge_at($path; $fragment): merge $fragment into the input, the live value at $path (null when
 # the live file lacks it). Hooks and the auto-mode environment have their own rules; otherwise
 # objects deep-merge, lists union, and any other value is the fragment's. Only keys the fragment
@@ -366,21 +386,33 @@ require_org_wide_blocks() {
     done
 }
 
+# require_distinct_hook_keys FRAGMENT_PATHS… — die, naming the fragment, the event and the key,
+# when a fragment declares one hook key twice under one event (see JQ_REPEATED_HOOK_KEY).
+require_distinct_hook_keys() {
+    local fragment problems
+    for fragment in "$@"; do
+        problems=$(jq -r "${HOOK_KEY_JQ_ARGUMENTS[@]}" "$JQ_REPEATED_HOOK_KEY" "$fragment") \
+            || die "could not read the hook keys of $fragment"
+        [[ -z "$problems" ]] \
+            || die "$fragment: ${problems%%$'\n'*} (a key is the script or executable alone, matcher excluded)"
+    done
+}
+
 # merge_settings LIVE_JSON_PATH FRAGMENT_PATHS… — print the live settings file merged with the
 # fragments, in the order given. An absent live file is the empty object. A live file that is not
-# a single JSON object, a fragment whose auto-mode block is malformed, or a merge that fails, dies.
+# a single JSON object, a fragment whose auto-mode block is malformed or that declares one hook key
+# twice under one event, or a merge that fails, dies.
 merge_settings() {
     local live_path="$1"
     shift
     require_org_wide_blocks "$@"
+    require_distinct_hook_keys "$@"
     local live_arguments=(--slurpfile live_documents "$live_path")
     [[ -e "$live_path" ]] || live_arguments=(--argjson live_documents "$ABSENT_LIVE_DOCUMENTS")
     jq -n -S --indent 2 "${live_arguments[@]}" \
         --arg org_wide_heading "$ORG_WIDE_HEADING" \
         --arg user_specific_heading "$USER_SPECIFIC_HEADING" \
-        --arg redirection_re "$HOOK_REDIRECTION_RE" \
-        --arg script_path_re "$HOOK_SCRIPT_PATH_RE" \
-        --argjson wrapper_words "$HOOK_WRAPPER_WORDS_JSON" \
+        "${HOOK_KEY_JQ_ARGUMENTS[@]}" \
         "$JQ_MERGE" "$@" \
         || die "could not merge $live_path with the fragments"
 }
@@ -428,16 +460,39 @@ print_lines() { [[ -z "$1" ]] || printf '%s\n' "$1"; }
 # report_rendered — the live file already is the render.
 report_rendered() { printf '%s: %s is rendered\n' "$SCRIPT_NAME" "$SETTINGS_PATH"; }
 
+# declared_top_level_keys — print, as one JSON array, every top-level key some fragment declares.
+declared_top_level_keys() {
+    jq -c -n '[inputs | keys[]] | unique' "${FRAGMENTS[@]}" \
+        || die "could not read the top-level keys of the fragments"
+}
+
+# only_declared_keys DECLARED_KEYS_JSON SETTINGS_TEXT — SETTINGS_TEXT (one JSON object in canonical
+# form, or nothing for an absent file) with only the top-level keys DECLARED_KEYS_JSON names, in
+# the same canonical form; nothing when SETTINGS_TEXT is empty.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_ONLY_DECLARED_KEYS='with_entries(select(.key as $key | any($declared_keys[]; . == $key)))'
+only_declared_keys() {
+    [[ -n "$2" ]] || return 0
+    jq -S --indent 2 --argjson declared_keys "$1" "$JQ_ONLY_DECLARED_KEYS" <<< "$2" \
+        || die "could not select the declared keys of $SETTINGS_PATH or its render"
+}
+
 # check_settings RENDERED LIVE — report "rendered" when LIVE (the live file's canonical form)
-# equals RENDERED; otherwise print the unified diff from LIVE to RENDERED and exit 1.
+# equals RENDERED; otherwise print the unified diff from LIVE to RENDERED and exit 1. Only the
+# top-level keys some fragment declares are diffed: an undeclared key is copied as found, so it
+# never differs, and its value (clauth's `env` among them) must never be printed as context.
 check_settings() {
-    local rendered="$1" live="$2" diff_status
+    local rendered="$1" live="$2" declared_keys live_declared rendered_declared diff_status
     if [[ "$live" == "$rendered" ]]; then
         report_rendered
         return 0
     fi
+    # Each dies inside the command substitution, having said why; pass the exit on.
+    declared_keys=$(declared_top_level_keys) || exit "$EXIT_COULD_NOT_RUN"
+    live_declared=$(only_declared_keys "$declared_keys" "$live") || exit "$EXIT_COULD_NOT_RUN"
+    rendered_declared=$(only_declared_keys "$declared_keys" "$rendered") || exit "$EXIT_COULD_NOT_RUN"
     diff -u --label "$DIFF_LIVE_LABEL" --label "$DIFF_RENDERED_LABEL" \
-        <(print_lines "$live") <(print_lines "$rendered")
+        <(print_lines "$live_declared") <(print_lines "$rendered_declared")
     diff_status=$?
     (( diff_status == DIFF_FOUND_DIFFERENCES )) \
         || die "could not diff $SETTINGS_PATH against its render (diff exited $diff_status)"

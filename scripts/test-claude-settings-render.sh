@@ -270,6 +270,29 @@ render
 check "hooks: an event no fragment declares is left as found" \
     "$RC|$(rendered '.hooks.UserPromptSubmit')" "0|$(expected '$live.hooks.UserPromptSubmit')"
 
+# An entry's key is its script (or executable) alone, matcher excluded, so a fragment's two entries
+# for one script under one event (one per matcher, the common idiom) would collapse to the last and
+# the render would lose one. Refused, naming the fragment, the event and the key. The same two
+# entries under two events are two keys and render; the needle must not appear there.
+DUPLICATE_KEY_SCRIPT='fixture-guard.sh'
+DUPLICATE_KEY_REFUSAL="$ALPHA_FRAGMENT: hooks.PreToolUse has two entries keyed '$DUPLICATE_KEY_SCRIPT'"
+reset_merge_fixture
+write_json "$ALPHA_FRAGMENT" <<'JSON'
+{"hooks": {"PreToolUse": [
+  {"matcher": "Bash", "hooks": [{"type": "command",
+    "command": "f=\"$HOME/.claude/hooks/fixture-guard.sh\"; [ -r \"$f\" ] && exec bash \"$f\"; exit 0"}]},
+  {"matcher": "Edit", "hooks": [{"type": "command", "command": "bash \"$HOME/.claude/hooks/fixture-guard.sh\""}]}
+]}}
+JSON
+render
+one_event_twice="$RC|$(contains "$OUT" "$DUPLICATE_KEY_REFUSAL")"
+jq '.hooks = {PreToolUse: [.hooks.PreToolUse[0]], PostToolUse: [.hooks.PreToolUse[1]]}' "$ALPHA_FRAGMENT" \
+    > "$ALPHA_FRAGMENT.split" && mv "$ALPHA_FRAGMENT.split" "$ALPHA_FRAGMENT"
+render
+two_events_once="$RC|$(contains "$OUT" "$DUPLICATE_KEY_REFUSAL")|$(contains "$OUT" 'has two entries keyed')"
+check "hooks: a fragment with one key twice under one event is refused (exit 2); under two events it renders" \
+    "$one_event_twice|$two_events_once" "2|yes|0|no|no"
+
 printf 'merge: only the org-wide block of autoMode.environment is replaced\n'
 reset_merge_fixture
 write_json "$LIVE" <<'JSON'
@@ -583,6 +606,22 @@ reformatted_level="$RC|$(contains "$OUT" "claude-settings-render: $target is ren
 check "check: exit 1 with a unified diff on drift, 0 when rendered == live" \
     "$drift|$level|$reformatted_level" "1|yes|yes|yes|same|0|0|yes|no|0|yes"
 
+# --check diffs only the keys some fragment declares. An undeclared key is copied as found, so it
+# never differs, but a whole-file diff prints it as context beside any drift: here the live `env`
+# sits right after the drifting `effortLevel`, so its value is in the hunk's context by
+# construction. The drift hunk itself must still print, and --print (what --apply would write)
+# must still carry the undeclared value.
+UNDECLARED_VALUE_MARKER='FIXTURE_SECRET_MARKER_8c1d'
+target=$(writer_settings_path check-undeclared)
+write_json "$COMMON_FRAGMENT" <<< '{"effortLevel": "high"}'
+jq -n --arg marker "$UNDECLARED_VALUE_MARKER" '{"effortLevel": "low", "env": {"FIXTURE_SECRET": $marker}}' > "$target"
+run_sut --check --settings "$target"
+declared_only_check="$RC|$(contains "$OUT" "$UNDECLARED_VALUE_MARKER")|$(contains "$OUT" $'\n-  "effortLevel": "low"')|$(contains "$OUT" $'\n+  "effortLevel": "high"')"
+run_sut --print --settings "$target"
+whole_print="$RC|$(contains "$OUT" "$UNDECLARED_VALUE_MARKER")"
+check "check: on drift prints only declared keys, never an undeclared env value (--print keeps it)" \
+    "$declared_only_check|$whole_print" "1|no|yes|yes|0|yes"
+
 target=$(writer_settings_path print)
 write_drift_fixture "$target"
 live_before=$(fingerprint "$target")
@@ -674,7 +713,7 @@ check "wire: with a host profile, herdr-claude-wire.sh renders through claude-se
     "0|--apply |absent|0|--apply --check |absent|0|--apply --check |[120,1]"
 
 printf '\n'
-EXPECTED_ROWS=33
+EXPECTED_ROWS=35
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
