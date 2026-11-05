@@ -419,6 +419,18 @@ backup_files() { mapfile -t BACKUP_FILES < <(compgen -G "$BACKUPS_DIR/$BACKUP_NA
 fingerprint() { printf '%s:%s' "$(sha256sum < "$1")" "$(stat -c %i "$1")"; }
 # same_or_changed BEFORE AFTER → same|changed
 same_or_changed() { [[ "$1" == "$2" ]] && printf same || printf changed; }
+# seed_backups STAMP_PREFIX COUNT — COUNT backups in the script's own name shape,
+# settings.json.before-<STAMP_PREFIX><two-digit second>Z, each holding its own name.
+seed_backups() {
+    local index seed_name
+    mkdir -p "$BACKUPS_DIR"
+    for (( index = 0; index < $2; index++ )); do
+        printf -v seed_name '%s%s%02dZ' "$BACKUP_NAME_PREFIX" "$1" "$index"
+        printf '{"seed": "%s"}\n' "$seed_name" > "$BACKUPS_DIR/$seed_name"
+    done
+}
+# backups_listing — every name in the backups dir, sorted, on one line.
+backups_listing() { compgen -G "$BACKUPS_DIR/*" | LC_ALL=C sort | tr '\n' ' '; }
 # reformat_as_equal PATH — rewrite PATH as the same JSON value in other bytes: compact, with the
 # top-level keys reversed. The writer compares canonical forms, so this must never count as drift.
 reformat_as_equal() {
@@ -444,9 +456,24 @@ mkdir -p "$(dirname "$BACKUPS_DIR")"
 failing_before=$(fingerprint "$failing_target")
 run_sut --apply --settings "$failing_target"
 failed_backup="$RC|$(contains "$OUT" "could not create the backups dir $BACKUPS_DIR")|$(same_or_changed "$failing_before" "$(fingerprint "$failing_target")")|$(matching_count "$(dirname "$failing_target")/$TEMP_FILE_PATTERN")"
+# A rename that fails (a mv that exits 1) after the backup is made: exit 2, the settings file as it
+# was, no temp file, and the backups dir exactly as it was: no stray copy, and none pruned. The ten
+# seeded backups are older than today, so a prune that ran before the rename would drop one.
+FAILING_MV_BIN="$TMPROOT/failing-mv-bin"
+mkdir -p "$FAILING_MV_BIN"
+printf '#!/bin/sh\nexit 1\n' > "$FAILING_MV_BIN/mv"
+chmod +x "$FAILING_MV_BIN/mv"
+failing_target=$(writer_settings_path mode-failed-rename)
+write_drift_fixture "$failing_target"
+seed_backups 20200101T0000 10
+failing_before=$(fingerprint "$failing_target")
+backups_before=$(backups_listing)
+PATH="$FAILING_MV_BIN:$PATH" run_sut --apply --settings "$failing_target"
+failed_rename="$RC|$(contains "$OUT" "could not rename")|$(same_or_changed "$failing_before" "$(fingerprint "$failing_target")")|$(matching_count "$(dirname "$failing_target")/$TEMP_FILE_PATTERN")|$(same_or_changed "$backups_before" "$(backups_listing)")"
 # The inode changes only when the file is replaced by a rename; an in-place write keeps it.
-check "apply: writes by temp file and rename, mode preserved (a new file: 600; a failed backup leaves no trace)" \
-    "$existing_target|$new_file|$failed_backup" "0|yes|640|changed|0|dark|0|600|0|2|yes|same|0"
+check "apply: writes by temp file and rename, mode preserved (a new file: 600; a failed backup or rename leaves no trace)" \
+    "$existing_target|$new_file|$failed_backup|$failed_rename" \
+    "0|yes|640|changed|0|dark|0|600|0|2|yes|same|0|2|yes|same|0|same"
 
 # A clock frozen at one second, so all twelve backups share a stamp: the names then differ only by
 # their counter, and a name pruning frees must not be reused (it would sort first, and be pruned
@@ -481,6 +508,29 @@ newest_backup_exact=$(cmp -s "$newest_backup" "$last_live_before_apply" && echo 
 check "apply: keeps a dated backup, at most 10" \
     "$apply_codes|${#BACKUP_FILES[@]}|$(jq -cs '[.[].fixtureRun]' "${BACKUP_FILES[@]}" 2>/dev/null < /dev/null)|$backup_names_dated|$newest_backup_exact|$(stat -c %a "${BACKUP_FILES[@]}" 2>/dev/null | sort -u | tr '\n' ' ')" \
     "000000000000|10|[3,4,5,6,7,8,9,10,11,12]|yes|exact|600 "
+
+# Ten backups stamped a day AFTER the frozen clock (a clock stepped back), and one file the script
+# did not make, named to sort before everything. Pruning by name alone would remove both the new
+# backup (it sorts before the ten) and the foreign file (it sorts first of all).
+WROTE_BACKUP_RE='\(backup ([^)]+)\)'
+target=$(writer_settings_path prune-guard)
+write_drift_fixture "$target"
+seed_backups 20261106T1200 10
+foreign_file="$BACKUPS_DIR/${BACKUP_NAME_PREFIX}20261105T115959Z.orig"
+printf '{"foreign": true}\n' > "$foreign_file"
+foreign_before=$(fingerprint "$foreign_file")
+cp "$target" "$last_live_before_apply"
+PATH="$FROZEN_CLOCK_BIN:$PATH" run_sut --apply --settings "$target"
+named_backup=''
+[[ "$OUT" =~ $WROTE_BACKUP_RE ]] && named_backup=${BASH_REMATCH[1]}
+own_shape_backups=0
+for backup in "$BACKUPS_DIR"/*; do
+    [[ "$(basename "$backup")" =~ ${BACKUP_NAME_RE}(\.[0-9]{3})?$ ]] && own_shape_backups=$((own_shape_backups + 1))
+done
+# The ten kept are the new backup and the nine newest seeds: the oldest seed is the one pruned.
+check "apply: the prune never removes the backup just written, nor a file the script did not make" \
+    "$RC|$([[ -n "$named_backup" && -e "$named_backup" ]] && echo exists || echo missing)|$(cmp -s "${named_backup:-/dev/null}" "$last_live_before_apply" && echo exact || echo differs)|$(same_or_changed "$foreign_before" "$(fingerprint "$foreign_file" 2>/dev/null)")|$own_shape_backups|$([[ -e "$BACKUPS_DIR/${BACKUP_NAME_PREFIX}20261106T120000Z" ]] && echo kept || echo pruned)" \
+    "0|exists|exact|same|10|pruned"
 
 target=$(writer_settings_path symlink)
 link_destination="$(dirname "$target")/real-settings.json"
@@ -565,7 +615,7 @@ no_jq_help="$RC|$(contains "$OUT" '--apply')"
 check "jq missing → exit 2 (--help still works)" "$no_jq_apply|$no_jq_help" "2|yes|same|0|yes"
 
 printf '\n'
-EXPECTED_ROWS=29
+EXPECTED_ROWS=30
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

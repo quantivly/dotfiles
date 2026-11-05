@@ -105,7 +105,10 @@ BACKUP_TIMESTAMP_FORMAT='%Y%m%dT%H%M%SZ'
 # order they were made: …Z, then …Z.001, then …Z.002.
 BACKUP_COUNTER_DIGITS=3
 BACKUP_COUNTER_MAX=999
-BACKUP_COUNTER_SUFFIX_RE='^\.([0-9]+)$'
+BACKUP_COUNTER_SUFFIX_RE='^\.([0-9]{3})$'
+# The names this script makes, from the prefix, the stamp format and the counter above. Only these
+# are pruned; any other file in the backups dir is left alone.
+BACKUP_NAME_RE='^settings\.json\.before-[0-9]{8}T[0-9]{6}Z(\.[0-9]{3})?$'
 BACKUPS_KEPT=10
 # The two sides of the --check diff, and diff's own status for "the inputs differ".
 DIFF_LIVE_LABEL='live'
@@ -491,23 +494,33 @@ back_up_settings() {
     fi
 }
 
-# prune_backups — delete the oldest backups beyond BACKUPS_KEPT. The names sort in the order they
-# were made (the UTC stamp, then the zero-padded counter), so the oldest come first in C order.
+# prune_backups — keep BACKUPS_KEPT backups: the one just written (BACKUP_PATH), wherever its name
+# sorts, and the newest of the others. Only names this script makes (BACKUP_NAME_RE) are
+# candidates, so a file it did not make is never removed. Those names sort in the order they were
+# made (the UTC stamp, then the zero-padded counter), so the oldest come first in C order; a clock
+# stepped back can only cost an older backup, never the new one.
 prune_backups() {
-    local found_backups=() sorted_backups=() excess
+    local found_backups=() candidate_backups=() sorted_backups=() backup excess
     shopt -s nullglob
     found_backups=("$BACKUPS_DIR/$BACKUP_NAME_PREFIX"*)
     shopt -u nullglob
-    excess=$(( ${#found_backups[@]} - BACKUPS_KEPT ))
+    for backup in "${found_backups[@]}"; do
+        if [[ "$backup" != "$BACKUP_PATH" && "${backup##*/}" =~ $BACKUP_NAME_RE ]]; then
+            candidate_backups+=("$backup")
+        fi
+    done
+    # The backup just written is one of the BACKUPS_KEPT.
+    excess=$(( ${#candidate_backups[@]} - (BACKUPS_KEPT - 1) ))
     (( excess > 0 )) || return 0
-    mapfile -t sorted_backups < <(printf '%s\n' "${found_backups[@]}" | LC_ALL=C sort)
-    rm -f -- "${sorted_backups[@]:0:excess}" || die "could not prune the oldest backups in $BACKUPS_DIR"
+    mapfile -t sorted_backups < <(printf '%s\n' "${candidate_backups[@]}" | LC_ALL=C sort)
+    rm -f -- "${sorted_backups[@]:0:excess}" \
+        || die "wrote $SETTINGS_PATH, but could not prune the oldest backups in $BACKUPS_DIR"
 }
 
 # write_settings RENDERED — write RENDERED over SETTINGS_PATH: into a temp file beside it, with the
 # previous file's mode (NEW_SETTINGS_MODE for a new file), then, once the previous file is backed
-# up and the backups pruned, by one rename. A failure before the rename leaves SETTINGS_PATH as it
-# was, removes the temp file, and exits 2.
+# up, by one rename; the backups are pruned only after the rename. A failure before or at the
+# rename leaves SETTINGS_PATH and the backups as they were, removes the temp file, and exits 2.
 write_settings() {
     local rendered="$1" settings_dir backup_note
     settings_dir=$(dirname -- "$SETTINGS_PATH")
@@ -519,16 +532,19 @@ write_settings() {
         chmod --reference="$SETTINGS_PATH" -- "$RENDER_TEMP_PATH" \
             || die "could not give $RENDER_TEMP_PATH the mode of $SETTINGS_PATH"
         back_up_settings
-        prune_backups
         backup_note="backup $BACKUP_PATH"
     else
         chmod "$NEW_SETTINGS_MODE" -- "$RENDER_TEMP_PATH" || die "could not set the mode of $RENDER_TEMP_PATH"
         backup_note='a new file; nothing to back up'
     fi
-    mv -T -- "$RENDER_TEMP_PATH" "$SETTINGS_PATH" \
-        || die "could not rename $RENDER_TEMP_PATH over $SETTINGS_PATH"
+    if ! mv -T -- "$RENDER_TEMP_PATH" "$SETTINGS_PATH"; then
+        # The settings file is unchanged, so its copy backs up nothing: drop it.
+        [[ -z "$BACKUP_PATH" ]] || rm -f -- "$BACKUP_PATH"
+        die "could not rename $RENDER_TEMP_PATH over $SETTINGS_PATH"
+    fi
     RENDER_TEMP_PATH=''
     printf '%s: wrote %s (%s)\n' "$SCRIPT_NAME" "$SETTINGS_PATH" "$backup_note"
+    [[ -z "$BACKUP_PATH" ]] || prune_backups
 }
 
 # apply_settings RENDERED LIVE — write RENDERED, unless LIVE (the live file's canonical form)
