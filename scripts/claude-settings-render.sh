@@ -22,12 +22,18 @@
 #   2. $OVERLAY_ROOT/claude/settings/common.json (private)
 #   3. $OVERLAY_ROOT/claude/settings/<tenant>.json for each tenant, in profile order (private)
 #
-# MERGE RULES.
-#   - Lists are unioned.
-#   - Objects are deep-merged, and a later fragment wins where both set a key.
-#   - Hooks are keyed by the basename of their command and replaced, never duplicated.
-#   - Only the org-wide auto-mode block is replaced; the rest of auto mode is merged.
-#   - $HOME is substituted in marketplace paths only.
+# MERGE RULES. The fragments are folded, in order, into the live settings file (absent: {}).
+#   - Lists are unioned: the live elements in their order, then each fragment's new ones; an
+#     element appears once.
+#   - Objects are deep-merged; on a scalar the fragment wins, and a later fragment over an earlier.
+#   - Hooks, per event: an entry is keyed by the basename of the first script path in its command
+#     (`$HOME/…` or `/…`, quoted or not, redirections ignored), or else by its executable (the
+#     first word that is not `command`, `exec`, `[`, `]`, `&&`, `||` or an option). A fragment entry
+#     replaces the live entry with its key, in place, and any second one (the same script under
+#     another path); a new key is appended. An event no fragment declares is left as found.
+#   - autoMode.environment: the fragment's lines replace the live lines from `### Org-wide` up to,
+#     not including, `### User-specific` (or to the end); with no `### Org-wide` they go first.
+#   - $HOME is substituted in marketplace source paths only.
 #   - A key no fragment declares is left exactly as the live file has it.
 #
 # Usage:
@@ -60,6 +66,20 @@ FRAGMENT_DIR_RELATIVE='claude/settings'
 HOST_PROFILE_DIR_RELATIVE='hosts'
 COMMON_FRAGMENT_NAME='common'
 PROFILE_NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+# The autoMode.environment headings that bound the block the tenant overlay owns.
+ORG_WIDE_HEADING='### Org-wide'
+USER_SPECIFIC_HEADING='### User-specific'
+# shellcheck disable=SC2016  # the literal the fragments carry, replaced in marketplace paths only
+HOME_PLACEHOLDER='$HOME'
+# The live file, slurped, when there is none: one empty object.
+ABSENT_LIVE_DOCUMENTS='[{}]'
+# A redirection in a hook command (`>/dev/null`, `2>&1`, `> /dev/null`), dropped before keying.
+HOOK_REDIRECTION_RE='[0-9]*[<>]+&?[[:space:]]*[^[:space:];]*'
+# A hook command's script path: starts the command or follows whitespace, `=` or a quote, and
+# begins `$HOME/` or `/`; capture 2 is the path, without its quotes.
+HOOK_SCRIPT_PATH_RE=$'(^|[[:space:]=\'"])((\\$HOME)?/[^[:space:]\'";]*)'
+# Words skipped when a hook command with no path is keyed by its executable.
+HOOK_WRAPPER_WORDS_JSON='["command", "exec", "[", "]", "&&", "||"]'
 EXIT_COULD_NOT_RUN=2
 EXIT_USAGE=64
 
@@ -154,7 +174,155 @@ load_fragments() {
     done
 }
 
-merge_settings() { die "not implemented"; }
+# ---------------------------------------------------------------------------------------------
+# The merge: one jq program, JQ_MERGE, built from the named filters below. It folds each fragment,
+# in order, into the live settings with merge_at, which dispatches on the path it is merging at.
+# ---------------------------------------------------------------------------------------------
+
+# union_lists($fragment_list): the input list followed by $fragment_list, each element once, at its
+# first position (JSON equality). The live order comes first because the live list is the input.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_UNION_LISTS='
+def union_lists($fragment_list):
+  reduce (. + $fragment_list)[] as $element ([];
+    if any(.[]; . == $element) then . else . + [$element] end);'
+
+# hook_key: the identity of one hook command, so one script under two paths is one hook.
+#   1. Redirections are dropped ($redirection_re), so `>/dev/null` and `2>&1` never name a script.
+#   2. The basename of the first script path ($script_path_re: a word or an assignment's value,
+#      quoted or not, that starts with `$HOME/` or `/`).
+#   3. Otherwise the executable: the first word that is not a wrapper ($wrapper_words) or an
+#      option, so `command -v herdmates … && exec herdmates hook X` is `herdmates`.
+#   4. Otherwise the command itself.
+# entry_key: an entry ({matcher?, hooks: [{type, command, …}]}) is keyed by its first command; an
+# entry without one (a prompt hook, or a malformed entry) by the entry itself, so it matches only
+# an equal entry. jq compares objects regardless of key order; a tojson key would not, and the
+# render's sorted copy would then be appended again on every render.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_HOOK_KEY='
+def path_basename: sub("/+$"; "") | split("/") | last;
+def is_wrapper_word: . as $word | any($wrapper_words[]; . == $word);
+def executable_word:
+  [splits("[[:space:];]+") | select(. != "" and (is_wrapper_word | not) and (startswith("-") | not))]
+  | first;
+def hook_key:
+  gsub($redirection_re; " ") as $command
+  | ([$command | match($script_path_re) | .captures[1].string | path_basename | select(. != "")] | first)
+    // ($command | executable_word)
+    // .;
+def entry_key:
+  (try .hooks[0].command catch null) as $command
+  | if ($command | type) == "string" then ($command | hook_key) else {uncommanded_entry: .} end;'
+
+# merge_hook_entries($fragment_entries): fold each fragment entry into the input (one event's
+# entries). It replaces the first entry with the same key, in that entry's place, and drops any
+# later one (the same script under another path); an entry with a new key is appended.
+# merge_hooks($fragment_hooks): do that for each event the fragment declares; an event it does not
+# declare is left exactly as found.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_MERGE_HOOKS='
+def merge_hook_entries($fragment_entries):
+  reduce $fragment_entries[] as $entry (.;
+    ($entry | entry_key) as $key
+    | . as $entries
+    | ([range(length) as $index | select(($entries[$index] | entry_key) == $key) | $index] | first)
+      as $first_match
+    | if $first_match == null then . + [$entry]
+      else [range(length) as $index
+            | if $index == $first_match then $entry
+              elif ($entries[$index] | entry_key) == $key then empty
+              else $entries[$index] end]
+      end);
+def merge_hooks($fragment_hooks):
+  reduce ($fragment_hooks | keys_unsorted[]) as $event (.;
+    .[$event] |= ((. // []) | merge_hook_entries($fragment_hooks[$event])));'
+
+# replace_org_wide_block($fragment_lines): in the input (the live autoMode.environment lines),
+# replace the lines from the $org_wide_heading line up to, not including, the next
+# $user_specific_heading line (or to the end) with $fragment_lines. Everything before the block
+# and from the user-specific heading on is kept. With no org-wide heading the fragment's lines go
+# first, ahead of every live line.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_AUTOMODE_ORG_WIDE='
+def first_index_of($line; $from): [range($from; length) as $index | select(.[$index] == $line) | $index] | first;
+def replace_org_wide_block($fragment_lines):
+  first_index_of($org_wide_heading; 0) as $block_start
+  | if $block_start == null then $fragment_lines + .
+    else (first_index_of($user_specific_heading; $block_start + 1) // length) as $block_end
+      | .[:$block_start] + $fragment_lines + .[$block_end:]
+    end;'
+
+# merge_at($path; $fragment): merge $fragment into the input, the live value at $path (null when
+# the live file lacks it). Hooks and the auto-mode environment have their own rules; otherwise
+# objects deep-merge, lists union, and any other value is the fragment's. Only keys the fragment
+# declares are visited, so a key no fragment declares keeps the live value untouched.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_DEEP_MERGE='
+def merge_at($path; $fragment):
+  ($fragment | type) as $fragment_type
+  | if $path == ["hooks"] and $fragment_type == "object" then
+      (. // {}) | merge_hooks($fragment)
+    elif $path == ["autoMode", "environment"] and $fragment_type == "array" then
+      (. // []) | replace_org_wide_block($fragment)
+    elif $fragment_type == "object" and (type == "object" or . == null) then
+      reduce ($fragment | keys_unsorted[]) as $key (. // {};
+        .[$key] |= merge_at($path + [$key]; $fragment[$key]))
+    elif $fragment_type == "array" and (type == "array" or . == null) then
+      (. // []) | union_lists($fragment)
+    else $fragment
+    end;'
+
+# The program: $live_documents is the live file slurped (exactly one object), and the fragments
+# arrive as inputs, in merge order.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_MERGE="$JQ_UNION_LISTS $JQ_HOOK_KEY $JQ_MERGE_HOOKS $JQ_AUTOMODE_ORG_WIDE $JQ_DEEP_MERGE"'
+def live_settings:
+  if ($live_documents | length) == 1 and ($live_documents[0] | type) == "object" then $live_documents[0]
+  else error("the live settings file is not one JSON object") end;
+reduce inputs as $fragment (live_settings; merge_at([]; $fragment))'
+
+# substitute_home: replace the literal $placeholder with $home in every marketplace source path; no
+# other string is touched (hook and statusLine commands keep $HOME for `sh -c` to expand).
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_SUBSTITUTE_HOME='
+def has_source_path: type == "object" and (.source | type) == "object" and (.source.path | type) == "string";
+if (.extraKnownMarketplaces | type) == "object" then
+  .extraKnownMarketplaces |= map_values(
+    if has_source_path then .source.path |= (split($placeholder) | join($home)) else . end)
+else . end'
+
+# merge_settings LIVE_JSON_PATH FRAGMENT_PATHS… — print the live settings file merged with the
+# fragments, in the order given. An absent live file is the empty object; one that is not a single
+# JSON object, or a merge that fails, dies.
+merge_settings() {
+    local live_path="$1"
+    shift
+    local live_arguments=(--slurpfile live_documents "$live_path")
+    [[ -e "$live_path" ]] || live_arguments=(--argjson live_documents "$ABSENT_LIVE_DOCUMENTS")
+    jq -n -S --indent 2 "${live_arguments[@]}" \
+        --arg org_wide_heading "$ORG_WIDE_HEADING" \
+        --arg user_specific_heading "$USER_SPECIFIC_HEADING" \
+        --arg redirection_re "$HOOK_REDIRECTION_RE" \
+        --arg script_path_re "$HOOK_SCRIPT_PATH_RE" \
+        --argjson wrapper_words "$HOOK_WRAPPER_WORDS_JSON" \
+        "$JQ_MERGE" "$@" \
+        || die "could not merge $live_path with the fragments"
+}
+
+# substitute_home — stdin JSON to stdout, with $HOME replaced in the marketplace paths only.
+substitute_home() {
+    jq -S --indent 2 --arg placeholder "$HOME_PLACEHOLDER" --arg home "$HOME" "$JQ_SUBSTITUTE_HOME" \
+        || die "could not substitute \$HOME in the marketplace paths"
+}
+
+# render_settings — print the render of SETTINGS_PATH: merged with FRAGMENTS, $HOME substituted.
+render_settings() {
+    local merged
+    # merge_settings dies inside the command substitution, having said why; pass its exit on.
+    merged=$(merge_settings "$SETTINGS_PATH" "${FRAGMENTS[@]}") || exit "$EXIT_COULD_NOT_RUN"
+    substitute_home <<< "$merged"
+}
+
 write_settings() { die "not implemented"; }
 
 main() {
@@ -166,13 +334,12 @@ main() {
     fi
     load_profile
     load_fragments
-    # merge_settings and write_settings are stubs that die until the merge and the writer land, so
-    # write_settings reads as unreachable to shellcheck for now.
-    # shellcheck disable=SC2317
+    # write_settings is a stub that dies until the writer lands, so --check and --apply reach it
+    # and nothing else.
     case "$MODE" in
         list-fragments) printf '%s\n' "${FRAGMENTS[@]}" ;;
-        print|check)    merge_settings ;;
-        apply)          merge_settings; write_settings ;;
+        print)          render_settings ;;
+        check|apply)    write_settings ;;
     esac
 }
 
