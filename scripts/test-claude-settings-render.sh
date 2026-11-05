@@ -95,6 +95,15 @@ $OVERLAY/claude/settings/alpha.json
 $OVERLAY/claude/settings/beta.json"
 check "fragments load in order base, common, tenants (profile order)" "$RC|$OUT" "0|$expected_order"
 
+# The base fragment is public and lands on every host, so it may carry only what this repo owns:
+# its own hooks, the statusLine, its own marketplace and the one plugin that marketplace serves.
+# Anything tenant-specific (another marketplace, a plugin, permissions, the auto-mode block) belongs
+# in the private overlays; a key added here would reach every host and every teammate.
+BASE_FRAGMENT="$DOTFILES/claude/settings/base.json"
+check "base: the public fragment carries only the repo's own keys" \
+    "$(jq -c '[keys, (.extraKnownMarketplaces | keys), (.enabledPlugins | keys), .statusLine.refreshInterval]' "$BASE_FRAGMENT" 2>&1)" \
+    '[["enabledPlugins","extraKnownMarketplaces","hooks","statusLine"],["dotfiles"],["linear-key@dotfiles"],120]'
+
 # ---------------------------------------------------------------------------------------------
 # The merge. Each row writes a live settings file and the overlay fragments, renders with --print
 # and asserts on the render with jq. The base fragment is the checkout's own, so a row asserts
@@ -615,7 +624,7 @@ no_jq_help="$RC|$(contains "$OUT" '--apply')"
 check "jq missing → exit 2 (--help still works)" "$no_jq_apply|$no_jq_help" "2|yes|same|0|yes"
 
 printf '\n'
-EXPECTED_ROWS=30
+EXPECTED_ROWS=31
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
