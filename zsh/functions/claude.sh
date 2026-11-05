@@ -1204,6 +1204,7 @@ _claude_doctor_rendered_settings() {
   local marker="${CLAUDE_SETTINGS_RENDER_MARKER:-$HOME/.config/claude-host-profile}"
   local renderer="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-settings-render.sh"
   local profile_name='' render_stderr render_rc last_stderr_line
+  local -a render_stderr_lines
   if [[ ! -f "$marker" ]]; then
     _doctor_note "no host profile (${marker/#$HOME/~}); settings.json is hand-kept here"
     return 0
@@ -1212,7 +1213,12 @@ _claude_doctor_rendered_settings() {
   # stderr kept for the ⚠, stdout (the diff) dropped: `--check` itself shows the diff.
   render_stderr="$("$renderer" --check 2>&1 >/dev/null)"
   render_rc=$?
-  last_stderr_line="${${(f)render_stderr}[-1]}"
+  # Split into a real array first. `${${(f)render_stderr}[-1]}` reads a single
+  # line (the renderer's `die` shape) as a scalar and returns its last CHARACTER;
+  # `(@f)` does not help in a nested expansion either. An array assignment keeps
+  # one line as one element, and empty stderr as one empty one.
+  render_stderr_lines=("${(@f)render_stderr}")
+  last_stderr_line="${render_stderr_lines[-1]}"
   case "$render_rc" in
     0) _doctor_ok "settings.json is rendered (profile $profile_name)" ;;
     1) _doctor_bad "settings.json drifted from its render — run scripts/claude-settings-render.sh --apply" ;;

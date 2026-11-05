@@ -274,6 +274,9 @@ run_doctor() {
     # FIRST: env takes the first word after an assignment as the command (127).
     if [[ -n "${LKEY:-}" ]]; then pre=("LINEAR_API_KEY=$LKEY"); else pre=(-u LINEAR_API_KEY); fi
     if [[ -n "${CFGDIR:-}" ]]; then pre+=("CLAUDE_CONFIG_DIR=$CFGDIR"); else pre=(-u CLAUDE_CONFIG_DIR "${pre[@]}"); fi
+    # Never the caller's host-profile marker: exported, it would make the
+    # no-profile row fail and route every other row through the real renderer.
+    pre=(-u CLAUDE_SETTINGS_RENDER_MARKER "${pre[@]}")
     # DOTFILES_ROOT is THIS tree, so the doctor reads this tree's
     # scripts/claude-account-dirs.data-entries (DO-835) -- system.sh would
     # otherwise default it to the fixture's own, empty, ~/.dotfiles. A row that
@@ -3703,33 +3706,43 @@ RENDER_ROOT="$TMPROOT/render-root"
 RENDER_CALLS="$TMPROOT/render-calls.log"
 mkdir -p "$RENDER_ROOT/scripts"
 cp "$DOTFILES/scripts/claude-account-dirs.data-entries" "$RENDER_ROOT/scripts/"
-# mk_render_stub EXIT_STATUS — the stub renderer: record "$*", print two stderr
-# lines (the doctor reports the last), exit EXIT_STATUS.
+# mk_render_stub EXIT_STATUS [one-line] — the stub renderer: record "$*", print
+# two stderr lines (the doctor reports the last), or with one-line only the
+# reason, as the renderer's own `die` does; exit EXIT_STATUS.
 mk_render_stub() {
-    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\necho "claude-settings-render: an earlier line" >&2\necho "claude-settings-render: the stub reason" >&2\nexit %s\n' \
-        "$RENDER_CALLS" "$1" > "$RENDER_ROOT/scripts/claude-settings-render.sh"
+    local earlier_line='echo "claude-settings-render: an earlier line" >&2'
+    [[ "${2:-}" == one-line ]] && earlier_line=':'
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n%s\necho "claude-settings-render: the stub reason" >&2\nexit %s\n' \
+        "$RENDER_CALLS" "$earlier_line" "$1" > "$RENDER_ROOT/scripts/claude-settings-render.sh"
     chmod +x "$RENDER_ROOT/scripts/claude-settings-render.sh"
 }
 mk_host_profile() { mkdir -p "$FHOME/.config"; printf 'cilantro\n' > "$FHOME/.config/claude-host-profile"; }
 
-new_home z1; write_cred; mk_render_stub 0; : > "$RENDER_CALLS"
+new_home rs1; write_cred; mk_render_stub 0; : > "$RENDER_CALLS"
 DROOT="$RENDER_ROOT" run_doctor
 want_out "no host profile is a note, not a finding" "· no host profile (~/.config/claude-host-profile); settings.json is hand-kept here"
 if [[ ! -s "$RENDER_CALLS" ]]; then ok "...and the renderer is not run"; else bad "...and the renderer is not run — it was: $(cat "$RENDER_CALLS")"; fi
 
-new_home z2; write_cred; mk_host_profile; mk_render_stub 0; : > "$RENDER_CALLS"
+new_home rs2; write_cred; mk_host_profile; mk_render_stub 0; : > "$RENDER_CALLS"
 DROOT="$RENDER_ROOT" run_doctor
 want_out "a level render is a ✓ naming the profile" "✓ settings.json is rendered (profile cilantro)"
 if [[ "$(cat "$RENDER_CALLS")" == "--check" ]]; then ok "...asked by --check alone: the doctor never applies"; else bad "...asked by --check alone — the stub saw: $(cat "$RENDER_CALLS")"; fi
 
-new_home z3; write_cred; mk_host_profile; mk_render_stub 1
+new_home rs3; write_cred; mk_host_profile; mk_render_stub 1
 DROOT="$RENDER_ROOT" run_doctor
 want_out "drift is a ✗ that names the fix" "✗ settings.json drifted from its render — run scripts/claude-settings-render.sh --apply"
 
-new_home z4; write_cred; mk_host_profile; mk_render_stub 2
+new_home rs4; write_cred; mk_host_profile; mk_render_stub 2
 DROOT="$RENDER_ROOT" run_doctor
 want_out "a render that could not run is a ⚠ carrying its last stderr line" "⚠ settings render could not run: claude-settings-render: the stub reason"
 no_out   "...and is not reported as drift" "settings.json drifted from its render"
+
+# One stderr line is the renderer's `die` shape, and the case a scalar subscript
+# got wrong: `${${(f)x}[-1]}` on one line is its last CHARACTER, so the ⚠ read
+# "could not run: n". The two-line stub above cannot see that.
+new_home rs5; write_cred; mk_host_profile; mk_render_stub 2 one-line
+DROOT="$RENDER_ROOT" run_doctor
+want_out "a one-line stderr is carried whole, not as its last character" "⚠ settings render could not run: claude-settings-render: the stub reason"
 
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
@@ -3749,7 +3762,7 @@ no_out   "...and is not reported as drift" "settings.json drifted from its rende
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=542
+EXPECTED_ROWS=543
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
