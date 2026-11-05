@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/claude-settings-render.sh` renders `~/.claude/settings.json` from a public base and
+  the tenant overlays, on a host with a profile (DO-884).** Step 2 of the shared-configuration
+  design (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, D4 as amended). A
+  host opts in with `~/.config/claude-host-profile` naming `~/.dotfiles-local/hosts/<name>.json`;
+  without it nothing is rendered and the script exits 0 with a note, before it looks for jq, so a
+  teammate's box is untouched. The fragments are `claude/settings/base.json` (public: the repo's
+  own hooks, the statusLine at `refreshInterval` 120, the `dotfiles` marketplace and
+  `linear-key`), then `common.json` and one `<tenant>.json` per tenant from `~/.dotfiles-local`.
+  They fold into the live file by rule: lists unioned, objects deep-merged, hooks keyed by their
+  script's basename (or executable) so one script under two paths is one entry, only the
+  `### Org-wide` block of `autoMode.environment` replaced, `$HOME` substituted in marketplace
+  paths only, and every undeclared key (clauth's `env` included) kept as found, so it is never
+  drift. `--check` (diff, exit 1 on drift), `--print`, `--apply` (temp file and rename, a
+  mode-600 backup under `~/.local/state/claude-settings-render/`, ten kept), `--list-fragments`;
+  a symlinked or non-object `settings.json` is refused. `./install` runs `--apply`;
+  `herdr-claude-wire.sh` hands its statusLine and Stop-bell steps to the renderer where a profile
+  exists (and writes `refreshInterval` 120 everywhere else); `claude-doctor` gains a "Rendered
+  settings" section (✓ rendered, ✗ drifted, ⚠ could not run). Guide: `docs/CLAUDE_SETUP.md`
+  ("Rendered settings"). State table: `scripts/test-claude-settings-render.sh` (33 rows,
+  hermetic; CI `claude-settings-render-test`), and seven rows in `scripts/test-claude-doctor.sh`.
+
 - **`scripts/claude-config-audit.sh` audits every host's Claude Code configuration, read-only
   (DO-880).** Step 1 of the shared-configuration design
   (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`): before any host is

@@ -200,3 +200,88 @@ replaces them: `ALIAS` is an ssh alias or `local`, `CFGDIR` a dot-directory unde
 - **A host whose shell startup prints to stdout fails its collect**: the stream does not unpack,
   so nothing partial lands.
 - **Untested against AL2-era hosts** (bash 4.2, tar 1.26); every default host runs Ubuntu.
+
+## Rendered settings (DO-884)
+
+On a host that carries a profile marker, `~/.claude/settings.json` is a render:
+`scripts/claude-settings-render.sh` folds a public base fragment and the private overlays the
+host's profile names into the live file. It is step 2 of the
+[shared-configuration design](superpowers/specs/2026-11-04-shared-claude-config-design.md), D4
+as amended on 2026-11-05.
+
+**The marker and the profile.** `~/.config/claude-host-profile` holds one line, the profile name
+(`[A-Za-z0-9][A-Za-z0-9._-]*`), written by `~/.dotfiles-local`'s install (DO-885). The profile is
+`~/.dotfiles-local/hosts/<name>.json`, `{"tenants": ["quantivly", …]}`, its tenants in merge
+order. **A host without the marker is not rendered**: a teammate's box, a modular `--herdr`
+adopter and CI get one line and exit 0, before the script even looks for jq, and there
+`herdr-claude-wire.sh` keeps merging its statusLine and Stop bell as it always has.
+
+**The fragments**, in merge order. Each must exist and be a JSON object, or nothing renders.
+
+| fragment | lives in | holds |
+|---|---|---|
+| `claude/settings/base.json` | this repo, public | the repo's own hooks (secret guard, herdr `SessionStart`, the Stop bell, herdmates), the statusLine (`refreshInterval` 120), the `dotfiles` marketplace and `linear-key`; a row pins it to exactly those keys |
+| `claude/settings/common.json` | `~/.dotfiles-local`, private | what every tenant shares |
+| `claude/settings/<tenant>.json` | `~/.dotfiles-local`, private | one per tenant in the profile, in profile order: permissions, plugins, marketplaces, the org-wide auto-mode block |
+
+**The merge rules**, from the script's header:
+
+```
+The fragments are folded, in order, into the live settings file (absent: {}).
+  - Lists are unioned: the live elements in their order, then each fragment's new ones; an
+    element appears once.
+  - Objects are deep-merged; on a scalar the fragment wins, and a later fragment over an earlier.
+  - Hooks, per event: an entry is keyed by the basename of the first script path in its command
+    (`$HOME/…`, `${HOME}/…`, `~/…` or `/…`, quoted or not, redirections ignored), or else by its
+    executable (the first word that is not `command`, `exec`, `[`, `]`, `&&`, `||` or an
+    option). A fragment entry replaces the live entry with its key, in place, and any second one
+    (the same script under another path); a new key is appended. An event no fragment declares
+    is left as found.
+  - autoMode.environment: the fragment's lines replace the live lines from `### Org-wide` up to,
+    not including, `### User-specific` (or to the end). With no live `### Org-wide`, they go
+    first, then `### User-specific` (moved up, or added), then the other live lines. A fragment
+    block must start with `### Org-wide` and hold no `### User-specific` (else exit 2).
+  - $HOME is substituted in marketplace source paths only.
+  - A key no fragment declares is left exactly as the live file has it.
+```
+
+**The verbs.** The render and the live file are compared in one canonical form
+(`jq -S --indent 2`), so formatting and key order are never drift.
+
+    scripts/claude-settings-render.sh --check            # the diff, live → rendered; writes nothing
+    scripts/claude-settings-render.sh --print            # the render on stdout; writes nothing
+    scripts/claude-settings-render.sh --apply            # write it, with a backup, only if it differs
+    scripts/claude-settings-render.sh --list-fragments   # the fragment paths, in merge order
+
+| exit | meaning |
+|---|---|
+| 0 | rendered, already level, or no host profile here (nothing to render) |
+| 1 | `--check` found drift |
+| 2 | could not run: no jq, a bad marker or profile, a fragment missing or not an object, a fragment auto-mode block that is not an org-wide block, a settings file that is a symlink or not one JSON object, a failed write or backup |
+| 64 | usage |
+
+`--settings PATH` renders another file; `CLAUDE_SETTINGS_RENDER_MARKER` and
+`CLAUDE_SETTINGS_RENDER_OVERLAY` override the marker and `~/.dotfiles-local`.
+
+**Who runs it.** `./install` runs `--apply` on every host (the no-marker note is its whole
+effect on most of them). `scripts/herdr-claude-wire.sh`, on a host with the marker, runs it once
+for its statusLine and Stop-bell steps (`--check` under `--print`) and merges nothing itself.
+`claude-doctor`'s "Rendered settings" section runs `--check`: ✓ rendered, ✗ drifted (run
+`--apply`), ⚠ could not run (its last stderr line), and a note on a host with no profile.
+
+**The backups.** `--apply` copies the file it replaces to
+`~/.local/state/claude-settings-render/settings.json.before-<UTC stamp>` (the directory is created mode 700),
+always mode 600 whatever the live file's mode. A second backup within one UTC second gets a
+`.NNN` counter (`…Z.001`), so the names sort in the order they were made. The newest ten are kept;
+a file in that directory whose name the script would not make is never pruned. A level file is
+not rewritten and makes no backup.
+
+**`settings.json` is still not a symlink.** It is a real file, written by a temp file beside it and
+one rename, keeping its mode (600 for a new one). A symlinked `settings.json`, even a dangling
+one, is refused by every verb that reads it. clauth rewrites `env` on every profile switch and
+Claude Code writes its own keys (`feedbackSurveyState` and the like); no fragment declares them,
+so they are kept as found and never count as drift. The account-dir builder still copies the
+rendered file into each seat's dir at launch.
+
+State table: `scripts/test-claude-settings-render.sh` (hermetic: fixture `HOME`, marker and
+overlay; CI `claude-settings-render-test`).

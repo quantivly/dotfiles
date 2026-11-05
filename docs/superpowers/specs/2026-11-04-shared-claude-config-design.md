@@ -235,6 +235,15 @@ therefore holds only what the repo itself owns; model and effort defaults are ov
    makes dev's `/home/ubuntu` SessionStart entry and the comms hooks' unguarded entries get
    replaced rather than duplicated. Source: `~/Projects/handoffs/2026-11-claude-config-audit/audit.md` "Not decided here".
 
+   **Amended 2026-11-05 (DO-884, during implementation):** (c) with no live `### Org-wide`
+   heading, the fragment's lines go first, then `### User-specific` (moved up, or added), then
+   the other live lines, so the next render finds both headings and changes nothing; a fragment
+   block must start with `### Org-wide` and hold no `### User-specific`, or the render exits 2.
+   (d) A hook path may also be spelled `${HOME}/…` or `~/…`. (e) The no-marker check comes
+   before the jq check, so `./install` (which runs `--apply` everywhere) exits 0 on a host with
+   neither. The rules as built, the verbs and the backups: `docs/CLAUDE_SETUP.md`, "Rendered
+   settings".
+
 `herdr-claude-wire.sh` keeps the herdr skill regeneration and `herdr integration install`,
 and its statusLine/bell merge becomes a call to the renderer. dotfiles-local's
 `claude-hooks-wire.sh` is retired in favour of the overlay. The account-dir builder keeps
