@@ -35,8 +35,8 @@
 #
 # THIS BAND ONLY WORKS BECAUSE settings.json SETS refreshInterval. Claude Code
 # re-runs the statusLine command on conversation events, debounced at 300 ms,
-# and those events go quiet exactly when idle grows; `"refreshInterval": 60` in
-# the statusLine entry re-runs it every 60 s regardless (docs:
+# and those events go quiet exactly when idle grows; `"refreshInterval": 120` in
+# the statusLine entry re-runs it every 120 s regardless (docs:
 # code.claude.com/docs/en/statusline, "event-driven triggers can go quiet when
 # the main session is idle"). Without it the band would freeze at its last
 # value and then every token here would expire with the 4-minute TTL below.

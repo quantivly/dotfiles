@@ -162,7 +162,7 @@ good_settings() {
     # shellcheck disable=SC2016  # $HOME stays literal: Claude Code's shell expands it
     jq -n --arg c "bash '$1/.claude/hooks/session-statusline.sh'" \
           --arg b 'f="$HOME/.claude/hooks/herdr-waiting-bell.sh"; [ -r "$f" ] && exec bash "$f"; exit 0' \
-        '{statusLine: {type: "command", command: $c, refreshInterval: 60},
+        '{statusLine: {type: "command", command: $c, refreshInterval: 120},
           hooks: {Stop: [{hooks: [{type: "command", command: $b}]}]}}'
 }
 
@@ -325,7 +325,7 @@ H="$(new_home wire1)"
 rc=0; out="$(HERDR_STUB_LOG="$WORK/stub.log" wire "$H")" || rc=$?
 check "exits 0 on a clean machine" "$rc" "0"
 check "statusLine.type"    "$(jq -r '.statusLine.type' "$H/.claude/settings.json" 2>/dev/null)" "command"
-check "refreshInterval 60" "$(jq -r '.statusLine.refreshInterval' "$H/.claude/settings.json" 2>/dev/null)" "60"
+check "refreshInterval 120" "$(jq -r '.statusLine.refreshInterval' "$H/.claude/settings.json" 2>/dev/null)" "120"
 cmd="$(jq -r '.statusLine.command' "$H/.claude/settings.json" 2>/dev/null)"
 hasnt "$cmd" '~' "command uses an absolute path, never ~ (it is not reliably expanded here)"
 has   "$cmd" "$H/.claude/hooks/session-statusline.sh" "command points at this HOME's hook"
@@ -466,7 +466,7 @@ rc=0; out="$(HOME="$H" PATH="/usr/bin:/bin" "$WIRE" 2>&1)" || rc=$?
 check "no herdr on PATH exits non-zero" "$rc" "1"
 has "$out" "herdr" "...naming herdr as what is missing"
 check "...having still written the statusLine it could" \
-      "$(jq -r '.statusLine.refreshInterval' "$H/.claude/settings.json" 2>/dev/null)" "60"
+      "$(jq -r '.statusLine.refreshInterval' "$H/.claude/settings.json" 2>/dev/null)" "120"
 
 H="$(new_home nojq)"
 printf '{"model":"opus"}\n' >"$H/.claude/settings.json"

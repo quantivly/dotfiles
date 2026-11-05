@@ -693,7 +693,7 @@ That produces:
 ```json
 { "statusLine": { "type": "command",
                   "command": "bash '/home/<you>/.claude/hooks/session-statusline.sh'",
-                  "refreshInterval": 60 } }
+                  "refreshInterval": 120 } }
 ```
 
 The absolute path is deliberate — whether `~` is expanded inside `statusLine.command` is

@@ -175,6 +175,12 @@ set, repo roots, whether herdr-draft is wanted, auth layout. Today's facts:
 The tenant → machine seat table in `claude/tenants.zsh` and `[machines.*]` in rabota's
 config already exist; the host profile points at them rather than restating seats.
 
+**Amended 2026-11-05 (DO-884):** host profiles are JSON, `~/.dotfiles-local/hosts/<profile>.json`
+with `{"tenants": [...]}`, read with jq; a host selects its profile through the marker file
+`~/.config/claude-host-profile` (one line, the profile name), and that marker is what gates
+rendering (D4: no marker, no render). The `hosts/<name>.toml` wording above is superseded.
+Source: `~/Projects/handoffs/2026-11-claude-config-audit/audit.md` "Not decided here".
+
 ### D3. One layout on every host
 
 `<config dir>/CLAUDE.md`, `keybindings.json`, `hooks/*`, `skills/*` are dotbot symlinks
@@ -191,8 +197,7 @@ sessions) runs the laptop's config against a remote filesystem.
 ### D4. `settings.json` is rendered from fragments, with `$HOME` paths
 
 New `scripts/claude-settings-render.sh` (dotfiles), run by `./install` and by the sync
-**only when a host profile exists** (`~/.dotfiles-local/hosts/<host>.toml`, or an explicit
-`--profile`): teammates who install the public repo through dev-setup, and modular
+**only when the host's marker file `~/.config/claude-host-profile` exists** (D2): teammates who install the public repo through dev-setup, and modular
 `--herdr` adopters, never have their `settings.json` rewritten. For them
 `herdr-claude-wire.sh` stays as it is, foreign-statusLine refusal included. `base.json`
 therefore holds only what the repo itself owns; model and effort defaults are overlay data.
@@ -203,6 +208,12 @@ therefore holds only what the repo itself owns; model and effort defaults are ov
    already works on dev), `extraKnownMarketplaces` (`quantivly` as a `github` source, never
    the `github-work` ssh alias; `dotfiles` as a directory source under `$HOME`), the
    `linear-key` plugin, `modelSettings`/`effortLevel` defaults.
+
+   **Amended 2026-11-05 (DO-884):** the `quantivly` marketplace
+   (`extraKnownMarketplaces.quantivly`) is declared in the quantivly tenant overlay
+   (`claude/settings/quantivly.json`), not in `base.json`; base keeps only the `dotfiles`
+   directory marketplace and `linear-key`. Reason: Zvi's Q2 (sol-build is personal-tenant
+   only; no work marketplace there). Source: `~/Projects/handoffs/2026-11-claude-config-audit/audit.md` "Not decided here".
 2. Overlays `~/.dotfiles-local/claude/settings/common.json` and
    `claude/settings/<tenant>.json` for each tenant in the host profile: `permissions.allow`,
    `permissions.defaultMode`, `enabledPlugins`, the comms hooks, the toysim live-store
@@ -213,6 +224,25 @@ therefore holds only what the repo itself owns; model and effort defaults are ov
    `feedbackSurveyState` and friends belong to Claude Code). Writes by temp file + rename,
    backs up the previous file, refuses a symlink (dev-sync's `here_plugins` already does
    this). `--check` prints the diff and exits 1; `--print` shows the result.
+
+   **Amended 2026-11-05 (DO-884):** (a) the renderer replaces only the `### Org-wide` block of
+   `autoMode.environment` (the lines from `### Org-wide` up to, not including,
+   `### User-specific`) from the tenant overlay; the `### User-specific` half of the live
+   array is left exactly as found. (b) Hooks are keyed by the basename of the first script
+   path in the hook command (`$HOME/...` or `/...`), or by the executable when the command
+   has no path (`herdmates hook …`); a rendered entry REPLACES the live entry with the same
+   key under the same event; an event no fragment declares is left as found. This is what
+   makes dev's `/home/ubuntu` SessionStart entry and the comms hooks' unguarded entries get
+   replaced rather than duplicated. Source: `~/Projects/handoffs/2026-11-claude-config-audit/audit.md` "Not decided here".
+
+   **Amended 2026-11-05 (DO-884, during implementation):** (c) with no live `### Org-wide`
+   heading, the fragment's lines go first, then `### User-specific` (moved up, or added), then
+   the other live lines, so the next render finds both headings and changes nothing; a fragment
+   block must start with `### Org-wide` and hold no `### User-specific`, or the render exits 2.
+   (d) A hook path may also be spelled `${HOME}/…` or `~/…`. (e) The no-marker check comes
+   before the jq check, so `./install` (which runs `--apply` everywhere) exits 0 on a host with
+   neither. The rules as built, the verbs and the backups: `docs/CLAUDE_SETUP.md`, "Rendered
+   settings".
 
 `herdr-claude-wire.sh` keeps the herdr skill regeneration and `herdr integration install`,
 and its statusLine/bell merge becomes a call to the renderer. dotfiles-local's
@@ -361,6 +391,10 @@ reports its age as it does the Claude token's.
 Credentials and the auth method; `autoMode.environment`; `.claude.json` (trust,
 onboarding, project state); `settings.local.json` (Claude Code's own "always allow"
 writes); transcripts; herdr server environment; `agents.slice` caps.
+
+**Amended 2026-11-05 (DO-884):** "`autoMode.environment` is per host" now reads "the
+user-specific half is per host": the renderer owns the `### Org-wide` block (D4 step 3) and
+leaves `### User-specific` as found. Source: `~/Projects/handoffs/2026-11-claude-config-audit/audit.md` "Not decided here".
 
 ## Sequencing (one PR per step)
 

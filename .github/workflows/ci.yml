@@ -375,6 +375,30 @@ jobs:
       - name: Run the claude-config-audit state table
         run: ./scripts/test-claude-config-audit.sh
 
+  claude-settings-render-test:
+    name: Claude Settings Render State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq
+
+      # The subject rewrites ~/.claude/settings.json, so the whole table runs
+      # under a fixture HOME and names its marker, overlay and settings file on
+      # every call; a runner having no ~/.config/claude-host-profile is not what
+      # makes it safe. The wire-script row runs a COPY of herdr-claude-wire.sh
+      # beside a recording stub renderer, with a herdr stub first on PATH.
+      # cmp, sha256sum and stat are stock; the suite exits 2 rather than passing
+      # if any tool is missing.
+      - name: Run the claude-settings-render state table
+        run: ./scripts/test-claude-settings-render.sh
+
   timer-health-test:
     name: Repo-Owned Timer Health State Table
     runs-on: ubuntu-latest
