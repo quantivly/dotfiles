@@ -31,7 +31,7 @@ has()   { if [[ "$2" == *"$3"* ]]; then ok "$1"; else bad "$1 — '$3' not in: $
 hasnt() { if [[ "$2" != *"$3"* ]]; then ok "$1"; else bad "$1 — '$3' unexpectedly in: ${2:0:600}"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for tool in bash jq; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
+for tool in bash jq cmp sha256sum stat; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
 [[ -x "$SUT" ]] || fatal "$SUT is not executable — every row below would assert nothing"
 
 # ---------------------------------------------------------------------------------------------
@@ -381,8 +381,191 @@ check "check: undeclared keys never count as drift" \
     "$first_render_rc|$first_render_change|$RC|$([[ "$OUT" == "$rewritten_live" ]] && echo identical || echo differs)" \
     "0|changed|0|identical"
 
+# ---------------------------------------------------------------------------------------------
+# The writer. Each row renders its own settings file, under the fixture HOME, with --settings.
+# The drift fixture is a live `theme: light` against a common fragment's `theme: dark`, so the
+# render differs from the live file in a declared key. Backups land in the fixture HOME's state
+# dir, which every row empties first.
+# ---------------------------------------------------------------------------------------------
+
+BACKUPS_DIR="$HOME/.local/state/claude-settings-render"
+BACKUP_NAME_PREFIX='settings.json.before-'
+BACKUP_NAME_RE='^settings\.json\.before-[0-9]{8}T[0-9]{6}Z'
+TEMP_FILE_PATTERN='.settings.json.render.*'
+
+# writer_settings_path ROW_NAME — reset the overlay fragments, empty the backups dir, make a fresh
+# directory for the row and print the path of its settings file (not created).
+writer_settings_path() {
+    local row_dir="$HOME/writer/$1"
+    rm -rf "$row_dir" "$BACKUPS_DIR"
+    mkdir -p "$row_dir"
+    reset_merge_fixture
+    printf '%s/settings.json\n' "$row_dir"
+}
+# write_drift_fixture SETTINGS_PATH — a live `theme: light`, and a common fragment that sets dark.
+write_drift_fixture() {
+    write_json "$COMMON_FRAGMENT" <<< '{"theme": "dark"}'
+    write_json "$1" <<< '{"theme": "light"}'
+}
+# matching_count PATTERN — how many paths match the glob PATTERN (0 when none).
+matching_count() {
+    local matches=()
+    mapfile -t matches < <(compgen -G "$1")
+    printf '%d' "${#matches[@]}"
+}
+# backup_files — the backups, oldest first (their names sort in creation order), into BACKUP_FILES.
+backup_files() { mapfile -t BACKUP_FILES < <(compgen -G "$BACKUPS_DIR/$BACKUP_NAME_PREFIX*" | LC_ALL=C sort); }
+# fingerprint PATH — the content hash and inode of PATH, so a row can tell "rewritten" from "kept".
+fingerprint() { printf '%s:%s' "$(sha256sum < "$1")" "$(stat -c %i "$1")"; }
+# same_or_changed BEFORE AFTER → same|changed
+same_or_changed() { [[ "$1" == "$2" ]] && printf same || printf changed; }
+# reformat_as_equal PATH — rewrite PATH as the same JSON value in other bytes: compact, with the
+# top-level keys reversed. The writer compares canonical forms, so this must never count as drift.
+reformat_as_equal() {
+    jq -c 'to_entries | reverse | from_entries' "$1" > "$1.reformatted" && mv "$1.reformatted" "$1"
+}
+
+printf 'writer: --apply, --check and --print\n'
+target=$(writer_settings_path mode)
+write_drift_fixture "$target"
+chmod 640 "$target"
+inode_before=$(stat -c %i "$target")
+run_sut --apply --settings "$target"
+existing_target="$RC|$(contains "$OUT" "wrote $target (backup $BACKUPS_DIR/")|$(stat -c %a "$target")|$(same_or_changed "$inode_before" "$(stat -c %i "$target")")|$(matching_count "$(dirname "$target")/$TEMP_FILE_PATTERN")|$(jq -r .theme "$target")"
+new_target=$(writer_settings_path mode-new)
+run_sut --apply --settings "$new_target"
+new_file="$RC|$(stat -c %a "$new_target" 2>/dev/null)|$(matching_count "$(dirname "$new_target")/$TEMP_FILE_PATTERN")"
+# A backups dir that cannot be made (a file stands in its place) fails the write after the temp
+# file exists: exit 2, the settings file as it was, and no temp file left beside it.
+failing_target=$(writer_settings_path mode-failed-backup)
+write_drift_fixture "$failing_target"
+mkdir -p "$(dirname "$BACKUPS_DIR")"
+: > "$BACKUPS_DIR"
+failing_before=$(fingerprint "$failing_target")
+run_sut --apply --settings "$failing_target"
+failed_backup="$RC|$(contains "$OUT" "could not create the backups dir $BACKUPS_DIR")|$(same_or_changed "$failing_before" "$(fingerprint "$failing_target")")|$(matching_count "$(dirname "$failing_target")/$TEMP_FILE_PATTERN")"
+# The inode changes only when the file is replaced by a rename; an in-place write keeps it.
+check "apply: writes by temp file and rename, mode preserved (a new file: 600; a failed backup leaves no trace)" \
+    "$existing_target|$new_file|$failed_backup" "0|yes|640|changed|0|dark|0|600|0|2|yes|same|0"
+
+# A clock frozen at one second, so all twelve backups share a stamp: the names then differ only by
+# their counter, and a name pruning frees must not be reused (it would sort first, and be pruned
+# next, in place of the oldest). The real date runs, so the backup names keep the script's format.
+FROZEN_CLOCK_BIN="$TMPROOT/frozen-clock-bin"
+FROZEN_EPOCH_SECONDS=1793880000   # 2026-11-05T12:00:00Z
+mkdir -p "$FROZEN_CLOCK_BIN"
+printf '#!/bin/sh\nexec "%s" -d @%s "$@"\n' "$(command -v date)" "$FROZEN_EPOCH_SECONDS" > "$FROZEN_CLOCK_BIN/date"
+chmod +x "$FROZEN_CLOCK_BIN/date"
+BACKUP_APPLY_RUNS=12
+target=$(writer_settings_path backups)
+write_json "$COMMON_FRAGMENT" <<< '{"theme": "dark"}'
+apply_codes=''
+last_live_before_apply="$TMPROOT/last-live-before-apply.json"
+for (( run = 1; run <= BACKUP_APPLY_RUNS; run++ )); do
+    # fixtureRun (an undeclared key) tells the backups apart. Editing it alone would not make the
+    # render differ, since the render copies it, so each run also reverts the declared theme.
+    jq -n --argjson run "$run" '{"theme": "light", "fixtureRun": $run}' > "$target"
+    cp "$target" "$last_live_before_apply"
+    PATH="$FROZEN_CLOCK_BIN:$PATH" run_sut --apply --settings "$target"
+    apply_codes+="$RC"
+done
+backup_files
+backup_names_dated=yes
+for backup in "${BACKUP_FILES[@]}"; do
+    [[ "$(basename "$backup")" =~ $BACKUP_NAME_RE ]] || backup_names_dated=no
+done
+newest_backup=/dev/null
+(( ${#BACKUP_FILES[@]} )) && newest_backup=${BACKUP_FILES[-1]}
+newest_backup_exact=$(cmp -s "$newest_backup" "$last_live_before_apply" && echo exact || echo differs)
+# Oldest first: the runs whose previous file each backup holds. Ten remain; runs 1 and 2 are gone.
+check "apply: keeps a dated backup, at most 10" \
+    "$apply_codes|${#BACKUP_FILES[@]}|$(jq -cs '[.[].fixtureRun]' "${BACKUP_FILES[@]}" 2>/dev/null < /dev/null)|$backup_names_dated|$newest_backup_exact|$(stat -c %a "${BACKUP_FILES[@]}" 2>/dev/null | sort -u | tr '\n' ' ')" \
+    "000000000000|10|[3,4,5,6,7,8,9,10,11,12]|yes|exact|600 "
+
+target=$(writer_settings_path symlink)
+link_destination="$(dirname "$target")/real-settings.json"
+write_json "$link_destination" <<< '{"theme": "light"}'
+ln -s "$link_destination" "$target"
+destination_before=$(sha256sum < "$link_destination")
+run_sut --apply --settings "$target"
+live_link="$RC|$(contains "$OUT" "$target is a symlink; refusing to write through it")|$([[ -L "$target" ]] && echo link)|$(same_or_changed "$destination_before" "$(sha256sum < "$link_destination")")"
+dangling_link="$(dirname "$target")/dangling.json"
+dangling_destination="$(dirname "$target")/absent-settings.json"
+ln -s "$dangling_destination" "$dangling_link"
+run_sut --apply --settings "$dangling_link"
+dangling_apply="$RC|$(contains "$OUT" "$dangling_link is a symlink; refusing to write through it")|$([[ -L "$dangling_link" ]] && echo link)|$([[ -e "$dangling_destination" ]] && echo created || echo absent)"
+# --check too: a dangling link read as an absent file would report drift (exit 1), not refuse.
+run_sut --check --settings "$dangling_link"
+dangling_check="$RC|$(contains "$OUT" "$dangling_link is a symlink; refusing to write through it")"
+check "apply: refuses a symlinked settings.json (exit 2)" \
+    "$live_link|$dangling_apply|$dangling_check" "2|yes|link|same|2|yes|link|absent|2|yes"
+
+target=$(writer_settings_path non-object)
+: > "$target"
+run_sut --apply --settings "$target"
+empty_file="$RC|$(contains "$OUT" "$target is not readable as one JSON object")|$(stat -c %s "$target")"
+write_json "$target" <<< '[{"theme": "light"}]'
+array_before=$(fingerprint "$target")
+run_sut --apply --settings "$target"
+array_file="$RC|$(contains "$OUT" "$target is not readable as one JSON object")|$(same_or_changed "$array_before" "$(fingerprint "$target")")"
+check "apply: refuses a non-object file (exit 2)" "$empty_file|$array_file" "2|yes|0|2|yes|same"
+
+target=$(writer_settings_path check)
+write_drift_fixture "$target"
+live_before=$(fingerprint "$target")
+run_sut --check --settings "$target"
+drift="$RC|$(contains "$OUT" $'--- live\n+++ rendered\n@@')|$(contains "$OUT" $'\n-  "theme": "light"')|$(contains "$OUT" $'\n+  "theme": "dark"')|$(same_or_changed "$live_before" "$(fingerprint "$target")")|$(matching_count "$BACKUPS_DIR/*")"
+run_sut --apply --settings "$target"
+run_sut --check --settings "$target"
+level="$RC|$(contains "$OUT" "claude-settings-render: $target is rendered")|$(contains "$OUT" '+++ rendered')"
+reformat_as_equal "$target"
+run_sut --check --settings "$target"
+reformatted_level="$RC|$(contains "$OUT" "claude-settings-render: $target is rendered")"
+check "check: exit 1 with a unified diff on drift, 0 when rendered == live" \
+    "$drift|$level|$reformatted_level" "1|yes|yes|yes|same|0|0|yes|no|0|yes"
+
+target=$(writer_settings_path print)
+write_drift_fixture "$target"
+live_before=$(fingerprint "$target")
+printed=$(CLAUDE_SETTINGS_RENDER_MARKER="$MARKER" CLAUDE_SETTINGS_RENDER_OVERLAY="$OVERLAY" \
+    "$SUT" --print --settings "$target" 2>/dev/null); print_rc=$?
+check "print: rendered JSON on stdout, nothing written" \
+    "$print_rc|$(jq -r .theme <<< "$printed" 2>/dev/null)|$(same_or_changed "$live_before" "$(fingerprint "$target")")|$([[ -e "$BACKUPS_DIR" ]] && echo backups || echo no-backups)|$(matching_count "$(dirname "$target")/$TEMP_FILE_PATTERN")" \
+    "0|dark|same|no-backups|0"
+
+target=$(writer_settings_path twice)
+write_drift_fixture "$target"
+run_sut --apply --settings "$target"
+first_apply="$RC|$(contains "$OUT" "wrote $target")"
+after_first_apply=$(fingerprint "$target")
+backups_after_first_apply=$(matching_count "$BACKUPS_DIR/$BACKUP_NAME_PREFIX*")
+run_sut --apply --settings "$target"
+second_apply="$RC|$(contains "$OUT" "claude-settings-render: $target is rendered")|$(contains "$OUT" 'wrote')|$(same_or_changed "$after_first_apply" "$(fingerprint "$target")")|$(matching_count "$BACKUPS_DIR/$BACKUP_NAME_PREFIX*")"
+# The same value in other bytes is still level: the reformatted file is kept as it is.
+reformat_as_equal "$target"
+after_reformat=$(fingerprint "$target")
+run_sut --apply --settings "$target"
+reformatted_apply="$RC|$(contains "$OUT" "claude-settings-render: $target is rendered")|$(same_or_changed "$after_reformat" "$(fingerprint "$target")")|$(matching_count "$BACKUPS_DIR/$BACKUP_NAME_PREFIX*")"
+check "apply twice: second run is a no-op (same bytes, no new backup), and so is one after a reformat" \
+    "$first_apply|$backups_after_first_apply|$second_apply|$reformatted_apply" "0|yes|1|0|yes|no|same|1|0|yes|same|1"
+
+# A PATH with what the script needs before its jq check (bash for env, dirname, sed for --help),
+# and no jq.
+NO_JQ_BIN="$TMPROOT/no-jq-bin"
+mkdir -p "$NO_JQ_BIN"
+for tool in bash dirname sed; do ln -s "$(command -v "$tool")" "$NO_JQ_BIN/$tool"; done
+target=$(writer_settings_path no-jq)
+write_drift_fixture "$target"
+live_before=$(fingerprint "$target")
+OUT=$(PATH="$NO_JQ_BIN" CLAUDE_SETTINGS_RENDER_MARKER="$MARKER" CLAUDE_SETTINGS_RENDER_OVERLAY="$OVERLAY" \
+    "$SUT" --apply --settings "$target" 2>&1); RC=$?
+no_jq_apply="$RC|$(contains "$OUT" 'claude-settings-render: jq is required')|$(same_or_changed "$live_before" "$(fingerprint "$target")")"
+OUT=$(PATH="$NO_JQ_BIN" "$SUT" --help 2>&1); RC=$?
+no_jq_help="$RC|$(contains "$OUT" '--apply')"
+check "jq missing → exit 2 (--help still works)" "$no_jq_apply|$no_jq_help" "2|yes|same|0|yes"
+
 printf '\n'
-EXPECTED_ROWS=21
+EXPECTED_ROWS=29
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

@@ -39,17 +39,27 @@
 #   - $HOME is substituted in marketplace source paths only.
 #   - A key no fragment declares is left exactly as the live file has it.
 #
+# WRITER. The settings path is refused (exit 2) when it is a symlink, even a dangling one, or a
+# file that is not one JSON object (an empty file included); an absent path renders from {}. The
+# render and the live file are compared in one canonical form (jq -S --indent 2), so formatting
+# and key order are never drift. --apply writes only when they differ: the render goes to a temp
+# file beside the settings file and takes its mode (600 for a new file), the previous file is
+# copied to ~/.local/state/claude-settings-render/settings.json.before-<UTC stamp> (the newest 10
+# kept), and the temp file is renamed over the settings file.
+#
 # Usage:
-#   claude-settings-render --check            exit 1 if the live file differs from the render
+#   claude-settings-render --check            print a unified diff and exit 1 if the live file
+#                                             differs from the render
 #   claude-settings-render --print            print the rendered settings to stdout
-#   claude-settings-render --apply            write the render to the settings path
+#   claude-settings-render --apply            write the render to the settings path, with a backup
 #   claude-settings-render --list-fragments   print the resolved fragment paths, one per line
 #     --settings PATH                         the settings file (default: ~/.claude/settings.json)
 #   claude-settings-render --help             this text
 #
 # Exit: 0 rendered, level, or no host profile here (nothing to render)
 #       1 drift on --check
-#       2 could not run (no jq, bad marker or profile, a fragment missing or not an object)
+#       2 could not run (no jq, bad marker or profile, a fragment missing or not an object, the
+#         settings file a symlink or not one JSON object, a failed write or backup)
 #       64 usage
 #
 # Overrides: CLAUDE_SETTINGS_RENDER_MARKER (default ~/.config/claude-host-profile),
@@ -83,6 +93,25 @@ HOOK_REDIRECTION_RE='[0-9]*[<>]+&?[[:space:]]*[^[:space:];]*'
 HOOK_SCRIPT_PATH_RE=$'(^|[[:space:]=\'"])((\\$HOME|\\$\\{HOME\\}|~)?/[^[:space:]\'";]*)'
 # Words skipped when a hook command with no path is keyed by its executable.
 HOOK_WRAPPER_WORDS_JSON='["command", "exec", "[", "]", "&&", "||"]'
+# The writer: a temp file beside the settings file, renamed over it; a new file's mode.
+TEMP_NAME_TEMPLATE='.settings.json.render.XXXXXX'
+NEW_SETTINGS_MODE=600
+# Backups of the previous file: settings.json.before-<UTC stamp>, private, the newest BACKUPS_KEPT.
+BACKUPS_DIR_RELATIVE='.local/state/claude-settings-render'
+BACKUPS_DIR_MODE=700
+BACKUP_NAME_PREFIX='settings.json.before-'
+BACKUP_TIMESTAMP_FORMAT='%Y%m%dT%H%M%SZ'
+# A second backup within one second gets a counter, zero-padded so the names still sort in the
+# order they were made: …Z, then …Z.001, then …Z.002.
+BACKUP_COUNTER_DIGITS=3
+BACKUP_COUNTER_MAX=999
+BACKUP_COUNTER_SUFFIX_RE='^\.([0-9]+)$'
+BACKUPS_KEPT=10
+# The two sides of the --check diff, and diff's own status for "the inputs differ".
+DIFF_LIVE_LABEL='live'
+DIFF_RENDERED_LABEL='rendered'
+DIFF_FOUND_DIFFERENCES=1
+EXIT_DRIFT=1
 EXIT_COULD_NOT_RUN=2
 EXIT_USAGE=64
 
@@ -90,7 +119,10 @@ PROFILE_MARKER="${CLAUDE_SETTINGS_RENDER_MARKER:-$HOME/$PROFILE_MARKER_RELATIVE}
 OVERLAY_ROOT="${CLAUDE_SETTINGS_RENDER_OVERLAY:-$HOME/$OVERLAY_ROOT_RELATIVE}"
 BASE_FRAGMENT="$DOTFILES/$BASE_FRAGMENT_RELATIVE"
 SETTINGS_PATH="$HOME/$SETTINGS_RELATIVE"
+BACKUPS_DIR="$HOME/$BACKUPS_DIR_RELATIVE"
 MODE=''                # check | print | apply | list-fragments
+RENDER_TEMP_PATH=''    # the writer's temp file while it exists; the EXIT trap removes it
+BACKUP_PATH=''         # the backup back_up_settings made
 PROFILE_NAME=''
 TENANTS=()
 FRAGMENTS=()
@@ -358,9 +390,160 @@ render_settings() {
     substitute_home <<< "$merged"
 }
 
-write_settings() { die "not implemented"; }
+# ---------------------------------------------------------------------------------------------
+# The writer and the verbs.
+# ---------------------------------------------------------------------------------------------
+
+# refuse_unsafe_settings — die unless SETTINGS_PATH is absent or a regular file holding one JSON
+# object. A symlink is refused first, even a dangling one, before anything reads the path as
+# absent: the rename would replace the link with a file, and a dangling one would render from {}.
+refuse_unsafe_settings() {
+    [[ ! -L "$SETTINGS_PATH" ]] || die "$SETTINGS_PATH is a symlink; refusing to write through it"
+    [[ -e "$SETTINGS_PATH" ]] || return 0
+    [[ -f "$SETTINGS_PATH" ]] || die "$SETTINGS_PATH is not a regular file; refusing to render over it"
+    # Slurped, an empty file is [] and two documents are two elements: neither is one object.
+    jq -se 'length == 1 and (.[0] | type) == "object"' "$SETTINGS_PATH" >/dev/null 2>&1 \
+        || die "$SETTINGS_PATH is not readable as one JSON object; refusing to render over it"
+}
+
+# live_settings_canonical — print the live settings file in the render's form (jq -S --indent 2),
+# or nothing when it is absent.
+live_settings_canonical() {
+    [[ -e "$SETTINGS_PATH" ]] || return 0
+    jq -S --indent 2 . "$SETTINGS_PATH" || die "could not read $SETTINGS_PATH"
+}
+
+# print_lines TEXT — TEXT and a newline, or nothing at all when TEXT is empty (an absent file).
+print_lines() { [[ -z "$1" ]] || printf '%s\n' "$1"; }
+
+# report_rendered — the live file already is the render.
+report_rendered() { printf '%s: %s is rendered\n' "$SCRIPT_NAME" "$SETTINGS_PATH"; }
+
+# check_settings RENDERED LIVE — report "rendered" when LIVE (the live file's canonical form)
+# equals RENDERED; otherwise print the unified diff from LIVE to RENDERED and exit 1.
+check_settings() {
+    local rendered="$1" live="$2" diff_status
+    if [[ "$live" == "$rendered" ]]; then
+        report_rendered
+        return 0
+    fi
+    diff -u --label "$DIFF_LIVE_LABEL" --label "$DIFF_RENDERED_LABEL" \
+        <(print_lines "$live") <(print_lines "$rendered")
+    diff_status=$?
+    (( diff_status == DIFF_FOUND_DIFFERENCES )) \
+        || die "could not diff $SETTINGS_PATH against its render (diff exited $diff_status)"
+    exit "$EXIT_DRIFT"
+}
+
+# remove_render_temp — the EXIT trap: remove the writer's temp file if it was never renamed.
+remove_render_temp() { [[ -z "$RENDER_TEMP_PATH" ]] || rm -f -- "$RENDER_TEMP_PATH"; }
+
+# next_backup_counter STAMP — print the counter for a new backup made in the UTC second STAMP: 0
+# (no suffix) when no backup carries that stamp, else one past the highest counter that does. Never
+# the lowest free one: a name that pruning freed would sort before the newer backups of that second,
+# and so be pruned next, in place of the oldest.
+next_backup_counter() {
+    local stamp_prefix="$BACKUPS_DIR/$BACKUP_NAME_PREFIX$1" same_second_backups=() backup suffix
+    local counter highest=-1
+    shopt -s nullglob
+    same_second_backups=("$stamp_prefix"*)
+    shopt -u nullglob
+    for backup in "${same_second_backups[@]}"; do
+        suffix=${backup#"$stamp_prefix"}
+        if [[ -z "$suffix" ]]; then
+            counter=0
+        elif [[ "$suffix" =~ $BACKUP_COUNTER_SUFFIX_RE ]]; then
+            counter=$(( 10#${BASH_REMATCH[1]} ))
+        else
+            continue    # not a name this script makes
+        fi
+        (( counter <= highest )) || highest=$counter
+    done
+    printf '%d\n' "$(( highest + 1 ))"
+}
+
+# back_up_settings — copy SETTINGS_PATH, byte for byte, to a new private file in BACKUPS_DIR named
+# for the current UTC second, and set BACKUP_PATH to it. A name already taken is never overwritten;
+# the next counter is tried instead.
+back_up_settings() {
+    local stamp counter counter_suffix
+    # shellcheck disable=SC2174  # intended: the backups dir is private, its parents keep the umask
+    mkdir -p -m "$BACKUPS_DIR_MODE" -- "$BACKUPS_DIR" || die "could not create the backups dir $BACKUPS_DIR"
+    stamp=$(date -u "+$BACKUP_TIMESTAMP_FORMAT") || die "could not read the clock to name the backup"
+    counter=$(next_backup_counter "$stamp")
+    while true; do
+        (( counter <= BACKUP_COUNTER_MAX )) \
+            || die "$BACKUP_COUNTER_MAX backups this second already in $BACKUPS_DIR; refusing to make another"
+        counter_suffix=''
+        (( counter == 0 )) || printf -v counter_suffix '.%0*d' "$BACKUP_COUNTER_DIGITS" "$counter"
+        BACKUP_PATH="$BACKUPS_DIR/$BACKUP_NAME_PREFIX$stamp$counter_suffix"
+        # noclobber makes the redirection exclusive: it fails, rather than truncates, a name that
+        # exists (a concurrent run took it), and the next counter is tried.
+        if ( umask 077; set -o noclobber; : > "$BACKUP_PATH" ) 2>/dev/null; then
+            break
+        fi
+        [[ -e "$BACKUP_PATH" ]] || die "could not create a backup in $BACKUPS_DIR"
+        counter=$(( counter + 1 ))
+    done
+    if ! cat -- "$SETTINGS_PATH" > "$BACKUP_PATH"; then
+        rm -f -- "$BACKUP_PATH"
+        die "could not copy $SETTINGS_PATH to $BACKUP_PATH"
+    fi
+}
+
+# prune_backups — delete the oldest backups beyond BACKUPS_KEPT. The names sort in the order they
+# were made (the UTC stamp, then the zero-padded counter), so the oldest come first in C order.
+prune_backups() {
+    local found_backups=() sorted_backups=() excess
+    shopt -s nullglob
+    found_backups=("$BACKUPS_DIR/$BACKUP_NAME_PREFIX"*)
+    shopt -u nullglob
+    excess=$(( ${#found_backups[@]} - BACKUPS_KEPT ))
+    (( excess > 0 )) || return 0
+    mapfile -t sorted_backups < <(printf '%s\n' "${found_backups[@]}" | LC_ALL=C sort)
+    rm -f -- "${sorted_backups[@]:0:excess}" || die "could not prune the oldest backups in $BACKUPS_DIR"
+}
+
+# write_settings RENDERED — write RENDERED over SETTINGS_PATH: into a temp file beside it, with the
+# previous file's mode (NEW_SETTINGS_MODE for a new file), then, once the previous file is backed
+# up and the backups pruned, by one rename. A failure before the rename leaves SETTINGS_PATH as it
+# was, removes the temp file, and exits 2.
+write_settings() {
+    local rendered="$1" settings_dir backup_note
+    settings_dir=$(dirname -- "$SETTINGS_PATH")
+    trap remove_render_temp EXIT
+    RENDER_TEMP_PATH=$(mktemp "$settings_dir/$TEMP_NAME_TEMPLATE") \
+        || die "could not create a temp file beside $SETTINGS_PATH"
+    printf '%s\n' "$rendered" > "$RENDER_TEMP_PATH" || die "could not write $RENDER_TEMP_PATH"
+    if [[ -e "$SETTINGS_PATH" ]]; then
+        chmod --reference="$SETTINGS_PATH" -- "$RENDER_TEMP_PATH" \
+            || die "could not give $RENDER_TEMP_PATH the mode of $SETTINGS_PATH"
+        back_up_settings
+        prune_backups
+        backup_note="backup $BACKUP_PATH"
+    else
+        chmod "$NEW_SETTINGS_MODE" -- "$RENDER_TEMP_PATH" || die "could not set the mode of $RENDER_TEMP_PATH"
+        backup_note='a new file; nothing to back up'
+    fi
+    mv -T -- "$RENDER_TEMP_PATH" "$SETTINGS_PATH" \
+        || die "could not rename $RENDER_TEMP_PATH over $SETTINGS_PATH"
+    RENDER_TEMP_PATH=''
+    printf '%s: wrote %s (%s)\n' "$SCRIPT_NAME" "$SETTINGS_PATH" "$backup_note"
+}
+
+# apply_settings RENDERED LIVE — write RENDERED, unless LIVE (the live file's canonical form)
+# already equals it: then nothing is written and no backup is made.
+apply_settings() {
+    local rendered="$1" live="$2"
+    if [[ "$live" == "$rendered" ]]; then
+        report_rendered
+        return 0
+    fi
+    write_settings "$rendered"
+}
 
 main() {
+    local rendered live
     parse_args "$@"
     command -v jq >/dev/null || die "jq is required"
     if [[ ! -f "$PROFILE_MARKER" ]]; then
@@ -369,12 +552,19 @@ main() {
     fi
     load_profile
     load_fragments
-    # write_settings is a stub that dies until the writer lands, so --check and --apply reach it
-    # and nothing else.
+    if [[ "$MODE" == list-fragments ]]; then
+        printf '%s\n' "${FRAGMENTS[@]}"
+        return 0
+    fi
+    # The refusals come before anything reads the settings path, or a dangling link reads as absent.
+    refuse_unsafe_settings
+    # Both die inside the command substitution, having said why; pass the exit on.
+    rendered=$(render_settings) || exit "$EXIT_COULD_NOT_RUN"
+    live=$(live_settings_canonical) || exit "$EXIT_COULD_NOT_RUN"
     case "$MODE" in
-        list-fragments) printf '%s\n' "${FRAGMENTS[@]}" ;;
-        print)          render_settings ;;
-        check|apply)    write_settings ;;
+        print) printf '%s\n' "$rendered" ;;
+        check) check_settings "$rendered" "$live" ;;
+        apply) apply_settings "$rendered" "$live" ;;
     esac
 }
 
