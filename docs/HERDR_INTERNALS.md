@@ -469,7 +469,7 @@ Gotchas, in the order they bite:
   they are missing (before DO-563 nothing checked either, in either install path).
   `claude/hooks/session-statusline.sh` is symlinked to `~/.claude/hooks/` by dotbot, but it must
   also be set as `statusLine` in `~/.claude/settings.json` (user-level, not in this repo), and that
-  entry needs `"refreshInterval": 60` — without the interval the idle band freezes when the session
+  entry needs `"refreshInterval": 120` — without the interval the idle band freezes when the session
   goes quiet and every token then expires on the 4-minute TTL, blanking the rows. Without the
   statusLine entry it never runs, every `$mdl`/`$eff_*`/`$ctx_*` token resolves to nothing, and those sidebar
   rows render empty with no error. It doubles as the in-pane status line, so visible model/context

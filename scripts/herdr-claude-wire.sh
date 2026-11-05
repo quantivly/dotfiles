@@ -44,6 +44,14 @@
 # one statusLine key, so the collision is real. A foreign statusLine is REFUSED
 # with an explanation, never overwritten.
 #
+# A HOST WITH A PROFILE IS DIFFERENT (DO-884). Where ~/.config/claude-host-profile
+# exists, settings.json is rendered from fragments by
+# scripts/claude-settings-render.sh, and the public base fragment declares both
+# the statusLine and the Stop bell. Steps 1 and 4 then run that renderer once
+# (`--apply`, or `--check` under --print) and skip their own jq merges: two
+# writers merging the same keys is how the file drifted in the first place.
+# Without the marker, this script behaves exactly as it always has.
+#
 # Idempotent. Safe to re-run after `herdr update` (and worth it -- SKILL.md is
 # version-specific).
 #
@@ -62,7 +70,15 @@ BELL_HOOK="${HOME}/.claude/hooks/herdr-waiting-bell.sh"
 # mid-deploy checkout from failing every Stop with exit 127.
 # shellcheck disable=SC2016  # a literal command string, expanded later by Claude Code
 BELL_HOOK_COMMAND='f="$HOME/.claude/hooks/herdr-waiting-bell.sh"; [ -r "$f" ] && exec bash "$f"; exit 0'
-REFRESH=60
+# Seconds between statusLine re-runs while a session is idle: well inside the
+# tokens' 4-minute TTL, and the value the base fragment renders (DO-884).
+REFRESH=120
+# A host profile hands settings.json to the renderer (see the header). The same
+# override the renderer reads, so the two can never disagree about the marker.
+HOST_PROFILE_MARKER="${CLAUDE_SETTINGS_RENDER_MARKER:-${HOME}/.config/claude-host-profile}"
+SETTINGS_RENDERER_NAME=claude-settings-render.sh
+SETTINGS_RENDERER="$(dirname "$0")/$SETTINGS_RENDERER_NAME"
+SETTINGS_RENDER_RC=''   # the renderer's exit status once it has run; '' before
 
 PRINT_ONLY=false
 case "$#:${1:-}" in
@@ -80,6 +96,28 @@ good() { say "  ${GRN}✓${OFF} $*"; }
 warn() { say "  ${YEL}○${OFF} $*"; }
 bad()  { say "  ${RED}✗${OFF} $*"; RC=1; }
 RC=0
+
+# render_from_host_profile WHAT — the host has a profile: run the settings
+# renderer, which writes WHAT along with everything else the fragments declare
+# (`--check` under --print, so nothing is written), and report it for WHAT. It
+# runs once per invocation: a second caller reports the first run's result, and
+# a failure already reported is not reported again (one fault, one ✗).
+render_from_host_profile() {
+    local what="$1" verb=--apply renderer_output
+    [[ "$PRINT_ONLY" == true ]] && verb=--check
+    if [[ -z "$SETTINGS_RENDER_RC" ]]; then
+        renderer_output="$("$SETTINGS_RENDERER" "$verb" 2>&1)"
+        SETTINGS_RENDER_RC=$?
+        [[ -z "$renderer_output" ]] || printf '%s\n' "$renderer_output" | sed "s/^/      ${DIM}/; s/\$/${OFF}/"
+    elif (( SETTINGS_RENDER_RC > 1 )); then
+        return 0
+    fi
+    case "$SETTINGS_RENDER_RC" in
+        0) good "$what: rendered from the host profile ($SETTINGS_RENDERER_NAME $verb)" ;;
+        1) warn "would render $what from the host profile (the diff above)" ;;
+        *) bad "$what: $SETTINGS_RENDERER_NAME $verb could not run (exit $SETTINGS_RENDER_RC) — its message is above" ;;
+    esac
+}
 
 # A signal mid-run left a temp file beside the destination (verified in review).
 # $tmp is reused by both sections; clearing it after each successful mv keeps the
@@ -106,6 +144,10 @@ elif [[ ! -e "$HOOK" ]]; then
     # install is incomplete and wiring around that would hide it.
     bad "no statusline hook at ${HOOK/#$HOME/\~} — run ./install --herdr first"
     say "      ${DIM}session-statusline.sh is linked by dotbot; nothing below can substitute for it.${OFF}"
+elif [[ -f "$HOST_PROFILE_MARKER" ]]; then
+    # The base fragment declares the statusLine (with refreshInterval); merging
+    # it here as well would make this script a second writer of the same key.
+    render_from_host_profile "statusLine"
 else
     # The command is stored as an ABSOLUTE path inside a bash -c wrapper: `~` is
     # not reliably expanded in this field, and a bare path is not executed by a
@@ -352,6 +394,11 @@ if ! command -v jq >/dev/null 2>&1; then
 elif [[ ! -e "$BELL_HOOK" ]]; then
     bad "no bell hook at ${BELL_HOOK/#$HOME/\~} — run ./install --herdr first"
     say "      ${DIM}herdr-waiting-bell.sh is linked by dotbot; registering a missing file would ring nothing.${OFF}"
+elif [[ -f "$HOST_PROFILE_MARKER" ]]; then
+    # The base fragment declares the bell too. Section 1 has usually run the
+    # renderer already, and then this only reports; it runs it when section 1
+    # stopped before it did (a missing statusline hook).
+    render_from_host_profile '"Waiting on you" bell (Stop hook)'
 elif [[ -e "$SETTINGS" && ! -r "$SETTINGS" ]]; then
     bad "cannot read ${SETTINGS/#$HOME/\~} — the Stop hook was not added"
 elif [[ -e "$SETTINGS" ]] && ! jq -e 'type == "object"' "$SETTINGS" >/dev/null 2>&1; then

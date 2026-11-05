@@ -632,8 +632,49 @@ check "no marker and no jq → exit 0 with the note" \
     "$RC|$(contains "$OUT" "no host profile at $TMPROOT/no-such-marker; nothing to render")|$(contains "$OUT" 'jq is required')|$(same_or_changed "$live_before" "$(fingerprint "$target")")" \
     "0|yes|no|same"
 
+# ---------------------------------------------------------------------------------------------
+# herdr-claude-wire.sh, which has no state table of its own for this: on a host with a profile it
+# must hand settings.json to the renderer and skip its own jq merges, and without one behave as
+# before. The wire script calls the renderer beside itself ("$(dirname "$0")/…"), so it runs here
+# from a copy whose neighbour is a stub that records each call and writes nothing: a settings.json
+# appearing under the marker means a merge ran anyway. A herdr stub keeps the real one (this box
+# has it) from writing into the fixture home.
+# ---------------------------------------------------------------------------------------------
+WIRE_TREE="$TMPROOT/wire-tree"
+WIRE_STUB_BIN="$WIRE_TREE/stub-bin"
+WIRE_HOME="$TMPROOT/wire-home"
+RENDERER_CALLS="$TMPROOT/renderer-calls.log"
+mkdir -p "$WIRE_TREE/scripts" "$WIRE_STUB_BIN" "$WIRE_HOME/.claude/hooks" "$WIRE_HOME/.config"
+cp "$DOTFILES/scripts/herdr-claude-wire.sh" "$WIRE_TREE/scripts/"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$RENDERER_CALLS" > "$WIRE_TREE/scripts/claude-settings-render.sh"
+printf '#!/bin/sh\ncase "$*" in\n  --skill) echo "STUB SKILL" ;;\n  "integration status") echo "claude: current (v8)" ;;\nesac\n' \
+    > "$WIRE_STUB_BIN/herdr"
+chmod +x "$WIRE_TREE/scripts/claude-settings-render.sh" "$WIRE_STUB_BIN/herdr"
+: > "$WIRE_HOME/.claude/hooks/session-statusline.sh"
+: > "$WIRE_HOME/.claude/hooks/herdr-waiting-bell.sh"
+WIRE_SETTINGS="$WIRE_HOME/.claude/settings.json"
+# run_wire ARGS… — the copied wire script under the wire home: its exit status in $RC.
+run_wire() {
+    env -u CLAUDE_SETTINGS_RENDER_MARKER HOME="$WIRE_HOME" PATH="$WIRE_STUB_BIN:$PATH" \
+        "$WIRE_TREE/scripts/herdr-claude-wire.sh" "$@" >/dev/null 2>&1; RC=$?
+}
+# renderer_calls — every recorded call, one line, in order.
+renderer_calls() { tr '\n' ' ' < "$RENDERER_CALLS" 2>/dev/null; }
+settings_state() { [[ -e "$WIRE_SETTINGS" ]] && printf written || printf absent; }
+printf 'laptop\n' > "$WIRE_HOME/.config/claude-host-profile"
+run_wire
+profiled_apply="$RC|$(renderer_calls)|$(settings_state)"
+run_wire --print
+profiled_print="$RC|$(renderer_calls)|$(settings_state)"
+rm -f "$WIRE_HOME/.config/claude-host-profile"
+run_wire
+unprofiled="$RC|$(renderer_calls)|$(jq -c '[.statusLine.refreshInterval, ([.hooks.Stop[].hooks[].command | select(contains("herdr-waiting-bell.sh"))] | length)]' "$WIRE_SETTINGS" 2>&1)"
+check "wire: with a host profile, herdr-claude-wire.sh renders through claude-settings-render.sh and skips its own merges" \
+    "$profiled_apply|$profiled_print|$unprofiled" \
+    "0|--apply |absent|0|--apply --check |absent|0|--apply --check |[120,1]"
+
 printf '\n'
-EXPECTED_ROWS=32
+EXPECTED_ROWS=33
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
