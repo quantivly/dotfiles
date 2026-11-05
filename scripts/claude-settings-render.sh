@@ -27,12 +27,15 @@
 #     element appears once.
 #   - Objects are deep-merged; on a scalar the fragment wins, and a later fragment over an earlier.
 #   - Hooks, per event: an entry is keyed by the basename of the first script path in its command
-#     (`$HOME/…` or `/…`, quoted or not, redirections ignored), or else by its executable (the
-#     first word that is not `command`, `exec`, `[`, `]`, `&&`, `||` or an option). A fragment entry
-#     replaces the live entry with its key, in place, and any second one (the same script under
-#     another path); a new key is appended. An event no fragment declares is left as found.
+#     (`$HOME/…`, `${HOME}/…`, `~/…` or `/…`, quoted or not, redirections ignored), or else by its
+#     executable (the first word that is not `command`, `exec`, `[`, `]`, `&&`, `||` or an
+#     option). A fragment entry replaces the live entry with its key, in place, and any second one
+#     (the same script under another path); a new key is appended. An event no fragment declares
+#     is left as found.
 #   - autoMode.environment: the fragment's lines replace the live lines from `### Org-wide` up to,
-#     not including, `### User-specific` (or to the end); with no `### Org-wide` they go first.
+#     not including, `### User-specific` (or to the end). With no live `### Org-wide`, they go
+#     first, then `### User-specific` (moved up, or added), then the other live lines. A fragment
+#     block must start with `### Org-wide` and hold no `### User-specific` (else exit 2).
 #   - $HOME is substituted in marketplace source paths only.
 #   - A key no fragment declares is left exactly as the live file has it.
 #
@@ -76,8 +79,8 @@ ABSENT_LIVE_DOCUMENTS='[{}]'
 # A redirection in a hook command (`>/dev/null`, `2>&1`, `> /dev/null`), dropped before keying.
 HOOK_REDIRECTION_RE='[0-9]*[<>]+&?[[:space:]]*[^[:space:];]*'
 # A hook command's script path: starts the command or follows whitespace, `=` or a quote, and
-# begins `$HOME/` or `/`; capture 2 is the path, without its quotes.
-HOOK_SCRIPT_PATH_RE=$'(^|[[:space:]=\'"])((\\$HOME)?/[^[:space:]\'";]*)'
+# begins `$HOME/`, `${HOME}/`, `~/` or `/`; capture 2 is the path, without its quotes.
+HOOK_SCRIPT_PATH_RE=$'(^|[[:space:]=\'"])((\\$HOME|\\$\\{HOME\\}|~)?/[^[:space:]\'";]*)'
 # Words skipped when a hook command with no path is keyed by its executable.
 HOOK_WRAPPER_WORDS_JSON='["command", "exec", "[", "]", "&&", "||"]'
 EXIT_COULD_NOT_RUN=2
@@ -190,7 +193,7 @@ def union_lists($fragment_list):
 # hook_key: the identity of one hook command, so one script under two paths is one hook.
 #   1. Redirections are dropped ($redirection_re), so `>/dev/null` and `2>&1` never name a script.
 #   2. The basename of the first script path ($script_path_re: a word or an assignment's value,
-#      quoted or not, that starts with `$HOME/` or `/`).
+#      quoted or not, that starts with `$HOME/`, `${HOME}/`, `~/` or `/`).
 #   3. Otherwise the executable: the first word that is not a wrapper ($wrapper_words) or an
 #      option, so `command -v herdmates … && exec herdmates hook X` is `herdmates`.
 #   4. Otherwise the command itself.
@@ -240,17 +243,35 @@ def merge_hooks($fragment_hooks):
 # replace_org_wide_block($fragment_lines): in the input (the live autoMode.environment lines),
 # replace the lines from the $org_wide_heading line up to, not including, the next
 # $user_specific_heading line (or to the end) with $fragment_lines. Everything before the block
-# and from the user-specific heading on is kept. With no org-wide heading the fragment's lines go
-# first, ahead of every live line.
+# and from the user-specific heading on is kept. With no org-wide heading, the fragment's lines go
+# first, then the user-specific heading (the live one, moved up, or a new one), then every other
+# live line in order, so the next render finds both headings and changes nothing. Every fragment
+# block starts with the org-wide heading and holds no user-specific one (JQ_ORG_WIDE_BLOCK_PROBLEM).
 # shellcheck disable=SC2016  # jq's own $variables, not the shell's
 JQ_AUTOMODE_ORG_WIDE='
 def first_index_of($line; $from): [range($from; length) as $index | select(.[$index] == $line) | $index] | first;
+def without_line_at($index): if $index == null then . else .[:$index] + .[$index + 1:] end;
 def replace_org_wide_block($fragment_lines):
   first_index_of($org_wide_heading; 0) as $block_start
-  | if $block_start == null then $fragment_lines + .
+  | if $block_start == null then
+      $fragment_lines + [$user_specific_heading]
+        + without_line_at(first_index_of($user_specific_heading; 0))
     else (first_index_of($user_specific_heading; $block_start + 1) // length) as $block_end
       | .[:$block_start] + $fragment_lines + .[$block_end:]
     end;'
+
+# What is wrong with one fragment autoMode.environment, or nothing. A block must start with the
+# org-wide heading and hold no user-specific one; otherwise the next render could not find the
+# block it wrote, and the file would grow on every render.
+# shellcheck disable=SC2016  # jq's own $variables, not the shell's
+JQ_ORG_WIDE_BLOCK_PROBLEM='
+if (.autoMode | type) != "object" or (.autoMode | has("environment") | not) then empty
+else .autoMode.environment as $lines
+  | if ($lines | type) != "array" then "is not a list of lines"
+    elif $lines[0] != $org_wide_heading then "does not start with the line \($org_wide_heading)"
+    elif any($lines[]; . == $user_specific_heading) then "holds the line \($user_specific_heading)"
+    else empty end
+end'
 
 # merge_at($path; $fragment): merge $fragment into the input, the live value at $path (null when
 # the live file lacks it). Hooks and the auto-mode environment have their own rules; otherwise
@@ -291,12 +312,26 @@ if (.extraKnownMarketplaces | type) == "object" then
     if has_source_path then .source.path |= (split($placeholder) | join($home)) else . end)
 else . end'
 
+# require_org_wide_blocks FRAGMENT_PATHS… — die, naming the fragment, when one carries an
+# autoMode.environment that is not an org-wide block (see JQ_ORG_WIDE_BLOCK_PROBLEM).
+require_org_wide_blocks() {
+    local fragment problem
+    for fragment in "$@"; do
+        problem=$(jq -r --arg org_wide_heading "$ORG_WIDE_HEADING" \
+            --arg user_specific_heading "$USER_SPECIFIC_HEADING" \
+            "$JQ_ORG_WIDE_BLOCK_PROBLEM" "$fragment") \
+            || die "could not read the auto-mode block of $fragment"
+        [[ -z "$problem" ]] || die "$fragment: autoMode.environment $problem"
+    done
+}
+
 # merge_settings LIVE_JSON_PATH FRAGMENT_PATHS… — print the live settings file merged with the
-# fragments, in the order given. An absent live file is the empty object; one that is not a single
-# JSON object, or a merge that fails, dies.
+# fragments, in the order given. An absent live file is the empty object. A live file that is not
+# a single JSON object, a fragment whose auto-mode block is malformed, or a merge that fails, dies.
 merge_settings() {
     local live_path="$1"
     shift
+    require_org_wide_blocks "$@"
     local live_arguments=(--slurpfile live_documents "$live_path")
     [[ -e "$live_path" ]] || live_arguments=(--argjson live_documents "$ABSENT_LIVE_DOCUMENTS")
     jq -n -S --indent 2 "${live_arguments[@]}" \

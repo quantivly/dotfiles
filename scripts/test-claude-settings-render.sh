@@ -226,6 +226,25 @@ check "hooks: a no-path command is keyed by its executable" \
 
 reset_merge_fixture
 write_json "$LIVE" <<'JSON'
+{"hooks": {"PreToolUse": [
+  {"matcher": "Bash", "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/x.sh"}]},
+  {"matcher": "Bash", "hooks": [{"type": "command", "command": "bash \"${HOME}/.claude/hooks/x.sh\""}]}
+]}}
+JSON
+write_json "$ALPHA_FRAGMENT" <<'JSON'
+{"hooks": {"PreToolUse": [
+  {"matcher": "Bash", "hooks": [{"type": "command",
+    "command": "f=\"$HOME/.claude/hooks/x.sh\"; [ -r \"$f\" ] && exec bash \"$f\"; exit 0"}]}
+]}}
+JSON
+render
+# Both live spellings are x.sh, not `bash`: the fragment's entry is the only x.sh entry left.
+check "hooks: a live entry spelled with ~/ or \${HOME}/ collapses onto the fragment's" \
+    "$RC|$(rendered '[.hooks.PreToolUse[].hooks[0].command | select(contains("/x.sh"))]')" \
+    "0|$(expected '[$alpha.hooks.PreToolUse[0].hooks[0].command]')"
+
+reset_merge_fixture
+write_json "$LIVE" <<'JSON'
 {"hooks": {"UserPromptSubmit": [
   {"hooks": [{"type": "command", "command": "bash '/home/ubuntu/.claude/hooks/q.sh'"}]},
   {"matcher": "*", "hooks": [{"type": "command", "command": "bash \"$HOME/.claude/hooks/q.sh\""}]},
@@ -266,6 +285,44 @@ JSON
 render
 check "autoMode: no user-specific half" \
     "$RC|$(rendered '.autoMode.environment')" '0|["Host preamble","### Org-wide","New org line"]'
+
+# render_twice — render, write the render back as the live file, render again. Sets
+# FIRST_ENVIRONMENT to the first render's "rc|autoMode.environment" and SECOND_RENDER to
+# "identical" when the second render is byte-identical to the first, else "differs".
+render_twice() {
+    local first_render
+    render
+    first_render=$OUT
+    FIRST_ENVIRONMENT="$RC|$(rendered '.autoMode.environment')"
+    printf '%s\n' "$first_render" > "$LIVE"
+    render
+    SECOND_RENDER=$([[ "$RC" == 0 && "$OUT" == "$first_render" ]] && echo identical || echo differs)
+}
+# With no live `### Org-wide`, the block goes first and `### User-specific` follows it (moved up,
+# or added), so the next render finds both headings and keeps every host line. Two live shapes:
+# no heading at all, and a user-specific heading with a host line above it.
+reset_merge_fixture
+write_json "$LIVE" <<< '{"autoMode": {"environment": ["Host line 1", "Host line 2"]}}'
+write_json "$ALPHA_FRAGMENT" <<< '{"autoMode": {"environment": ["### Org-wide", "New org line"]}}'
+render_twice
+no_heading_renders="$FIRST_ENVIRONMENT|$SECOND_RENDER"
+write_json "$LIVE" <<< '{"autoMode": {"environment": ["Host preamble", "### User-specific", "User line"]}}'
+render_twice
+user_heading_only_renders="$FIRST_ENVIRONMENT|$SECOND_RENDER"
+check "autoMode: no live org-wide heading — the second render equals the first" \
+    "$no_heading_renders|$user_heading_only_renders" \
+    '0|["### Org-wide","New org line","### User-specific","Host line 1","Host line 2"]|identical|0|["### Org-wide","New org line","### User-specific","Host preamble","User line"]|identical'
+
+reset_merge_fixture
+write_json "$ALPHA_FRAGMENT" <<< '{"autoMode": {"environment": ["New org line"]}}'
+render
+block_without_heading="$RC|$(contains "$OUT" "$ALPHA_FRAGMENT: autoMode.environment does not start with the line ### Org-wide")"
+reset_merge_fixture
+write_json "$BETA_FRAGMENT" <<< '{"autoMode": {"environment": ["### Org-wide", "New org line", "### User-specific", "Host line"]}}'
+render
+block_with_user_heading="$RC|$(contains "$OUT" "$BETA_FRAGMENT: autoMode.environment holds the line ### User-specific")"
+check "autoMode: a fragment block without the org-wide heading, or with the user-specific one, is refused (exit 2)" \
+    "$block_without_heading|$block_with_user_heading" "2|yes|2|yes"
 
 printf 'merge: $HOME in marketplace paths, and the keys no fragment declares\n'
 reset_merge_fixture
@@ -325,7 +382,7 @@ check "check: undeclared keys never count as drift" \
     "0|changed|0|identical"
 
 printf '\n'
-EXPECTED_ROWS=18
+EXPECTED_ROWS=21
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
