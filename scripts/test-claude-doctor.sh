@@ -3689,6 +3689,48 @@ LKEY="$LK_FAKE" run_doctor
 want_out "an unreadable settings.json leaves enablement NOT CHECKED" "whether linear-key is enabled is NOT CHECKED"
 no_out   "...and earns no ✓"                                        "linear-key plugin installed, enabled"
 
+#-----------------------------------------------------------------------------
+section "Z. Rendered settings (DO-884)"
+#-----------------------------------------------------------------------------
+# A host with ~/.config/claude-host-profile has settings.json rendered by
+# scripts/claude-settings-render.sh, and the doctor asks its --check. The
+# renderer here is a stub in a fixture DOTFILES_ROOT that records its arguments
+# and answers with a chosen exit status, so each row pins one branch; the
+# renderer's own behaviour is its own table's business
+# (scripts/test-claude-settings-render.sh). The doctor writes nothing, so the
+# stub must only ever see --check.
+RENDER_ROOT="$TMPROOT/render-root"
+RENDER_CALLS="$TMPROOT/render-calls.log"
+mkdir -p "$RENDER_ROOT/scripts"
+cp "$DOTFILES/scripts/claude-account-dirs.data-entries" "$RENDER_ROOT/scripts/"
+# mk_render_stub EXIT_STATUS — the stub renderer: record "$*", print two stderr
+# lines (the doctor reports the last), exit EXIT_STATUS.
+mk_render_stub() {
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\necho "claude-settings-render: an earlier line" >&2\necho "claude-settings-render: the stub reason" >&2\nexit %s\n' \
+        "$RENDER_CALLS" "$1" > "$RENDER_ROOT/scripts/claude-settings-render.sh"
+    chmod +x "$RENDER_ROOT/scripts/claude-settings-render.sh"
+}
+mk_host_profile() { mkdir -p "$FHOME/.config"; printf 'cilantro\n' > "$FHOME/.config/claude-host-profile"; }
+
+new_home z1; write_cred; mk_render_stub 0; : > "$RENDER_CALLS"
+DROOT="$RENDER_ROOT" run_doctor
+want_out "no host profile is a note, not a finding" "· no host profile (~/.config/claude-host-profile); settings.json is hand-kept here"
+if [[ ! -s "$RENDER_CALLS" ]]; then ok "...and the renderer is not run"; else bad "...and the renderer is not run — it was: $(cat "$RENDER_CALLS")"; fi
+
+new_home z2; write_cred; mk_host_profile; mk_render_stub 0; : > "$RENDER_CALLS"
+DROOT="$RENDER_ROOT" run_doctor
+want_out "a level render is a ✓ naming the profile" "✓ settings.json is rendered (profile cilantro)"
+if [[ "$(cat "$RENDER_CALLS")" == "--check" ]]; then ok "...asked by --check alone: the doctor never applies"; else bad "...asked by --check alone — the stub saw: $(cat "$RENDER_CALLS")"; fi
+
+new_home z3; write_cred; mk_host_profile; mk_render_stub 1
+DROOT="$RENDER_ROOT" run_doctor
+want_out "drift is a ✗ that names the fix" "✗ settings.json drifted from its render — run scripts/claude-settings-render.sh --apply"
+
+new_home z4; write_cred; mk_host_profile; mk_render_stub 2
+DROOT="$RENDER_ROOT" run_doctor
+want_out "a render that could not run is a ⚠ carrying its last stderr line" "⚠ settings render could not run: claude-settings-render: the stub reason"
+no_out   "...and is not reported as drift" "settings.json drifted from its render"
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
 # loop, an unset variable under `set -u`. Every row that still ran would pass
@@ -3707,7 +3749,7 @@ no_out   "...and earns no ✓"                                        "linear-ke
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=535
+EXPECTED_ROWS=542
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

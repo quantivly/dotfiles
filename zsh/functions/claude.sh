@@ -1194,6 +1194,32 @@ _claude_doctor_pools() {
   done
 }
 
+# The rendered settings, the "--- Rendered settings ---" section of claude-doctor
+# (DO-884). A host carrying a profile marker has ~/.claude/settings.json rendered
+# from fragments by scripts/claude-settings-render.sh; this asks that script's
+# read-only --check whether the live file is still the render. --apply is never
+# run from here: the doctor writes nothing. Without a marker the file is
+# hand-kept, which is a fact about the host, not a finding.
+_claude_doctor_rendered_settings() {
+  local marker="${CLAUDE_SETTINGS_RENDER_MARKER:-$HOME/.config/claude-host-profile}"
+  local renderer="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-settings-render.sh"
+  local profile_name='' render_stderr render_rc last_stderr_line
+  if [[ ! -f "$marker" ]]; then
+    _doctor_note "no host profile (${marker/#$HOME/~}); settings.json is hand-kept here"
+    return 0
+  fi
+  IFS= read -r profile_name < "$marker"
+  # stderr kept for the ⚠, stdout (the diff) dropped: `--check` itself shows the diff.
+  render_stderr="$("$renderer" --check 2>&1 >/dev/null)"
+  render_rc=$?
+  last_stderr_line="${${(f)render_stderr}[-1]}"
+  case "$render_rc" in
+    0) _doctor_ok "settings.json is rendered (profile $profile_name)" ;;
+    1) _doctor_bad "settings.json drifted from its render — run scripts/claude-settings-render.sh --apply" ;;
+    *) _doctor_warn "settings render could not run: ${last_stderr_line:-exit $render_rc}" ;;
+  esac
+}
+
 # The Linear API-key plugin, the "--- Linear ---" section of claude-doctor
 # (DO-801). claude/plugins/linear-key sends LINEAR_API_KEY to Linear's MCP server,
 # so no seat signs in. Every way it stops doing that is silent, measured on
@@ -2822,6 +2848,10 @@ claude-doctor() {
       echo "    there is one source of truth — a stale one reads as configuration that works."
     fi
   }
+
+  echo
+  echo "--- Rendered settings ---"
+  _claude_doctor_rendered_settings
 
   echo
   echo "--- Pools ---"
