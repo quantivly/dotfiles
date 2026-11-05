@@ -14,8 +14,10 @@
 # (D2, D4).
 #
 # PROFILE. A host opts in by carrying a marker file naming its profile. A host without the
-# marker is not rendered: the script says so and exits 0, touching nothing. The profile is
-# $OVERLAY_ROOT/hosts/<profile>.json, an object whose `tenants` array lists tenants in order.
+# marker is not rendered: the script says so and exits 0, touching nothing. That check comes
+# before any other, jq's included, so a host with neither (a teammate's box) gets the note and
+# `./install` never fails there. The profile is $OVERLAY_ROOT/hosts/<profile>.json, an object
+# whose `tenants` array lists tenants in order.
 #
 # FRAGMENTS, in merge order (every one must exist and be a JSON object):
 #   1. claude/settings/base.json in this checkout (public)
@@ -39,13 +41,17 @@
 #   - $HOME is substituted in marketplace source paths only.
 #   - A key no fragment declares is left exactly as the live file has it.
 #
-# WRITER. The settings path is refused (exit 2) when it is a symlink, even a dangling one, or a
-# file that is not one JSON object (an empty file included); an absent path renders from {}. The
-# render and the live file are compared in one canonical form (jq -S --indent 2), so formatting
-# and key order are never drift. --apply writes only when they differ: the render goes to a temp
-# file beside the settings file and takes its mode (600 for a new file), the previous file is
-# copied to ~/.local/state/claude-settings-render/settings.json.before-<UTC stamp> (the newest 10
-# kept), and the temp file is renamed over the settings file.
+# WRITER. Every verb that reads the settings path (--check, --print and --apply) refuses it
+# (exit 2) when it is a symlink, even a dangling one, or a file that is not one JSON object (an
+# empty file included); an absent path renders from {}. The render and the live file are compared
+# in one canonical form (jq -S --indent 2), so formatting and key order are never drift. --apply
+# writes only when they differ: the render goes to a temp file beside the settings file and takes
+# its mode (600 for a new file), the previous file is copied to
+# ~/.local/state/claude-settings-render/settings.json.before-<UTC stamp>, and the temp file is
+# renamed over the settings file. A backup is always mode 600, whatever the live file's mode; a
+# second backup within one UTC second gets a `.NNN` counter (`…Z.001`, `…Z.002`), so the names
+# still sort in the order they were made; the newest 10 are kept, and a file in that dir whose
+# name this script would not make is never pruned.
 #
 # Usage:
 #   claude-settings-render --check            print a unified diff and exit 1 if the live file
@@ -401,7 +407,7 @@ render_settings() {
 # object. A symlink is refused first, even a dangling one, before anything reads the path as
 # absent: the rename would replace the link with a file, and a dangling one would render from {}.
 refuse_unsafe_settings() {
-    [[ ! -L "$SETTINGS_PATH" ]] || die "$SETTINGS_PATH is a symlink; refusing to write through it"
+    [[ ! -L "$SETTINGS_PATH" ]] || die "refusing a symlinked settings.json: $SETTINGS_PATH"
     [[ -e "$SETTINGS_PATH" ]] || return 0
     [[ -f "$SETTINGS_PATH" ]] || die "$SETTINGS_PATH is not a regular file; refusing to render over it"
     # Slurped, an empty file is [] and two documents are two elements: neither is one object.
@@ -561,11 +567,13 @@ apply_settings() {
 main() {
     local rendered live
     parse_args "$@"
-    command -v jq >/dev/null || die "jq is required"
+    # The marker first: a host with no profile and no jq (a teammate's box) gets the note and
+    # exit 0, so `./install`, which runs --apply everywhere, never fails there.
     if [[ ! -f "$PROFILE_MARKER" ]]; then
         printf '%s: no host profile at %s; nothing to render\n' "$SCRIPT_NAME" "$PROFILE_MARKER"
         exit 0
     fi
+    command -v jq >/dev/null || die "jq is required"
     load_profile
     load_fragments
     if [[ "$MODE" == list-fragments ]]; then

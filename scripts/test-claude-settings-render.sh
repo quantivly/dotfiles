@@ -547,15 +547,15 @@ write_json "$link_destination" <<< '{"theme": "light"}'
 ln -s "$link_destination" "$target"
 destination_before=$(sha256sum < "$link_destination")
 run_sut --apply --settings "$target"
-live_link="$RC|$(contains "$OUT" "$target is a symlink; refusing to write through it")|$([[ -L "$target" ]] && echo link)|$(same_or_changed "$destination_before" "$(sha256sum < "$link_destination")")"
+live_link="$RC|$(contains "$OUT" "refusing a symlinked settings.json: $target")|$([[ -L "$target" ]] && echo link)|$(same_or_changed "$destination_before" "$(sha256sum < "$link_destination")")"
 dangling_link="$(dirname "$target")/dangling.json"
 dangling_destination="$(dirname "$target")/absent-settings.json"
 ln -s "$dangling_destination" "$dangling_link"
 run_sut --apply --settings "$dangling_link"
-dangling_apply="$RC|$(contains "$OUT" "$dangling_link is a symlink; refusing to write through it")|$([[ -L "$dangling_link" ]] && echo link)|$([[ -e "$dangling_destination" ]] && echo created || echo absent)"
+dangling_apply="$RC|$(contains "$OUT" "refusing a symlinked settings.json: $dangling_link")|$([[ -L "$dangling_link" ]] && echo link)|$([[ -e "$dangling_destination" ]] && echo created || echo absent)"
 # --check too: a dangling link read as an absent file would report drift (exit 1), not refuse.
 run_sut --check --settings "$dangling_link"
-dangling_check="$RC|$(contains "$OUT" "$dangling_link is a symlink; refusing to write through it")"
+dangling_check="$RC|$(contains "$OUT" "refusing a symlinked settings.json: $dangling_link")"
 check "apply: refuses a symlinked settings.json (exit 2)" \
     "$live_link|$dangling_apply|$dangling_check" "2|yes|link|same|2|yes|link|absent|2|yes"
 
@@ -623,8 +623,17 @@ OUT=$(PATH="$NO_JQ_BIN" "$SUT" --help 2>&1); RC=$?
 no_jq_help="$RC|$(contains "$OUT" '--apply')"
 check "jq missing → exit 2 (--help still works)" "$no_jq_apply|$no_jq_help" "2|yes|same|0|yes"
 
+# A teammate's box: no marker and no jq. `./install` runs --apply on every host, so the marker
+# check must come before the jq check, or the install fails where nothing was ever to be rendered.
+live_before=$(fingerprint "$target")
+OUT=$(PATH="$NO_JQ_BIN" CLAUDE_SETTINGS_RENDER_MARKER="$TMPROOT/no-such-marker" CLAUDE_SETTINGS_RENDER_OVERLAY="$OVERLAY" \
+    "$SUT" --apply --settings "$target" 2>&1); RC=$?
+check "no marker and no jq → exit 0 with the note" \
+    "$RC|$(contains "$OUT" "no host profile at $TMPROOT/no-such-marker; nothing to render")|$(contains "$OUT" 'jq is required')|$(same_or_changed "$live_before" "$(fingerprint "$target")")" \
+    "0|yes|no|same"
+
 printf '\n'
-EXPECTED_ROWS=31
+EXPECTED_ROWS=32
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
