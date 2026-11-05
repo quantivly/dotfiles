@@ -1,0 +1,84 @@
+{
+  "enabledPlugins": {
+    "linear-key@dotfiles": true
+  },
+  "extraKnownMarketplaces": {
+    "dotfiles": {
+      "source": {
+        "path": "$HOME/.dotfiles/claude/plugins",
+        "source": "directory"
+      }
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "f=\"$HOME/.claude/hooks/secret-emission-guard.sh\"; [ -r \"$f\" ] && exec bash \"$f\"; exit 0",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "f=\"$HOME/.claude/hooks/herdr-agent-state.sh\"; [ -r \"$f\" ] && exec bash \"$f\" session; exit 0",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "f=\"$HOME/.claude/hooks/herdr-waiting-bell.sh\"; [ -r \"$f\" ] && exec bash \"$f\"; exit 0",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "command": "command -v herdmates >/dev/null 2>&1 && exec herdmates hook TaskCompleted; exit 0",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "command": "command -v herdmates >/dev/null 2>&1 && exec herdmates hook TaskCreated; exit 0",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "command": "command -v herdmates >/dev/null 2>&1 && exec herdmates hook TeammateIdle; exit 0",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "command": "bash \"$HOME/.claude/hooks/session-statusline.sh\"",
+    "refreshInterval": 120,
+    "type": "command"
+  }
+}
