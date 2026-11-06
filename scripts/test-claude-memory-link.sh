@@ -994,6 +994,7 @@ STUB_BIN="$TMPROOT/apply-stub-bin"
 STUB_STATE_FILE="$TMPROOT/apply-stub-state"
 export STUB_STATE_FILE
 OLD_MTIME_STAMP='200101010000'
+PARTIAL_SUFFIX='.link-partial'
 CONFLICT_MD_SUFFIX=".conflict-$FIXTURE_HOST.md"
 UTC_STAMP_NAME_RE='/memory\.replaced-[0-9]{8}T[0-9]{6}Z$'
 
@@ -1067,6 +1068,12 @@ file_manifest() {
     (cd "$1" && find . -type f ! -name "$MERGED_MARKER" -exec sha256sum {} + | LC_ALL=C sort)
 }
 
+# partial_of DIR NAME — the partial-copy path a merge uses for DIR/NAME.
+partial_of() { printf '%s/.%s%s' "$1" "$2" "$PARTIAL_SUFFIX"; }
+
+# partial_count DIR — how many partial copies lie under DIR.
+partial_count() { find "$1" -name ".*$PARTIAL_SUFFIX" | wc -l | tr -d ' '; }
+
 # write_stub TOOL — make $STUB_BIN hold one wrapper for TOOL, its sh body from stdin, with $real_tool
 # naming the real one. $STUB_STATE_FILE starts absent, for a body that counts its calls.
 write_stub() {
@@ -1130,6 +1137,15 @@ check "apply: a differing topic file becomes a conflict copy and the store's cop
     "$RC|$OUT|$(body_of "$store_dir/topic.md")|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")" \
     "0|$(linked_line 0 0 1)|store body|replaced body"
 
+apply_scene replaced-copy-newer
+write_file "$memory_dir/topic.md" 'the newer body'
+write_file "$store_dir/topic.md" 'the older body'
+touch -t "$OLD_MTIME_STAMP" "$store_dir/topic.md"
+run_sut --apply
+check "apply: the store's copy keeps its name even when the replaced copy is newer" \
+    "$RC|$(body_of "$store_dir/topic.md")|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")" \
+    "0|the older body|the newer body"
+
 apply_scene earlier-conflict
 write_file "$memory_dir/topic.md" 'replaced body'
 write_file "$store_dir/topic.md" 'store body'
@@ -1146,6 +1162,18 @@ write_file "$store_dir/topic$CONFLICT_MD_SUFFIX" 'replaced body'
 run_sut --apply
 check "apply: a conflict copy with the same body is not written twice" \
     "$RC|$OUT|$(body_of "$store_dir/topic.conflict-$FIXTURE_HOST.2.md")" "0|$(linked_line 0 0 1)|<absent>"
+
+apply_scene conflict-names-taken
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+write_file "$store_dir/topic$CONFLICT_MD_SUFFIX" 'taken'
+for (( conflict_ordinal = 2; conflict_ordinal <= 100; conflict_ordinal++ )); do
+    write_file "$store_dir/topic.conflict-$FIXTURE_HOST.$conflict_ordinal.md" 'taken'
+done
+run_sut --apply
+check "apply: with every conflict name taken the file is reported, exit 2 and no marker" \
+    "$RC|$(contains "$OUT" "gave up on a conflict copy of $store_dir/topic.md")|$(body_of "$store_dir/topic.conflict-$FIXTURE_HOST.101.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|<absent>|0 marked, 1 unmarked"
 
 apply_scene no-extension
 write_file "$memory_dir/notes" 'replaced notes'
@@ -1166,7 +1194,13 @@ check "apply: the infix goes before the final extension only" \
 
 printf 'apply: an index file is a line union\n'
 apply_scene index-union
-write_file "$memory_dir/MEMORY.md" $'- shared\n- [new](new.md)\n$(touch injected)\n- shared\n- [new](new.md)'
+injected_path="$TMPROOT/injected-by-the-union"
+injection_line="\$(touch '$injected_path')"
+write_file "$memory_dir/MEMORY.md" "- shared
+- [new](new.md)
+$injection_line
+- shared
+- [new](new.md)"
 write_file "$store_dir/MEMORY.md" $'- [kept](kept.md)\n- shared'
 run_sut --apply
 check "apply: MEMORY.md is a line union, store order first" \
@@ -1174,7 +1208,9 @@ check "apply: MEMORY.md is a line union, store order first" \
     "0|$(linked_line 0 0 1)|- [kept](kept.md)
 - shared
 - [new](new.md)
-\$(touch injected)|<absent>"
+$injection_line|<absent>"
+check "apply: a line of an index file is text, and nothing in it runs" \
+    "$([[ -e "$injected_path" ]] && printf 'it ran')" ""
 
 apply_scene topic-index
 write_file "$memory_dir/INDEX_topics.md" '- replaced line'
@@ -1330,43 +1366,49 @@ check "resume: the next --apply finishes what giving up left" \
     "$RC|$(memory_kind "$memory_dir")|$(body_of "$store_dir/recreated.md")|$(body_of "$store_dir/MEMORY.md")|$(replaced_dir_counts "$key_dir")" \
     "0|link to $store_dir|recreated body|- index|5 marked, 0 unmarked"
 
-# A writer that beats the copy: the check said absent, and the file is there by the time cp runs.
+# A writer that beats the publish: the check said absent, and the file is there by the time the copy
+# is ready to take the name.
 apply_scene writer-beats-copy
 write_file "$memory_dir/topic.md" 'replaced body'
 write_stub cp <<'STUB'
 if [ ! -e "$STUB_STATE_FILE" ]; then
     : > "$STUB_STATE_FILE"
-    for last_argument; do :; done
-    printf "the writer's body\n" > "$last_argument"
+    printf "the writer's body\n" > "$STUB_TARGET_PATH"
 fi
 exec "$real_tool" "$@"
 STUB
-PATH="$STUB_BIN:$PATH" run_sut --apply
+PATH="$STUB_BIN:$PATH" STUB_TARGET_PATH="$store_dir/topic.md" run_sut --apply
 check "apply: a file that appears in the store just before the copy is not overwritten" \
     "$RC|$OUT|$(body_of "$store_dir/topic.md")|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")" \
     "0|$(linked_line 0 0 1)|the writer's body|replaced body"
 
 printf 'resume: a run stopped before the merge finished\n'
-# A real kill, at the comparison after the first copy: one file is in the store and the link is in
-# place. cmp, because the script runs it directly, so its parent is the script and no subshell.
+# A real kill, as the second file's copy is checked: one file is in the store, the other only a
+# partial, and the link is in place. cmp, because the script runs it directly, so its parent is the
+# script and no subshell.
 apply_scene killed-merge
 write_file "$memory_dir/first.md" 'first body'
 write_file "$memory_dir/second.md" 'second body'
 write_stub cmp <<'STUB'
-kill -9 "$PPID"
-exit 1
+if [ -e "$STUB_STATE_FILE" ]; then
+    kill -9 "$PPID"
+    exit 1
+fi
+: > "$STUB_STATE_FILE"
+exec "$real_tool" "$@"
 STUB
 PATH="$STUB_BIN:$PATH" run_sut --apply
 killed_rc=$RC
 killed_memory=$(memory_kind "$memory_dir")
+killed_partials=$(partial_count "$store_dir")
 run_sut --check
 check "resume: an unmarked replaced directory makes --check exit 1" \
-    "$killed_rc|$killed_memory|$RC|$(contains "$OUT" "$key${TAB}PENDING-MERGE")|$(replaced_dir_counts "$key_dir")" \
-    "137|link to $store_dir|1|yes|0 marked, 1 unmarked"
+    "$killed_rc|$killed_memory|$killed_partials|$RC|$(contains "$OUT" "$key${TAB}PENDING-MERGE")|$(replaced_dir_counts "$key_dir")" \
+    "137|link to $store_dir|1|1|yes|0 marked, 1 unmarked"
 run_sut --apply
 check "resume: the next --apply merges it and writes the marker" \
-    "$RC|$OUT|$(body_of "$store_dir/first.md")|$(body_of "$store_dir/second.md")|$(replaced_dir_counts "$key_dir")" \
-    "0|$(linked_line 1 1 0)|first body|second body|1 marked, 0 unmarked"
+    "$RC|$OUT|$(body_of "$store_dir/first.md")|$(body_of "$store_dir/second.md")|$(replaced_dir_counts "$key_dir")|$(partial_count "$store_dir")" \
+    "0|$(linked_line 1 1 0)|first body|second body|1 marked, 0 unmarked|0"
 late_replaced_dirs=("$key_dir"/memory.replaced-*)
 write_file "${late_replaced_dirs[0]}/added-afterwards.md" 'added afterwards'
 run_sut --apply
@@ -1617,6 +1659,338 @@ PATH="$STUB_BIN:$PATH" run_sut --apply
 check "lock: a lock that cannot be taken is exit 2, with nothing touched" \
     "$RC|$(contains "$OUT" "could not take the lock $STATE_DIR/link.lock")|$(tree_fingerprint)" "2|yes|$tree_before"
 
+printf 'apply: a failure stops only what failed\n'
+apply_scene bad-file-keeps-going
+write_file "$store_dir/aa" 'a file in the way'
+write_file "$memory_dir/aa/x.md" 'x body'
+write_file "$memory_dir/zz/y.md" 'y body'
+write_file "$memory_dir/top.md" 'top body'
+run_sut --apply
+check "apply: a file that cannot be merged stops only itself: the rest reach the store, no marker, exit 2" \
+    "$RC|$(contains "$OUT" "could not create $store_dir/aa")|$(body_of "$store_dir/aa")|$(body_of "$store_dir/zz/y.md")|$(body_of "$store_dir/top.md")|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|a file in the way|y body|top body|link to $store_dir|0 marked, 1 unmarked"
+
+# Three keys in discovery order. The stub spares b and c a real copy failure: only the fifo's name
+# fails, so a regression fails these rows rather than hanging on the fifo.
+reset_scene
+for repo in a-stuck b-real c-pending; do
+    make_checkout "code/$repo" "git@github.com:$FIXTURE_OWNER/$repo.git"
+done
+a_key=$(key_of "$HOME/code/a-stuck")
+b_key=$(key_of "$HOME/code/b-real")
+c_key=$(key_of "$HOME/code/c-pending")
+b_store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/b-real"
+c_store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/c-pending"
+mkdir -p "$PROJECTS_DIR/$a_key/memory"
+mkfifo "$PROJECTS_DIR/$a_key/memory/pipe"
+real_memory "$b_key" MEMORY.md
+write_file "$c_store_dir/.gitkeep-for-the-link" 'kept'
+link_memory "$c_key" "$c_store_dir"
+write_file "$PROJECTS_DIR/$c_key/$REPLACED_STAMP/pending.md" 'pending body'
+write_stub cp <<'STUB'
+case "$*" in *pipe*) exit 1 ;; esac
+exec "$real_tool" "$@"
+STUB
+b_line="linked $b_key -> $b_store_dir (copied 1, identical 0, kept-both 0)"
+c_line="linked $c_key -> $c_store_dir (copied 1, identical 0, kept-both 0)"
+tree_before=$(tree_fingerprint)
+PATH="$STUB_BIN:$PATH" run_sut --apply --dry-run
+check "dry-run: a key that fails stops only itself too, and nothing changes" \
+    "$RC|$(contains "$OUT" "$b_line")|$(contains "$OUT" "$c_line")|$(contains "$OUT" "could not finish 1 key(s): $a_key")|$(tree_fingerprint)" \
+    "2|yes|yes|yes|$tree_before"
+PATH="$STUB_BIN:$PATH" run_sut --apply
+apply_result="$RC|$(contains "$OUT" "/pipe is neither a file nor a symlink")|$(contains "$OUT" "could not finish 1 key(s): $a_key")|$(contains "$OUT" "$b_line")|$(contains "$OUT" "$c_line")"
+run_sut --list
+check "apply: a key that fails stops only itself: later keys finish, exit 2 naming it" \
+    "$apply_result|$(row_of_key "$a_key" | cut -f2)|$(row_of_key "$b_key" | cut -f2)|$(row_of_key "$c_key" | cut -f2)|$(body_of "$c_store_dir/pending.md")" \
+    "2|yes|yes|yes|yes|PENDING-MERGE|LINKED|LINKED|pending body"
+
+reset_scene
+for repo in a-locked b-after-locked; do
+    make_checkout "code/$repo" "git@github.com:$FIXTURE_OWNER/$repo.git"
+done
+a_key=$(key_of "$HOME/code/a-locked")
+b_key=$(key_of "$HOME/code/b-after-locked")
+real_memory "$a_key" MEMORY.md
+real_memory "$b_key" MEMORY.md
+chmod 000 "$PROJECTS_DIR/$a_key"
+run_sut --apply
+locked_key_result="$RC|$(contains "$OUT" "$PROJECTS_DIR/$a_key is not a readable directory")|$(contains "$OUT" "could not finish 1 key(s): $a_key")|$(memory_kind "$PROJECTS_DIR/$b_key/memory")"
+chmod 755 "$PROJECTS_DIR/$a_key"
+check "apply: a key directory that cannot be read stops only itself" \
+    "$locked_key_result" \
+    "2|yes|yes|link to $STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/b-after-locked"
+
+# New writes belong in the store whatever an older directory holds, so the link is not held back.
+pending_scene pending-fails-real-waits
+mkfifo "$replaced_dir/pipe"
+rm "$memory_dir"
+write_file "$memory_dir/new.md" 'new body'
+write_stub cp <<'STUB'
+case "$*" in *pipe*) exit 1 ;; esac
+exec "$real_tool" "$@"
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a pending merge that fails does not hold the link back" \
+    "$RC|$(contains "$OUT" "/pipe is neither a file nor a symlink")|$(memory_kind "$memory_dir")|$(body_of "$store_dir/new.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|link to $store_dir|new body|1 marked, 1 unmarked"
+
+# The dry run's plan spans keys: a subshell per key would count the shared file as copied twice.
+pair_source=$(make_source_repo pair-source)
+reset_scene
+make_checkout code/pair-super "git@github.com:$FIXTURE_OWNER/pair-super.git"
+git -C "$HOME/code/pair-super" commit -q --allow-empty -m first || fatal "could not commit in pair-super"
+add_submodule code/pair-super pair-sub pair-sub "$pair_source"
+git -C "$HOME/code/pair-super/pair-sub" remote set-url origin "git@github.com:$FIXTURE_OWNER/pair-sub.git" \
+    || fatal "could not set the submodule's origin"
+real_memory "$(key_of "$HOME/code/pair-super/pair-sub")" shared.md
+real_memory "$(key_of "$HOME/code/pair-super/.git/modules/pair-sub")" shared.md
+run_sut --apply --dry-run
+pair_dry_run="$RC|$OUT"
+run_sut --apply
+check "dry-run: a file a submodule's two keys share counts across them, as the run counts it" \
+    "$pair_dry_run|$(contains "$OUT" 'copied 1, identical 0')|$(contains "$OUT" 'copied 0, identical 1')" "0|$OUT|yes|yes"
+
+printf 'apply: a copy takes the name only when it is whole\n'
+BIG_BODY=$(printf 'a line of a body long enough to cut short %.0s\n' {1..200})
+TRUNCATED_BODY='cut sho'
+# write_truncating_cp_stub — the first cp writes a short file to its destination and exits with
+# $STUB_CP_EXIT; every later one is the real cp.
+write_truncating_cp_stub() {
+    write_stub cp <<'STUB'
+if [ ! -e "$STUB_STATE_FILE" ]; then
+    : > "$STUB_STATE_FILE"
+    for last_argument; do :; done
+    printf '%s' "$STUB_SHORT_BODY" > "$last_argument"
+    exit "$STUB_CP_EXIT"
+fi
+exec "$real_tool" "$@"
+STUB
+}
+
+apply_scene short-copy-reports-failure
+write_file "$memory_dir/big.md" "$BIG_BODY"
+write_truncating_cp_stub
+PATH="$STUB_BIN:$PATH" STUB_SHORT_BODY="$TRUNCATED_BODY" STUB_CP_EXIT=1 run_sut --apply
+check "apply: a copy cut short that reports failure never takes the file's name" \
+    "$RC|$(contains "$OUT" 'could not copy')|$(body_of "$store_dir/big.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|<absent>|0 marked, 1 unmarked"
+
+apply_scene short-copy-reports-success
+write_file "$memory_dir/big.md" "$BIG_BODY"
+write_truncating_cp_stub
+PATH="$STUB_BIN:$PATH" STUB_SHORT_BODY="$TRUNCATED_BODY" STUB_CP_EXIT=0 run_sut --apply
+check "apply: a copy cut short that reports success never takes the file's name" \
+    "$RC|$(contains "$OUT" 'did not arrive whole')|$(body_of "$store_dir/big.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|<absent>|0 marked, 1 unmarked"
+run_sut --apply
+check "resume: the next --apply brings the whole file and removes the short partial" \
+    "$RC|$OUT|$(body_of "$store_dir/big.md")|$(partial_count "$store_dir")|$(replaced_dir_counts "$key_dir")" \
+    "0|$(linked_line 1 0 0)|$BIG_BODY|0|1 marked, 0 unmarked"
+
+# A real short write. The signal is ignored so that cp sees EFBIG and fails, as on a full disk,
+# rather than dying with a core dump.
+apply_scene short-copy-for-real
+write_file "$memory_dir/big.md" "$BIG_BODY"
+short_write_result=$(
+    trap '' XFSZ
+    ulimit -f 1
+    run_sut --apply
+    printf '%s|%s' "$RC" "$(contains "$OUT" 'could not copy')"
+)
+check "apply: a real short write (ulimit -f) never takes the file's name" \
+    "$short_write_result|$(body_of "$store_dir/big.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|<absent>|0 marked, 1 unmarked"
+
+# The reviewer's stale conflict copy: a short one must not stand in for the body at that name.
+apply_scene short-conflict-copy
+write_file "$memory_dir/big.md" "$BIG_BODY"
+write_file "$store_dir/big.md" 'store body'
+write_truncating_cp_stub
+PATH="$STUB_BIN:$PATH" STUB_SHORT_BODY="$TRUNCATED_BODY" STUB_CP_EXIT=0 run_sut --apply
+short_conflict_result="$RC|$(body_of "$store_dir/big$CONFLICT_MD_SUFFIX")"
+run_sut --apply
+check "apply: a conflict copy cut short never takes the conflict name, and the resume writes no .2" \
+    "$short_conflict_result|$RC|$(body_of "$store_dir/big$CONFLICT_MD_SUFFIX")|$(body_of "$store_dir/big.conflict-$FIXTURE_HOST.2.md")|$(partial_count "$store_dir")" \
+    "2|<absent>|0|$BIG_BODY|<absent>|0"
+
+apply_scene leftover-partials
+write_file "$memory_dir/topic.md" 'topic body'
+write_file "$memory_dir/same.md" 'same body'
+write_file "$store_dir/same.md" 'same body'
+write_file "$(partial_of "$store_dir" topic.md)" 'a short leftover'
+write_file "$(partial_of "$store_dir" same.md)" 'same body'
+write_file "$(partial_of "$store_dir" other.md)" "another file's leftover"
+run_sut --apply
+check "apply: a leftover partial is removed by the next merge of its own file, and another file's stays" \
+    "$RC|$OUT|$(body_of "$store_dir/topic.md")|$(body_of "$(partial_of "$store_dir" topic.md)")|$(body_of "$(partial_of "$store_dir" same.md)")|$(body_of "$(partial_of "$store_dir" other.md)")" \
+    "0|$(linked_line 1 1 0)|topic body|<absent>|<absent>|another file's leftover"
+
+apply_scene leftover-partial-symlink
+write_file "$memory_dir/topic.md" 'topic body'
+write_file "$TMPROOT/outside-partial-target" 'outside body'
+mkdir -p "$store_dir"
+ln -s "$TMPROOT/outside-partial-target" "$(partial_of "$store_dir" topic.md)"
+run_sut --apply
+check "apply: a leftover partial that is a symlink is not written through" \
+    "$RC|$(body_of "$TMPROOT/outside-partial-target")|$(body_of "$store_dir/topic.md")|$(partial_count "$store_dir")" \
+    "0|outside body|topic body|0"
+
+reset_scene
+make_checkout code/only-a-partial "git@github.com:$FIXTURE_OWNER/only-a-partial.git"
+key=$(key_of "$HOME/code/only-a-partial")
+store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/only-a-partial"
+write_file "$(partial_of "$store_dir" topic.md)" 'a short leftover'
+run_sut --list
+partial_list_result="$RC|$(row_of_key "$key")"
+tree_before=$(tree_fingerprint)
+run_sut --apply
+check "list: a leftover partial is not a file the store holds" \
+    "$partial_list_result|$RC|$OUT|$(tree_fingerprint)" "0||0||$tree_before"
+
+apply_scene partial-named-source
+write_file "$memory_dir/topic.md" 'topic body'
+write_file "$(partial_of "$memory_dir" other.md)" 'named like a partial'
+run_sut --apply
+replaced_dirs=("$key_dir"/memory.replaced-*)
+check "apply: a file named like a partial in a memory directory stays out of the store, and in the replaced directory" \
+    "$RC|$OUT|$(partial_count "$store_dir")|$(body_of "$(partial_of "${replaced_dirs[0]}" other.md)")" \
+    "0|$(linked_line 1 0 0)|0|named like a partial"
+
+printf 'apply: a real directory holding the marker\n'
+apply_scene restored-with-marker
+write_file "$memory_dir/topic.md" 'written since the undo'
+: > "$memory_dir/$MERGED_MARKER"
+run_sut --apply --dry-run
+restored_dry_run="$RC|$OUT"
+run_sut --apply
+apply_result="$RC|$OUT"
+run_sut --check
+check "apply: a real directory already holding the marker is merged, and ends marked" \
+    "$restored_dry_run|$apply_result|$RC|$(body_of "$store_dir/topic.md")|$([[ -e "$store_dir/$MERGED_MARKER" ]] && printf 'marker in the store')|$(replaced_dir_counts "$key_dir")" \
+    "0|$(linked_line 1 0 0)|0|$(linked_line 1 0 0)|0|written since the undo||1 marked, 0 unmarked"
+
+# Stopped between the rename and the link, a stale marker would read as merged for good.
+apply_scene restored-then-stopped
+write_file "$memory_dir/topic.md" 'written since the undo'
+: > "$memory_dir/$MERGED_MARKER"
+write_stub ln <<'STUB'
+exit 1
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+stopped_rc=$RC
+run_sut --check
+check "resume: a directory that held the marker reads as pending when stopped right after the rename" \
+    "$stopped_rc|$RC|$(contains "$OUT" "$key${TAB}PENDING-MERGE")|$(replaced_dir_counts "$key_dir")" \
+    "2|1|yes|0 marked, 1 unmarked"
+
+apply_scene marker-is-a-directory
+write_file "$memory_dir/topic.md" 'topic body'
+mkdir -p "$memory_dir/$MERGED_MARKER"
+run_sut --apply
+check "apply: a stale marker that cannot be removed is exit 2, before the rename" \
+    "$RC|$(contains "$OUT" "could not clear the stale marker in $memory_dir")|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|real|0 marked, 0 unmarked"
+
+printf 'apply: never through a symlink\n'
+apply_scene store-symlink-outside
+outside_dir="$TMPROOT/outside-the-store"
+rm -rf "$outside_dir"
+write_file "$outside_dir/MEMORY.md" '- outside line'
+mkdir -p "$store_dir"
+ln -s "$outside_dir" "$store_dir/sub"
+write_file "$memory_dir/sub/x.md" 'x body'
+write_file "$memory_dir/sub/MEMORY.md" '- replaced line'
+write_file "$memory_dir/sub/deeper/z.md" 'z body'
+write_file "$memory_dir/ok.md" 'ok body'
+outside_listing_before=$(file_manifest "$outside_dir")
+run_sut --apply
+check "apply: a store symlink pointing outside is refused and nothing lands outside" \
+    "$RC|$(contains "$OUT" "refusing $store_dir/sub/x.md")|$(contains "$OUT" "refusing $store_dir/sub/MEMORY.md")|$(contains "$OUT" "refusing $store_dir/sub/deeper/z.md")|$(file_manifest "$outside_dir")|$([[ -e "$outside_dir/deeper" ]] && printf 'made a directory')|$(body_of "$store_dir/ok.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|yes|yes|$outside_listing_before||ok body|0 marked, 1 unmarked"
+
+apply_scene store-symlink-dangling
+mkdir -p "$store_dir"
+ln -s "$TMPROOT/no-such-store-part" "$store_dir/dead"
+write_file "$memory_dir/dead/x.md" 'x body'
+run_sut --apply
+check "apply: a dangling symlink in the store's path is refused" \
+    "$RC|$(contains "$OUT" "refusing $store_dir/dead/x.md")|$([[ -e "$TMPROOT/no-such-store-part" ]] && printf 'made its target')|$(replaced_dir_counts "$key_dir")" \
+    "2|yes||0 marked, 1 unmarked"
+
+apply_scene store-symlink-inside
+write_file "$store_dir/real-sub/kept.md" 'kept body'
+ln -s "$store_dir/real-sub" "$store_dir/alias"
+write_file "$memory_dir/alias/x.md" 'x body'
+run_sut --apply
+check "apply: a store symlink that stays inside the store directory is followed" \
+    "$RC|$OUT|$(body_of "$store_dir/real-sub/x.md")" "0|$(linked_line 1 0 0)|x body"
+
+apply_scene store-dir-is-symlink
+write_file "$memory_dir/sub/x.md" 'x body'
+real_store_dir="$TMPROOT/store-dir-elsewhere"
+rm -rf "$real_store_dir"
+mkdir -p "$real_store_dir" "$(dirname "$store_dir")"
+ln -s "$real_store_dir" "$store_dir"
+run_sut --apply
+apply_result="$RC|$OUT"
+run_sut --list
+check "apply: a store directory that is itself a symlink still works" \
+    "$apply_result|$(row_of_key "$key" | cut -f2)|$(body_of "$real_store_dir/sub/x.md")" \
+    "0|$(linked_line 1 0 0)|LINKED|x body"
+
+pending_scene marker-dangling
+write_file "$replaced_dir/topic.md" 'pending body'
+marker_target="$TMPROOT/no-such-marker-target"
+rm -f "$marker_target"
+ln -s "$marker_target" "$replaced_dir/$MERGED_MARKER"
+run_sut --apply
+check "apply: a dangling marker symlink is refused, and nothing is written through it" \
+    "$RC|$(contains "$OUT" "refusing to write the marker through the symlink $replaced_dir/$MERGED_MARKER")|$([[ -e "$marker_target" ]] && printf 'wrote through it')|$(body_of "$store_dir/topic.md")|$([[ -L "$store_dir/$MERGED_MARKER" ]] && printf 'marker in the store')" \
+    "2|yes||pending body|"
+
+pending_scene marker-link-to-file
+write_file "$replaced_dir/topic.md" 'pending body'
+write_file "$TMPROOT/marker-link-target" 'a file of someone else'
+ln -s "$TMPROOT/marker-link-target" "$replaced_dir/$MERGED_MARKER"
+run_sut --check
+marker_link_check="$RC|$(contains "$OUT" "$key${TAB}PENDING-MERGE")"
+run_sut --apply
+check "apply: a marker symlink to a file does not count as merged, and the file is left alone" \
+    "$marker_link_check|$RC|$(body_of "$store_dir/topic.md")|$(body_of "$TMPROOT/marker-link-target")" \
+    "1|yes|2|pending body|a file of someone else"
+
+apply_scene directory-at-partial-name
+write_file "$memory_dir/topic.md" 'replaced body'
+write_stub cp <<'STUB'
+for last_argument; do :; done
+mkdir -p "$last_argument"
+exec "$real_tool" "$@"
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a directory appearing at the partial name is refused rather than entered" \
+    "$RC|$(contains "$OUT" 'could not copy')|$(find "$(partial_of "$store_dir" topic.md)" -mindepth 1 | wc -l | tr -d ' ')|$(body_of "$store_dir/topic.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|0|<absent>|0 marked, 1 unmarked"
+
+run_sut --apply
+check "apply: a leftover that cannot be removed is exit 2 and writes no marker" \
+    "$RC|$(contains "$OUT" 'could not remove the leftover')|$(body_of "$store_dir/topic.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|<absent>|0 marked, 1 unmarked"
+
+apply_scene directory-at-target-name
+write_file "$memory_dir/topic.md" 'replaced body'
+write_stub cp <<'STUB'
+if [ ! -e "$STUB_STATE_FILE" ]; then
+    : > "$STUB_STATE_FILE"
+    mkdir -p "$STUB_TARGET_PATH"
+fi
+exec "$real_tool" "$@"
+STUB
+PATH="$STUB_BIN:$PATH" STUB_TARGET_PATH="$store_dir/topic.md" run_sut --apply
+check "apply: a directory appearing at the file's name is not entered, and the file goes beside it" \
+    "$RC|$(find "$store_dir/topic.md" -mindepth 1 | wc -l | tr -d ' ')|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")|$(partial_count "$store_dir")" \
+    "0|0|replaced body|0"
+
 printf 'apply: every failure stops before the marker\n'
 apply_scene memory-plain-file
 rmdir "$memory_dir"
@@ -1656,6 +2030,18 @@ check "apply: a copy that fails is exit 2 and writes no marker" \
     "2|yes|yes|link to $store_dir|0 marked, 1 unmarked"
 
 # A copy that reports success and leaves nothing. Stepping to the next name would write forever.
+# Only the publish fails: the swap's own ln has no partial in its arguments.
+apply_scene publish-fails
+write_file "$memory_dir/topic.md" 'topic body'
+write_stub ln <<'STUB'
+case "$*" in *"$STUB_FAILING_NAME"*) printf 'stub publish failure\n' >&2; exit 1 ;; esac
+exec "$real_tool" "$@"
+STUB
+PATH="$STUB_BIN:$PATH" STUB_FAILING_NAME="$PARTIAL_SUFFIX" run_sut --apply
+check "apply: a publish that fails is exit 2 and writes no marker" \
+    "$RC|$(contains "$OUT" 'could not publish')|$(contains "$OUT" 'stub publish failure')|$(body_of "$store_dir/topic.md")|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|yes|<absent>|<absent>|0 marked, 1 unmarked"
+
 apply_scene conflict-copy-lost
 write_file "$memory_dir/topic.md" 'replaced body'
 write_file "$store_dir/topic.md" 'store body'
@@ -1664,8 +2050,8 @@ exit 0
 STUB
 PATH="$STUB_BIN:$PATH" run_sut --apply
 check "apply: a conflict copy that does not arrive is exit 2 and writes no marker" \
-    "$RC|$(contains "$OUT" "the conflict copy $store_dir/topic$CONFLICT_MD_SUFFIX does not match")|$(replaced_dir_counts "$key_dir")" \
-    "2|yes|0 marked, 1 unmarked"
+    "$RC|$(contains "$OUT" 'did not arrive whole')|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|<absent>|0 marked, 1 unmarked"
 
 apply_scene cmp-fails
 write_file "$memory_dir/topic.md" 'replaced body'
@@ -1683,10 +2069,10 @@ write_file "$memory_dir/readable.md" 'readable body'
 write_file "$memory_dir/locked/topic.md" 'locked body'
 chmod 000 "$memory_dir/locked"
 run_sut --apply
-find_fails_result="$RC|$(contains "$OUT" "could not read $key_dir/memory.replaced-")|$(replaced_dir_counts "$key_dir")"
+find_fails_result="$RC|$(contains "$OUT" "could not read $key_dir/memory.replaced-")|$(body_of "$store_dir/readable.md")|$(replaced_dir_counts "$key_dir")"
 chmod -R u+rwx "$key_dir"
-check "apply: a directory that cannot be walked is exit 2 and writes no marker" \
-    "$find_fails_result" "2|yes|0 marked, 1 unmarked"
+check "apply: a directory that cannot be walked merges what it could list, exit 2 and no marker" \
+    "$find_fails_result" "2|yes|readable body|0 marked, 1 unmarked"
 
 apply_scene file-where-directory
 write_file "$memory_dir/sub/topic.md" 'replaced body'
@@ -1771,7 +2157,7 @@ done
 check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
 
 printf '\n'
-EXPECTED_ROWS=157
+EXPECTED_ROWS=188
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

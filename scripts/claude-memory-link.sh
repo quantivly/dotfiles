@@ -6,8 +6,9 @@
 # Map each Claude Code project key to its directory in a git-backed memory store, report the state
 # of the key's `memory` entry, and (--apply) make that entry a symlink into the store, merging a real
 # directory's files in afterwards. --check and --list only read. Nothing here deletes or overwrites a
-# memory file. Design: docs/superpowers/specs/2026-11-04-shared-claude-config-design.md (D7 and its
-# amendments M1-M8).
+# memory file; the only things it removes are its own, a leftover partial copy and a stale marker.
+# Design: docs/superpowers/specs/2026-11-04-shared-claude-config-design.md (D7 and its amendments
+# M1-M8).
 #
 # WHY. Claude Code keeps auto-memory in <projects dir>/<key>/memory/, one directory per checkout
 # path on one machine, so memory neither survives a new host nor follows a repo between hosts. A
@@ -74,29 +75,49 @@
 #
 # THE SWAP, whose order is the safety argument:
 #   1. mkdir -p the store directory
-#   2. rename memory to memory.replaced-<UTC stamp>: one parent, so atomic, and a session's write
-#      lands in the directory under one name or the other
+#   2. mv -T memory to memory.replaced-<UTC stamp>. mv -T is atomic only when it is a rename(2) within
+#      one filesystem, which is why the replaced name is beside the original
 #   3. ln -s -T the store directory to memory (-T: never INSIDE a directory a writer just recreated).
 #      A recreated real directory is renamed to memory.replaced-<stamp>.NNN and the link retried, at
 #      most 3 times; then exit 2
 #   4. merge each replaced directory into the store directory, then write the marker in it
-# The merge reads a directory only once it has its replaced name, so a file written up to the last
-# moment is in the walk. The marker follows the last file, so a run stopped anywhere leaves
-# PENDING-MERGE, which --check reports and the next --apply finishes before anything else on that
-# key. A key whose store is not checked out, and a key no candidate claims, have nowhere their
-# pending merge may go: --apply leaves them alone. A replaced directory is never pruned.
+# The merge reads a directory only once it has its replaced name. A write by path before the rename
+# is in the walk. A writer holding an open descriptor or a cwd inside the directory can land after
+# the walk, and stays only in the replaced directory. The marker follows the last file, so a run
+# stopped anywhere leaves PENDING-MERGE, which --check reports and the next --apply finishes before
+# anything else on that key. A key whose store is not checked out, and a key no candidate claims,
+# have nowhere their pending merge may go: --apply leaves them alone. A replaced directory is never
+# pruned.
+#
+# A REAL DIRECTORY ALREADY HOLDING THE MARKER is merged like any other, not refused. It is what
+# undoing a link with `mv memory.replaced-X memory` leaves, and the marker spoke for what the
+# directory held then, not for what was written since. A refusal would keep every later write off the
+# store until someone removed the marker by hand. So the marker goes before the rename, and a run
+# stopped right after the rename still reads as pending.
 #
 # THE MERGE of one file, at any depth. A symlink is copied and compared as a link: followed, it would
 # bring what it points at into a store that is pushed to a remote.
-#   absent from the store           cp -n -p, so a writer that gets there first keeps its file
+#   absent from the store           copied to .<name>.link-partial beside the target, checked against
+#                                   the source for size and content, then published by link(2), which
+#                                   cannot overwrite. So a short copy never takes the name, and a
+#                                   writer that gets there first keeps its file
 #   byte-identical                  nothing
 #   MEMORY.md or INDEX_*.md differ  the lines only the replaced copy has are appended. Appended and
 #                                   never rewritten: the store's lines stay, as does a concurrent write
-#   anything else differs           the replaced file is copied beside the store's as a conflict copy:
+#   anything else differs           the store's copy keeps its name regardless of which body is newer;
+#                                   the replaced copy becomes the conflict copy, published the same way:
 #                                   x.md -> x.conflict-<host>.md, no extension: appended; a copy with
 #                                   another body is kept and the next is .conflict-<host>.2, .3, ...
 #                                   A copy with the same body is already that file, so a resumed merge
 #                                   adds none.
+# A leftover partial from a stopped run is no store file: nothing counts it, and only the next merge
+# of the same file removes it. A file named like one in a memory directory stays in the replaced
+# directory. A target whose directory resolves outside the store directory is refused, so nothing is
+# written through a symlink in the store, and a marker path that is a symlink is refused as well.
+#
+# A FAILURE STOPS ONLY WHAT FAILED. A file that cannot be merged leaves its directory unmarked, and the
+# directory's other files still go. A key that fails prints its reasons and no line, and the later keys
+# still run. The run then exits 2 naming those keys.
 #
 # Usage:
 #   claude-memory-link --check   print each row that is not LINKED or NO-STORE, then a summary line;
@@ -111,8 +132,9 @@
 #                                per key acted on:
 #                                  linked <key> -> <store dir> (copied <n>, identical <n>, kept-both <n>)
 #                                or `merged` for that line when the key finished a merge and keeps a
-#                                link that points elsewhere. A second run prints nothing. Holds an
-#                                flock on <state dir>/link.lock; another run waits for it.
+#                                link that points elsewhere. A key that fails prints its reasons on
+#                                stderr instead. A second run prints nothing. Holds an flock on
+#                                <state dir>/link.lock; another run waits for it.
 #                                --dry-run prints the same lines and changes nothing, so it takes no
 #                                lock: creating the lock file would be a change.
 #                                --only limits the run to one key; one no candidate claims is exit 2.
@@ -123,7 +145,7 @@
 #       2 could not run (HOME unset, no jq or git, a bad store table, tenant-route or git could not
 #         answer, a key two stores share, an unreadable projects or key directory, a memory entry that
 #         is neither a directory nor a symlink; on --apply also no flock or cmp, an unusable host name,
-#         and any step of a swap or a merge that failed, which leaves the key pending)
+#         and any step of a swap or a merge that failed, reported once the other keys have run)
 #       64 usage
 #
 # Needs bash 4.4: associative arrays (4.0), a nameref (4.3), and `wait` on a process substitution
@@ -153,7 +175,16 @@ REPLACED_STAMP_FORMAT='+%Y%m%dT%H%M%SZ'
 LINK_LOCK_FILE_NAME='link.lock'
 MAX_LINK_RETRIES=3
 INDEX_FILE_NAME='MEMORY.md'
+TOPIC_INDEX_FILE_GLOB='INDEX_*.md'
 CONFLICT_INFIX='.conflict-'
+# A run holds the lock while it looks for a free name, so that search has an end.
+MAX_CONFLICT_COPIES=100
+# A copy on its way to <name> is .<name>.link-partial until it is known to be whole.
+PARTIAL_COPY_SUFFIX='.link-partial'
+PARTIAL_COPY_NAME_GLOB=".*$PARTIAL_COPY_SUFFIX"
+# entries_are_identical: cmp could not tell. publish_copy: something is at the target by then.
+COMPARISON_FAILED=2
+PUBLISH_TARGET_TAKEN=3
 # The host goes into a file name in the store, so it may not climb out of the directory.
 HOST_NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 REPOS_DIR_NAME='repos'
@@ -209,6 +240,7 @@ KEPT_BOTH_COUNT=0
 # A dry run copies nothing, so a later file with the same target compares against this: store path →
 # the source a run would have copied there. It spans keys, since a submodule's two keys share a store.
 declare -A PLANNED_SOURCE_OF_TARGET=()
+PHYSICAL_STORE_DIR=''         # what resolve_store_directory found; empty when it does not exist yet
 
 usage() { sed -n '/^# Usage:/,/^# Exit:/p' "$SELF" | sed '$d; s/^# \{0,1\}//'; }
 
@@ -530,8 +562,15 @@ require_readable_if_present() {
     fi
 }
 
+# path_is_free PATH — true when nothing is at PATH, not even a dangling symlink.
+path_is_free() { [[ ! -e "$1" && ! -L "$1" ]]; }
+
+# is_regular_file PATH — true for a regular file itself, not a symlink to one.
+is_regular_file() { [[ -f "$1" && ! -L "$1" ]]; }
+
 # load_unmarked_replaced_dirs KEY_DIR — set UNMARKED_REPLACED_DIRS to the replaced directories there
-# that lack the marker, oldest first, since the stamp sorts by time.
+# that lack the marker, oldest first, since the stamp sorts by time. A marker is a regular file: this
+# script writes no other kind, and a symlink there must not read as merged.
 load_unmarked_replaced_dirs() {
     local key_dir=$1 replaced_dirs=() replaced_dir
     UNMARKED_REPLACED_DIRS=()
@@ -539,7 +578,7 @@ load_unmarked_replaced_dirs() {
     replaced_dirs=("$key_dir/$MEMORY_ENTRY_NAME$REPLACED_DIR_INFIX"*)
     shopt -u nullglob
     for replaced_dir in "${replaced_dirs[@]}"; do
-        if [[ -d "$replaced_dir" && ! -L "$replaced_dir" && ! -f "$replaced_dir/$MERGED_MARKER_NAME" ]]; then
+        if [[ -d "$replaced_dir" && ! -L "$replaced_dir" ]] && ! is_regular_file "$replaced_dir/$MERGED_MARKER_NAME"; then
             UNMARKED_REPLACED_DIRS+=("$replaced_dir")
         fi
     done
@@ -551,12 +590,12 @@ has_unmerged_replaced_dir() {
     (( ${#UNMARKED_REPLACED_DIRS[@]} ))
 }
 
-# directory_holds_a_file DIR — true when anything but a directory lies under DIR, at any depth. find
-# does not descend into a symlink named as its starting point, so a DIR that is itself a symlink
-# holds nothing by this test, whatever its target holds.
+# directory_holds_a_file DIR — true when anything but a directory or a leftover partial copy lies
+# under DIR, at any depth. find does not descend into a symlink named as its starting point, so a DIR
+# that is itself a symlink holds nothing by this test, whatever its target holds.
 directory_holds_a_file() {
     local first_found
-    first_found=$(find "$1" -mindepth 1 ! -type d -print -quit) || die "could not read $1"
+    first_found=$(find "$1" -mindepth 1 ! -type d ! -name "$PARTIAL_COPY_NAME_GLOB" -print -quit) || die "could not read $1"
     [[ -n "$first_found" ]]
 }
 
@@ -620,17 +659,19 @@ state_of_unclaimed_key() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# The merge: one replaced directory's files into a store directory.
+# The merge: one replaced directory's files into a store directory. Nothing from here to prepare_apply
+# ends the run: a failure is reported and returned, so that the other files and keys still go.
 # ---------------------------------------------------------------------------------------------
 
-# path_is_free PATH — true when nothing is at PATH, not even a dangling symlink.
-path_is_free() { [[ ! -e "$1" && ! -L "$1" ]]; }
+# report_failure MESSAGE — say what could not be done, on stderr, and return 1.
+report_failure() {
+    printf '%s: %s\n' "$SCRIPT_NAME" "$1" >&2
+    return 1
+}
 
-# is_regular_file PATH — true for a regular file itself, not a symlink to one.
-is_regular_file() { [[ -f "$1" && ! -L "$1" ]]; }
-
-# entries_are_identical FIRST SECOND — true when both are links to one target, or regular files with
-# one body. Dies when cmp cannot tell, which must not read as "they differ".
+# entries_are_identical FIRST SECOND — 0 when both are links to one target, or regular files with one
+# body; 1 when not; COMPARISON_FAILED when cmp cannot tell, having said so, since that must not read
+# as "they differ".
 entries_are_identical() {
     local first=$1 second=$2 comparison_status
     if [[ -L "$first" || -L "$second" ]]; then
@@ -640,20 +681,52 @@ entries_are_identical() {
     if ! is_regular_file "$first" || ! is_regular_file "$second"; then return 1; fi
     cmp -s -- "$first" "$second"
     comparison_status=$?
-    (( comparison_status <= 1 )) || die "could not compare $first and $second"
+    if (( comparison_status > 1 )); then
+        report_failure "could not compare $first and $second"
+        return "$COMPARISON_FAILED"
+    fi
     return "$comparison_status"
 }
 
-# copy_without_overwriting SOURCE TARGET — copy, keeping mode and mtime and copying a link as a link.
-# What -n does when TARGET exists varies (GNU cp warns on it, and its exit has changed between
-# versions; --update=none is too new for coreutils 8.32), so the output is held back and a failure
-# counts only if nothing arrived. The caller compares afterwards.
-copy_without_overwriting() {
-    local source_file=$1 target_file=$2 copy_output
-    if copy_output=$(cp -n -P -p -- "$source_file" "$target_file" 2>&1); then return 0; fi
-    if path_is_free "$target_file"; then
-        die "could not copy $source_file to $target_file: $copy_output"
+# partial_copy_path_of TARGET — where a copy waits beside TARGET until it is known to be whole.
+partial_copy_path_of() { printf '%s/.%s%s' "${1%/*}" "${1##*/}" "$PARTIAL_COPY_SUFFIX"; }
+
+# remove_leftover_partial_copy TARGET — remove what a stopped run left on its way to TARGET. The one
+# place a leftover goes: the name is derived from this file, so no other merge can reach it.
+remove_leftover_partial_copy() {
+    local partial_path
+    partial_path=$(partial_copy_path_of "$1")
+    if path_is_free "$partial_path"; then return 0; fi
+    rm -f -- "$partial_path" || report_failure "could not remove the leftover $partial_path"
+}
+
+# publish_copy SOURCE TARGET — bring SOURCE to TARGET whole or not at all, keeping mode and mtime and
+# copying a link as a link. cmp tells a short copy by its size as well as its bytes. link(2) cannot
+# overwrite, and -T keeps both tools out of a directory at the name. Returns 0 when published,
+# PUBLISH_TARGET_TAKEN when something is at TARGET by then, which stays as it is, and 1 when it
+# failed, having said so; the partial then stays for the next merge of this file.
+publish_copy() {
+    local source_file=$1 target_file=$2 partial_path copy_output link_output comparison_status publish_status=0
+    partial_path=$(partial_copy_path_of "$target_file")
+    if ! copy_output=$(cp -T -P -p -- "$source_file" "$partial_path" 2>&1); then
+        report_failure "could not copy $source_file to $partial_path: $copy_output"
+        return 1
     fi
+    entries_are_identical "$source_file" "$partial_path"
+    comparison_status=$?
+    if (( comparison_status == 1 )); then
+        report_failure "the copy of $source_file did not arrive whole at $partial_path"
+    fi
+    (( comparison_status == 0 )) || return 1
+    if ! link_output=$(ln -P -T -- "$partial_path" "$target_file" 2>&1); then
+        if path_is_free "$target_file"; then
+            report_failure "could not publish $partial_path as $target_file: $link_output"
+            return 1
+        fi
+        publish_status=$PUBLISH_TARGET_TAKEN
+    fi
+    rm -f -- "$partial_path" || { report_failure "could not remove $partial_path"; return 1; }
+    return "$publish_status"
 }
 
 # append_lines_only_in_source SOURCE TARGET — append to the index TARGET each line only SOURCE has, in
@@ -664,54 +737,55 @@ append_lines_only_in_source() {
     local -A seen_lines=()
     while IFS= read -r line || [[ -n "$line" ]]; do
         seen_lines["line:$line"]=1
-    done < "$target_file" || die "could not read $target_file"
+    done < "$target_file" || { report_failure "could not read $target_file"; return 1; }
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "${seen_lines["line:$line"]:-}" ]] || continue
         seen_lines["line:$line"]=1
         lines_to_append+="$line"$'\n'
-    done < "$source_file" || die "could not read $source_file"
+    done < "$source_file" || { report_failure "could not read $source_file"; return 1; }
     [[ -n "$lines_to_append" ]] || return 0
     # The store's last line stays whole. $(...) drops a final newline, so a last byte shows only if
     # it is something else; an empty file shows none.
     if [[ -n "$(tail -c 1 -- "$target_file")" ]]; then
         lines_to_append=$'\n'"$lines_to_append"
     fi
-    printf '%s' "$lines_to_append" >> "$target_file" || die "could not add lines to $target_file"
+    printf '%s' "$lines_to_append" >> "$target_file" || report_failure "could not add lines to $target_file"
 }
 
 # write_conflict_copy SOURCE TARGET — copy SOURCE beside TARGET under the first conflict-copy name
 # that is free. A name already holding SOURCE's body means that copy exists, and nothing is written.
-# The loop only steps over names that are taken, so it ends: a copy that arrives wrong stops the run,
-# rather than writing the next name, and the next.
+# The loop only steps over names that are taken, and over MAX_CONFLICT_COPIES of them it stops.
 write_conflict_copy() {
     local source_file=$1 target_parent=${2%/*} target_name=${2##*/}
-    local name_stem=$target_name final_extension='' ordinal=1 infix copy_path
+    local name_stem=$target_name final_extension='' ordinal=1 infix copy_path copy_status
     # .hidden and trailing. have no extension: the infix goes after the whole name.
     if [[ "$target_name" == ?*.?* ]]; then
         name_stem=${target_name%.*}
         final_extension=".${target_name##*.}"
     fi
-    while :; do
+    while (( ordinal <= MAX_CONFLICT_COPIES )); do
         infix="$CONFLICT_INFIX$HOST_NAME"
         (( ordinal == 1 )) || infix+=".$ordinal"
         copy_path="$target_parent/$name_stem$infix$final_extension"
+        remove_leftover_partial_copy "$copy_path" || return 1
         if path_is_free "$copy_path"; then
-            copy_without_overwriting "$source_file" "$copy_path"
-            entries_are_identical "$source_file" "$copy_path" \
-                || die "the conflict copy $copy_path does not match $source_file"
-            return 0
+            publish_copy "$source_file" "$copy_path"
+            copy_status=$?
+            (( copy_status == PUBLISH_TARGET_TAKEN )) || return "$copy_status"
         fi
-        if entries_are_identical "$source_file" "$copy_path"; then return 0; fi
+        entries_are_identical "$source_file" "$copy_path"
+        copy_status=$?
+        (( copy_status != 0 )) || return 0
+        (( copy_status == 1 )) || return 1
         ordinal=$(( ordinal + 1 ))
     done
+    report_failure "gave up on a conflict copy of $2: $MAX_CONFLICT_COPIES names are taken"
 }
 
 # is_index_file_name NAME — true for a file whose difference is a line union, not a conflict copy.
 is_index_file_name() {
-    case "$1" in
-        "$INDEX_FILE_NAME"|INDEX_*.md) return 0 ;;
-        *) return 1 ;;
-    esac
+    # shellcheck disable=SC2053  # the glob on the right is the point
+    [[ "$1" == "$INDEX_FILE_NAME" || "$1" == $TOPIC_INDEX_FILE_GLOB ]]
 }
 
 # keep_both SOURCE TARGET EXISTING — SOURCE differs from what the store holds at TARGET. EXISTING is
@@ -727,12 +801,49 @@ keep_both() {
     fi
 }
 
-# merge_file_into_store SOURCE TARGET — bring one file of a replaced directory into the store. A FIFO
-# would hang cp while this run holds the lock, and a device has no body to keep, so anything but a
-# file or a symlink stops the run and leaves the key pending.
+# resolve_store_directory STORE_DIR — set PHYSICAL_STORE_DIR, making the directory first on a real
+# run. On a dry run one that does not exist yet stays empty: nothing in it can lead anywhere.
+resolve_store_directory() {
+    local store_dir=$1
+    PHYSICAL_STORE_DIR=''
+    if (( ! IS_DRY_RUN )) && ! mkdir -p -- "$store_dir"; then
+        report_failure "could not create $store_dir"
+        return 1
+    fi
+    [[ -d "$store_dir" ]] || return 0
+    # It dies inside the command substitution, having said why.
+    PHYSICAL_STORE_DIR=$(physical_path_of "$store_dir") || return 1
+}
+
+# target_parent_is_inside_store PARENT — false when the deepest part of PARENT that exists resolves
+# outside the store directory, or does not resolve at all. Asked before anything reads or writes
+# there, since mkdir -p, >> and cp all follow a symlink. A plain file in the way leads nowhere, and
+# mkdir -p reports it.
+target_parent_is_inside_store() {
+    local existing_ancestor=$1 physical_ancestor
+    [[ -n "$PHYSICAL_STORE_DIR" ]] || return 0
+    while [[ -n "$existing_ancestor" ]] && path_is_free "$existing_ancestor"; do
+        existing_ancestor=${existing_ancestor%/*}
+    done
+    if is_regular_file "$existing_ancestor"; then return 0; fi
+    physical_ancestor=$(cd -P -- "$existing_ancestor" 2>/dev/null && pwd -P) || return 1
+    [[ "$physical_ancestor" == "$PHYSICAL_STORE_DIR" || "$physical_ancestor" == "$PHYSICAL_STORE_DIR"/* ]]
+}
+
+# merge_file_into_store SOURCE TARGET — bring one file of a replaced directory into the store, or
+# return 1 having said why. A FIFO would hang cp while this run holds the lock, and a device has no
+# body to keep, so anything but a file or a symlink is such a failure.
 merge_file_into_store() {
-    local source_file=$1 target_file=$2 existing_file
-    [[ -L "$source_file" || -f "$source_file" ]] || die "$source_file is neither a file nor a symlink"
+    local source_file=$1 target_file=$2 target_parent=${2%/*} existing_file merge_status
+    if [[ ! -L "$source_file" && ! -f "$source_file" ]]; then
+        report_failure "$source_file is neither a file nor a symlink"
+        return 1
+    fi
+    if ! target_parent_is_inside_store "$target_parent"; then
+        report_failure "refusing $target_file: its directory resolves outside $PHYSICAL_STORE_DIR"
+        return 1
+    fi
+    if (( ! IS_DRY_RUN )); then remove_leftover_partial_copy "$target_file" || return 1; fi
     existing_file=${PLANNED_SOURCE_OF_TARGET[$target_file]:-$target_file}
     if path_is_free "$existing_file"; then
         if (( IS_DRY_RUN )); then
@@ -740,41 +851,68 @@ merge_file_into_store() {
             COPIED_COUNT=$(( COPIED_COUNT + 1 ))
             return 0
         fi
-        mkdir -p -- "${target_file%/*}" || die "could not create ${target_file%/*}"
-        copy_without_overwriting "$source_file" "$target_file"
-        # Different now only if a writer got there first: its file stays, and this one goes beside it.
-        if entries_are_identical "$source_file" "$target_file"; then
+        mkdir -p -- "$target_parent" || { report_failure "could not create $target_parent"; return 1; }
+        publish_copy "$source_file" "$target_file"
+        merge_status=$?
+        if (( merge_status == 0 )); then
             COPIED_COUNT=$(( COPIED_COUNT + 1 ))
             return 0
         fi
-    elif entries_are_identical "$source_file" "$existing_file"; then
+        (( merge_status == PUBLISH_TARGET_TAKEN )) || return 1
+        # A writer got there first. Its file stays, and is compared like any other.
+    fi
+    entries_are_identical "$source_file" "$existing_file"
+    merge_status=$?
+    if (( merge_status == 0 )); then
         IDENTICAL_COUNT=$(( IDENTICAL_COUNT + 1 ))
         return 0
     fi
+    (( merge_status == 1 )) || return 1
     keep_both "$source_file" "$target_file" "$existing_file"
 }
 
-# merge_directory_into_store SOURCE_DIR STORE_DIR — every file under SOURCE_DIR, NUL-safe. A walk that
-# fails stops here, before any file and so before any marker.
+# merge_directory_into_store SOURCE_DIR STORE_DIR — every file under SOURCE_DIR, NUL-safe, but a
+# leftover partial and the directory's own marker. A file that fails stops only itself, and a walk that
+# fails partway still merges what it listed; either returns 1, so the marker stays unwritten.
 merge_directory_into_store() {
-    local source_dir=$1 store_dir=$2 source_files=() source_file
-    read_nul_items source_files find "$source_dir" -mindepth 1 ! -type d -print0 \
-        || die "could not read $source_dir"
+    local source_dir=$1 store_dir=$2 source_files=() source_file has_failed=0
+    resolve_store_directory "$store_dir" || return 1
+    if ! read_nul_items source_files find "$source_dir" -mindepth 1 ! -type d ! -name "$PARTIAL_COPY_NAME_GLOB" -print0; then
+        report_failure "could not read $source_dir"
+        has_failed=1
+    fi
     for source_file in "${source_files[@]}"; do
-        merge_file_into_store "$source_file" "$store_dir/${source_file#"$source_dir"/}"
+        [[ "$source_file" != "$source_dir/$MERGED_MARKER_NAME" ]] || continue
+        merge_file_into_store "$source_file" "$store_dir/${source_file#"$source_dir"/}" || has_failed=1
     done
+    return "$has_failed"
+}
+
+# write_merged_marker REPLACED_DIR — the marker, never through a symlink at its path. A dry run asks
+# the same question and writes nothing.
+write_merged_marker() {
+    local marker_path="$1/$MERGED_MARKER_NAME"
+    if [[ -L "$marker_path" ]]; then
+        report_failure "refusing to write the marker through the symlink $marker_path"
+        return 1
+    fi
+    (( ! IS_DRY_RUN )) || return 0
+    : > "$marker_path" || report_failure "could not write the marker in $1"
 }
 
 # merge_unmarked_replaced_dirs KEY_DIR STORE_DIR — merge each replaced directory lacking the marker,
-# and only then write the marker in it.
+# and write the marker only in one that merged whole.
 merge_unmarked_replaced_dirs() {
-    local key_dir=$1 store_dir=$2 replaced_dir
+    local key_dir=$1 store_dir=$2 replaced_dir has_failed=0
     load_unmarked_replaced_dirs "$key_dir"
     for replaced_dir in "${UNMARKED_REPLACED_DIRS[@]}"; do
-        merge_directory_into_store "$replaced_dir" "$store_dir"
-        (( IS_DRY_RUN )) || : > "$replaced_dir/$MERGED_MARKER_NAME" \
-            || die "could not write the marker in $replaced_dir"
+        if merge_directory_into_store "$replaced_dir" "$store_dir"; then
+            write_merged_marker "$replaced_dir" || has_failed=1
+        else
+            has_failed=1
+        fi
     done
+    return "$has_failed"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -782,7 +920,8 @@ merge_unmarked_replaced_dirs() {
 # ---------------------------------------------------------------------------------------------
 
 # rename_memory_aside KEY_DIR STAMP — rename the real memory directory to the first free replaced
-# name: memory.replaced-<stamp>, then .001, .002, … mv -T would replace an empty directory there.
+# name: memory.replaced-<stamp>, then .001, .002, … mv -T would replace an empty directory there. A
+# marker inside is stale (see the header) and goes first, so that the new name never reads as merged.
 rename_memory_aside() {
     local key_dir=$1 stamp=$2 memory_path="$1/$MEMORY_ENTRY_NAME" ordinal=0 replaced_path base_path
     base_path="$memory_path$REPLACED_DIR_INFIX$stamp"
@@ -791,22 +930,26 @@ rename_memory_aside() {
         ordinal=$(( ordinal + 1 ))
         printf -v replaced_path '%s.%03d' "$base_path" "$ordinal"
     done
-    mv -T -- "$memory_path" "$replaced_path" || die "could not rename $memory_path to $replaced_path"
+    rm -f -- "$memory_path/$MERGED_MARKER_NAME" || { report_failure "could not clear the stale marker in $memory_path"; return 1; }
+    mv -T -- "$memory_path" "$replaced_path" || report_failure "could not rename $memory_path to $replaced_path"
 }
 
 # link_memory_entry KEY_DIR STORE_DIR STAMP — make memory the link. Without -T, ln would put the link
 # inside a directory a writer just recreated, and report success. That directory goes aside and the
-# link is retried; a writer that outlasts the retries stops the run with every directory unmarked.
+# link is retried; a writer that outlasts the retries stops this key with every directory unmarked.
 link_memory_entry() {
     local key_dir=$1 store_dir=$2 stamp=$3 memory_path="$1/$MEMORY_ENTRY_NAME" retries=0 link_error
     while ! link_error=$(ln -s -T -- "$store_dir" "$memory_path" 2>&1); do
         if [[ ! -d "$memory_path" || -L "$memory_path" ]]; then
-            die "could not link $memory_path to $store_dir: $link_error"
+            report_failure "could not link $memory_path to $store_dir: $link_error"
+            return 1
         fi
-        (( retries < MAX_LINK_RETRIES )) \
-            || die "gave up on $memory_path: recreated again after $MAX_LINK_RETRIES retries; its replaced directories stay unmarked"
+        if (( retries >= MAX_LINK_RETRIES )); then
+            report_failure "gave up on $memory_path: recreated again after $MAX_LINK_RETRIES retries; its replaced directories stay unmarked"
+            return 1
+        fi
         retries=$(( retries + 1 ))
-        rename_memory_aside "$key_dir" "$stamp"
+        rename_memory_aside "$key_dir" "$stamp" || return 1
     done
 }
 
@@ -816,12 +959,12 @@ swap_real_directory_for_link() {
     local key_dir=$1 store_dir=$2 stamp
     if (( IS_DRY_RUN )); then
         merge_directory_into_store "$key_dir/$MEMORY_ENTRY_NAME" "$store_dir"
-        return 0
+        return
     fi
-    mkdir -p -- "$store_dir" || die "could not create $store_dir"
-    stamp=$(date -u "$REPLACED_STAMP_FORMAT") || die "could not read the clock"
-    rename_memory_aside "$key_dir" "$stamp"
-    link_memory_entry "$key_dir" "$store_dir" "$stamp"
+    mkdir -p -- "$store_dir" || { report_failure "could not create $store_dir"; return 1; }
+    stamp=$(date -u "$REPLACED_STAMP_FORMAT") || { report_failure "could not read the clock"; return 1; }
+    rename_memory_aside "$key_dir" "$stamp" || return 1
+    link_memory_entry "$key_dir" "$store_dir" "$stamp" || return 1
     merge_unmarked_replaced_dirs "$key_dir" "$store_dir"
 }
 
@@ -830,18 +973,22 @@ swap_real_directory_for_link() {
 link_missing_entry() {
     local key_dir=$1 store_dir=$2 stamp
     (( ! IS_DRY_RUN )) || return 0
-    mkdir -p -- "$key_dir" "$store_dir" || die "could not create $key_dir or $store_dir"
-    stamp=$(date -u "$REPLACED_STAMP_FORMAT") || die "could not read the clock"
-    link_memory_entry "$key_dir" "$store_dir" "$stamp"
+    mkdir -p -- "$key_dir" "$store_dir" || { report_failure "could not create $key_dir or $store_dir"; return 1; }
+    stamp=$(date -u "$REPLACED_STAMP_FORMAT") || { report_failure "could not read the clock"; return 1; }
+    link_memory_entry "$key_dir" "$store_dir" "$stamp" || return 1
     merge_unmarked_replaced_dirs "$key_dir" "$store_dir"
 }
 
 # apply_key KEY STORE RELATIVE_DIR — finish the key's pending merges, bring its entry to a link, and
-# print its line if anything was to do. WRONG-LINK, NO-STORE and a key with no state keep what they have.
+# print its line if anything was to do. Returns 1 if any of that failed, having said why, and prints
+# no line then. A pending merge that fails does not hold the entry back: the files that could not go
+# stay where they are either way, and new writes belong in the store. WRONG-LINK, NO-STORE and a key
+# with no state keep what they have.
 apply_key() {
     local key=$1 store=$2 relative_dir=$3
-    local key_dir="$PROJECTS_DIR/$1" store_dir="$STORES_ROOT/$2/$3" had_unmerged=0 state report_verb=linked
-    require_readable_if_present "$key_dir"
+    local key_dir="$PROJECTS_DIR/$1" store_dir="$STORES_ROOT/$2/$3" had_unmerged=0 has_failed=0 state report_verb=linked
+    # A subshell, because this check dies and a key that cannot be read stops only itself.
+    ( require_readable_if_present "$key_dir" ) || return 1
     # Pending or not: with no store here, a merge has nowhere it may go.
     [[ -e "$STORES_ROOT/$store/.git" ]] || return 0
     COPIED_COUNT=0
@@ -849,37 +996,48 @@ apply_key() {
     KEPT_BOTH_COUNT=0
     if has_unmerged_replaced_dir "$key_dir"; then
         had_unmerged=1
-        merge_unmarked_replaced_dirs "$key_dir" "$store_dir"
+        merge_unmarked_replaced_dirs "$key_dir" "$store_dir" || has_failed=1
     fi
-    # It dies inside the command substitution, having said why; pass the exit on.
-    state=$(state_of_memory_entry "$key" "$store" "$relative_dir") || exit "$EXIT_COULD_NOT_RUN"
+    # It dies inside the command substitution, having said why.
+    state=$(state_of_memory_entry "$key" "$store" "$relative_dir") || return 1
     # A run stopped between the rename and the link left no entry, and if its directory was empty
     # nothing in the store either. The replaced directory is what says a link is due.
     if [[ -z "$state" ]] && (( had_unmerged )); then state=MISSING; fi
     case "$state" in
-        REAL-DIR) swap_real_directory_for_link "$key_dir" "$store_dir" ;;
-        MISSING)  link_missing_entry "$key_dir" "$store_dir" ;;
-        DANGLING) (( IS_DRY_RUN )) || mkdir -p -- "$store_dir" || die "could not create $store_dir" ;;
+        REAL-DIR) swap_real_directory_for_link "$key_dir" "$store_dir" || has_failed=1 ;;
+        MISSING)  link_missing_entry "$key_dir" "$store_dir" || has_failed=1 ;;
+        DANGLING)
+            if (( ! IS_DRY_RUN )) && ! mkdir -p -- "$store_dir"; then
+                report_failure "could not create $store_dir"
+                has_failed=1
+            fi ;;
         WRONG-LINK)
             (( had_unmerged )) || return 0
             report_verb=merged ;;
         *)  (( had_unmerged )) || return 0 ;;
     esac
+    (( ! has_failed )) || return 1
     printf '%s %s -> %s (copied %d, identical %d, kept-both %d)\n' "$report_verb" "$key" \
         "$(escaped_for_one_line "$store_dir")" "$COPIED_COUNT" "$IDENTICAL_COUNT" "$KEPT_BOTH_COUNT"
 }
 
 # apply_all_keys — apply_key for every candidate, or for the one --only names. Keys no candidate
-# claims are not walked: an unmapped one has no store directory to go to.
+# claims are not walked: an unmapped one has no store directory to go to. A key that fails stops only
+# itself; the run exits 2 at the end, naming each. Each key runs in this shell, not a subshell: the
+# dry run's plan and each key's counts live here.
 apply_all_keys() {
-    local index
+    local index failed_keys=()
     if [[ -n "$ONLY_KEY" && -z "${SOURCE_DIR_OF_KEY[$ONLY_KEY]:-}" ]]; then
         die "no candidate on this host claims key $ONLY_KEY"
     fi
     for (( index = 0; index < ${#CANDIDATE_KEYS[@]}; index++ )); do
         if [[ -n "$ONLY_KEY" && "${CANDIDATE_KEYS[index]}" != "$ONLY_KEY" ]]; then continue; fi
-        apply_key "${CANDIDATE_KEYS[index]}" "${CANDIDATE_STORES[index]}" "${CANDIDATE_RELATIVE_DIRS[index]}"
+        apply_key "${CANDIDATE_KEYS[index]}" "${CANDIDATE_STORES[index]}" "${CANDIDATE_RELATIVE_DIRS[index]}" \
+            || failed_keys+=("${CANDIDATE_KEYS[index]}")
     done
+    if (( ${#failed_keys[@]} )); then
+        die "could not finish ${#failed_keys[@]} key(s): ${failed_keys[*]}"
+    fi
 }
 
 # prepare_apply — settle the host name and, on a real run, wait for the lock. Everything that reads a
