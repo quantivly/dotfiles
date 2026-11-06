@@ -290,6 +290,14 @@ check "map: origin owner and repo are lowercased" \
     "0|$(row_line "$hub_key" REAL-DIR "$ALPHA_STORE" repos/example-org/hub "$HOME/code/hub")|$(row_line "$other_key" REAL-DIR "$ALPHA_STORE" repos/example-org/other-repo "$HOME/code/other")"
 
 reset_scene
+make_checkout code/slashed 'https://github.com/Example-Org/Slashed.git/'
+key=$(key_of "$HOME/code/slashed")
+real_memory "$key"
+run_sut --list
+check "map: an origin's trailing slash is dropped with its .git" \
+    "$RC|$(row_of_key "$key" | cut -f2,4)" "0|REAL-DIR${TAB}repos/example-org/slashed"
+
+reset_scene
 make_checkout code/No-Origin
 key=$(key_of "$HOME/code/No-Origin")
 real_memory "$key"
@@ -403,6 +411,21 @@ check "map: a relative gitdir is resolved from the checkout" \
     "$RC|$(row_of_key "$key")" \
     "0|$(row_line "$key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/relative-sub" "$relative_git_dir")"
 
+# The same shape as git writes it, absolute: joined to the checkout, it would name nothing.
+reset_scene
+make_checkout code/absolute-super
+absolute_git_dir="$HOME/code/absolute-super/.git/modules/absolute-sub"
+mkdir -p "$(dirname "$absolute_git_dir")"
+git init -q --separate-git-dir="$absolute_git_dir" "$HOME/code/absolute-sub" || fatal "could not make absolute-sub"
+git --git-dir="$HOME/code/absolute-sub/.git" remote add origin "git@github.com:$FIXTURE_OWNER/absolute-sub.git" \
+    || fatal "git does not accept the absolute gitdir fixture"
+key=$(key_of "$absolute_git_dir")
+real_memory "$key"
+run_sut --list
+check "map: an absolute gitdir is used as it is" \
+    "$RC|$(row_of_key "$key")" \
+    "0|$(row_line "$key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/absolute-sub" "$absolute_git_dir")"
+
 slash_source=$(make_source_repo slash-source)
 reset_scene
 make_checkout code/slash-super
@@ -434,6 +457,23 @@ check "map: a worktree .git file is skipped" \
     "$RC|$(row_of_key "$main_key" | cut -f2)|$(row_of_key "$linked_key")" "0|REAL-DIR|"
 check "map: a worktree of a submodule is skipped" \
     "$RC|$(row_of_key "$main_key" | cut -f2)|$(row_of_key "$sub_worktree_key")" "0|REAL-DIR|"
+
+# A worktree has no key of its own, and neither has what it holds: the worktree is made after the
+# submodule, and populated, so there is something for a wrong walk to find.
+populated_source=$(make_source_repo populated-source)
+reset_scene
+make_checkout code/populated-main "git@github.com:$FIXTURE_OWNER/populated-main.git"
+git -C "$HOME/code/populated-main" commit -q --allow-empty -m first || fatal "could not commit in populated-main"
+add_submodule code/populated-main populated-sub populated-sub "$populated_source"
+git -C "$HOME/code/populated-main" worktree add -q "$HOME/code/populated-linked" || fatal "could not add a worktree"
+git -C "$HOME/code/populated-linked" submodule --quiet update --init || fatal "could not populate the worktree's submodule"
+main_key=$(key_of "$HOME/code/populated-main")
+worktree_submodule_key=$(key_of "$HOME/code/populated-linked/populated-sub")
+real_memory "$main_key"
+real_memory "$worktree_submodule_key"
+run_sut --list
+check "map: a worktree brings no submodules with it" \
+    "$RC|$(row_of_key "$main_key" | cut -f2)|$(row_of_key "$worktree_submodule_key")" "0|REAL-DIR|"
 
 nested_inner_source=$(make_source_repo nested-inner-source)
 nested_outer_source=$(make_source_repo nested-outer-source)
@@ -740,6 +780,32 @@ chmod 755 "$PROJECTS_DIR/$NO_CHECKOUT_KEY"
 check "list: an unclaimed unreadable key directory is exit 2 naming it" \
     "$RC|$(contains "$OUT" "$PROJECTS_DIR/$NO_CHECKOUT_KEY is not a readable directory")" "2|yes"
 
+# A projects dir that cannot be listed would glob to nothing and report a clean host. Listing takes
+# both bits, so each mode lacks a different one: neither, read only, search only.
+reset_scene
+add_state UNMAPPED
+unreadable_results=''
+for unreadable_mode in 000 644 311; do
+    chmod "$unreadable_mode" "$PROJECTS_DIR"
+    run_sut --check
+    chmod 755 "$PROJECTS_DIR"
+    unreadable_results+="$unreadable_mode $RC $(contains "$OUT" "$PROJECTS_DIR is not a readable directory")|"
+done
+check "list: an unreadable projects dir is exit 2 naming it" \
+    "$unreadable_results" "000 2 yes|644 2 yes|311 2 yes|"
+
+# find failing must not read as "the directory holds nothing". A wrapper, so that the row needs no
+# unreadable directory and holds as root.
+FAILING_FIND_BIN="$TMPROOT/failing-find-bin"
+mkdir -p "$FAILING_FIND_BIN"
+printf '#!/bin/sh\nexit 1\n' > "$FAILING_FIND_BIN/find"
+chmod +x "$FAILING_FIND_BIN/find"
+reset_scene
+add_state MISSING
+PATH="$FAILING_FIND_BIN:$PATH" run_sut --list
+check "list: find failing is exit 2 naming the directory" \
+    "$RC|$(contains "$OUT" "could not read $STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/missing-repo")" "2|yes"
+
 rm -rf "$PROJECTS_DIR"
 : > "$PROJECTS_DIR"
 run_sut --list
@@ -904,7 +970,7 @@ check "tools: HOME unset is exit 2 naming it (--help still works)" \
     "$home_unset_check|$RC|$(contains "$OUT" '--check')" "2|yes|0|yes"
 
 printf '\n'
-EXPECTED_ROWS=79
+EXPECTED_ROWS=84
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
