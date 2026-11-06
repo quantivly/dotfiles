@@ -277,6 +277,9 @@ run_doctor() {
     # Never the caller's host-profile marker: exported, it would make the
     # no-profile row fail and route every other row through the real renderer.
     pre=(-u CLAUDE_SETTINGS_RENDER_MARKER "${pre[@]}")
+    # Never the caller's memory-store table either: every row but one reaches the
+    # table by the default path, which HOME puts inside the fixture.
+    pre=(-u CLAUDE_MEMORY_CONFIG "${pre[@]}")
     # DOTFILES_ROOT is THIS tree, so the doctor reads this tree's
     # scripts/claude-account-dirs.data-entries (DO-835) -- system.sh would
     # otherwise default it to the fixture's own, empty, ~/.dotfiles. A row that
@@ -3744,6 +3747,115 @@ new_home rs5; write_cred; mk_host_profile; mk_render_stub 2 one-line
 DROOT="$RENDER_ROOT" run_doctor
 want_out "a one-line stderr is carried whole, not as its last character" "⚠ settings render could not run: claude-settings-render: the stub reason"
 
+#-----------------------------------------------------------------------------
+section "AA. Memory stores (DO-891)"
+#-----------------------------------------------------------------------------
+# A host with ~/.dotfiles-local/claude/memory-stores.json keeps memory in stores,
+# and the doctor asks scripts/claude-memory-link.sh --check. The script here is a
+# stub, as the renderer is in section Z: it prints what a row chooses on each
+# stream and exits as the row chooses, and the script's own behaviour is its own
+# table's business (scripts/test-claude-memory-link.sh). Two things differ from
+# section Z, and they are why these rows exist: stdout is the report here, so it
+# has to survive the capture; and an exit 0 can carry UNMAPPED rows, which must
+# not read as the all-clear.
+MEMORY_ROOT="$TMPROOT/memory-root"
+MEMORY_CALLS="$TMPROOT/memory-calls.log"
+MEMORY_STUB="$MEMORY_ROOT/scripts/claude-memory-link.sh"
+mkdir -p "$MEMORY_ROOT/scripts"
+cp "$DOTFILES/scripts/claude-account-dirs.data-entries" "$MEMORY_ROOT/scripts/"
+# mk_link_stub EXIT_STATUS STDOUT_TEXT STDERR_TEXT — record "$*", then print each
+# text from a file, so a row's tabs and backslashes reach the doctor as written.
+mk_link_stub() {
+    printf '%s' "$2" > "$MEMORY_ROOT/stub-stdout"
+    printf '%s' "$3" > "$MEMORY_ROOT/stub-stderr"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncat "%s"\ncat "%s" >&2\nexit %s\n' \
+        "$MEMORY_CALLS" "$MEMORY_ROOT/stub-stdout" "$MEMORY_ROOT/stub-stderr" "$1" > "$MEMORY_STUB"
+    chmod +x "$MEMORY_STUB"
+    : > "$MEMORY_CALLS"
+}
+mk_memory_table() { mkdir -p "$FHOME/.dotfiles-local/claude"; printf '{"stores":{}}\n' > "$FHOME/.dotfiles-local/claude/memory-stores.json"; }
+# Rows as --check prints them: TSV, key first. The source directory of the second
+# holds a tab as the script escapes it, the two characters \t, which a zsh `echo`
+# would turn back into a tab.
+REAL_DIR_ROW=$'-home-u-code-one\tREAL-DIR\talpha\trepos/example-org/one\t/home/u/code/one'
+WRONG_LINK_ROW=$'-home-u-code-two\tWRONG-LINK\tbeta\tdirs/code-two\t/home/u/code/t\\two'
+UNMAPPED_ROW=$'-home-u-gone\tUNMAPPED\t\t\t'
+MEMORY_REASON='claude-memory-link: the stub reason'
+
+new_home ms1; write_cred; mk_link_stub 0 '' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "no store table is a note, not a finding" "· no memory stores configured (~/.dotfiles-local/claude/memory-stores.json)"
+if [[ ! -s "$MEMORY_CALLS" ]]; then ok "...and the link script is not run"; else bad "...and the link script is not run — it was: $(cat "$MEMORY_CALLS")"; fi
+
+new_home ms2; write_cred; mk_memory_table; mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "exit 0 with the summary alone is a ✓ carrying the counts" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped)"
+no_out   "...and is not reported as could-not-run" "memory stores could not be checked"
+
+new_home ms3; write_cred; mk_memory_table
+mk_link_stub 1 "$REAL_DIR_ROW"$'\n'"$WRONG_LINK_ROW"$'\nclaude-memory-link: 7 linked, 2 to fix, 0 unmapped\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "exit 1 is a ✗ carrying the counts and how to see the fix" "✗ memory directories are not linked into their stores (7 linked, 2 to fix, 0 unmapped) — scripts/claude-memory-link.sh --apply --dry-run shows what --apply would do"
+want_out "...with its first row shown whole"                 "    $REAL_DIR_ROW"
+want_out "...and its second, whose backslash survives"       "    $WRONG_LINK_ROW"
+no_out   "...and never the ✓"                                "every memory directory is linked"
+want_rc  "...and the doctor exits non-zero on it"            1
+
+new_home ms4; write_cred; mk_memory_table
+mk_link_stub 0 "$UNMAPPED_ROW"$'\nclaude-memory-link: 7 linked, 0 to fix, 1 unmapped\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "exit 0 with an UNMAPPED row is a ⚠ naming the table's fix" "⚠ memory directories no table entry claims (7 linked, 0 to fix, 1 unmapped) — add them to checkout_globs or plain_dirs"
+want_out "...with the row shown whole, empty fields and all"  "    $UNMAPPED_ROW"
+no_out   "...and never the ✓ of the summary-only exit 0"      "every memory directory is linked"
+want_rc  "...and an UNMAPPED key alone does not fail the doctor" 0
+
+new_home ms5; write_cred; mk_memory_table
+mk_link_stub 2 '' $'claude-memory-link: an earlier line\n'"$MEMORY_REASON"$'\n'
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "exit 2 is a ⚠ carrying the last stderr line" "⚠ memory stores could not be checked: $MEMORY_REASON"
+no_out   "...and is not reported as unlinked" "memory directories are not linked"
+no_out   "...and never the ✓"                 "every memory directory is linked"
+
+# One stderr line with no final newline, the one case a scalar subscript still gets
+# wrong here (section Z's trap): `${${(f)x}[-1]}` reads it as its last CHARACTER.
+# With a final newline, which the capture keeps, that form reads it correctly, so
+# only this stub tells the array from the scalar. ms7 carries the newline form.
+new_home ms5b; write_cred; mk_memory_table; mk_link_stub 2 '' "$MEMORY_REASON"
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "a one-line stderr is carried whole" "⚠ memory stores could not be checked: $MEMORY_REASON"
+
+new_home ms5c; write_cred; mk_memory_table; mk_link_stub 2 '' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "an exit 2 with nothing on stderr still says it could not run" "⚠ memory stores could not be checked: exit 2"
+
+new_home ms6; write_cred; mk_memory_table; mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+if [[ "$(cat "$MEMORY_CALLS")" == "--check" ]]; then ok "the script is asked by --check alone: the doctor never applies"; else bad "the script is asked by --check alone — the stub saw: $(cat "$MEMORY_CALLS")"; fi
+
+# The script takes a table that is a symlink to nothing as a fault, what a
+# mid-deploy overlay leaves behind. The doctor must not read that as "not configured".
+new_home ms7; write_cred; mkdir -p "$FHOME/.dotfiles-local/claude"
+ln -s "$FHOME/gone.json" "$FHOME/.dotfiles-local/claude/memory-stores.json"
+mk_link_stub 2 '' "$MEMORY_REASON"$'\n'
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "a dangling store table goes to the script, not to the note" "⚠ memory stores could not be checked: $MEMORY_REASON"
+no_out   "...and is not called unconfigured" "no memory stores configured"
+
+new_home ms8; write_cred; mkdir -p "$FHOME/other"; printf '{"stores":{}}\n' > "$FHOME/other/table.json"
+mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped\n' ''
+DROOT="$MEMORY_ROOT" PRELUDE="export CLAUDE_MEMORY_CONFIG='$FHOME/other/table.json'" run_doctor
+want_out "CLAUDE_MEMORY_CONFIG names the table the doctor looks for, as it does for the script" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped)"
+
+# Exit 0 is not enough for the ✓: the summary is what says the check got to the end.
+new_home ms9; write_cred; mk_memory_table; mk_link_stub 0 '' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "exit 0 with no summary is a ⚠" "⚠ memory stores could not be checked: --check printed no summary"
+no_out   "...and never the ✓"            "every memory directory is linked"
+
+new_home ms10; write_cred; mk_memory_table; rm -f "$MEMORY_STUB"
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "a link script that is not there is a ⚠, not a silence" "⚠ memory stores could not be checked:"
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
 # loop, an unset variable under `set -u`. Every row that still ran would pass
@@ -3762,7 +3874,7 @@ want_out "a one-line stderr is carried whole, not as its last character" "⚠ se
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=543
+EXPECTED_ROWS=568
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

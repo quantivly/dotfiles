@@ -1226,6 +1226,64 @@ _claude_doctor_rendered_settings() {
   esac
 }
 
+# The memory stores, the "--- Memory stores ---" section of claude-doctor
+# (DO-891). A host carrying ~/.dotfiles-local/claude/memory-stores.json keeps
+# Claude Code's memory in git-backed stores, and this asks the read-only --check
+# of scripts/claude-memory-link.sh how far each key is from a link into its store.
+# --apply is never run from here: the doctor writes nothing. Without the table the
+# memory directories are plain ones, which is a fact about the host, not a finding.
+#
+# Unlike the section above this keeps stdout, since the rows are the report. And
+# an exit 0 is not yet the ✓: UNMAPPED rows alone do not fail --check, so the ✓
+# needs no rows at all, and the summary that says the check reached its end.
+_claude_doctor_memory_stores() {
+  local store_table="${CLAUDE_MEMORY_CONFIG:-$HOME/.dotfiles-local/claude/memory-stores.json}"
+  local link_script="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-memory-link.sh"
+  local summary_prefix='claude-memory-link: '
+  local captured_streams link_stdout link_rc last_stderr_line report_line reported_row summary_counts=''
+  local -a stream_parts link_stderr_lines report_lines reported_rows
+  # -L too: to the script a table that is a symlink to nothing is a fault, what a
+  # mid-deploy overlay leaves, and not a host that opted out.
+  if [[ ! -e "$store_table" && ! -L "$store_table" ]]; then
+    _doctor_note "no memory stores configured (${store_table/#$HOME/~})"
+    return 0
+  fi
+  # Both streams with no temp file: the inner substitution takes stdout, stderr
+  # falls through to the outer one, and NULs then set off stdout and the status.
+  captured_streams="$( ( link_stdout="$("$link_script" --check)"; link_rc=$?; printf '\0%s\0%d' "$link_stdout" "$link_rc" ) 2>&1 )"
+  stream_parts=("${(@ps:\0:)captured_streams}")
+  link_rc="${stream_parts[3]}"
+  # Unquoted (f) in an array assignment: one line stays one element (the scalar
+  # trap the section above records), and stderr's own final newline, which the NUL
+  # keeps from being stripped, leaves no empty last element.
+  link_stderr_lines=(${(f)stream_parts[1]})
+  last_stderr_line="${link_stderr_lines[-1]}"
+  report_lines=(${(f)stream_parts[2]})
+  for report_line in "${report_lines[@]}"; do
+    if [[ "$report_line" == "$summary_prefix"*" linked, "*" to fix, "*" unmapped" ]]; then
+      summary_counts="${report_line#"$summary_prefix"}"
+    else
+      reported_rows+=("$report_line")
+    fi
+  done
+  case "$link_rc" in
+    0)
+      if (( ${#reported_rows} )); then
+        _doctor_warn "memory directories no table entry claims (${summary_counts:-no summary}) — add them to checkout_globs or plain_dirs"
+      elif [[ -n "$summary_counts" ]]; then
+        _doctor_ok "every memory directory is linked ($summary_counts)"
+      else
+        _doctor_warn "memory stores could not be checked: --check printed no summary"
+      fi ;;
+    1) _doctor_bad "memory directories are not linked into their stores (${summary_counts:-no summary}) — scripts/claude-memory-link.sh --apply --dry-run shows what --apply would do" ;;
+    *) _doctor_warn "memory stores could not be checked: ${last_stderr_line:-exit $link_rc}" ;;
+  esac
+  # printf, never echo: zsh's echo would turn the script's escaped \t back into a tab.
+  for reported_row in "${reported_rows[@]}"; do
+    printf '    %s\n' "$reported_row"
+  done
+}
+
 # The Linear API-key plugin, the "--- Linear ---" section of claude-doctor
 # (DO-801). claude/plugins/linear-key sends LINEAR_API_KEY to Linear's MCP server,
 # so no seat signs in. Every way it stops doing that is silent, measured on
@@ -2858,6 +2916,10 @@ claude-doctor() {
   echo
   echo "--- Rendered settings ---"
   _claude_doctor_rendered_settings
+
+  echo
+  echo "--- Memory stores ---"
+  _claude_doctor_memory_stores
 
   echo
   echo "--- Pools ---"
