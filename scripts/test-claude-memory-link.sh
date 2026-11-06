@@ -3,12 +3,13 @@
 # scripts/test-claude-memory-link.sh
 # ==================================
 #
-# State table for scripts/claude-memory-link.sh, the read-only half: mapping Claude Code project
-# keys to memory-store directories, and reporting the state of each key's `memory` entry.
+# State table for scripts/claude-memory-link.sh: mapping Claude Code project keys to memory-store
+# directories, reporting the state of each key's `memory` entry, and (--apply) swapping a real
+# directory for a link and merging it into the store, resumably.
 #
 # HERMETIC. Every row runs against fixtures under mktemp -d, under a fixture HOME, with the projects
-# dir, the stores root, the store table and tenant-route all named explicitly; git reads only the
-# fixture's config files. Checkouts are real ones (`git init`, `git submodule add`, `git worktree
+# dir, the stores root, the store table, the state dir, the host name and tenant-route all named
+# explicitly; git reads only the fixture's config files. Checkouts are real ones (`git init`, `git submodule add`, `git worktree
 # add`), because a hand-written `.git` file would be a claim about git. tenant-route is a stub that
 # answers per directory: fixture tenants are alpha and beta.
 # Requires: bash, git, jq.
@@ -49,7 +50,7 @@ bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for tool in bash git jq find sha256sum sort; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
+for tool in bash git jq find sha256sum sort cmp flock mkfifo stat touch; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
 [[ -x "$SUT" ]] || fatal "$SUT is not executable — every row below would assert nothing"
 # Mode 000 does not stop root, so the unreadable-directory rows would pass on nothing. Not a skip: a
 # skipped row is neither a pass nor a fail, and it would leave a green total behind.
@@ -63,6 +64,8 @@ TAB=$'\t'
 PROJECTS_DIR="$TMPROOT/projects"
 STORES_ROOT="$TMPROOT/stores"
 CONFIG="$TMPROOT/memory-stores.json"
+STATE_DIR="$TMPROOT/state"
+FIXTURE_HOST='fixture-host'
 ROUTE_STUB="$TMPROOT/stub-bin/tenant-route"
 ROUTE_CALLS="$TMPROOT/route-calls"
 ALPHA_STORE='alpha-store'
@@ -102,10 +105,10 @@ write_default_config() {
 JSON
 }
 
-# reset_scene — nothing under the fixture home, the projects dir or the stores root; the alpha store
-# checked out, the beta store not; the default table; no recorded route calls.
+# reset_scene — nothing under the fixture home, the projects dir, the stores root or the state dir;
+# the alpha store checked out, the beta store not; the default table; no recorded route calls.
 reset_scene() {
-    rm -rf "$HOME" "$PROJECTS_DIR" "$STORES_ROOT" "$ROUTE_CALLS"
+    rm -rf "$HOME" "$PROJECTS_DIR" "$STORES_ROOT" "$STATE_DIR" "$ROUTE_CALLS"
     mkdir -p "$HOME" "$PROJECTS_DIR" "$STORES_ROOT"
     git init -q "$STORES_ROOT/$ALPHA_STORE" || fatal "could not create the alpha store"
     write_default_config
@@ -165,7 +168,8 @@ store_file() {
 # run_sut ARGS… → combined output in $OUT, exit status in $RC. Every override is always set.
 run_sut() {
     OUT=$(CLAUDE_MEMORY_PROJECTS_DIR="$PROJECTS_DIR" CLAUDE_MEMORY_STORES_ROOT="$STORES_ROOT" \
-        CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" "$SUT" "$@" 2>&1); RC=$?
+        CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_STATE_DIR="$STATE_DIR" \
+        CLAUDE_MEMORY_HOST="$FIXTURE_HOST" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" "$SUT" "$@" 2>&1); RC=$?
 }
 
 # row_of_key KEY — the --list line of KEY in $OUT, or nothing. A plain string match, so that the
@@ -256,8 +260,19 @@ check "usage: an unknown argument is exit 64" "$RC|$(contains "$OUT" 'unknown ar
 run_sut --list --check
 check "usage: two verbs are exit 64" "$RC|$(contains "$OUT" 'only one verb allowed')" "64|yes"
 run_sut --help
-check "usage: --help is exit 0 and names both verbs" \
-    "$RC|$(contains "$OUT" '--list')$(contains "$OUT" '--check')" "0|yesyes"
+check "usage: --help is exit 0 and names every verb and flag" \
+    "$RC|$(contains "$OUT" '--list')$(contains "$OUT" '--check')$(contains "$OUT" '--apply')$(contains "$OUT" '--dry-run')$(contains "$OUT" '--only')" \
+    "0|yesyesyesyesyes"
+run_sut --dry-run
+dry_run_alone="$RC|$(contains "$OUT" '--dry-run and --only go with --apply')"
+run_sut --list --only some-key
+check "usage: --dry-run or --only without --apply is exit 64" \
+    "$dry_run_alone|$RC|$(contains "$OUT" '--dry-run and --only go with --apply')" "64|yes|64|yes"
+run_sut --apply --only
+only_with_nothing="$RC|$(contains "$OUT" '--only needs a key')"
+run_sut --apply --only ''
+check "usage: --only with no key is exit 64" \
+    "$only_with_nothing|$RC|$(contains "$OUT" '--only needs a key')" "64|yes|64|yes"
 
 # ---------------------------------------------------------------------------------------------
 # The key rule. The literal is the example the spec gives; the function is called directly because
@@ -969,8 +984,794 @@ OUT=$(env -u HOME "$SUT" --help 2>&1); RC=$?
 check "tools: HOME unset is exit 2 naming it (--help still works)" \
     "$home_unset_check|$RC|$(contains "$OUT" '--check')" "2|yes|0|yes"
 
+# ---------------------------------------------------------------------------------------------
+# --apply: the swap, the merge and the resume. Each scene is one checkout with a real memory
+# directory unless it says otherwise. A wrapper first on PATH is how a row gets between two steps of
+# the script, as a session writing at that moment would.
+# ---------------------------------------------------------------------------------------------
+
+STUB_BIN="$TMPROOT/apply-stub-bin"
+STUB_STATE_FILE="$TMPROOT/apply-stub-state"
+export STUB_STATE_FILE
+OLD_MTIME_STAMP='200101010000'
+CONFLICT_MD_SUFFIX=".conflict-$FIXTURE_HOST.md"
+UTC_STAMP_NAME_RE='/memory\.replaced-[0-9]{8}T[0-9]{6}Z$'
+
+# apply_scene REPO — a new scene with one checkout and its real, empty memory directory. Sets $key,
+# $key_dir, $memory_dir and $store_dir.
+apply_scene() {
+    reset_scene
+    make_checkout "code/$1" "git@github.com:$FIXTURE_OWNER/$1.git"
+    key=$(key_of "$HOME/code/$1")
+    key_dir="$PROJECTS_DIR/$key"
+    memory_dir="$key_dir/memory"
+    store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/$1"
+    mkdir -p "$memory_dir" || fatal "could not create the memory directory of $1"
+}
+
+# pending_scene REPO — as a run stopped before its merge finished: memory is already the link, and
+# $replaced_dir exists, empty and unmarked.
+pending_scene() {
+    apply_scene "$1"
+    rmdir "$memory_dir" || fatal "could not clear the memory directory of $1"
+    mkdir -p "$store_dir" || fatal "could not create the store directory of $1"
+    ln -s "$store_dir" "$memory_dir" || fatal "could not link the memory of $1"
+    replaced_dir="$key_dir/$REPLACED_STAMP"
+    mkdir -p "$replaced_dir" || fatal "could not create the replaced directory of $1"
+}
+
+# write_file PATH BODY — PATH holding BODY and a newline, its parent created.
+write_file() {
+    mkdir -p "$(dirname "$1")" || fatal "could not create the parent of $1"
+    printf '%s\n' "$2" > "$1" || fatal "could not write $1"
+}
+
+# body_of PATH — what PATH holds, or <absent>.
+body_of() { if [[ -f "$1" ]]; then cat "$1"; else printf '<absent>'; fi; }
+
+# linked_line COPIED IDENTICAL KEPT_BOTH — the expected line for the scene's key.
+linked_line() { printf 'linked %s -> %s (copied %d, identical %d, kept-both %d)' "$key" "$store_dir" "$1" "$2" "$3"; }
+
+# memory_kind PATH — what a memory entry is: `link to <target>`, `real` or `absent`.
+memory_kind() {
+    if [[ -L "$1" ]]; then
+        printf 'link to %s' "$(readlink "$1")"
+    elif [[ -d "$1" ]]; then
+        printf 'real'
+    else
+        printf 'absent'
+    fi
+}
+
+# replaced_dir_counts KEY_DIR — how many replaced directories hold the marker and how many do not.
+replaced_dir_counts() {
+    local candidate_dir marked_count=0 unmarked_count=0
+    for candidate_dir in "$1"/memory.replaced-*; do
+        [[ -d "$candidate_dir" ]] || continue
+        if [[ -f "$candidate_dir/$MERGED_MARKER" ]]; then
+            marked_count=$((marked_count + 1))
+        else
+            unmarked_count=$((unmarked_count + 1))
+        fi
+    done
+    printf '%d marked, %d unmarked' "$marked_count" "$unmarked_count"
+}
+
+# tree_fingerprint — one hash of every path, type, link target, size and mtime in the scene.
+tree_fingerprint() {
+    find "$HOME" "$PROJECTS_DIR" "$STORES_ROOT" -printf '%p %y %l %s %T@\n' | LC_ALL=C sort | sha256sum
+}
+
+# file_manifest DIR — every file under DIR but the marker, by content hash.
+file_manifest() {
+    (cd "$1" && find . -type f ! -name "$MERGED_MARKER" -exec sha256sum {} + | LC_ALL=C sort)
+}
+
+# write_stub TOOL — make $STUB_BIN hold one wrapper for TOOL, its sh body from stdin, with $real_tool
+# naming the real one. $STUB_STATE_FILE starts absent, for a body that counts its calls.
+write_stub() {
+    local tool=$1 real_tool
+    real_tool=$(command -v "$tool") || fatal "no $tool to wrap"
+    rm -rf "$STUB_BIN" "$STUB_STATE_FILE"
+    mkdir -p "$STUB_BIN" || fatal "could not create the stub directory"
+    { printf '#!/bin/sh\nreal_tool=%q\n' "$real_tool"; cat; } > "$STUB_BIN/$tool" || fatal "could not write the $tool stub"
+    chmod +x "$STUB_BIN/$tool" || fatal "could not make the $tool stub executable"
+}
+
+printf 'apply: a real directory becomes a link\n'
+apply_scene real-to-link
+write_file "$memory_dir/MEMORY.md" '- [topic](topic.md)'
+write_file "$memory_dir/topic.md" 'topic body'
+source_manifest=$(file_manifest "$memory_dir")
+stamp_hour_before=$(date -u +%Y%m%dT%H)
+TZ=Etc/GMT-12 run_sut --apply
+stamp_hour_after=$(date -u +%Y%m%dT%H)
+apply_result="$RC|$OUT"
+replaced_dirs=("$key_dir"/memory.replaced-*)
+run_sut --list
+check "apply: a real directory becomes a link and every file is in the store" \
+    "$apply_result|$(memory_kind "$memory_dir")|$(row_of_key "$key" | cut -f2)|$(body_of "$store_dir/MEMORY.md")|$(body_of "$store_dir/topic.md")" \
+    "0|$(linked_line 2 0 0)|link to $store_dir|LINKED|- [topic](topic.md)|topic body"
+check "apply: the replaced directory still holds every original file" \
+    "$(file_manifest "${replaced_dirs[0]}")" "$source_manifest"
+replaced_stamp_hour=${replaced_dirs[0]##*memory.replaced-}
+replaced_stamp_hour=${replaced_stamp_hour:0:11}
+check "apply: the replaced directory is named by a UTC stamp and holds the marker" \
+    "${#replaced_dirs[@]}|$([[ "${replaced_dirs[0]}" =~ $UTC_STAMP_NAME_RE ]] && printf named)|$([[ "$replaced_stamp_hour" == "$stamp_hour_before" || "$replaced_stamp_hour" == "$stamp_hour_after" ]] && printf utc)|$(replaced_dir_counts "$key_dir")" \
+    "1|named|utc|1 marked, 0 unmarked"
+
+tree_before=$(tree_fingerprint)
+run_sut --apply
+check "apply: a second run prints nothing" "$RC|$OUT|$(tree_fingerprint)" "0||$tree_before"
+
+apply_scene copy-metadata
+write_file "$memory_dir/old.md" 'old body'
+chmod 640 "$memory_dir/old.md"
+touch -t "$OLD_MTIME_STAMP" "$memory_dir/old.md"
+expected_metadata=$(stat -c '%a %Y' "$memory_dir/old.md")
+run_sut --apply
+check "apply: a copied file keeps its mtime and mode" "$RC|$(stat -c '%a %Y' "$store_dir/old.md" 2>&1)" "0|$expected_metadata"
+
+apply_scene identical-file
+write_file "$memory_dir/same.md" 'same body'
+write_file "$store_dir/same.md" 'same body'
+touch -t "$OLD_MTIME_STAMP" "$store_dir/same.md"
+expected_metadata=$(stat -c '%Y' "$store_dir/same.md")
+run_sut --apply
+check "apply: identical files are not copied" \
+    "$RC|$OUT|$(stat -c '%Y' "$store_dir/same.md")" "0|$(linked_line 0 1 0)|$expected_metadata"
+
+printf 'apply: a file that differs\n'
+apply_scene differing-topic
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+run_sut --apply
+check "apply: a differing topic file becomes a conflict copy and the store's copy is untouched" \
+    "$RC|$OUT|$(body_of "$store_dir/topic.md")|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")" \
+    "0|$(linked_line 0 0 1)|store body|replaced body"
+
+apply_scene earlier-conflict
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+write_file "$store_dir/topic$CONFLICT_MD_SUFFIX" 'an earlier conflict'
+run_sut --apply
+check "apply: an existing conflict copy with another body is kept, and the new one is numbered .2" \
+    "$RC|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")|$(body_of "$store_dir/topic.conflict-$FIXTURE_HOST.2.md")" \
+    "0|an earlier conflict|replaced body"
+
+apply_scene same-conflict
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+write_file "$store_dir/topic$CONFLICT_MD_SUFFIX" 'replaced body'
+run_sut --apply
+check "apply: a conflict copy with the same body is not written twice" \
+    "$RC|$OUT|$(body_of "$store_dir/topic.conflict-$FIXTURE_HOST.2.md")" "0|$(linked_line 0 0 1)|<absent>"
+
+apply_scene no-extension
+write_file "$memory_dir/notes" 'replaced notes'
+write_file "$store_dir/notes" 'store notes'
+write_file "$memory_dir/.hidden" 'replaced hidden'
+write_file "$store_dir/.hidden" 'store hidden'
+run_sut --apply
+check "apply: a file with no extension gets the infix appended" \
+    "$RC|$(body_of "$store_dir/notes.conflict-$FIXTURE_HOST")|$(body_of "$store_dir/.hidden.conflict-$FIXTURE_HOST")" \
+    "0|replaced notes|replaced hidden"
+
+apply_scene final-extension
+write_file "$memory_dir/backup.tar.gz" 'replaced archive'
+write_file "$store_dir/backup.tar.gz" 'store archive'
+run_sut --apply
+check "apply: the infix goes before the final extension only" \
+    "$RC|$(body_of "$store_dir/backup.tar.conflict-$FIXTURE_HOST.gz")" "0|replaced archive"
+
+printf 'apply: an index file is a line union\n'
+apply_scene index-union
+write_file "$memory_dir/MEMORY.md" $'- shared\n- [new](new.md)\n$(touch injected)\n- shared\n- [new](new.md)'
+write_file "$store_dir/MEMORY.md" $'- [kept](kept.md)\n- shared'
+run_sut --apply
+check "apply: MEMORY.md is a line union, store order first" \
+    "$RC|$OUT|$(body_of "$store_dir/MEMORY.md")|$(body_of "$store_dir/MEMORY$CONFLICT_MD_SUFFIX")" \
+    "0|$(linked_line 0 0 1)|- [kept](kept.md)
+- shared
+- [new](new.md)
+\$(touch injected)|<absent>"
+
+apply_scene topic-index
+write_file "$memory_dir/INDEX_topics.md" '- replaced line'
+write_file "$store_dir/INDEX_topics.md" '- store line'
+write_file "$memory_dir/NOT_INDEX_topics.md" '- replaced line'
+write_file "$store_dir/NOT_INDEX_topics.md" '- store line'
+run_sut --apply
+check "apply: INDEX_*.md is a line union too, and a name that only resembles it is not" \
+    "$RC|$(body_of "$store_dir/INDEX_topics.md")|$(body_of "$store_dir/NOT_INDEX_topics.md")|$(body_of "$store_dir/NOT_INDEX_topics$CONFLICT_MD_SUFFIX")" \
+    "0|- store line
+- replaced line|- store line|- replaced line"
+
+apply_scene index-subset
+write_file "$memory_dir/MEMORY.md" '- shared'
+write_file "$store_dir/MEMORY.md" $'- kept\n- shared'
+touch -t "$OLD_MTIME_STAMP" "$store_dir/MEMORY.md"
+expected_metadata=$(stat -c '%Y' "$store_dir/MEMORY.md")
+run_sut --apply
+check "apply: an index with no new line is not written" \
+    "$RC|$OUT|$(stat -c '%Y' "$store_dir/MEMORY.md")" "0|$(linked_line 0 0 1)|$expected_metadata"
+
+apply_scene index-no-newline
+printf -- '- replaced last' > "$memory_dir/MEMORY.md"
+mkdir -p "$store_dir"
+printf -- '- store last' > "$store_dir/MEMORY.md"
+run_sut --apply
+check "apply: an index with no final newline keeps every line whole" \
+    "$RC|$(body_of "$store_dir/MEMORY.md")|$(tail -c 1 "$store_dir/MEMORY.md" | od -An -c | tr -d ' ')" \
+    "0|- store last
+- replaced last|\\n"
+
+apply_scene index-store-no-newline
+write_file "$memory_dir/MEMORY.md" '- shared'
+mkdir -p "$store_dir"
+printf -- '- shared' > "$store_dir/MEMORY.md"
+run_sut --apply
+check "apply: a store index's last line counts as a line even with no final newline" \
+    "$RC|$OUT|$(body_of "$store_dir/MEMORY.md")" "0|$(linked_line 0 0 1)|- shared"
+
+apply_scene index-empty-store
+write_file "$memory_dir/MEMORY.md" $'- first\n- second'
+mkdir -p "$store_dir"
+: > "$store_dir/MEMORY.md"
+run_sut --apply
+check "apply: an empty index in the store takes every line, with no blank line first" \
+    "$RC|$(body_of "$store_dir/MEMORY.md")" "0|- first
+- second"
+
+printf 'apply: every file, whatever it is\n'
+apply_scene archive-subdir
+write_file "$memory_dir/.archive/old.md" 'old body'
+write_file "$memory_dir/.archive/topic.md" 'replaced topic'
+write_file "$store_dir/.archive/topic.md" 'store topic'
+write_file "$memory_dir/.archive/deeper/MEMORY.md" '- replaced line'
+write_file "$store_dir/.archive/deeper/MEMORY.md" '- store line'
+run_sut --apply
+check "apply: a subdirectory (.archive/) is merged by the same rule" \
+    "$RC|$OUT|$(body_of "$store_dir/.archive/old.md")|$(body_of "$store_dir/.archive/topic.md")|$(body_of "$store_dir/.archive/topic$CONFLICT_MD_SUFFIX")|$(body_of "$store_dir/.archive/deeper/MEMORY.md")" \
+    "0|$(linked_line 1 0 2)|old body|store topic|replaced topic|- store line
+- replaced line"
+
+apply_scene awkward-names
+AWKWARD_NAMES=('a b.md' '-dash.md' $'new\nline.md' 'star*.md' '[x].md')
+awkward_expected=''
+for awkward_name in "${AWKWARD_NAMES[@]}"; do
+    write_file "$memory_dir/$awkward_name" "body of $awkward_name"
+    awkward_expected+="body of $awkward_name|"
+done
+write_file "$memory_dir/-differs.md" 'replaced body'
+write_file "$store_dir/-differs.md" 'store body'
+run_sut --apply
+awkward_results=''
+for awkward_name in "${AWKWARD_NAMES[@]}"; do
+    awkward_results+="$(body_of "$store_dir/$awkward_name")|"
+done
+check "apply: awkward file names survive" \
+    "$RC|$OUT|$awkward_results$(body_of "$store_dir/-differs$CONFLICT_MD_SUFFIX")" \
+    "0|$(linked_line 5 0 1)|${awkward_expected}replaced body"
+
+# Followed, the link would copy what it points at into a store that a sync pushes to a remote.
+apply_scene symlink-copied
+write_file "$TMPROOT/outside-store-target" 'outside body'
+ln -s "$TMPROOT/outside-store-target" "$memory_dir/pointer.md"
+ln -s "$TMPROOT/no-such-target" "$memory_dir/dangling.md"
+run_sut --apply
+check "apply: a symlink in a memory directory stays a link, and its target is not copied" \
+    "$RC|$OUT|$(readlink "$store_dir/pointer.md")|$(readlink "$store_dir/dangling.md")" \
+    "0|$(linked_line 2 0 0)|$TMPROOT/outside-store-target|$TMPROOT/no-such-target"
+
+apply_scene symlink-compared
+write_file "$TMPROOT/link-target-one" 'one body'
+write_file "$TMPROOT/link-target-two" 'one body'
+ln -s "$TMPROOT/link-target-one" "$memory_dir/same.md"
+ln -s "$TMPROOT/link-target-one" "$memory_dir/other.md"
+mkdir -p "$store_dir"
+ln -s "$TMPROOT/link-target-one" "$store_dir/same.md"
+ln -s "$TMPROOT/link-target-two" "$store_dir/other.md"
+run_sut --apply
+check "apply: a symlink is compared by where it points, not by what it holds" \
+    "$RC|$OUT|$(readlink "$store_dir/other.md")|$(readlink "$store_dir/other$CONFLICT_MD_SUFFIX")" \
+    "0|$(linked_line 0 1 1)|$TMPROOT/link-target-two|$TMPROOT/link-target-one"
+
+# A directory where the memory has a file cannot be overwritten or compared; the file goes beside it.
+apply_scene directory-in-store
+write_file "$memory_dir/MEMORY.md" '- replaced line'
+mkdir -p "$store_dir/MEMORY.md"
+run_sut --apply
+check "apply: a directory in the store where the memory has a file gets a conflict copy" \
+    "$RC|$OUT|$(body_of "$store_dir/MEMORY$CONFLICT_MD_SUFFIX")" "0|$(linked_line 0 0 1)|- replaced line"
+
+printf 'apply: a session writing during the swap\n'
+apply_scene late-write
+write_file "$memory_dir/MEMORY.md" '- index'
+write_stub mv <<'STUB'
+printf 'late body\n' > "$STUB_MEMORY_DIR/late.md"
+exec "$real_tool" "$@"
+STUB
+PATH="$STUB_BIN:$PATH" STUB_MEMORY_DIR="$memory_dir" run_sut --apply
+check "apply: a file written just before the rename is still merged" \
+    "$RC|$OUT|$(body_of "$store_dir/late.md")" "0|$(linked_line 2 0 0)|late body"
+
+apply_scene recreated-memory
+write_file "$memory_dir/MEMORY.md" '- index'
+write_stub ln <<'STUB'
+if [ ! -e "$STUB_STATE_FILE" ]; then
+    : > "$STUB_STATE_FILE"
+    mkdir -p "$STUB_MEMORY_DIR"
+    printf 'recreated body\n' > "$STUB_MEMORY_DIR/recreated.md"
+fi
+exec "$real_tool" "$@"
+STUB
+PATH="$STUB_BIN:$PATH" STUB_MEMORY_DIR="$memory_dir" run_sut --apply
+apply_result="$RC|$OUT"
+run_sut --list
+check "apply: a memory directory recreated before the link is merged too" \
+    "$apply_result|$(row_of_key "$key" | cut -f2)|$(body_of "$store_dir/recreated.md")|$(replaced_dir_counts "$key_dir")" \
+    "0|$(linked_line 2 0 0)|LINKED|recreated body|2 marked, 0 unmarked"
+
+apply_scene keeps-recreating
+write_file "$memory_dir/MEMORY.md" '- index'
+write_stub ln <<'STUB'
+printf 'x' >> "$STUB_STATE_FILE"
+mkdir -p "$STUB_MEMORY_DIR"
+printf 'recreated body\n' > "$STUB_MEMORY_DIR/recreated.md"
+exec "$real_tool" "$@"
+STUB
+PATH="$STUB_BIN:$PATH" STUB_MEMORY_DIR="$memory_dir" run_sut --apply
+check "apply: a writer that keeps recreating the directory is given up on after 3 retries, exit 2" \
+    "$RC|$(contains "$OUT" "gave up on $memory_dir")|$(wc -c < "$STUB_STATE_FILE" | tr -d ' ')|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|4|real|0 marked, 4 unmarked"
+run_sut --apply
+check "resume: the next --apply finishes what giving up left" \
+    "$RC|$(memory_kind "$memory_dir")|$(body_of "$store_dir/recreated.md")|$(body_of "$store_dir/MEMORY.md")|$(replaced_dir_counts "$key_dir")" \
+    "0|link to $store_dir|recreated body|- index|5 marked, 0 unmarked"
+
+# A writer that beats the copy: the check said absent, and the file is there by the time cp runs.
+apply_scene writer-beats-copy
+write_file "$memory_dir/topic.md" 'replaced body'
+write_stub cp <<'STUB'
+if [ ! -e "$STUB_STATE_FILE" ]; then
+    : > "$STUB_STATE_FILE"
+    for last_argument; do :; done
+    printf "the writer's body\n" > "$last_argument"
+fi
+exec "$real_tool" "$@"
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a file that appears in the store just before the copy is not overwritten" \
+    "$RC|$OUT|$(body_of "$store_dir/topic.md")|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")" \
+    "0|$(linked_line 0 0 1)|the writer's body|replaced body"
+
+printf 'resume: a run stopped before the merge finished\n'
+# A real kill, at the comparison after the first copy: one file is in the store and the link is in
+# place. cmp, because the script runs it directly, so its parent is the script and no subshell.
+apply_scene killed-merge
+write_file "$memory_dir/first.md" 'first body'
+write_file "$memory_dir/second.md" 'second body'
+write_stub cmp <<'STUB'
+kill -9 "$PPID"
+exit 1
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+killed_rc=$RC
+killed_memory=$(memory_kind "$memory_dir")
+run_sut --check
+check "resume: an unmarked replaced directory makes --check exit 1" \
+    "$killed_rc|$killed_memory|$RC|$(contains "$OUT" "$key${TAB}PENDING-MERGE")|$(replaced_dir_counts "$key_dir")" \
+    "137|link to $store_dir|1|yes|0 marked, 1 unmarked"
+run_sut --apply
+check "resume: the next --apply merges it and writes the marker" \
+    "$RC|$OUT|$(body_of "$store_dir/first.md")|$(body_of "$store_dir/second.md")|$(replaced_dir_counts "$key_dir")" \
+    "0|$(linked_line 1 1 0)|first body|second body|1 marked, 0 unmarked"
+late_replaced_dirs=("$key_dir"/memory.replaced-*)
+write_file "${late_replaced_dirs[0]}/added-afterwards.md" 'added afterwards'
+run_sut --apply
+check "resume: a marked replaced directory is not merged again" \
+    "$RC|$OUT|$(body_of "$store_dir/added-afterwards.md")" "0||<absent>"
+
+# Stopped between the rename and the link, with a file to merge: the failed ln is the stop.
+apply_scene ln-fails
+write_file "$memory_dir/MEMORY.md" '- index'
+write_stub ln <<'STUB'
+exit 1
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a link that fails is exit 2 and the replaced directory stays unmarked" \
+    "$RC|$(contains "$OUT" "could not link $memory_dir")|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|absent|0 marked, 1 unmarked"
+run_sut --apply
+check "resume: a run stopped before the link gets its link and finishes the merge" \
+    "$RC|$OUT|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
+    "0|$(linked_line 1 0 0)|link to $store_dir|1 marked, 0 unmarked"
+
+# The same stop with an empty directory: no entry and nothing in the store is no state at all, and
+# only the replaced directory says this key was on its way to a link.
+apply_scene ln-fails-empty
+rmdir "$memory_dir"
+mkdir -p "$key_dir/$REPLACED_STAMP"
+run_sut --apply
+check "resume: a run stopped before the link gets its link when the directory was empty" \
+    "$RC|$OUT|$(memory_kind "$memory_dir")|$([[ -d "$store_dir" ]] && printf present)|$(replaced_dir_counts "$key_dir")" \
+    "0|$(linked_line 0 0 0)|link to $store_dir|present|1 marked, 0 unmarked"
+
+# A stop while a session has recreated the directory: the pending merge, then the swap.
+pending_scene pending-then-real
+write_file "$replaced_dir/from-replaced.md" 'from replaced'
+rm "$memory_dir"
+write_file "$memory_dir/from-real.md" 'from real'
+run_sut --apply
+check "resume: a pending merge is finished before a real directory is swapped" \
+    "$RC|$OUT|$(memory_kind "$memory_dir")|$(body_of "$store_dir/from-replaced.md")|$(body_of "$store_dir/from-real.md")|$(replaced_dir_counts "$key_dir")" \
+    "0|$(linked_line 2 0 0)|link to $store_dir|from replaced|from real|2 marked, 0 unmarked"
+
+printf 'apply: the other states\n'
+reset_scene
+add_state MISSING
+key=${EXPECTED_ROW[MISSING]%%"$TAB"*}
+store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/missing-repo"
+run_sut --apply
+check "apply: MISSING gets a link" \
+    "$RC|$OUT|$(memory_kind "$PROJECTS_DIR/$key/memory")" "0|$(linked_line 0 0 0)|link to $store_dir"
+
+reset_scene
+add_state DANGLING
+key=${EXPECTED_ROW[DANGLING]%%"$TAB"*}
+store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/dangling-repo"
+run_sut --apply
+apply_result="$RC|$OUT"
+run_sut --list
+check "apply: DANGLING gets its target back" \
+    "$apply_result|$(row_of_key "$key" | cut -f2)|$([[ -d "$store_dir" ]] && printf present)" \
+    "0|$(linked_line 0 0 0)|LINKED|present"
+
+for untouched_state in NO-STORE WRONG-LINK UNMAPPED; do
+    reset_scene
+    add_state "$untouched_state"
+    tree_before=$(tree_fingerprint)
+    run_sut --apply
+    check "apply: $untouched_state is left alone" "$RC|$OUT|$(tree_fingerprint)" "0||$tree_before"
+done
+
+# A pending merge with no store checked out here has nowhere it may go; nor has one no candidate claims.
+reset_scene
+make_checkout code/beta-pending-apply "git@github.com:$FIXTURE_OWNER/beta-pending-apply.git"
+key=$(key_of "$HOME/code/beta-pending-apply")
+write_file "$PROJECTS_DIR/$key/$REPLACED_STAMP/topic.md" 'pending body'
+tree_before=$(tree_fingerprint)
+run_sut --apply
+apply_result="$RC|$OUT|$(tree_fingerprint)"
+run_sut --check
+check "apply: a pending merge with no store checked out is left alone, and --check still reports it" \
+    "$apply_result|$RC|$(contains "$OUT" "$key${TAB}PENDING-MERGE")" "0||$tree_before|1|yes"
+
+reset_scene
+write_file "$PROJECTS_DIR/$NO_CHECKOUT_KEY/$REPLACED_STAMP/topic.md" 'pending body'
+tree_before=$(tree_fingerprint)
+run_sut --apply
+apply_result="$RC|$OUT|$(tree_fingerprint)"
+run_sut --check
+check "apply: a pending merge no candidate claims is left alone, and --check still reports it" \
+    "$apply_result|$RC|$(contains "$OUT" "$NO_CHECKOUT_KEY${TAB}PENDING-MERGE")" "0||$tree_before|1|yes"
+
+pending_scene pending-wrong-link
+write_file "$replaced_dir/topic.md" 'pending body'
+rm "$memory_dir"
+mkdir -p "$TMPROOT/elsewhere"
+ln -s "$TMPROOT/elsewhere" "$memory_dir"
+run_sut --apply
+check "apply: a WRONG-LINK key finishes its pending merge, says merged, and keeps its link" \
+    "$RC|$OUT|$(memory_kind "$memory_dir")|$(body_of "$store_dir/topic.md")|$(replaced_dir_counts "$key_dir")" \
+    "0|merged $key -> $store_dir (copied 1, identical 0, kept-both 0)|link to $TMPROOT/elsewhere|pending body|1 marked, 0 unmarked"
+
+two_key_source=$(make_source_repo two-key-source)
+reset_scene
+make_checkout code/two-key-super "git@github.com:$FIXTURE_OWNER/two-key-super.git"
+git -C "$HOME/code/two-key-super" commit -q --allow-empty -m first || fatal "could not commit in two-key-super"
+add_submodule code/two-key-super two-key-sub two-key-sub "$two_key_source"
+git -C "$HOME/code/two-key-super/two-key-sub" remote set-url origin "git@github.com:$FIXTURE_OWNER/two-key-sub.git" \
+    || fatal "could not set the submodule's origin"
+own_key=$(key_of "$HOME/code/two-key-super/two-key-sub")
+git_dir_key=$(key_of "$HOME/code/two-key-super/.git/modules/two-key-sub")
+store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/two-key-sub"
+real_memory "$own_key" own.md
+real_memory "$git_dir_key" git-dir.md
+run_sut --apply
+check "apply: a submodule's two keys both link to one store directory" \
+    "$RC|$(line_count "$OUT")|$(memory_kind "$PROJECTS_DIR/$own_key/memory")|$(memory_kind "$PROJECTS_DIR/$git_dir_key/memory")|$(body_of "$store_dir/own.md")|$(body_of "$store_dir/git-dir.md")" \
+    "0|2|link to $store_dir|link to $store_dir|fixture memory|fixture memory"
+
+# A slug keeps what the directory's name holds, so a newline there must not split the line.
+reset_scene
+set_plain_dirs '["new\nline"]'
+mkdir -p "$HOME/new"$'\n'"line"
+key=$(key_of "$HOME/new"$'\n'"line")
+real_memory "$key" MEMORY.md
+run_sut --apply
+check "apply: a store directory with a newline in its name stays on one line, escaped" \
+    "$RC|$(line_count "$OUT")|$OUT" \
+    "0|1|linked $key -> $STORES_ROOT/$ALPHA_STORE/dirs/new\\nline (copied 1, identical 0, kept-both 0)"
+
+printf 'apply: --only\n'
+reset_scene
+make_checkout code/only-this "git@github.com:$FIXTURE_OWNER/only-this.git"
+make_checkout code/not-this "git@github.com:$FIXTURE_OWNER/not-this.git"
+only_key=$(key_of "$HOME/code/only-this")
+not_this_key=$(key_of "$HOME/code/not-this")
+real_memory "$only_key" MEMORY.md
+real_memory "$not_this_key" MEMORY.md
+run_sut --apply --only "$only_key"
+only_result="$RC|$(line_count "$OUT")"
+run_sut --list
+check "apply: --only limits the run to one key" \
+    "$only_result|$(row_of_key "$only_key" | cut -f2)|$(row_of_key "$not_this_key" | cut -f2)" "0|1|LINKED|REAL-DIR"
+
+run_sut --apply --only "$NO_CHECKOUT_KEY"
+check "apply: --only naming a key no candidate claims is exit 2 naming it" \
+    "$RC|$(contains "$OUT" "no candidate on this host claims key $NO_CHECKOUT_KEY")" "2|yes"
+
+printf 'dry-run: the same lines, and nothing changed\n'
+apply_scene dry-run-repo
+write_file "$memory_dir/absent.md" 'absent body'
+write_file "$memory_dir/same.md" 'same body'
+write_file "$store_dir/same.md" 'same body'
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+write_file "$memory_dir/MEMORY.md" '- replaced line'
+write_file "$store_dir/MEMORY.md" '- store line'
+tree_before=$(tree_fingerprint)
+run_sut --apply --dry-run
+check "dry-run: prints the counts and changes nothing" \
+    "$RC|$OUT|$(tree_fingerprint)|$([[ -e "$STATE_DIR" ]] && printf 'made a state dir')" \
+    "0|$(linked_line 1 1 2)|$tree_before|"
+dry_run_out=$OUT
+run_sut --apply
+check "dry-run: the run itself then prints the same line" "$RC|$OUT" "0|$dry_run_out"
+
+reset_scene
+add_state MISSING
+add_state DANGLING
+add_state PENDING-MERGE
+write_file "$PROJECTS_DIR/${EXPECTED_ROW[PENDING-MERGE]%%"$TAB"*}/$REPLACED_STAMP/topic.md" 'pending body'
+tree_before=$(tree_fingerprint)
+run_sut --apply --dry-run
+dry_run_result="$RC|$(line_count "$OUT")|$(tree_fingerprint)"
+dry_run_out=$OUT
+run_sut --apply
+check "dry-run: MISSING, DANGLING and PENDING-MERGE print what the run prints, and change nothing" \
+    "$dry_run_result|$dry_run_out" "0|3|$tree_before|$OUT"
+
+# One new file in two unmerged directories: the run copies it once and then finds it identical.
+apply_scene dry-run-two-dirs
+write_file "$memory_dir/shared.md" 'shared body'
+write_file "$key_dir/$REPLACED_STAMP/shared.md" 'shared body'
+run_sut --apply --dry-run
+dry_run_result="$RC|$OUT"
+run_sut --apply
+check "dry-run: a file in two unmerged directories counts as the run counts it" \
+    "$dry_run_result|$RC|$OUT" "0|$(linked_line 1 1 0)|0|$(linked_line 1 1 0)"
+
+# Stopped before the link with an empty directory: only the replaced directory says a link is due.
+apply_scene dry-run-empty-pending
+rmdir "$memory_dir"
+mkdir -p "$key_dir/$REPLACED_STAMP"
+tree_before=$(tree_fingerprint)
+run_sut --apply --dry-run
+check "dry-run: a run stopped before the link prints the line it would print, and adds nothing" \
+    "$RC|$OUT|$(tree_fingerprint)" "0|$(linked_line 0 0 0)|$tree_before"
+
+printf 'apply: the lock\n'
+apply_scene lock-held
+write_file "$memory_dir/MEMORY.md" '- index'
+mkdir -p "$STATE_DIR" || fatal "could not create the state dir"
+lock_taken_file="$TMPROOT/lock-taken"
+lock_released_file="$TMPROOT/lock-released"
+rm -f "$lock_taken_file" "$lock_released_file"
+# Still holding the lock when it writes the second file, so a run that waited always sees that file.
+# shellcheck disable=SC2016  # expanded by the bash -c, not this one
+flock "$STATE_DIR/link.lock" bash -c ': > "$1"; sleep 1; : > "$2"' _ "$lock_taken_file" "$lock_released_file" &
+lock_holder_pid=$!
+for (( lock_wait_step = 0; lock_wait_step < 100; lock_wait_step++ )); do
+    [[ -e "$lock_taken_file" ]] && break
+    sleep 0.05
+done
+[[ -e "$lock_taken_file" ]] || fatal "the row's lock holder never took the lock"
+run_sut --apply
+check "lock: a second run waits while the lock is held" \
+    "$RC|$OUT|$([[ -e "$lock_released_file" ]] && printf 'finished after the release')" \
+    "0|$(linked_line 1 0 0)|finished after the release"
+wait "$lock_holder_pid"
+
+apply_scene lock-default-dir
+STATE_DIR='' run_sut --apply
+check "lock: the state dir defaults to ~/.local/state/claude-memory-sync" \
+    "$RC|$([[ -f "$HOME/.local/state/claude-memory-sync/link.lock" ]] && printf present)" "0|present"
+
+apply_scene lock-no-state-dir
+write_file "$memory_dir/MEMORY.md" '- index'
+: > "$STATE_DIR"
+tree_before=$(tree_fingerprint)
+run_sut --apply
+check "lock: a state dir that cannot be created is exit 2, with nothing touched" \
+    "$RC|$(contains "$OUT" "could not create $STATE_DIR")|$(tree_fingerprint)" "2|yes|$tree_before"
+rm -f "$STATE_DIR"
+
+apply_scene lock-file-blocked
+write_file "$memory_dir/MEMORY.md" '- index'
+mkdir -p "$STATE_DIR/link.lock"
+tree_before=$(tree_fingerprint)
+run_sut --apply
+check "lock: a lock file that cannot be opened is exit 2, with nothing touched" \
+    "$RC|$(contains "$OUT" "could not open the lock $STATE_DIR/link.lock")|$(tree_fingerprint)" "2|yes|$tree_before"
+
+apply_scene lock-fails
+write_file "$memory_dir/MEMORY.md" '- index'
+write_stub flock <<'STUB'
+exit 1
+STUB
+tree_before=$(tree_fingerprint)
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "lock: a lock that cannot be taken is exit 2, with nothing touched" \
+    "$RC|$(contains "$OUT" "could not take the lock $STATE_DIR/link.lock")|$(tree_fingerprint)" "2|yes|$tree_before"
+
+printf 'apply: every failure stops before the marker\n'
+apply_scene memory-plain-file
+rmdir "$memory_dir"
+write_file "$memory_dir" 'a plain file'
+tree_before=$(tree_fingerprint)
+run_sut --apply
+check "apply: a memory entry that is a plain file is exit 2 naming it, with nothing touched" \
+    "$RC|$(contains "$OUT" "$memory_dir is neither a directory nor a symlink")|$(tree_fingerprint)" "2|yes|$tree_before"
+
+apply_scene store-dir-blocked
+write_file "$memory_dir/MEMORY.md" '- index'
+: > "$STORES_ROOT/$ALPHA_STORE/repos"
+run_sut --apply
+check "apply: a store directory that cannot be created is exit 2 before the rename" \
+    "$RC|$(contains "$OUT" "could not create $store_dir")|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|real|0 marked, 0 unmarked"
+
+apply_scene mv-fails
+write_file "$memory_dir/MEMORY.md" '- index'
+write_stub mv <<'STUB'
+exit 1
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a rename that fails is exit 2 and the real directory stays" \
+    "$RC|$(contains "$OUT" "could not rename $memory_dir")|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|real|0 marked, 0 unmarked"
+
+apply_scene cp-fails
+write_file "$memory_dir/topic.md" 'replaced body'
+write_stub cp <<'STUB'
+printf 'stub copy failure\n' >&2
+exit 1
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a copy that fails is exit 2 and writes no marker" \
+    "$RC|$(contains "$OUT" 'stub copy failure')|$(contains "$OUT" 'could not copy')|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|yes|link to $store_dir|0 marked, 1 unmarked"
+
+# A copy that reports success and leaves nothing. Stepping to the next name would write forever.
+apply_scene conflict-copy-lost
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+write_stub cp <<'STUB'
+exit 0
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a conflict copy that does not arrive is exit 2 and writes no marker" \
+    "$RC|$(contains "$OUT" "the conflict copy $store_dir/topic$CONFLICT_MD_SUFFIX does not match")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|0 marked, 1 unmarked"
+
+apply_scene cmp-fails
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+write_stub cmp <<'STUB'
+exit 2
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a comparison that fails is exit 2, no conflict copy and no marker" \
+    "$RC|$(contains "$OUT" 'could not compare')|$(body_of "$store_dir/topic$CONFLICT_MD_SUFFIX")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|<absent>|0 marked, 1 unmarked"
+
+apply_scene find-fails
+write_file "$memory_dir/readable.md" 'readable body'
+write_file "$memory_dir/locked/topic.md" 'locked body'
+chmod 000 "$memory_dir/locked"
+run_sut --apply
+find_fails_result="$RC|$(contains "$OUT" "could not read $key_dir/memory.replaced-")|$(replaced_dir_counts "$key_dir")"
+chmod -R u+rwx "$key_dir"
+check "apply: a directory that cannot be walked is exit 2 and writes no marker" \
+    "$find_fails_result" "2|yes|0 marked, 1 unmarked"
+
+apply_scene file-where-directory
+write_file "$memory_dir/sub/topic.md" 'replaced body'
+write_file "$store_dir/sub" 'a file in the way'
+run_sut --apply
+check "apply: a file where the store needs a directory is exit 2 and writes no marker" \
+    "$RC|$(contains "$OUT" "could not create $store_dir/sub")|$(body_of "$store_dir/sub")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|a file in the way|0 marked, 1 unmarked"
+
+# The real cp would block on the fifo forever, under the lock. A failing stub turns that regression
+# into a failed row rather than a table that hangs.
+apply_scene fifo-in-memory
+mkfifo "$memory_dir/pipe"
+write_stub cp <<'STUB'
+exit 1
+STUB
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: a fifo in a memory directory is exit 2 naming it, and writes no marker" \
+    "$RC|$(contains "$OUT" "/pipe is neither a file nor a symlink")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|0 marked, 1 unmarked"
+
+apply_scene index-read-only
+write_file "$memory_dir/MEMORY.md" '- replaced line'
+write_file "$store_dir/MEMORY.md" '- store line'
+chmod 444 "$store_dir/MEMORY.md"
+run_sut --apply
+check "apply: an index that cannot be appended to is exit 2 and writes no marker" \
+    "$RC|$(contains "$OUT" "could not add lines to $store_dir/MEMORY.md")|$(body_of "$store_dir/MEMORY.md")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|- store line|0 marked, 1 unmarked"
+
+pending_scene marker-fails
+write_file "$replaced_dir/topic.md" 'pending body'
+chmod 555 "$replaced_dir"
+run_sut --apply
+marker_fails_result="$RC|$(contains "$OUT" "could not write the marker in $replaced_dir")|$(body_of "$store_dir/topic.md")|$(replaced_dir_counts "$key_dir")"
+chmod 755 "$replaced_dir"
+check "apply: a marker that cannot be written is exit 2, and the key stays pending" \
+    "$marker_fails_result" "2|yes|pending body|0 marked, 1 unmarked"
+
+printf 'apply: what it needs\n'
+apply_scene default-host
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+write_stub hostname <<'STUB'
+[ "$1" = '-s' ] || exit 9
+printf 'stub-short-host\n'
+STUB
+FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "apply: the host in a conflict copy's name defaults to hostname -s" \
+    "$RC|$(body_of "$store_dir/topic.conflict-stub-short-host.md")" "0|replaced body"
+
+apply_scene unusable-host
+write_file "$memory_dir/topic.md" 'replaced body'
+write_file "$store_dir/topic.md" 'store body'
+tree_before=$(tree_fingerprint)
+FIXTURE_HOST='../up' run_sut --apply
+check "apply: a host name that cannot be in a file name is exit 2, with nothing touched" \
+    "$RC|$(contains "$OUT" "host name '../up' cannot go in a file name")|$(tree_fingerprint)" "2|yes|$tree_before"
+
+apply_scene no-table
+write_file "$memory_dir/MEMORY.md" '- index'
+rm -f "$CONFIG"
+tree_before=$(tree_fingerprint)
+run_sut --apply
+check "apply: no store table is exit 0 with the note, nothing touched and no state dir" \
+    "$RC|$OUT|$(tree_fingerprint)|$([[ -e "$STATE_DIR" ]] && printf 'made a state dir')" \
+    "0|claude-memory-link: no store table at $CONFIG; nothing to do|$tree_before|"
+
+apply_tool_results=''
+for needed_tool in flock cmp; do
+    apply_scene "no-$needed_tool"
+    MISSING_TOOL_BIN="$TMPROOT/no-$needed_tool-bin"
+    mkdir -p "$MISSING_TOOL_BIN"
+    for tool in bash dirname sed jq git flock cmp; do
+        if [[ "$tool" != "$needed_tool" ]]; then ln -sf "$(command -v "$tool")" "$MISSING_TOOL_BIN/$tool"; fi
+    done
+    OUT=$(PATH="$MISSING_TOOL_BIN" CLAUDE_MEMORY_PROJECTS_DIR="$PROJECTS_DIR" CLAUDE_MEMORY_STORES_ROOT="$STORES_ROOT" \
+        CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_STATE_DIR="$STATE_DIR" CLAUDE_MEMORY_HOST="$FIXTURE_HOST" \
+        CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" "$SUT" --apply 2>&1); RC=$?
+    apply_tool_results+="$needed_tool $RC $(contains "$OUT" "claude-memory-link: $needed_tool is required")|"
+done
+check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
+
 printf '\n'
-EXPECTED_ROWS=84
+EXPECTED_ROWS=157
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
