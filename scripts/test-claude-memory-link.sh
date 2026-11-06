@@ -18,15 +18,17 @@ set -uo pipefail
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUT="$DOTFILES/scripts/claude-memory-link.sh"
 # Checked, because every fixture path hangs off it and reset_scene removes them: with an empty
-# TMPROOT, HOME would be /home.
+# TMPROOT, HOME would be /home. Physical, because the script keys a directory by its physical path
+# and every expected line below is built from this one.
 TMPROOT="$(mktemp -d)" || { printf 'FATAL: mktemp failed\n' >&2; exit 2; }
 trap 'rm -rf "$TMPROOT"' EXIT
+TMPROOT="$(cd -P "$TMPROOT" && pwd -P)" || { printf 'FATAL: could not resolve the fixture root\n' >&2; exit 2; }
 
 HOME="$TMPROOT/home"
 mkdir -p "$HOME"
 export HOME
 # A row run from a git hook would otherwise point every fixture git at the hook's repository.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 GIT_CONFIG_GLOBAL="$TMPROOT/gitconfig-global"
 GIT_CONFIG_SYSTEM="$TMPROOT/gitconfig-system"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
@@ -49,6 +51,9 @@ fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
 for tool in bash git jq find sha256sum sort; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
 [[ -x "$SUT" ]] || fatal "$SUT is not executable — every row below would assert nothing"
+# Mode 000 does not stop root, so the unreadable-directory rows would pass on nothing. Not a skip: a
+# skipped row is neither a pass nor a fail, and it would leave a green total behind.
+(( $(id -u) != 0 )) || fatal "the table cannot run as root: its unreadable-directory rows would assert nothing"
 
 # ---------------------------------------------------------------------------------------------
 # Fixtures. A scene is an empty fixture home, projects dir and stores root, plus the store table.
@@ -68,13 +73,13 @@ REPLACED_STAMP='memory.replaced-20261106T000000Z'
 MERGED_MARKER='.merged-into-store'
 NO_CHECKOUT_KEY='-no-such-checkout'
 
-# The stub tenant-route: it records the call, then answers by a word in the directory's name.
-# None of these words can arise from mktemp's suffix, which holds no hyphen.
+# The stub tenant-route: it records the call, then answers by a word in the directory's BASENAME.
+# Never the whole path: the fixture root sits under whatever TMPDIR names, which can hold these words.
 mkdir -p "$(dirname "$ROUTE_STUB")" "$SOURCE_REPOS"
 cat > "$ROUTE_STUB" <<STUB
 #!/usr/bin/env bash
 printf '%s\0' "\$1" >> '$ROUTE_CALLS'
-case "\$1" in
+case "\${1##*/}" in
     *route-refuses-*) printf 'stub refusal\n' >&2; exit 3 ;;
     *route-garbled-*) printf '{"tenant":"alpha"} and then this is not json\n'; exit 0 ;;
     *route-blank-*)   printf '{"tenant":"","state":"none","why":"stub"}\n'; exit 0 ;;
@@ -460,8 +465,8 @@ run_sut --list
 check "map: a directory both a glob and plain_dirs name is one row, asked about once" \
     "$RC|$(line_count "$OUT")|$(row_of_key "$key" | cut -f2)|$(recorded_route_calls)" "0|1|REAL-DIR|$HOME/code/both-ways "
 
-# (d) Two directories can share a key: a-b/sub and a/b-sub both flatten the same way. The first
-# candidate keeps the key, and the second still claims the key only it has.
+# Two directories can share a key: a-b/sub and a/b-sub both flatten the same way. Within one store
+# the first candidate keeps the key, and the second still claims the key only it has.
 reset_scene
 jq '.checkout_globs = ["code/shared-sub", "code/shared"]' "$CONFIG" > "$CONFIG.new" && mv "$CONFIG.new" "$CONFIG"
 shared_source=$(make_source_repo shared-source)
@@ -481,7 +486,30 @@ check "map: a key two directories share stays with the first" \
     "$RC|$(line_count "$OUT")|$(row_of_key "$shared_key")|$(row_of_key "$shared_git_dir_key")" \
     "0|2|$(row_line "$shared_key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/first-claim" "$HOME/code/shared-sub")|$(row_line "$shared_git_dir_key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/second-claim" "$shared_git_dir")"
 
-# (k) A glob is one pattern, whatever it holds.
+# The same flattening across two stores: code/beta-twin and code-beta/twin. Claude Code would keep one
+# memory directory for both, and the sync would commit one tenant's memory to the other's remote.
+reset_scene
+set_plain_dirs '["code-beta/twin"]'
+make_checkout code/beta-twin "git@github.com:$FIXTURE_OWNER/beta-twin.git"
+mkdir -p "$HOME/code-beta/twin"
+key=$(key_of "$HOME/code/beta-twin")
+run_sut --list
+check "map: a key two directories share across stores is exit 2 naming both" \
+    "$RC|$(contains "$OUT" "key $key is shared by $HOME/code/beta-twin (store $BETA_STORE) and $HOME/code-beta/twin (store $ALPHA_STORE)")" "2|yes"
+
+# And with neither directory bringing a second key: the first keeps it, and the second is still asked.
+reset_scene
+set_plain_dirs '["code-plain/twin"]'
+make_checkout code/plain-twin "git@github.com:$FIXTURE_OWNER/plain-twin.git"
+mkdir -p "$HOME/code-plain/twin"
+key=$(key_of "$HOME/code/plain-twin")
+real_memory "$key"
+run_sut --list
+check "map: a key two directories share in one store goes to the first, silently" \
+    "$RC|$OUT|$(recorded_route_calls)" \
+    "0|$(row_line "$key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/plain-twin" "$HOME/code/plain-twin")|$HOME/code-plain/twin $HOME/code/plain-twin "
+
+# A glob is one pattern, whatever it holds.
 reset_scene
 jq '.checkout_globs = ["my code/*"]' "$CONFIG" > "$CONFIG.new" && mv "$CONFIG.new" "$CONFIG"
 make_checkout 'my code/spaced' "git@github.com:$FIXTURE_OWNER/spaced.git"
@@ -490,7 +518,7 @@ real_memory "$key"
 run_sut --list
 check "map: a checkout glob holding a space is one pattern" "$RC|$(row_of_key "$key" | cut -f2,4)" "0|REAL-DIR${TAB}repos/$FIXTURE_OWNER/spaced"
 
-# (l) git failing while it lists submodules must not read as "no submodules". The wrapper fails only
+# git failing while it lists submodules must not read as "no submodules". The wrapper fails only
 # for `submodule`; a process substitution's status is otherwise invisible.
 FAILING_SUBMODULE_BIN="$TMPROOT/failing-submodule-bin"
 mkdir -p "$FAILING_SUBMODULE_BIN"
@@ -503,14 +531,87 @@ PATH="$FAILING_SUBMODULE_BIN:$PATH" run_sut --list
 check "map: git failing to list submodules is exit 2 naming the checkout" \
     "$RC|$(contains "$OUT" "git could not list the submodules of $HOME/code/lists-badly")" "2|yes"
 
+# An exported repository variable would point the script's own git calls at another repository: a
+# git hook's environment, say. Each one must leave the submodule's row as it is.
+git_variable_source=$(make_source_repo git-variable-source)
+reset_scene
+make_checkout code/variable-super "git@github.com:$FIXTURE_OWNER/variable-super.git"
+git -C "$HOME/code/variable-super" commit -q --allow-empty -m first || fatal "could not commit in variable-super"
+add_submodule code/variable-super variable-sub variable-sub "$git_variable_source"
+git -C "$HOME/code/variable-super/variable-sub" remote set-url origin "git@github.com:$FIXTURE_OWNER/variable-sub.git" \
+    || fatal "could not set the submodule's origin"
+key=$(key_of "$HOME/code/variable-super/variable-sub")
+real_memory "$key"
+git_variable_results=''
+git_variable_expected=''
+for git_variable in GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE; do
+    export "$git_variable=$TMPROOT/no-such-git-path"
+    run_sut --list
+    unset "$git_variable"
+    git_variable_results+="$git_variable $RC $(row_of_key "$key" | cut -f2,4)|"
+    git_variable_expected+="$git_variable 0 REAL-DIR${TAB}repos/$FIXTURE_OWNER/variable-sub|"
+done
+check "map: an exported git variable cannot change or hide a submodule's row" \
+    "$git_variable_results" "$git_variable_expected"
+
+# Claude Code's cwd is the physical path, so that is the key a session uses. Keyed by the link, this
+# checkout would read MISSING under a key no session uses, and UNMAPPED under the one they do.
+reset_scene
+make_checkout elsewhere/real-repo "git@github.com:$FIXTURE_OWNER/real-repo.git"
+mkdir -p "$HOME/code"
+ln -s "$HOME/elsewhere/real-repo" "$HOME/code/link-repo"
+physical_key=$(key_of "$HOME/elsewhere/real-repo")
+real_memory "$physical_key" MEMORY.md
+store_file "$ALPHA_STORE" "repos/$FIXTURE_OWNER/real-repo"
+run_sut --list
+check "map: a symlinked candidate is keyed by its physical path" "$RC|$OUT" \
+    "0|$(row_line "$physical_key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/real-repo" "$HOME/elsewhere/real-repo")"
+
+reset_scene
+set_plain_dirs '["link-notes"]'
+mkdir -p "$HOME/real-notes"
+ln -s "$HOME/real-notes" "$HOME/link-notes"
+physical_key=$(key_of "$HOME/real-notes")
+real_memory "$physical_key"
+run_sut --list
+check "map: a symlinked plain directory is keyed and slugged by its physical path" "$RC|$OUT" \
+    "0|$(row_line "$physical_key" REAL-DIR "$ALPHA_STORE" dirs/real-notes "$HOME/real-notes")"
+
+# A slug is relative to the physical home, or every directory would read as outside it.
+reset_scene
+set_plain_dirs '["Notes"]'
+mkdir -p "$HOME/Notes"
+key=$(key_of "$HOME/Notes")
+real_memory "$key"
+ln -s "$HOME" "$TMPROOT/home-link"
+HOME="$TMPROOT/home-link" run_sut --list
+rm -f "$TMPROOT/home-link"
+check "map: a symlinked home keeps the slug relative to it" "$RC|$OUT" \
+    "0|$(row_line "$key" REAL-DIR "$ALPHA_STORE" dirs/notes "$HOME/Notes")"
+
+# Outside home a directory has no path relative to it, so a directory with no origin has no slug.
+reset_scene
+set_plain_dirs '["link-out"]'
+mkdir -p "$TMPROOT/outside-home"
+ln -s "$TMPROOT/outside-home" "$HOME/link-out"
+run_sut --list
+check "map: a directory outside home with no origin is exit 2 naming it" \
+    "$RC|$(contains "$OUT" "$TMPROOT/outside-home is outside $HOME")" "2|yes"
+
 # ---------------------------------------------------------------------------------------------
 # --list: one key in each state, in one scene.
 # ---------------------------------------------------------------------------------------------
 
 printf 'list: one row per state\n'
 ALL_STATES=(LINKED REAL-DIR MISSING DANGLING PENDING-MERGE WRONG-LINK NO-STORE UNMAPPED)
+read_only_source=$(make_source_repo read-only-source)
 reset_scene
 for state in "${ALL_STATES[@]}"; do add_state "$state"; done
+# A populated submodule with no memory and nothing in its store, so it adds no row: it is here for
+# the read-only row below, which must cover `git submodule foreach` running on a real one.
+make_checkout code/read-only-super "git@github.com:$FIXTURE_OWNER/read-only-super.git"
+git -C "$HOME/code/read-only-super" commit -q --allow-empty -m first || fatal "could not commit in read-only-super"
+add_submodule code/read-only-super read-only-sub read-only-sub "$read_only_source"
 empty_unclaimed_key='-empty-unclaimed'
 real_memory "$empty_unclaimed_key"
 mkdir -p "$PROJECTS_DIR/$empty_unclaimed_key/memory/empty-subdir"
@@ -540,7 +641,7 @@ run_sut --list
 check "list: a candidate with no memory and nothing in its store directory is not listed" \
     "$no_store_dir|$RC|$OUT" "0||0|"
 
-# (g) a file at any depth counts
+# A file at any depth counts as the store directory holding memory.
 reset_scene
 make_checkout code/nested-file "git@github.com:$FIXTURE_OWNER/nested-file.git"
 key=$(key_of "$HOME/code/nested-file")
@@ -548,7 +649,10 @@ store_file "$ALPHA_STORE" "repos/$FIXTURE_OWNER/nested-file/deeper"
 run_sut --list
 check "list: a file at any depth in the store directory is MISSING" "$RC|$(row_of_key "$key" | cut -f2)" "0|MISSING"
 
-# (i) only a REAL directory can be unmapped: a symlink under an unclaimed key already went somewhere.
+# Only a REAL directory can be unmapped: a symlink under an unclaimed key already went somewhere. Two
+# things give this answer: the script's `! -L`, and `find`, which does not descend into a symlink
+# named as its starting point. So dropping `! -L` alone is an equivalent mutant; the row fails when
+# find follows that link as well.
 reset_scene
 mkdir -p "$TMPROOT/elsewhere-with-file"
 : > "$TMPROOT/elsewhere-with-file/MEMORY.md"
@@ -615,6 +719,26 @@ run_sut --list
 check "list: a directory name with a newline, tab or backslash stays one row, escaped" \
     "$RC|$(line_count "$OUT")|$(row_of_key "$key")" \
     "0|1|$(row_line "$key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/awkward-repo" "$HOME/code/new\\nline\\ttab\\\\slash-repo")"
+
+# Mode 000: every test of what the directory holds would answer "nothing there", which is a clean
+# report over real memory. The mode goes back before the row, or the fixture root cannot be removed.
+reset_scene
+make_checkout code/locked-key "git@github.com:$FIXTURE_OWNER/locked-key.git"
+key=$(key_of "$HOME/code/locked-key")
+real_memory "$key" MEMORY.md
+chmod 000 "$PROJECTS_DIR/$key"
+run_sut --check
+chmod 755 "$PROJECTS_DIR/$key"
+check "list: a candidate's unreadable key directory is exit 2 naming it" \
+    "$RC|$(contains "$OUT" "$PROJECTS_DIR/$key is not a readable directory")" "2|yes"
+
+reset_scene
+real_memory "$NO_CHECKOUT_KEY" MEMORY.md
+chmod 000 "$PROJECTS_DIR/$NO_CHECKOUT_KEY"
+run_sut --check
+chmod 755 "$PROJECTS_DIR/$NO_CHECKOUT_KEY"
+check "list: an unclaimed unreadable key directory is exit 2 naming it" \
+    "$RC|$(contains "$OUT" "$PROJECTS_DIR/$NO_CHECKOUT_KEY is not a readable directory")" "2|yes"
 
 rm -rf "$PROJECTS_DIR"
 : > "$PROJECTS_DIR"
@@ -770,8 +894,17 @@ OUT=$(PATH="$NO_GIT_BIN" CLAUDE_MEMORY_PROJECTS_DIR="$PROJECTS_DIR" CLAUDE_MEMOR
     CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" "$SUT" --list 2>&1); RC=$?
 check "tools: git missing is exit 2 naming it" "$RC|$(contains "$OUT" 'claude-memory-link: git is required')" "2|yes"
 
+# Every default path hangs off HOME. A raw `unbound variable` would exit 1, which --check's callers
+# read as "attention" rather than could-not-run. --help needs no home.
+OUT=$(env -u HOME CLAUDE_MEMORY_PROJECTS_DIR="$PROJECTS_DIR" CLAUDE_MEMORY_STORES_ROOT="$STORES_ROOT" \
+    CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" "$SUT" --check 2>&1); RC=$?
+home_unset_check="$RC|$(contains "$OUT" 'claude-memory-link: HOME is not set')"
+OUT=$(env -u HOME "$SUT" --help 2>&1); RC=$?
+check "tools: HOME unset is exit 2 naming it (--help still works)" \
+    "$home_unset_check|$RC|$(contains "$OUT" '--check')" "2|yes|0|yes"
+
 printf '\n'
-EXPECTED_ROWS=69
+EXPECTED_ROWS=79
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

@@ -22,10 +22,17 @@
 #
 # THE KEY of a path is the path with every character outside [A-Za-z0-9] replaced by `-`. Checked
 # against every live key on one machine that still resolves to a directory. No directory there
-# holds `_`, so what `_` becomes is UNVERIFIED; nor is a non-ASCII character verified.
+# holds `_`, so what `_` becomes is UNVERIFIED. A non-ASCII character is unverified too, and its key
+# depends on the locale: `café` ends `caf--` under LC_ALL=C (one dash per byte) and `caf-` under
+# C.UTF-8 (one per character), so a unit with no LANG and a shell can disagree.
 #
-# CANDIDATES, deduplicated by key (the first wins, and no later candidate with that key is asked
-# about):
+# THE PATH a key comes from is the physical one, since that is Claude Code's cwd: a candidate reached
+# through a symlink is keyed, routed and slugged by where it really is.
+#
+# CANDIDATES, deduplicated by key. A directory named twice is asked about once. Two directories can
+# flatten to one key (a-b/c and a/b-c), and Claude Code then uses one memory directory for both. In
+# one store the first keeps the key. Across stores that would commit one store's memory to the
+# other's remote, which cannot be taken back, so it is exit 2 naming both.
 #   1. every directory matching a checkout_globs entry that holds .git, and every populated
 #      submodule of it, recursively. `git submodule status --recursive` lists the same submodules
 #      but has no NUL form and prints paths that cannot be told from its trailing `(describe)`, so
@@ -47,8 +54,9 @@
 # answers, asked once per candidate; a tenant no store lists is exit 2, never a default. The
 # directory in the store is repos/<owner>/<repo> for a checkout with an origin (lowercased, by the
 # rule of repo_of_url in scripts/dev-sync), or dirs/<slug> for a directory with no .git or a repo
-# with no origin (the path relative to $HOME, / becoming -, lowercased; `home` for $HOME itself). An
-# origin's URL is never printed: it can carry a credential.
+# with no origin (the path relative to $HOME, / becoming -, lowercased; `home` for $HOME itself).
+# Outside $HOME such a directory has no slug, which is exit 2. An origin's URL is never printed: it
+# can carry a credential.
 #
 # STATES, first match wins. PENDING-MERGE comes first because a merge left unfinished must be
 # reported whatever else is true of the key, a missing store and an unclaimed key included.
@@ -75,9 +83,13 @@
 #
 # Exit: 0 ok, or no store table here (nothing to do)
 #       1 attention on --check
-#       2 could not run (no jq or git, a bad store table, tenant-route or git could not answer, a
-#         memory entry that is neither a directory nor a symlink)
+#       2 could not run (HOME unset, no jq or git, a bad store table, tenant-route or git could not
+#         answer, a key two stores share, an unreadable projects or key directory, a memory entry that
+#         is neither a directory nor a symlink)
 #       64 usage
+#
+# Needs bash 4.4: associative arrays (4.0), a nameref (4.3), and `wait` on a process substitution
+# (4.4), which is how a failed listing is told from an empty one.
 #
 # Overrides: CLAUDE_MEMORY_PROJECTS_DIR (default ~/.claude/projects), CLAUDE_MEMORY_STORES_ROOT
 # (~/.local/share/claude-memory), CLAUDE_MEMORY_CONFIG (~/.dotfiles-local/claude/memory-stores.json),
@@ -115,17 +127,19 @@ EXIT_ATTENTION=1
 EXIT_COULD_NOT_RUN=2
 EXIT_USAGE=64
 
-PROJECTS_DIR="${CLAUDE_MEMORY_PROJECTS_DIR:-$HOME/$PROJECTS_DIR_RELATIVE}"
-STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-$HOME/$STORES_ROOT_RELATIVE}"
-CONFIG_PATH="${CLAUDE_MEMORY_CONFIG:-$HOME/$CONFIG_RELATIVE}"
+# HOME may be unset here: main refuses that, and --help needs no home.
+PROJECTS_DIR="${CLAUDE_MEMORY_PROJECTS_DIR:-${HOME:-}/$PROJECTS_DIR_RELATIVE}"
+STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-${HOME:-}/$STORES_ROOT_RELATIVE}"
+CONFIG_PATH="${CLAUDE_MEMORY_CONFIG:-${HOME:-}/$CONFIG_RELATIVE}"
 TENANT_ROUTE="${CLAUDE_MEMORY_TENANT_ROUTE:-$DOTFILES/$TENANT_ROUTE_RELATIVE}"
 
 MODE=''                       # check | list
 declare -A STORE_OF_TENANT=() # tenant → store, from the table
 CHECKOUT_GLOBS=()
 PLAIN_DIRS=()
-# The candidates, as parallel arrays in discovery order; CLAIMED_KEYS is the set of their keys.
-declare -A CLAIMED_KEYS=()
+# The candidates, as parallel arrays in discovery order, and who claimed each key.
+declare -A SOURCE_DIR_OF_KEY=()
+declare -A STORE_OF_KEY=()
 CANDIDATE_KEYS=()
 CANDIDATE_STORES=()
 CANDIDATE_RELATIVE_DIRS=()
@@ -204,6 +218,9 @@ lexically_normal_path() {
     printf '/%s' "${kept_components[*]}"
 }
 
+# physical_path_of DIR — print DIR with every symlink resolved. Dies when DIR cannot be entered.
+physical_path_of() { (cd -P -- "$1" 2>/dev/null && pwd -P) || die "could not enter $1"; }
+
 # ---------------------------------------------------------------------------------------------
 # The mapping: a path to its key, a directory to its store directory, the table behind them.
 # ---------------------------------------------------------------------------------------------
@@ -274,15 +291,18 @@ repo_of_url() {
     printf '%s\n' "$1" | sed -E 's#/+$##; s#\.git$##; s#^.*[:/]([^/:]+)/([^/:]+)$#\1/\2#' | tr '[:upper:]' '[:lower:]'
 }
 
-# dirs_slug_of_path DIR — the slug of a directory with no repo identity: the path relative to $HOME,
-# with / as -, lowercased; `home` for $HOME itself.
+# dirs_slug_of_path PHYSICAL_DIR — the slug of a directory with no repo identity: the path relative
+# to the physical $HOME, with / as -, lowercased; `home` for $HOME itself. Dies outside $HOME, where
+# there is no such path.
 dirs_slug_of_path() {
     local dir=$1 home_dir relative_path slug
-    home_dir=$(lexically_normal_path "$HOME")
+    # It dies inside the command substitution, having said why; pass the exit on.
+    home_dir=$(physical_path_of "$HOME") || exit "$EXIT_COULD_NOT_RUN"
     if [[ "$dir" == "$home_dir" ]]; then
         printf '%s' "$HOME_SLUG"
         return 0
     fi
+    [[ "$dir" == "$home_dir"/* ]] || die "$dir is outside $home_dir and has no origin, so it has no store directory"
     relative_path=${dir#"$home_dir"/}
     slug=${relative_path//\//-}
     printf '%s' "${slug,,}"
@@ -291,7 +311,7 @@ dirs_slug_of_path() {
 # store_relative_dir DIR — print repos/<owner>/<repo> for a checkout with an origin, else dirs/<slug>.
 # --git-dir, not -C: with an unreadable .git, -C walks up and answers for whichever repo holds DIR.
 store_relative_dir() {
-    local dir=$1 origin_url origin_status owner_and_repo
+    local dir=$1 origin_url origin_status owner_and_repo slug
     if [[ -e "$dir/.git" ]]; then
         origin_url=$(git --git-dir="$dir/.git" remote get-url origin 2>/dev/null)
         origin_status=$?
@@ -305,7 +325,9 @@ store_relative_dir() {
         (( origin_status == GIT_EXIT_NO_SUCH_REMOTE )) \
             || die "git could not read the origin of $dir (exit $origin_status)"
     fi
-    printf '%s/%s' "$DIRS_DIR_NAME" "$(dirs_slug_of_path "$dir")"
+    # It dies inside the command substitution, having said why; pass the exit on.
+    slug=$(dirs_slug_of_path "$dir") || exit "$EXIT_COULD_NOT_RUN"
+    printf '%s/%s' "$DIRS_DIR_NAME" "$slug"
 }
 
 # store_dir_of_candidate DIR — print <store>/<relative dir> for a candidate directory. Dies when
@@ -346,28 +368,35 @@ classify_directory() {
     fi
 }
 
-# register_candidate KEY MAPPED_DIR SOURCE_DIR — record KEY's candidate, unless KEY is claimed.
+# register_candidate KEY MAPPED_DIR SOURCE_DIR — record KEY's candidate. A claimed key stays with its
+# first candidate, unless this one maps to another store: that dies, naming both.
 register_candidate() {
-    local key=$1 mapped_dir=$2 source_dir=$3
-    [[ -z "${CLAIMED_KEYS[$key]:-}" ]] || return 0
-    CLAIMED_KEYS[$key]=1
+    local key=$1 mapped_dir=$2 source_dir=$3 store=${2%%/*}
+    if [[ -n "${SOURCE_DIR_OF_KEY[$key]:-}" ]]; then
+        [[ "${STORE_OF_KEY[$key]}" == "$store" ]] \
+            || die "key $key is shared by ${SOURCE_DIR_OF_KEY[$key]} (store ${STORE_OF_KEY[$key]}) and $source_dir (store $store)"
+        return 0
+    fi
+    SOURCE_DIR_OF_KEY[$key]=$source_dir
+    STORE_OF_KEY[$key]=$store
     CANDIDATE_KEYS+=("$key")
-    CANDIDATE_STORES+=("${mapped_dir%%/*}")
+    CANDIDATE_STORES+=("$store")
     CANDIDATE_RELATIVE_DIRS+=("${mapped_dir#*/}")
     CANDIDATE_SOURCE_DIRS+=("$source_dir")
 }
 
 # add_candidate DIR — register DIR's key, and for a submodule its git-dir key, on one store
-# directory. A worktree adds nothing (CHECKOUT_KIND says so afterwards). tenant-route is asked only
-# when some key of DIR is still unclaimed.
+# directory. A worktree adds nothing (CHECKOUT_KIND says so afterwards). A directory that already
+# holds all its keys is not asked about again; any other is routed, even if its keys are claimed,
+# since only its store can say whether it may share them.
 add_candidate() {
     local dir=$1 own_key git_dir_key='' mapped_dir
     classify_directory "$dir"
     [[ "$CHECKOUT_KIND" != worktree ]] || return 0
     own_key=$(project_key_of_path "$dir")
     [[ -z "$SUBMODULE_GIT_DIR" ]] || git_dir_key=$(project_key_of_path "$SUBMODULE_GIT_DIR")
-    if [[ -n "${CLAIMED_KEYS[$own_key]:-}" ]]; then
-        if [[ -z "$git_dir_key" || -n "${CLAIMED_KEYS[$git_dir_key]:-}" ]]; then return 0; fi
+    if [[ "${SOURCE_DIR_OF_KEY[$own_key]:-}" == "$dir" ]]; then
+        if [[ -z "$git_dir_key" || "${SOURCE_DIR_OF_KEY[$git_dir_key]:-}" == "$SUBMODULE_GIT_DIR" ]]; then return 0; fi
     fi
     # It dies inside the command substitution, having said why; pass the exit on.
     mapped_dir=$(store_dir_of_candidate "$dir") || exit "$EXIT_COULD_NOT_RUN"
@@ -379,9 +408,10 @@ add_candidate() {
 # populated submodules, recursively. A worktree brings no submodules with it.
 add_checkout_and_submodules() {
     local dir submodule_paths=() submodule_path
-    dir=$(lexically_normal_path "$1")
-    [[ -d "$dir" ]] || return 0
-    if [[ ! -e "$dir/.git" && ! -L "$dir/.git" ]]; then return 0; fi
+    [[ -d "$1" ]] || return 0
+    if [[ ! -e "$1/.git" && ! -L "$1/.git" ]]; then return 0; fi
+    # It dies inside the command substitution, having said why; pass the exit on.
+    dir=$(physical_path_of "$1") || exit "$EXIT_COULD_NOT_RUN"
     add_candidate "$dir"
     [[ "$CHECKOUT_KIND" != worktree ]] || return 0
     read_nul_items submodule_paths git -C "$dir" submodule --quiet foreach --recursive "$PRINT_SUBMODULE_PATH" \
@@ -403,7 +433,7 @@ expand_home_glob() {
 
 # load_candidates — every candidate on this host: the checkouts first, then the plain directories.
 load_candidates() {
-    local glob_pattern glob_match plain_dir normal_dir
+    local glob_pattern glob_match plain_dir physical_dir
     for glob_pattern in "${CHECKOUT_GLOBS[@]}"; do
         expand_home_glob "$glob_pattern"
         for glob_match in "${GLOB_MATCHES[@]}"; do
@@ -411,14 +441,25 @@ load_candidates() {
         done
     done
     for plain_dir in "${PLAIN_DIRS[@]}"; do
-        normal_dir=$(lexically_normal_path "$HOME/$plain_dir")
-        if [[ -d "$normal_dir" ]]; then add_candidate "$normal_dir"; fi
+        [[ -d "$HOME/$plain_dir" ]] || continue
+        # It dies inside the command substitution, having said why; pass the exit on.
+        physical_dir=$(physical_path_of "$HOME/$plain_dir") || exit "$EXIT_COULD_NOT_RUN"
+        add_candidate "$physical_dir"
     done
 }
 
 # ---------------------------------------------------------------------------------------------
 # The state of a key.
 # ---------------------------------------------------------------------------------------------
+
+# require_readable_if_present PATH — die when PATH exists and cannot be listed. Every test of what a
+# directory holds would otherwise answer "nothing there": a glob, -e, -d and -L all do, and that
+# reports a clean host over real memory. An absent path is no fault: no session has run there yet.
+require_readable_if_present() {
+    if [[ -e "$1" && ! ( -d "$1" && -r "$1" && -x "$1" ) ]]; then
+        die "$1 is not a readable directory"
+    fi
+}
 
 # has_unmerged_replaced_dir KEY_DIR — true when a replaced directory there lacks the marker.
 has_unmerged_replaced_dir() {
@@ -434,7 +475,9 @@ has_unmerged_replaced_dir() {
     return 1
 }
 
-# directory_holds_a_file DIR — true when anything but a directory lies under DIR, at any depth.
+# directory_holds_a_file DIR — true when anything but a directory lies under DIR, at any depth. find
+# does not descend into a symlink named as its starting point, so a DIR that is itself a symlink
+# holds nothing by this test, whatever its target holds.
 directory_holds_a_file() {
     local first_found
     first_found=$(find "$1" -mindepth 1 ! -type d -print -quit) || die "could not read $1"
@@ -461,6 +504,7 @@ state_of_memory_link() {
 state_of_mapped_key() {
     local key_dir="$PROJECTS_DIR/$1" store=$2 relative_dir=$3
     local memory_path="$key_dir/$MEMORY_ENTRY_NAME" store_dir="$STORES_ROOT/$2/$3"
+    require_readable_if_present "$key_dir"
     if has_unmerged_replaced_dir "$key_dir"; then
         printf 'PENDING-MERGE'
     elif [[ ! -e "$STORES_ROOT/$store/.git" ]]; then
@@ -476,9 +520,12 @@ state_of_mapped_key() {
     fi
 }
 
-# state_of_unclaimed_key KEY — print the state of a key no candidate claims, or nothing.
+# state_of_unclaimed_key KEY — print the state of a key no candidate claims, or nothing. The `! -L`
+# states the rule, that only a real directory can be unmapped. directory_holds_a_file also answers no
+# for a symlink, so a mutant dropping `! -L` alone is equivalent.
 state_of_unclaimed_key() {
     local key_dir="$PROJECTS_DIR/$1" memory_path="$PROJECTS_DIR/$1/$MEMORY_ENTRY_NAME"
+    require_readable_if_present "$key_dir"
     if has_unmerged_replaced_dir "$key_dir"; then
         printf 'PENDING-MERGE'
     elif [[ -d "$memory_path" && ! -L "$memory_path" ]] && directory_holds_a_file "$memory_path"; then
@@ -522,7 +569,7 @@ load_rows() {
     for key_dir in "${key_dirs[@]}"; do
         key=${key_dir%/}
         key=${key##*/}
-        [[ -z "${CLAIMED_KEYS[$key]:-}" ]] || continue
+        [[ -z "${SOURCE_DIR_OF_KEY[$key]:-}" ]] || continue
         state=$(state_of_unclaimed_key "$key") || exit "$EXIT_COULD_NOT_RUN"
         if [[ -n "$state" ]]; then add_row "$state" "$key" '' '' ''; fi
     done
@@ -551,6 +598,11 @@ print_check() {
 
 main() {
     parse_args "$@"
+    # Every default path, the globs and the slugs hang off HOME.
+    [[ -n "${HOME:-}" ]] || die "HOME is not set"
+    # These would point this script's git calls, and tenant-route's, at another repository: a git hook
+    # exports them, and a bogus GIT_DIR makes a submodule vanish from the listing without an error.
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
     # A symlink whose target is gone is what a mid-deploy overlay leaves behind: a fault, not a
     # choice not to configure this host.
     if [[ -L "$CONFIG_PATH" && ! -e "$CONFIG_PATH" ]]; then
@@ -563,11 +615,7 @@ main() {
     fi
     command -v jq >/dev/null || die "jq is required"
     command -v git >/dev/null || die "git is required"
-    # An unreadable projects dir would glob to nothing and report a clean host; an absent one is a
-    # host where no session has run yet, which is no fault.
-    if [[ -e "$PROJECTS_DIR" && ! ( -d "$PROJECTS_DIR" && -r "$PROJECTS_DIR" && -x "$PROJECTS_DIR" ) ]]; then
-        die "$PROJECTS_DIR is not a readable directory"
-    fi
+    require_readable_if_present "$PROJECTS_DIR"
     load_store_table
     load_candidates
     load_rows
