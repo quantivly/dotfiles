@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/claude-memory-link.sh` links Claude Code's memory directories into git-backed stores,
+  on a host with a store table (DO-891).** The link half of D7 in the shared-configuration design
+  (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, amendments M1-M8). A host opts
+  in with `~/.dotfiles-local/claude/memory-stores.json`; without it nothing is touched and the script
+  exits 0 with a note, before it looks for jq. Each project key maps to
+  `~/.local/share/claude-memory/<store>/repos/<owner>/<repo>` or `dirs/<slug>`, in the store whose
+  `tenants` holds the tenant `scripts/tenant-route` answers. `--check` and `--list` read and report
+  eight states; `--apply [--dry-run] [--only <key>]` renames a real `memory` directory to
+  `memory.replaced-<stamp>` beside it, links, merges the renamed directory into the store and writes
+  the marker `.merged-into-store` last, so a stopped run reads as `PENDING-MERGE` and the next one
+  finishes it. It never deletes or overwrites a memory file: index files take a line union, any other
+  difference becomes a `.conflict-<host>` copy, and a replaced directory is never pruned. `./install`
+  does not run it, and nothing here commits or pushes a store. `claude-doctor` gains a "Memory stores"
+  section (a note with no table, ✓ linked, ✗ with each row, ⚠ with each `UNMAPPED` row, ⚠ could not
+  run). `scripts/redact-secrets.sh` gains `--shapes-only` for at-rest gates, and refuses a second
+  argument with exit 64. Guide: `docs/CLAUDE_SETUP.md` ("Memory stores"). State table:
+  `scripts/test-claude-memory-link.sh` (188 rows, hermetic; CI `claude-memory-link-test`), 25 rows
+  in `scripts/test-claude-doctor.sh`, and one in `scripts/test-claude-config-audit.sh` pinning that
+  a linked `memory` is collected by content.
+
 - **`scripts/claude-settings-render.sh` renders `~/.claude/settings.json` from a public base and
   the tenant overlays, on a host with a profile (DO-884).** Step 2 of the shared-configuration
   design (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, D4 as amended). A

@@ -288,3 +288,139 @@ rendered file into each seat's dir at launch.
 
 State table: `scripts/test-claude-settings-render.sh` (hermetic: fixture `HOME`, marker and
 overlay; CI `claude-settings-render-test`).
+
+## Memory stores (DO-891)
+
+Claude Code keeps auto-memory in `~/.claude/projects/<key>/memory/`, one directory per checkout
+path on one machine, so memory neither survives a new host nor follows a repo between hosts.
+`scripts/claude-memory-link.sh` maps each project key to a directory in a git-backed store and makes
+its `memory` entry a symlink there. It is the link half of D7 in the
+[shared-configuration design](superpowers/specs/2026-11-04-shared-claude-config-design.md), as
+amended (M1-M8). The link alone commits and pushes nothing; syncing a store is a separate step.
+
+**The layout.** A store is a git checkout at `~/.local/share/claude-memory/<store>`, keyed by repo
+identity rather than by path:
+
+```
+~/.local/share/claude-memory/<store>/
+  repos/<owner>/<repo>/   a checkout with an origin (lowercased, by the rule of repo_of_url in scripts/dev-sync)
+  dirs/<slug>/            a directory with no .git, or a repo with no origin
+```
+
+The slug is the path relative to `$HOME`, `/` becoming `-`, lowercased, and `home` for `$HOME` itself.
+
+**The table.** `~/.dotfiles-local/claude/memory-stores.json`, private, is what opts a host in:
+
+```json
+{
+  "stores": {"<store>": {"remote": "https://github.com/<owner>/<repo>.git", "tenants": ["<tenant>"]}},
+  "checkout_globs": ["<path relative to $HOME, may hold *>"],
+  "plain_dirs": ["<path relative to $HOME; the empty string is $HOME>"]
+}
+```
+
+**A host without the table is not touched**: one line and exit 0, before the script even looks for
+jq. A store in the table that is not checked out on this host is left alone too. `./install` does
+not run this script: a table and a by-hand `--apply` are the only way a link appears.
+
+**Which directory a key names.** The key of a path is the physical path with every character outside
+`[A-Za-z0-9]` replaced by `-`, and the candidates are every directory matching a `checkout_globs`
+entry that holds `.git`, each populated submodule of one, and every `plain_dirs` entry that exists.
+A candidate's store is the one whose `tenants` holds the tenant `scripts/tenant-route <dir>` answers;
+a tenant no store lists is exit 2, never a default. A worktree has no key of its own, since Claude
+Code keys it by the main checkout. A submodule has two, its own path and its git dir, both linked to
+one store directory. The script's header has the full rules.
+
+**The eight states**, first match wins. A candidate with no `memory` entry and nothing in its store
+directory has no state and no row.
+
+| state | what it means | `--check` | `--apply` |
+|---|---|---|---|
+| `PENDING-MERGE` | a `memory.replaced-*` directory without the marker exists | to fix | finishes the merge, unless the store is not checked out or no candidate claims the key: then it has nowhere to go and is left |
+| `NO-STORE` | mapped, but that store is not checked out on this host | not shown | left alone |
+| `LINKED` | a symlink to the mapped store directory, which exists | counted | nothing |
+| `DANGLING` | the right symlink, but its target directory does not exist | to fix | creates the directory |
+| `WRONG-LINK` | a symlink to anywhere else | to fix | left alone, to fix by hand (a pending merge still finishes, reported as `merged`) |
+| `REAL-DIR` | a real directory, the key is mapped, the store is checked out | to fix | swaps it for the link and merges it in |
+| `MISSING` | no `memory` entry, and the mapped store directory holds a file, such as memory another host wrote | to fix | creates the link |
+| `UNMAPPED` | a real `memory` directory holding a file, under a key no candidate claims | shown, exit 0 | not walked: it has no store directory, so add it to the table |
+
+**The verbs.** `--check` and `--list` only read.
+
+    scripts/claude-memory-link.sh --check                 # each row not LINKED or NO-STORE, then the summary line
+    scripts/claude-memory-link.sh --list                  # every key as TSV: key, state, store, store-relative directory, source directory
+    scripts/claude-memory-link.sh --apply --dry-run       # the lines --apply would print; changes nothing, takes no lock
+    scripts/claude-memory-link.sh --apply                 # finish pending merges, then link
+    scripts/claude-memory-link.sh --apply --only <key>    # the same for one key
+
+`--apply` prints one line per key it acted on, and nothing on a second run:
+`linked <key> -> <store dir> (copied <n>, identical <n>, kept-both <n>)`. A real run holds an flock on
+`~/.local/state/claude-memory-sync/link.lock`, so another run waits for it.
+
+| exit | meaning |
+|---|---|
+| 0 | nothing to fix, or no table here. `UNMAPPED` rows alone are exit 0, with their rows printed |
+| 1 | `--check` found a key to fix |
+| 2 | could not run: `HOME` unset, no jq or git, a bad table (a symlink to nothing included), `tenant-route` or git could not answer, a key two stores share, an unreadable projects or key directory, a `memory` entry that is neither a directory nor a symlink; on `--apply` also no flock or cmp, an unusable host name, and any step of a swap or a merge that failed, reported once the other keys have run |
+| 64 | usage |
+
+**What `--apply` does to a real directory**, in this order, which is the safety argument:
+
+1. `mkdir -p` the store directory.
+2. Rename `memory` to `memory.replaced-<UTC yyyymmddThhmmssZ>` beside it, atomic within one
+   filesystem. A write by path before this point is in the merge.
+3. Symlink `memory` to the store directory. A directory a writer recreated meanwhile is renamed
+   aside too and the link retried, at most 3 times, then exit 2.
+4. Merge each replaced directory into the store directory, file by file.
+5. Write the marker `.merged-into-store` in the replaced directory, after its last file.
+
+**What it never does: delete or overwrite a memory file.** The replaced directory stays beside the
+link and is never pruned, and the only changes to a store's existing content are the appended index
+lines below. A writer holding an open descriptor or a cwd inside the directory can land after the
+walk; that write stays in the replaced directory, not lost and not merged.
+
+**The marker means "merged".** A replaced directory without `.merged-into-store` reads as
+`PENDING-MERGE`, so a run stopped anywhere fails `--check`, and the next `--apply` finishes the merge
+before anything else on that key. A file that cannot be merged leaves its directory unmarked while
+its other files still go, and a key that fails stops only itself. A real directory that already holds
+the marker, which is what undoing a link with `mv memory.replaced-<stamp> memory` leaves, is merged
+like any other: the marker spoke for what it held then, so it is removed before the rename.
+
+**One file in the merge**, at any depth. A symlink is copied and compared as a link, never followed,
+or it would bring what it points at into a store that is pushed to a remote.
+
+| the store holds | what happens |
+|---|---|
+| nothing at that name | copied to a `.<name>.link-partial` beside it, checked against the source, and published by `link(2)`, which cannot overwrite |
+| the same bytes | nothing |
+| a different `MEMORY.md` or `INDEX_*.md` | the lines only the replaced copy has are appended |
+| any other different file | the store's copy keeps its name, whichever is newer, and the replaced copy becomes a conflict copy beside it |
+
+A conflict copy inserts `.conflict-<host>` before the final extension: `x.md` becomes
+`x.conflict-<host>.md`, and a name with no extension gets it appended. A copy that already holds
+another body is kept and the next is `x.conflict-<host>.2.md`, `.3.md`, and so on; one with the same
+body is that file already, so a resumed merge adds none.
+
+**Adding a directory.** An `UNMAPPED` row is usually the prompt: it names a key holding memory that
+the table does not claim. Add a pattern to `checkout_globs` for a checkout (with its populated
+submodules), or the path to `plain_dirs` for a directory that is not one, and make sure a store's
+`tenants` lists the tenant `scripts/tenant-route <dir>` answers for it. `--check` then shows the key
+as `REAL-DIR`; look with `--apply --dry-run --only <key>`, then run `--apply --only <key>`.
+
+**Permission mode, from the pilot** (Claude Code 2.1.319, 2026-11-06). With `memory` a symlink to a
+directory outside `~/.claude`, the index loads at session start, and Write, Read and Edit work. A
+`default`-mode session is asked on a memory write, as it was before the link; an `auto`-mode one is
+not.
+
+**Who runs it.** `claude-doctor`'s "Memory stores" section runs `--check`, and nothing else: a note
+with no table, ✓ with the counts, ✗ with each row on exit 1 (`--apply --dry-run` shows what `--apply`
+would do), ⚠ with each row when an exit 0 carries `UNMAPPED` rows, and ⚠ with the last stderr line
+when it could not run. `CLAUDE_MEMORY_PROJECTS_DIR`, `CLAUDE_MEMORY_STORES_ROOT`,
+`CLAUDE_MEMORY_CONFIG`, `CLAUDE_MEMORY_STATE_DIR`, `CLAUDE_MEMORY_HOST` and
+`CLAUDE_MEMORY_TENANT_ROUTE` override the paths, the host in a conflict copy's name and the tenant
+lookup.
+
+State table: `scripts/test-claude-memory-link.sh` (hermetic: fixture `HOME`, every path named, real
+`git init` checkouts; CI `claude-memory-link-test`). The doctor's rows are section AA of
+`scripts/test-claude-doctor.sh`, and `scripts/test-claude-config-audit.sh` pins that
+`claude-config-audit.sh` collects a linked `memory` by content.
