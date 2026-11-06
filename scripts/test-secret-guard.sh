@@ -194,6 +194,37 @@ check "multi-line input is preserved line-for-line" \
       "$(printf 'a\nb\nc\n' | "$REDACT" | wc -l | tr -d ' ')" "3"
 
 echo
+echo "=== redact-secrets --shapes-only: the shape rules without the by-name pair ==="
+# The by-name rules run last and overwrite a shape marker on GH_TOKEN=<shape>, so
+# a gate cannot count markers in the full output; it asks for this mode instead.
+shapes_only() { printf '%s' "$1" | "$REDACT" --shapes-only; }
+check "shapes-only: a github token is redacted" \
+      "$(shapes_only "tok=$GHO")" "tok=<REDACTED:github-token>"
+check "shapes-only: FOO_TOKEN=plainvalue passes unchanged" \
+      "$(shapes_only 'FOO_TOKEN=plainvalue')" "FOO_TOKEN=plainvalue"
+check "shapes-only: GH_TOKEN=<token shape> is redacted, labelled by the shape" \
+      "$(shapes_only "GH_TOKEN=$GHO")" "GH_TOKEN=<REDACTED:github-token>"
+check "no argument: FOO_TOKEN=plainvalue is still redacted" \
+      "$(red 'FOO_TOKEN=plainvalue')" "FOO_TOKEN=<REDACTED:by-name>"
+check "unknown flag: exit 64" \
+      "$(printf 'x' | "$REDACT" --nope >/dev/null 2>&1; echo $?)" "64"
+# Pin the no-argument output byte for byte against a stored expectation, through
+# a fixture that crosses shape rules, both by-name rules and plain prose.
+MULTI_RULE_FIXTURE="$(printf 'k=%s\nGH_TOKEN=%s\nNOTION_PAT=abc\nplain prose\n' "$ANT" "$GHO")"
+MULTI_RULE_EXPECTED_FULL='k=<REDACTED:anthropic-key>
+GH_TOKEN=<REDACTED:by-name>
+NOTION_PAT=<REDACTED:by-name>
+plain prose'
+MULTI_RULE_EXPECTED_SHAPES='k=<REDACTED:anthropic-key>
+GH_TOKEN=<REDACTED:github-token>
+NOTION_PAT=abc
+plain prose'
+check "no argument: a multi-rule fixture matches its stored expectation" \
+      "$(printf '%s\n' "$MULTI_RULE_FIXTURE" | "$REDACT")" "$MULTI_RULE_EXPECTED_FULL"
+check "shapes-only: the same fixture matches its stored expectation" \
+      "$(printf '%s\n' "$MULTI_RULE_FIXTURE" | "$REDACT" --shapes-only)" "$MULTI_RULE_EXPECTED_SHAPES"
+
+echo
 echo "=== the guard: commands that must be REFUSED ==="
 ask() {  # ask <command> -> "deny" | "allow"
   local d
@@ -1007,7 +1038,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=283
+EXPECTED_ROWS=290
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.

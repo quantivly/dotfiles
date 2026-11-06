@@ -55,33 +55,67 @@
 # reach a terminal here, and matches on shape alone so it needs no wordlist and
 # cannot leak by failing to know a variable name.
 #
+# --shapes-only: the same filter WITHOUT the two by-name rules. It exists for
+# at-rest gates (a file about to be committed): there, ordinary prose such as
+# `FOO_TOKEN=value` would be withheld forever by the name rules, so the gate wants
+# shapes alone. A gate cannot instead count shape markers in the full output,
+# because the by-name rule runs last and overwrites the marker on a line such as
+# `GH_TOKEN=gho_…`, hiding exactly that credential from the count.
+#
 # Usage:  <command that may print a secret> 2>&1 | redact-secrets
 #         redact-secrets < file
+#         redact-secrets --shapes-only < file
 #
 # Exit status is sed's. Input is passed through unchanged on any pattern miss.
+# Any other argument: usage on stderr, exit 64.
 
 set -uo pipefail
 
-# One sed program. Ordered longest/most-specific first so a broader pattern
-# cannot eat half of a narrower one's match.
-exec sed -E \
-  -e 's/gh[pousr]_[A-Za-z0-9]{30,}/<REDACTED:github-token>/g' \
-  -e 's/github_pat_[A-Za-z0-9_]{20,}/<REDACTED:github-pat>/g' \
-  -e 's/sk-ant-[A-Za-z0-9_-]{20,}/<REDACTED:anthropic-key>/g' \
-  -e 's/xox[baprse]-[A-Za-z0-9-]{10,}/<REDACTED:slack-token>/g' \
-  -e 's/AKIA[0-9A-Z]{16}/<REDACTED:aws-access-key-id>/g' \
-  -e 's/ASIA[0-9A-Z]{16}/<REDACTED:aws-temp-key-id>/g' \
-  -e 's/(aws_secret_access_key[[:space:]]*=[[:space:]]*)[A-Za-z0-9\/+=]{30,}/\1<REDACTED:aws-secret>/g' \
-  -e 's/glpat-[A-Za-z0-9_-]{20,}/<REDACTED:gitlab-pat>/g' \
-  -e 's/ntn_[A-Za-z0-9]{40,}/<REDACTED:notion-token>/g' \
-  -e 's/lin_api_[A-Za-z0-9]{30,}/<REDACTED:linear-key>/g' \
-  -e 's/(SAMLRequest=)[A-Za-z0-9%+\/=_-]{20,}/\1<REDACTED:saml-request>/g' \
-  -e 's/(CRV1:)[^[:space:]"<]+/\1<REDACTED:vpn-auth-challenge>/g' \
-  -e 's/([Bb]earer[[:space:]]+)[A-Za-z0-9._~+\/-]{20,}=*/\1<REDACTED:bearer>/g' \
-  -e 's/(-----BEGIN [A-Z ]*PRIVATE KEY-----).*/\1<REDACTED:private-key>/g' \
-  -e 's/(https?:\/\/[^:@[:space:]\/]+):[^@[:space:]\/]+@/\1:<REDACTED:url-password>@/g' \
-  -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Z0-9_]*=)[^[:space:]]+/\1<REDACTED:by-name>/g' \
+EXIT_USAGE=64
+SHAPES_ONLY_FLAG="--shapes-only"
+
+use_by_name_rules=1
+case "${1:-}" in
+  "") ;;
+  "$SHAPES_ONLY_FLAG") use_by_name_rules=0 ;;
+  *)
+    echo "usage: redact-secrets [$SHAPES_ONLY_FLAG] < input" >&2
+    exit "$EXIT_USAGE"
+    ;;
+esac
+
+# Ordered longest/most-specific first so a broader pattern cannot eat half of a
+# narrower one's match.
+SHAPE_RULES=(
+  -e 's/gh[pousr]_[A-Za-z0-9]{30,}/<REDACTED:github-token>/g'
+  -e 's/github_pat_[A-Za-z0-9_]{20,}/<REDACTED:github-pat>/g'
+  -e 's/sk-ant-[A-Za-z0-9_-]{20,}/<REDACTED:anthropic-key>/g'
+  -e 's/xox[baprse]-[A-Za-z0-9-]{10,}/<REDACTED:slack-token>/g'
+  -e 's/AKIA[0-9A-Z]{16}/<REDACTED:aws-access-key-id>/g'
+  -e 's/ASIA[0-9A-Z]{16}/<REDACTED:aws-temp-key-id>/g'
+  -e 's/(aws_secret_access_key[[:space:]]*=[[:space:]]*)[A-Za-z0-9\/+=]{30,}/\1<REDACTED:aws-secret>/g'
+  -e 's/glpat-[A-Za-z0-9_-]{20,}/<REDACTED:gitlab-pat>/g'
+  -e 's/ntn_[A-Za-z0-9]{40,}/<REDACTED:notion-token>/g'
+  -e 's/lin_api_[A-Za-z0-9]{30,}/<REDACTED:linear-key>/g'
+  -e 's/(SAMLRequest=)[A-Za-z0-9%+\/=_-]{20,}/\1<REDACTED:saml-request>/g'
+  -e 's/(CRV1:)[^[:space:]"<]+/\1<REDACTED:vpn-auth-challenge>/g'
+  -e 's/([Bb]earer[[:space:]]+)[A-Za-z0-9._~+\/-]{20,}=*/\1<REDACTED:bearer>/g'
+  -e 's/(-----BEGIN [A-Z ]*PRIVATE KEY-----).*/\1<REDACTED:private-key>/g'
+  -e 's/(https?:\/\/[^:@[:space:]\/]+):[^@[:space:]\/]+@/\1:<REDACTED:url-password>@/g'
+)
+
+BY_NAME_RULES=(
+  -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Z0-9_]*=)[^[:space:]]+/\1<REDACTED:by-name>/g'
   -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]*_PAT=)[^[:space:]]+/\1<REDACTED:by-name>/g'
+)
+
+rules=("${SHAPE_RULES[@]}")
+if (( use_by_name_rules )); then
+  rules+=("${BY_NAME_RULES[@]}")
+fi
+
+exec sed -E "${rules[@]}"
+
   # `_PAT` is its OWN rule, not another entry in the alternation above, and the
   # anchoring is the whole point. The alternation is followed by `[A-Z0-9_]*=`,
   # so ANY form of PAT placed inside it has that trailing class absorb whatever
