@@ -208,6 +208,11 @@ check "no argument: FOO_TOKEN=plainvalue is still redacted" \
       "$(red 'FOO_TOKEN=plainvalue')" "FOO_TOKEN=<REDACTED:by-name>"
 check "unknown flag: exit 64" \
       "$(printf 'x' | "$REDACT" --nope >/dev/null 2>&1; echo $?)" "64"
+check "a second argument: exit 64, after the flag (usage on stderr) or after an empty first one" \
+      "$(printf 'x' | "$REDACT" --shapes-only extra 2>&1 >/dev/null; echo "rc=$?"; printf 'x' | "$REDACT" '' extra >/dev/null 2>&1; echo "rc=$?")" \
+      "usage: redact-secrets [--shapes-only] < input
+rc=64
+rc=64"
 # Pin the no-argument output byte for byte against a stored expectation, through
 # a fixture that crosses shape rules, both by-name rules and plain prose.
 MULTI_RULE_FIXTURE="$(printf 'k=%s\nGH_TOKEN=%s\nNOTION_PAT=abc\nplain prose\n' "$ANT" "$GHO")"
@@ -1038,7 +1043,7 @@ check "...while still denying it" \
 # Whitespace is squashed before matching because CLAUDE.md wraps the sentence
 # BETWEEN the script name and the count, so a line-oriented grep would miss it
 # for that reason alone -- and would then report drift that does not exist.
-EXPECTED_ROWS=290
+EXPECTED_ROWS=291
 
 # 1 = the documented sentence says exactly this many checks. Anything else --
 # a stale number, a reword, an unreadable or missing file -- is not a pass.

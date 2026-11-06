@@ -67,17 +67,19 @@
 #         redact-secrets --shapes-only < file
 #
 # Exit status is sed's. Input is passed through unchanged on any pattern miss.
-# Any other argument: usage on stderr, exit 64.
+# Any other argument, or a second one: usage on stderr, exit 64.
 
 set -uo pipefail
 
 EXIT_USAGE=64
 SHAPES_ONLY_FLAG="--shapes-only"
 
+# The argument count and the first argument: `--shapes-only file` would otherwise
+# read stdin and quietly ignore the file it was given.
 use_by_name_rules=1
-case "${1:-}" in
-  "") ;;
-  "$SHAPES_ONLY_FLAG") use_by_name_rules=0 ;;
+case "$#:${1:-}" in
+  0: | 1:) ;;
+  "1:$SHAPES_ONLY_FLAG") use_by_name_rules=0 ;;
   *)
     echo "usage: redact-secrets [$SHAPES_ONLY_FLAG] < input" >&2
     exit "$EXIT_USAGE"
@@ -86,6 +88,29 @@ esac
 
 # Ordered longest/most-specific first so a broader pattern cannot eat half of a
 # narrower one's match.
+#
+# The two VPN shapes, added 2026-09-23 (DO-692). Both are SHAPE rules: they
+# appear bare in a log line and in a URL, never as VAR=value, so no name rule
+# can reach them. Measured before adding: a synthetic re-auth line passed
+# through this script completely unchanged, and Chrome history on this box
+# already held 253 rows carrying a SAMLRequest parameter.
+#
+#   SAMLRequest= is an unsigned SAML AuthnRequest, deflate+base64+percent-
+#   encoded. It is not a bearer credential, but it names the IdP, the service
+#   provider and the local assertion-consumer endpoint, and it is the string a
+#   phishing payload would be built from. The KEY is kept and only the value
+#   replaced, so a redacted line still reads as what it is.
+#
+#   CRV1:… is the AWS Client VPN re-auth challenge. Its `R:instance-…`
+#   segment is a session identifier of its own, so the value is dropped to the
+#   first whitespace or quote. Anchored on CRV1: ALONE, not on the 5.x client's
+#   `AUTH_FAILED,CRV1:`: 6.x logs it as `info: "CRV1:…"`, and the 5.x anchor
+#   let that through untouched (2026-11-02). `<` is excluded so the rule never
+#   re-matches its own replacement.
+#
+# The {20,} floor on SAMLRequest matches the `ntn_short` row's reasoning: a
+# bare `SAMLRequest=` with nothing after it is prose, and a redactor that
+# mangles prose is one somebody removes from the pipeline.
 SHAPE_RULES=(
   -e 's/gh[pousr]_[A-Za-z0-9]{30,}/<REDACTED:github-token>/g'
   -e 's/github_pat_[A-Za-z0-9_]{20,}/<REDACTED:github-pat>/g'
@@ -104,6 +129,26 @@ SHAPE_RULES=(
   -e 's/(https?:\/\/[^:@[:space:]\/]+):[^@[:space:]\/]+@/\1:<REDACTED:url-password>@/g'
 )
 
+# `_PAT` is its OWN rule, not another entry in the alternation below, and the
+# anchoring is the whole point. The alternation is followed by `[A-Z0-9_]*=`,
+# so ANY form of PAT placed inside it has that trailing class absorb whatever
+# follows: measured, both `PAT` and `_PAT` there redact `SOME_PATH=/x`,
+# `MY_PATHS=/a` and `COMPATIBLE=yes`. Requiring `_PAT` immediately before the
+# `=` excludes all three, and a redactor that mangles ordinary variables is
+# one somebody removes from the pipeline, after which it redacts nothing.
+#
+# `PATH=` and `PATTERN=` are safe for a different and simpler reason -- the
+# `=` adjacency, since both have a character between `PAT` and the `=`. An
+# earlier version of this comment claimed naked `PAT` in the alternation
+# swallowed `PATH=`; it does not, because the leading `[A-Z]` consumes the
+# `P`. Only a rule allowing PAT *anywhere* before the `=` reaches PATH, which
+# is the mutation the PATH and PATTERN rows in the state table pin.
+#
+# Found 2026-09-07, and it mattered more than an ordinary miss: DO-576 had
+# just made the guard refuse `tail ~/.zshrc.local` and name this script as
+# the remedy, so a NOTION_PAT that matched neither a shape nor a name rule
+# printed in full through the very pipe the deny message recommends. A remedy
+# that silently does not remedy is worse than no remedy.
 BY_NAME_RULES=(
   -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Z0-9_]*=)[^[:space:]]+/\1<REDACTED:by-name>/g'
   -e 's/((^|[[:space:]])[A-Z][A-Z0-9_]*_PAT=)[^[:space:]]+/\1<REDACTED:by-name>/g'
@@ -115,47 +160,3 @@ if (( use_by_name_rules )); then
 fi
 
 exec sed -E "${rules[@]}"
-
-  # `_PAT` is its OWN rule, not another entry in the alternation above, and the
-  # anchoring is the whole point. The alternation is followed by `[A-Z0-9_]*=`,
-  # so ANY form of PAT placed inside it has that trailing class absorb whatever
-  # follows: measured, both `PAT` and `_PAT` there redact `SOME_PATH=/x`,
-  # `MY_PATHS=/a` and `COMPATIBLE=yes`. Requiring `_PAT` immediately before the
-  # `=` excludes all three, and a redactor that mangles ordinary variables is
-  # one somebody removes from the pipeline, after which it redacts nothing.
-  #
-  # `PATH=` and `PATTERN=` are safe for a different and simpler reason -- the
-  # `=` adjacency, since both have a character between `PAT` and the `=`. An
-  # earlier version of this comment claimed naked `PAT` in the alternation
-  # swallowed `PATH=`; it does not, because the leading `[A-Z]` consumes the
-  # `P`. Only a rule allowing PAT *anywhere* before the `=` reaches PATH, which
-  # is the mutation the PATH and PATTERN rows in the state table pin.
-  #
-  # Found 2026-09-07, and it mattered more than an ordinary miss: DO-576 had
-  # just made the guard refuse `tail ~/.zshrc.local` and name this script as
-  # the remedy, so a NOTION_PAT that matched neither a shape nor a name rule
-  # printed in full through the very pipe the deny message recommends. A remedy
-  # that silently does not remedy is worse than no remedy.
-  #
-  # The two VPN shapes, added 2026-09-23 (DO-692). Both are SHAPE rules: they
-  # appear bare in a log line and in a URL, never as VAR=value, so no name rule
-  # can reach them. Measured before adding: a synthetic re-auth line passed
-  # through this script completely unchanged, and Chrome history on this box
-  # already held 253 rows carrying a SAMLRequest parameter.
-  #
-  #   SAMLRequest= is an unsigned SAML AuthnRequest, deflate+base64+percent-
-  #   encoded. It is not a bearer credential, but it names the IdP, the service
-  #   provider and the local assertion-consumer endpoint, and it is the string a
-  #   phishing payload would be built from. The KEY is kept and only the value
-  #   replaced, so a redacted line still reads as what it is.
-  #
-  #   CRV1:… is the AWS Client VPN re-auth challenge. Its `R:instance-…`
-  #   segment is a session identifier of its own, so the value is dropped to the
-  #   first whitespace or quote. Anchored on CRV1: ALONE, not on the 5.x client's
-  #   `AUTH_FAILED,CRV1:`: 6.x logs it as `info: "CRV1:…"`, and the 5.x anchor
-  #   let that through untouched (2026-11-02). `<` is excluded so the rule never
-  #   re-matches its own replacement.
-  #
-  # The {20,} floor on SAMLRequest matches the `ntn_short` row's reasoning: a
-  # bare `SAMLRequest=` with nothing after it is prose, and a redactor that
-  # mangles prose is one somebody removes from the pipeline.
