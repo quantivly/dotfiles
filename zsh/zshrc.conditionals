@@ -37,6 +37,16 @@
 #   4. Plugins module loads remaining integrations (direnv, forgit, etc.)
 DOTFILES_ZSH_DIR="${${(%):-%N}:A:h}"
 
+# A dotfiles worktree carries a copy of the global mise config at its root, where
+# mise reads it as an untrusted project config and errors in every new shell. The
+# copy adds nothing, so mise ignores it, which also means a branch's changed config
+# is never parsed (trusting the path would run it unreviewed). The base is
+# dotfiles-work's own default. An env var because mise 2026.6.14 parses the
+# ignored_config_paths TOML key and then does nothing with it, and exported BEFORE
+# activation because `mise activate` runs its hook at eval time.
+# Why: docs/TROUBLESHOOTING.md. Pinned by scripts/test-mise-worktree.sh.
+export MISE_IGNORED_CONFIG_PATHS="${DOTFILES_WORKTREES:-$HOME/.herdr/worktrees/.dotfiles}"
+
 # Activate mise early so mise-managed tools are available for conditionals below
 if command -v mise &>/dev/null; then
     eval "$(mise activate zsh)"

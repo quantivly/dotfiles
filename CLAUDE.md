@@ -289,8 +289,9 @@ mise trust ~/.dotfiles/.mise.toml  # Trust dotfiles config (one-time)
 ```
 
 **`~/.config/mise/config.toml` is a SYMLINK to `~/.dotfiles/.mise.toml`, not a copy** — `mise use -g`
-writes *through* it to the repo file, so the two cannot diverge, which is the whole point.
-Per-project overrides go in a project-root `.mise.toml` and need `mise trust`.
+writes *through* it to the repo file, so the two cannot diverge.
+Per-project overrides go in a project-root `.mise.toml` and need `mise trust`. A dotfiles
+worktree's copy is ignored: a branch's edit is inert until deployed.
 
 **Run `scripts/verify-tools.sh` after any mise change.** Two failure modes here are stable, silent
 and self-perpetuating: `./install` keeps a pre-existing *differing* `config.toml` forever after one
@@ -689,7 +690,6 @@ Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTIN
 - **Slow startup:** `time zsh -i -c exit` (target: <250ms). Caches at `~/.cache/{quanticli-paths,gh-token-cache,p10k-pr-cache}/`
 - **Function not found:** Check symlink (`ls -la ~/.zshrc`), re-run `./install`
 - **Tool not loading:** `command -v toolname`, then `source ~/.zshrc`
-- **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
 - **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
 - **Git auth:** `gh-doctor` (declared vs *effective* account — `gh auth status` reports only the declared one), then `gh auth login`
 - **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Heed its DIFFERS warning before any `clauth switch` (see the Claude section). If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.

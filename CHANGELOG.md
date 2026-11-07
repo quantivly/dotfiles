@@ -372,6 +372,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A new dotfiles worktree no longer starts with mise's trust error, and mise works in it.**
+  `~/.dotfiles/.mise.toml` is the global config, so every worktree carried a copy at its root that
+  mise read as an untrusted project config: every new shell printed the error and every `mise`
+  lookup there failed. herdr-draft's `inherit_trust` could not cover it, because `mise trust --show`
+  prints no row for a config it classes as global
+  ([herdr-draft#369](https://github.com/ZviBaratz/herdr-draft/issues/369)). `zshrc.conditionals` now
+  exports `MISE_IGNORED_CONFIG_PATHS` for the worktree base before activating mise, so the copy is
+  never parsed and the global config applies. A branch's edit to `.mise.toml` is therefore inert
+  until deployed. `scripts/test-mise-worktree.sh` pins it against real mise, in CI's
+  `mise-worktree-test`.
 - **Nothing on dev starts a stray `ssh-agent` any more.** An agent a shell starts outlives it,
   and on 2026-11-03 dev had one orphan under pid 1 per dev-sync run, and one more inside
   `herdr-server.service`. Four paths reached `eval "$(ssh-agent -s)"`:

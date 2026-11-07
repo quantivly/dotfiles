@@ -398,7 +398,9 @@ unnoticed.
    2026-08-30; this file previously said "copied", which is what let the drift below go
    unnoticed). `mise use -g` writes *through* the symlink to the repo file, so the two cannot
    diverge — which is the whole point.
-3. **Project overrides:** `.mise.toml` in project root — per-project versions, requires `mise trust`
+3. **Project overrides:** `.mise.toml` in project root — per-project versions, requires `mise trust`.
+   A dotfiles worktree is the exception: mise ignores its copy, so a branch's edit to `.mise.toml`
+   is inert until deployed ([why](TROUBLESHOOTING.md#in-a-dotfiles-worktree)).
 
 **The failure mode this architecture has, and how it is detected.** `./install` only creates
 that symlink when the target is absent or byte-identical; if a real file is already there and
