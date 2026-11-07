@@ -399,6 +399,30 @@ jobs:
       - name: Run the claude-settings-render state table
         run: ./scripts/test-claude-settings-render.sh
 
+  claude-memory-link-test:
+    name: Claude Memory Link State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq
+
+      # The subject renames memory directories and writes into stores, so the
+      # whole table runs under a fixture HOME and names its projects dir, stores
+      # root, store table, state dir, host and tenant-route on every call; git
+      # reads only the fixture's config files. The table exits 2 as root, since
+      # its unreadable-directory rows would assert nothing there; GitHub-hosted
+      # runners run as `runner`, so nothing here has to drop privileges. git,
+      # flock, cmp, mkfifo and timeout are stock; it exits 2 if any tool is missing.
+      - name: Run the claude-memory-link state table
+        run: ./scripts/test-claude-memory-link.sh
+
   timer-health-test:
     name: Repo-Owned Timer Health State Table
     runs-on: ubuntu-latest

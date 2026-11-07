@@ -303,6 +303,33 @@ if [[ -f $W/h1/cfg/CLAUDE.md && -f $W/h1/cfg/hooks/a.sh && -f $W/h1/cfg/skills/r
 fi
 check "include set: exit 0 and every layout path present" "$H1_COLLECT_RC $layout_complete" "0 yes"
 
+printf 'collect: a memory directory that is a symlink is collected by content\n'
+# What scripts/claude-memory-link.sh leaves behind: `memory` a symlink to a store directory outside
+# the config dir. Two hosts built alike, one of them linked, must collect the same files.
+make_host memreal
+make_host memlink
+MEMLINK_PROJECT="$FIXTURE_HOSTS/memlink/.claude/projects/-home-memlink-quantivly-hub"
+MEMLINK_STORE_DIR="$FIXTURE_HOSTS/memlink/.local/share/claude-memory/alpha/repos/example-org/hub"
+mkdir -p "${MEMLINK_STORE_DIR%/*}"
+mv "$MEMLINK_PROJECT/memory" "$MEMLINK_STORE_DIR"
+ln -s "$MEMLINK_STORE_DIR" "$MEMLINK_PROJECT/memory"
+W_MEMORY_LINK="$TMPROOT/ws-memory-link"
+"$SUT" --collect --workspace "$W_MEMORY_LINK" --host memreal=memreal:.claude --host memlink=memlink:.claude >/dev/null 2>&1
+memory_link_collect_rc=$?
+COLLECTED_FROM_REAL_DIR="$W_MEMORY_LINK/memreal/memory/-home-memreal-quantivly-hub"
+COLLECTED_FROM_LINK="$W_MEMORY_LINK/memlink/memory/-home-memlink-quantivly-hub"
+# Each state is checked apart, since two empty directories would satisfy the diff alone.
+memory_entry_kind=real-dir; [[ -L "$MEMLINK_PROJECT/memory" ]] && memory_entry_kind=symlink
+collected_kind=absent
+if [[ -L "$COLLECTED_FROM_LINK" ]]; then collected_kind=symlink
+elif [[ -d "$COLLECTED_FROM_LINK" ]]; then collected_kind=real-dir; fi
+linked_topic_state=absent
+cmp -s "$MEMLINK_STORE_DIR/fact-one.md" "$COLLECTED_FROM_LINK/fact-one.md" && linked_topic_state=copied
+collected_differences=$(diff -r "$COLLECTED_FROM_REAL_DIR" "$COLLECTED_FROM_LINK" 2>&1)
+check "symlinked memory: collected as a real directory, with the same files by content as a real one" \
+    "$memory_link_collect_rc $memory_entry_kind $collected_kind $linked_topic_state|$collected_differences" \
+    "0 symlink real-dir copied|"
+
 printf "collect: the dotfiles checkout's own .claude is collected\n"
 dotfiles_skill_state=absent
 cmp -s "$H1/.dotfiles/.claude/skills/x/SKILL.md" "$W/h1/repos/home/.dotfiles/.claude/skills/x/SKILL.md" \
@@ -1035,7 +1062,7 @@ check "sections: cfg/ 6 of 12 and quantivly-hub 6 of 7 in their headings, rows n
     "$cfg_heading $cfg_shape|$store_heading $store_shape" "yes DDDDDDIIIIII|yes DDDDDDI"
 
 printf '\n'
-EXPECTED_ROWS=51
+EXPECTED_ROWS=52
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

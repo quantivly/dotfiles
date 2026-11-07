@@ -467,6 +467,8 @@ Design points that are load-bearing rather than preferences:
   rather than a list. So accounts in a pool share memory, plugin configuration and skills; only the
   identity differs. `claude-doctor` asserts it per account dir, because nothing about a session
   reveals that it has quietly stopped sharing.
+  On a host with a store table, each project's `memory` under that shared `projects/` is one link
+  further, into a git-backed store: [Memory stores](CLAUDE_SETUP.md#memory-stores-do-891).
   The one genuine exception is **plugin MCP OAuth**: `mcpOAuth` lives *inside* `.credentials.json`,
   so it is per-account by construction and each profile needs its own browser flow per plugin MCP
   server. The **claude.ai connectors** for the same services ride the login token and need no such

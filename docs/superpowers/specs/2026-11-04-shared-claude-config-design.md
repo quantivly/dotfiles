@@ -1,6 +1,6 @@
 # Shared Claude Code configuration across hosts — design
 
-**Status:** approved by Zvi 2026-11-04 (brainstorm, builder check and his eight answers recorded below). Implementation plans: docs/superpowers/plans/2026-11-04-claude-config-audit.md (steps 1–2), later plans per step.
+**Status:** approved by Zvi 2026-11-04 (brainstorm, builder check and his eight answers recorded below). Implementation plans: docs/superpowers/plans/2026-11-04-claude-config-audit.md (steps 1–2), docs/superpowers/plans/2026-11-06-claude-memory-stores.md (step 5), later plans per step.
 
 ## Context
 
@@ -327,6 +327,44 @@ dev's lanes already push. On the laptop (Q4) the unit pushes through gh's keyrin
 credential and, when the keyring is locked or the laptop just resumed, skips quietly;
 the doctor row reports the age of the last successful sync with a laptop threshold of
 2 h rather than 1 h, and no token is written to disk for it.
+
+**Amended 2026-11-06 (DO-891):** eight amendments, from the plan
+`docs/superpowers/plans/2026-11-06-claude-memory-stores.md`. Where they differ from the text above,
+they win. M7 reverses a recorded answer and **awaits Zvi's confirmation**; the other seven stand.
+
+- **(M1) Stores are a table, not one per tenant.** `memory-stores.json` names each store, its
+  `remote` and the `tenants` it holds. A store is checked out at
+  `~/.local/share/claude-memory/<store>`. A key maps to the store whose `tenants` holds the tenant
+  `scripts/tenant-route <dir>` answers.
+- **(M2) Store-relative directory.** A checkout with an `origin`: `repos/<owner>/<repo>`, lowercased,
+  by the rule of `repo_of_url` in `scripts/dev-sync`. A directory with no `.git`, or a repo with no
+  `origin`: `dirs/<slug>`, where slug is the path relative to `$HOME` with `/` → `-`, lowercased, and
+  `home` for `$HOME` itself.
+- **(M3) Keys.** The project key of a path is the path with every character outside `[A-Za-z0-9]`
+  replaced by `-` (`/home/u/.dotfiles` → `-home-u--dotfiles`). This reproduces every live key on the
+  laptop that still resolves to a directory; no directory there shows what `_` becomes, so that case
+  is unverified. A worktree of an ordinary repo has no key of its own: Claude Code keys it by the
+  main checkout. A submodule has **two** keys: its own path (sessions started in it), and its git dir
+  `<super>/.git/modules/<name>` (sessions started in a worktree *of* the submodule, whose common dir
+  is that git dir). Both link to one store directory.
+- **(M4) Conflict copies** are named by inserting `.conflict-<host>` before the final extension
+  (`x.md` → `x.conflict-<host>.md`; no extension: appended), not `<name>.<host>.md` as above, so a
+  glob finds them without a host list. An existing copy with a different body is never overwritten:
+  the next free `.conflict-<host>.2`, `.3`, … is used.
+- **(M5) What gets a link.** A candidate is linked when it has a real `memory/` directory, **or**
+  when its mapped store directory already holds a file (memory another host wrote). Nothing is
+  created for a checkout with neither.
+- **(M6) The secret gate withholds files, it does not refuse the commit.** A file whose content
+  changes under the redactor's shape rules is left uncommitted and named; the other files sync.
+- **(M7, awaiting Zvi's confirmation) Auth on a host with more than one GitHub account reads the
+  routed token file.** This section and the answer recorded as Q4 say "keyring via gh, no token on
+  disk". The keyring is keyed by host and cannot choose an account (`docs/GH_ACCOUNT_ROUTING.md`), so
+  the sync asks `scripts/gh-route` and reads the shell's existing token cache file, as the
+  `rabota schedule` tick does. No new token file is created. This reverses a recorded answer and
+  needs Zvi's confirmation before the sync's network half is built.
+- **(M8) Merge, never rebase.** This section says `pull --rebase`. A rebase removes every unpushed
+  file from the working tree while it replays, and a session writing in that window stops it in a
+  state `--abort` cannot leave (probed). The sync integrates with one `git merge`.
 
 **User memories.** Cross-repo memories about Zvi are curated, low-churn data about this
 person, which is dotfiles-local's charter: `~/.dotfiles-local/claude/memory-user/MEMORY.md`
