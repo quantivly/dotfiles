@@ -19,13 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   eight states; `--apply [--dry-run] [--only <key>]` renames a real `memory` directory to
   `memory.replaced-<stamp>` beside it, links, merges the renamed directory into the store and writes
   the marker `.merged-into-store` last, so a stopped run reads as `PENDING-MERGE` and the next one
-  finishes it. It never deletes or overwrites a memory file: index files take a line union, any other
-  difference becomes a `.conflict-<host>` copy, and a replaced directory is never pruned. `./install`
-  does not run it, and nothing here commits or pushes a store. `claude-doctor` gains a "Memory stores"
-  section (a note with no table, ✓ linked, ✗ with each row, ⚠ with each `UNMAPPED` row, ⚠ could not
-  run). `scripts/redact-secrets.sh` gains `--shapes-only` for at-rest gates, and refuses a second
+  finishes it; a file written into a replaced directory after its marker reads as pending again, and
+  only it is merged. It never deletes or overwrites a memory file: index files take a line union, any
+  other difference becomes a `.conflict-<host>` copy, and a replaced directory is never pruned. A store
+  directory that resolves outside its store checkout is refused before anything is made or written
+  for that key. `./install` does not run it, and nothing here commits or pushes a store. `claude-doctor`
+  gains a "Memory stores" section (a note with no table, ✓ linked, ✗ with each row, ⚠ with each
+  `UNMAPPED` row, ⚠ when no store is checked out and keys wait for one, ⚠ could not run).
+  `scripts/redact-secrets.sh` gains `--shapes-only` for at-rest gates, and refuses a second
   argument with exit 64. Guide: `docs/CLAUDE_SETUP.md` ("Memory stores"). State table:
-  `scripts/test-claude-memory-link.sh` (188 rows, hermetic; CI `claude-memory-link-test`), 25 rows
+  `scripts/test-claude-memory-link.sh` (201 rows, hermetic; CI `claude-memory-link-test`), 41 rows
   in `scripts/test-claude-doctor.sh`, and one in `scripts/test-claude-config-audit.sh` pinning that
   a linked `memory` is collected by content.
 

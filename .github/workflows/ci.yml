@@ -419,7 +419,7 @@ jobs:
       # reads only the fixture's config files. The table exits 2 as root, since
       # its unreadable-directory rows would assert nothing there; GitHub-hosted
       # runners run as `runner`, so nothing here has to drop privileges. git,
-      # flock, cmp and mkfifo are stock; it exits 2 if any tool is missing.
+      # flock, cmp, mkfifo and timeout are stock; it exits 2 if any tool is missing.
       - name: Run the claude-memory-link state table
         run: ./scripts/test-claude-memory-link.sh
 

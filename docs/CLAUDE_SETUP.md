@@ -336,14 +336,14 @@ directory has no state and no row.
 
 | state | what it means | `--check` | `--apply` |
 |---|---|---|---|
-| `PENDING-MERGE` | a `memory.replaced-*` directory without the marker exists | to fix | finishes the merge, unless the store is not checked out or no candidate claims the key: then it has nowhere to go and is left |
-| `NO-STORE` | mapped, but that store is not checked out on this host | not shown | left alone |
+| `PENDING-MERGE` | a `memory.replaced-*` directory exists without the marker, or holding a file newer than it | to fix | finishes the merge, unless the store is not checked out or no candidate claims the key: then it has nowhere to go and is left |
+| `NO-STORE` | mapped, but that store is not checked out on this host | not shown, but counted as `without a store` when its `memory` is a real directory holding a file | left alone |
 | `LINKED` | a symlink to the mapped store directory, which exists | counted | nothing |
 | `DANGLING` | the right symlink, but its target directory does not exist | to fix | creates the directory |
 | `WRONG-LINK` | a symlink to anywhere else | to fix | left alone, to fix by hand (a pending merge still finishes, reported as `merged`) |
 | `REAL-DIR` | a real directory, the key is mapped, the store is checked out | to fix | swaps it for the link and merges it in |
 | `MISSING` | no `memory` entry, and the mapped store directory holds a file, such as memory another host wrote | to fix | creates the link |
-| `UNMAPPED` | a real `memory` directory holding a file, under a key no candidate claims | shown, exit 0 | not walked: it has no store directory, so add it to the table |
+| `UNMAPPED` | a real `memory` directory holding a file, under a key no candidate claims | shown, exit 0 | not walked: it has no store directory (see **Adding a directory**) |
 
 **The verbs.** `--check` and `--list` only read.
 
@@ -352,6 +352,13 @@ directory has no state and no row.
     scripts/claude-memory-link.sh --apply --dry-run       # the lines --apply would print; changes nothing, takes no lock
     scripts/claude-memory-link.sh --apply                 # finish pending merges, then link
     scripts/claude-memory-link.sh --apply --only <key>    # the same for one key
+
+`--check` ends with its summary line:
+
+    claude-memory-link: <n> linked, <n> to fix, <n> unmapped, <n> without a store
+
+The last count is the `NO-STORE` keys whose `memory` is a real directory holding a file: memory
+waiting for its store to be checked out here. No row of `--check` names them; `--list` does.
 
 `--apply` prints one line per key it acted on, and nothing on a second run:
 `linked <key> -> <store dir> (copied <n>, identical <n>, kept-both <n>)`. A real run holds an flock on
@@ -377,14 +384,22 @@ directory has no state and no row.
 **What it never does: delete or overwrite a memory file.** The replaced directory stays beside the
 link and is never pruned, and the only changes to a store's existing content are the appended index
 lines below. A writer holding an open descriptor or a cwd inside the directory can land after the
-walk; that write stays in the replaced directory, not lost and not merged.
+walk; that write stays in the replaced directory, not lost and not merged. Nothing leaves the store
+through a symlink either: a store directory that resolves outside its store checkout (a link planted
+at `repos/<owner>`, say) is exit 2 before anything is made, renamed or written for that key, and a
+target whose directory resolves outside the store directory is refused file by file.
 
 **The marker means "merged".** A replaced directory without `.merged-into-store` reads as
 `PENDING-MERGE`, so a run stopped anywhere fails `--check`, and the next `--apply` finishes the merge
 before anything else on that key. A file that cannot be merged leaves its directory unmarked while
 its other files still go, and a key that fails stops only itself. A real directory that already holds
 the marker, which is what undoing a link with `mv memory.replaced-<stamp> memory` leaves, is merged
-like any other: the marker spoke for what it held then, so it is removed before the rename.
+like any other: the marker spoke for what it held then, so it is removed before the rename. The one
+case the marker does not settle is a file written into a replaced directory after it: a regular file
+newer than the marker reads as `PENDING-MERGE` again, and the next `--apply` merges what is newer than
+the marker, and only that, since the store has been free to move on from the rest, then writes the
+marker anew. A marker path holding anything but a regular file is refused, exit 2, and the directory
+stays unmarked.
 
 **One file in the merge**, at any depth. A symlink is copied and compared as a link, never followed,
 or it would bring what it points at into a store that is pushed to a remote.
@@ -402,10 +417,15 @@ another body is kept and the next is `x.conflict-<host>.2.md`, `.3.md`, and so o
 body is that file already, so a resumed merge adds none.
 
 **Adding a directory.** An `UNMAPPED` row is usually the prompt: it names a key holding memory that
-the table does not claim. Add a pattern to `checkout_globs` for a checkout (with its populated
-submodules), or the path to `plain_dirs` for a directory that is not one, and make sure a store's
-`tenants` lists the tenant `scripts/tenant-route <dir>` answers for it. `--check` then shows the key
-as `REAL-DIR`; look with `--apply --dry-run --only <key>`, then run `--apply --only <key>`.
+the table does not claim. A key whose directory still exists is claimed by adding it to
+`checkout_globs` or `plain_dirs`: a pattern in `checkout_globs` for a checkout (with its populated
+submodules), or the path in `plain_dirs` for a directory that is not one, with a store's `tenants`
+listing the tenant `scripts/tenant-route <dir>` answers for it. `--check` then shows the key as
+`REAL-DIR`; look with `--apply --dry-run --only <key>`, then run `--apply --only <key>`.
+
+A key whose directory no longer exists cannot be claimed: a `plain_dirs` entry absent on this host is
+skipped and no glob matches what is gone. Read its memory, move what is worth keeping into the store
+by hand, then move the key directory aside, or the row is permanent.
 
 **Permission mode, from the pilot** (Claude Code 2.1.319, 2026-11-06). With `memory` a symlink to a
 directory outside `~/.claude`, the index loads at session start, and Write, Read and Edit work. A
@@ -414,8 +434,10 @@ not.
 
 **Who runs it.** `claude-doctor`'s "Memory stores" section runs `--check`, and nothing else: a note
 with no table, ✓ with the counts, ✗ with each row on exit 1 (`--apply --dry-run` shows what `--apply`
-would do), ⚠ with each row when an exit 0 carries `UNMAPPED` rows, and ⚠ with the last stderr line
-when it could not run. `CLAUDE_MEMORY_PROJECTS_DIR`, `CLAUDE_MEMORY_STORES_ROOT`,
+would do), ⚠ with each row and both remedies when an exit 0 carries `UNMAPPED` rows, ⚠
+`no memory store is checked out on this host (<n> keys wait for one)` when nothing is linked and keys
+hold memory waiting for a store, and ⚠ with the last stderr line when it could not run.
+`CLAUDE_MEMORY_PROJECTS_DIR`, `CLAUDE_MEMORY_STORES_ROOT`,
 `CLAUDE_MEMORY_CONFIG`, `CLAUDE_MEMORY_STATE_DIR`, `CLAUDE_MEMORY_HOST` and
 `CLAUDE_MEMORY_TENANT_ROUTE` override the paths, the host in a conflict copy's name and the tenant
 lookup.

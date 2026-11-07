@@ -50,7 +50,7 @@ bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for tool in bash git jq find sha256sum sort cmp flock mkfifo stat touch; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
+for tool in bash git jq find sha256sum sort cmp flock mkfifo stat touch timeout; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
 [[ -x "$SUT" ]] || fatal "$SUT is not executable — every row below would assert nothing"
 # Mode 000 does not stop root, so the unreadable-directory rows would pass on nothing. Not a skip: a
 # skipped row is neither a pass nor a fail, and it would leave a green total behind.
@@ -166,10 +166,21 @@ store_file() {
 }
 
 # run_sut ARGS… → combined output in $OUT, exit status in $RC. Every override is always set.
+SUT_RUNNER_PREFIX=()
 run_sut() {
     OUT=$(CLAUDE_MEMORY_PROJECTS_DIR="$PROJECTS_DIR" CLAUDE_MEMORY_STORES_ROOT="$STORES_ROOT" \
         CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_STATE_DIR="$STATE_DIR" \
-        CLAUDE_MEMORY_HOST="$FIXTURE_HOST" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" "$SUT" "$@" 2>&1); RC=$?
+        CLAUDE_MEMORY_HOST="$FIXTURE_HOST" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" \
+        "${SUT_RUNNER_PREFIX[@]}" "$SUT" "$@" 2>&1); RC=$?
+}
+
+# run_sut_bounded ARGS… — run_sut for a row whose regression is a hang under the lock: the row then
+# fails on exit 124, where the table would otherwise never end.
+HANG_BOUND_SECONDS=30
+run_sut_bounded() {
+    SUT_RUNNER_PREFIX=(timeout --kill-after=5 "$HANG_BOUND_SECONDS")
+    run_sut "$@"
+    SUT_RUNNER_PREFIX=()
 }
 
 # row_of_key KEY — the --list line of KEY in $OUT, or nothing. A plain string match, so that the
@@ -682,7 +693,7 @@ check "list: an empty unclaimed directory is not listed" \
     "$(row_of_key "$empty_unclaimed_key")|$(line_count "$list_out")" "|${#ALL_STATES[@]}"
 run_sut --check
 check "check: the summary counts every state" \
-    "$RC|$(contains "$OUT" 'claude-memory-link: 1 linked, 5 to fix, 1 unmapped')" "1|yes"
+    "$RC|$(contains "$OUT" 'claude-memory-link: 1 linked, 5 to fix, 1 unmapped, 1 without a store')" "1|yes"
 tree_after=$(find "$HOME" "$PROJECTS_DIR" "$STORES_ROOT" -printf '%p %y %l %s %T@\n' | LC_ALL=C sort | sha256sum)
 # The exit status is part of the row: a script that does nothing changes nothing, too.
 check "read-only: --list and --check change nothing, mtimes included" "$list_rc|$tree_after" "0|$tree_before"
@@ -845,7 +856,7 @@ for state in REAL-DIR MISSING DANGLING PENDING-MERGE WRONG-LINK; do
     run_sut --check
     check "check: exit 1 on $state" "$RC|$OUT" \
         "1|${EXPECTED_ROW[$state]}
-claude-memory-link: 0 linked, 1 to fix, 0 unmapped"
+claude-memory-link: 0 linked, 1 to fix, 0 unmapped, 0 without a store"
 done
 
 reset_scene
@@ -853,26 +864,53 @@ add_state UNMAPPED
 run_sut --check
 check "check: UNMAPPED alone is exit 0 and its row is printed" "$RC|$OUT" \
     "0|${EXPECTED_ROW[UNMAPPED]}
-claude-memory-link: 0 linked, 0 to fix, 1 unmapped"
+claude-memory-link: 0 linked, 0 to fix, 1 unmapped, 0 without a store"
 
 reset_scene
 add_state LINKED
 run_sut --check
 check "check: all linked is exit 0 with only the summary line" "$RC|$OUT" \
-    "0|claude-memory-link: 1 linked, 0 to fix, 0 unmapped"
+    "0|claude-memory-link: 1 linked, 0 to fix, 0 unmapped, 0 without a store"
 
 reset_scene
 add_state NO-STORE
 run_sut --check
 check "check: NO-STORE alone is exit 0 and is not printed" "$RC|$OUT" \
-    "0|claude-memory-link: 0 linked, 0 to fix, 0 unmapped"
+    "0|claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 1 without a store"
+
+# Every mapped key NO-STORE, which is what the doctor must not read as the all-clear. Only a real
+# directory holding a file waits for a store: the three other keys here have nothing that does.
+reset_scene
+for repo in beta-holds-memory beta-also-holds-memory beta-empty-memory beta-no-entry beta-link-entry; do
+    make_checkout "code/$repo" "git@github.com:$FIXTURE_OWNER/$repo.git"
+done
+real_memory "$(key_of "$HOME/code/beta-holds-memory")" MEMORY.md
+real_memory "$(key_of "$HOME/code/beta-also-holds-memory")" topic.md
+real_memory "$(key_of "$HOME/code/beta-empty-memory")"
+mkdir -p "$TMPROOT/link-target-with-a-file"
+printf 'fixture memory\n' > "$TMPROOT/link-target-with-a-file/MEMORY.md"
+link_memory "$(key_of "$HOME/code/beta-link-entry")" "$TMPROOT/link-target-with-a-file"
+run_sut --check
+check "check: the summary counts the NO-STORE keys holding memory, and no other" "$RC|$OUT" \
+    "0|claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 2 without a store"
+
+# A count that cannot be taken is no smaller count.
+reset_scene
+add_state NO-STORE
+unreadable_memory_dir="$PROJECTS_DIR/${EXPECTED_ROW[NO-STORE]%%"$TAB"*}/memory"
+chmod 000 "$unreadable_memory_dir"
+run_sut --check
+unreadable_no_store_result="$RC|$(contains "$OUT" "could not read $unreadable_memory_dir")"
+chmod 755 "$unreadable_memory_dir"
+check "check: a NO-STORE key whose memory cannot be read is exit 2 naming it" \
+    "$unreadable_no_store_result" "2|yes"
 
 reset_scene
 add_state REAL-DIR
 run_sut
 check "check: no verb means --check" "$RC|$OUT" \
     "1|${EXPECTED_ROW[REAL-DIR]}
-claude-memory-link: 0 linked, 1 to fix, 0 unmapped"
+claude-memory-link: 0 linked, 1 to fix, 0 unmapped, 0 without a store"
 
 # ---------------------------------------------------------------------------------------------
 # The store table.
@@ -994,6 +1032,7 @@ STUB_BIN="$TMPROOT/apply-stub-bin"
 STUB_STATE_FILE="$TMPROOT/apply-stub-state"
 export STUB_STATE_FILE
 OLD_MTIME_STAMP='200101010000'
+MARKER_PAST_MTIME_STAMP='200201010000'
 PARTIAL_SUFFIX='.link-partial'
 CONFLICT_MD_SUFFIX=".conflict-$FIXTURE_HOST.md"
 UTC_STAMP_NAME_RE='/memory\.replaced-[0-9]{8}T[0-9]{6}Z$'
@@ -1409,8 +1448,11 @@ run_sut --apply
 check "resume: the next --apply merges it and writes the marker" \
     "$RC|$OUT|$(body_of "$store_dir/first.md")|$(body_of "$store_dir/second.md")|$(replaced_dir_counts "$key_dir")|$(partial_count "$store_dir")" \
     "0|$(linked_line 1 1 0)|first body|second body|1 marked, 0 unmarked|0"
+# Older than the marker, so the marker settles it. A newer file is the one case it does not: the rows
+# under "apply: a file written after the marker".
 late_replaced_dirs=("$key_dir"/memory.replaced-*)
 write_file "${late_replaced_dirs[0]}/added-afterwards.md" 'added afterwards'
+touch -t "$OLD_MTIME_STAMP" "${late_replaced_dirs[0]}/added-afterwards.md"
 run_sut --apply
 check "resume: a marked replaced directory is not merged again" \
     "$RC|$OUT|$(body_of "$store_dir/added-afterwards.md")" "0||<absent>"
@@ -1892,6 +1934,67 @@ check "apply: a stale marker that cannot be removed is exit 2, before the rename
     "$RC|$(contains "$OUT" "could not clear the stale marker in $memory_dir")|$(memory_kind "$memory_dir")|$(replaced_dir_counts "$key_dir")" \
     "2|yes|real|0 marked, 0 unmarked"
 
+printf 'apply: a file written after the marker\n'
+# The marker is set in the past, rather than the row racing the clock: -newer compares timestamps, and
+# a file written in the marker's own tick is not newer.
+apply_scene_marked_in_the_past() {
+    pending_scene "$1"
+    shift
+    local file_body_pair
+    for file_body_pair in "$@"; do
+        write_file "$replaced_dir/${file_body_pair%%=*}" "${file_body_pair#*=}"
+    done
+    run_sut --apply
+    (( RC == 0 )) || fatal "could not mark the replaced directory of the scene: $OUT"
+    find "$replaced_dir" -type f -exec touch -t "$OLD_MTIME_STAMP" {} +
+    touch -t "$MARKER_PAST_MTIME_STAMP" "$replaced_dir/$MERGED_MARKER"
+}
+
+apply_scene_marked_in_the_past written-after-marker 'settled.md=settled body'
+write_file "$replaced_dir/late.md" 'late body'
+marker_mtime_before=$(stat -c '%Y' "$replaced_dir/$MERGED_MARKER")
+tree_before=$(tree_fingerprint)
+run_sut --apply --dry-run
+late_dry_run="$RC|$OUT|$(tree_fingerprint)"
+run_sut --check
+late_check="$RC|$(contains "$OUT" "$key${TAB}PENDING-MERGE")"
+run_sut --apply
+late_apply="$RC|$OUT"
+marker_mtime_after=$(stat -c '%Y' "$replaced_dir/$MERGED_MARKER")
+run_sut --check
+late_check_after="$RC"
+run_sut --apply
+check "apply: a file written into a marked directory is merged, and the marker moves" \
+    "$late_dry_run|$late_check|$late_apply|$late_check_after|$RC|$OUT|$(body_of "$store_dir/late.md")|$(replaced_dir_counts "$key_dir")|$(( marker_mtime_after > marker_mtime_before ))" \
+    "0|$(linked_line 1 0 0)|$tree_before|1|yes|0|$(linked_line 1 0 0)|0|0||late body|1 marked, 0 unmarked|1"
+
+# The rest was merged when the marker was written, and the store has been free to move on since.
+apply_scene_marked_in_the_past only-the-newcomer 'edited.md=body when merged' 'deleted.md=deleted body' 'MEMORY.md=- line of the replaced directory'
+write_file "$store_dir/edited.md" 'edited since'
+rm -f "$store_dir/deleted.md"
+write_file "$store_dir/MEMORY.md" '- the store dropped that line'
+write_file "$replaced_dir/late.md" 'late body'
+run_sut --apply
+check "apply: a file written after the marker brings only itself, and the store keeps what it moved on to" \
+    "$RC|$OUT|$(body_of "$store_dir/late.md")|$(body_of "$store_dir/edited.md")|$(body_of "$store_dir/deleted.md")|$(body_of "$store_dir/MEMORY.md")|$(find "$store_dir" -name '*.conflict-*' | wc -l | tr -d ' ')" \
+    "0|$(linked_line 1 0 0)|late body|edited since|<absent>|- the store dropped that line|0"
+
+apply_scene_marked_in_the_past partial-after-marker
+write_file "$(partial_of "$replaced_dir" other.md)" 'named like a partial'
+run_sut --check
+check "check: a file named like a partial, written after the marker, does not read as pending" \
+    "$RC|$(contains "$OUT" PENDING-MERGE)" "0|no"
+
+apply_scene_marked_in_the_past unreadable-after-marker 'locked/x.md=x body'
+chmod 000 "$replaced_dir/locked"
+run_sut --check
+unreadable_check="$RC|$(contains "$OUT" "$key${TAB}PENDING-MERGE")"
+run_sut --apply
+unreadable_apply="$RC|$(contains "$OUT" "could not read $replaced_dir")"
+chmod 755 "$replaced_dir/locked"
+check "check: a marked directory that cannot be walked reads as pending, not as settled" \
+    "$unreadable_check|$unreadable_apply" "1|yes|2|yes"
+
 printf 'apply: never through a symlink\n'
 apply_scene store-symlink-outside
 outside_dir="$TMPROOT/outside-the-store"
@@ -1928,16 +2031,99 @@ check "apply: a store symlink that stays inside the store directory is followed"
 
 apply_scene store-dir-is-symlink
 write_file "$memory_dir/sub/x.md" 'x body'
-real_store_dir="$TMPROOT/store-dir-elsewhere"
-rm -rf "$real_store_dir"
+real_store_dir="$STORES_ROOT/$ALPHA_STORE/store-dir-elsewhere"
 mkdir -p "$real_store_dir" "$(dirname "$store_dir")"
 ln -s "$real_store_dir" "$store_dir"
 run_sut --apply
 apply_result="$RC|$OUT"
 run_sut --list
-check "apply: a store directory that is itself a symlink still works" \
+check "apply: a store directory that is itself a symlink inside the checkout still works" \
     "$apply_result|$(row_of_key "$key" | cut -f2)|$(body_of "$real_store_dir/sub/x.md")" \
     "0|$(linked_line 1 0 0)|LINKED|x body"
+
+# Containment compares physical paths, so a checkout reached through a link of its own is no escape.
+apply_scene store-checkout-is-symlink
+write_file "$memory_dir/x.md" 'x body'
+real_checkout_dir="$TMPROOT/store-checkout-elsewhere"
+rm -rf "$real_checkout_dir"
+mv "$STORES_ROOT/$ALPHA_STORE" "$real_checkout_dir" || fatal "could not move the store checkout"
+ln -s "$real_checkout_dir" "$STORES_ROOT/$ALPHA_STORE" || fatal "could not link the store checkout"
+run_sut --apply
+check "apply: a store checkout that is itself a symlink still works" \
+    "$RC|$OUT|$(body_of "$real_checkout_dir/repos/$FIXTURE_OWNER/store-checkout-is-symlink/x.md")" \
+    "0|$(linked_line 1 0 0)|x body"
+
+# plant_link_above_store_dir OUTSIDE_DIR — repos/<owner> in the alpha store is a symlink to OUTSIDE_DIR,
+# which is empty: what a link committed on another host would leave here. $STORES_ROOT is physical.
+plant_link_above_store_dir() {
+    rm -rf "$1" "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER"
+    mkdir -p "$1" "$STORES_ROOT/$ALPHA_STORE/repos" || fatal "could not create the fixture directories"
+    ln -s "$1" "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" || fatal "could not plant the link"
+}
+
+# outside_entry_count DIR — how many entries lie under DIR.
+outside_entry_count() { find "$1" -mindepth 1 | wc -l | tr -d ' '; }
+
+above_store_dir="$TMPROOT/outside-above-the-store"
+
+apply_scene link-above-real-dir
+make_checkout code/z-after-link-above 'git@github.com:other-org/z-after-link-above.git'
+after_key=$(key_of "$HOME/code/z-after-link-above")
+real_memory "$after_key" MEMORY.md
+plant_link_above_store_dir "$above_store_dir"
+write_file "$memory_dir/x.md" 'x body'
+refusal_line="refusing $store_dir: it resolves outside the store checkout $STORES_ROOT/$ALPHA_STORE"
+run_sut --apply --dry-run
+link_above_dry_run="$RC|$(contains "$OUT" "$refusal_line")"
+run_sut --apply
+apply_result="$RC|$(contains "$OUT" "$refusal_line")|$(contains "$OUT" "could not finish 1 key(s): $key")"
+run_sut --list
+check "apply: a symlink above the store directory that leaves the checkout is refused: nothing lands outside, the key stays REAL-DIR, later keys link" \
+    "$link_above_dry_run|$apply_result|$(outside_entry_count "$above_store_dir")|$(memory_kind "$memory_dir")|$(row_of_key "$key" | cut -f2)|$(replaced_dir_counts "$key_dir")|$(row_of_key "$after_key" | cut -f2)" \
+    "2|yes|2|yes|yes|0|real|REAL-DIR|0 marked, 0 unmarked|LINKED"
+
+# The same refusal from each other place that would make the directory, or write into it.
+apply_scene link-above-missing
+rmdir "$memory_dir"
+plant_link_above_store_dir "$above_store_dir"
+write_file "$above_store_dir/link-above-missing/MEMORY.md" 'memory reached through the link'
+outside_listing_before=$(file_manifest "$above_store_dir")
+run_sut --apply --dry-run
+link_above_dry_run="$RC|$(contains "$OUT" "refusing $store_dir: it resolves outside")"
+run_sut --apply
+check "apply: a MISSING key behind a symlink above the store directory gets no link" \
+    "$link_above_dry_run|$RC|$(contains "$OUT" "refusing $store_dir: it resolves outside")|$(memory_kind "$memory_dir")|$(file_manifest "$above_store_dir")" \
+    "2|yes|2|yes|absent|$outside_listing_before"
+
+apply_scene link-above-dangling
+rmdir "$memory_dir"
+plant_link_above_store_dir "$above_store_dir"
+link_memory "$key" "$store_dir"
+run_sut --apply
+check "apply: a DANGLING key behind a symlink above the store directory makes nothing outside" \
+    "$RC|$(contains "$OUT" "refusing $store_dir: it resolves outside")|$(outside_entry_count "$above_store_dir")" \
+    "2|yes|0"
+
+pending_scene link-above-pending
+write_file "$replaced_dir/topic.md" 'pending body'
+plant_link_above_store_dir "$above_store_dir"
+run_sut --apply
+check "apply: a pending merge behind a symlink above the store directory lands nothing outside, and stays pending" \
+    "$RC|$(contains "$OUT" "refusing $store_dir: it resolves outside")|$(outside_entry_count "$above_store_dir")|$(replaced_dir_counts "$key_dir")" \
+    "2|yes|0|0 marked, 1 unmarked"
+
+apply_scene store-dir-links-outside
+write_file "$memory_dir/x.md" 'x body'
+outside_store_dir="$TMPROOT/store-dir-outside-the-checkout"
+rm -rf "$outside_store_dir"
+mkdir -p "$outside_store_dir" "$(dirname "$store_dir")"
+ln -s "$outside_store_dir" "$store_dir"
+run_sut --apply
+apply_result="$RC|$(contains "$OUT" "refusing $store_dir: it resolves outside")"
+run_sut --list
+check "apply: a store directory that is itself a symlink out of the checkout is refused, and the key stays REAL-DIR" \
+    "$apply_result|$(outside_entry_count "$outside_store_dir")|$(row_of_key "$key" | cut -f2)" \
+    "2|yes|0|REAL-DIR"
 
 pending_scene marker-dangling
 write_file "$replaced_dir/topic.md" 'pending body'
@@ -1959,6 +2145,29 @@ run_sut --apply
 check "apply: a marker symlink to a file does not count as merged, and the file is left alone" \
     "$marker_link_check|$RC|$(body_of "$store_dir/topic.md")|$(body_of "$TMPROOT/marker-link-target")" \
     "1|yes|2|pending body|a file of someone else"
+
+# The regression blocks in open(2) under the lock, so this runs bounded.
+reset_scene
+for repo in a-fifo-marker b-after-fifo-marker; do
+    make_checkout "code/$repo" "git@github.com:$FIXTURE_OWNER/$repo.git"
+done
+a_key=$(key_of "$HOME/code/a-fifo-marker")
+b_key=$(key_of "$HOME/code/b-after-fifo-marker")
+a_store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/a-fifo-marker"
+b_store_dir="$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER/b-after-fifo-marker"
+mkdir -p "$a_store_dir"
+link_memory "$a_key" "$a_store_dir"
+a_replaced_dir="$PROJECTS_DIR/$a_key/$REPLACED_STAMP"
+write_file "$a_replaced_dir/topic.md" 'pending body'
+mkfifo "$a_replaced_dir/$MERGED_MARKER"
+real_memory "$b_key" MEMORY.md
+fifo_refusal="refusing to write the marker at $a_replaced_dir/$MERGED_MARKER: it is not a regular file"
+run_sut_bounded --apply --dry-run
+fifo_dry_run="$RC|$(contains "$OUT" "$fifo_refusal")"
+run_sut_bounded --apply
+check "apply: a fifo at the marker path is refused, exit 2 naming it, nothing hangs and the later key links" \
+    "$fifo_dry_run|$RC|$(contains "$OUT" "$fifo_refusal")|$(contains "$OUT" "could not finish 1 key(s): $a_key")|$(replaced_dir_counts "$PROJECTS_DIR/$a_key")|$(body_of "$a_store_dir/topic.md")|$(memory_kind "$PROJECTS_DIR/$b_key/memory")" \
+    "2|yes|2|yes|yes|0 marked, 1 unmarked|pending body|link to $b_store_dir"
 
 apply_scene directory-at-partial-name
 write_file "$memory_dir/topic.md" 'replaced body'
@@ -2157,7 +2366,7 @@ done
 check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
 
 printf '\n'
-EXPECTED_ROWS=188
+EXPECTED_ROWS=201
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

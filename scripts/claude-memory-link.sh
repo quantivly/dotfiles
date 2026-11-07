@@ -62,7 +62,8 @@
 #
 # STATES, first match wins. PENDING-MERGE comes first because a merge left unfinished must be
 # reported whatever else is true of the key, a missing store and an unclaimed key included.
-#   PENDING-MERGE a memory.replaced-* directory without the marker .merged-into-store exists
+#   PENDING-MERGE a memory.replaced-* directory exists without the marker .merged-into-store, or
+#                 holding a regular file newer than it
 #   NO-STORE      mapped, but that store is not checked out on this host
 #   LINKED        memory is a symlink to the mapped store directory, which exists
 #   DANGLING      the right symlink, but its target directory does not exist
@@ -89,6 +90,12 @@
 # have nowhere their pending merge may go: --apply leaves them alone. A replaced directory is never
 # pruned.
 #
+# A FILE WRITTEN AFTER THE MARKER is the one case the marker does not settle. A regular file newer than
+# the marker makes the directory read as pending again, and the next --apply merges what is newer than
+# the marker, and only that, since the store has been free to move on from the rest, then writes the
+# marker anew. A file written in the marker's own clock tick reads as settled, and one whose mtime lies
+# in the future reads as pending until the clock passes it.
+#
 # A REAL DIRECTORY ALREADY HOLDING THE MARKER is merged like any other, not refused. It is what
 # undoing a link with `mv memory.replaced-X memory` leaves, and the marker spoke for what the
 # directory held then, not for what was written since. A refusal would keep every later write off the
@@ -112,17 +119,22 @@
 #                                   adds none.
 # A leftover partial from a stopped run is no store file: nothing counts it, and only the next merge
 # of the same file removes it. A file named like one in a memory directory stays in the replaced
-# directory. A target whose directory resolves outside the store directory is refused, so nothing is
-# written through a symlink in the store, and a marker path that is a symlink is refused as well.
+# directory. A store directory that resolves outside its store checkout is refused before anything is
+# made, renamed or written for that key, and a target whose directory resolves outside the store
+# directory is refused, so nothing is written through a symlink out of the store. A marker path holding
+# anything but a regular file is refused as well: a symlink would be written through, a fifo would
+# hang this run under the lock.
 #
 # A FAILURE STOPS ONLY WHAT FAILED. A file that cannot be merged leaves its directory unmarked, and the
 # directory's other files still go. A key that fails prints its reasons and no line, and the later keys
 # still run. The run then exits 2 naming those keys.
 #
 # Usage:
-#   claude-memory-link --check   print each row that is not LINKED or NO-STORE, then a summary line;
-#                                exit 1 if any key is REAL-DIR, MISSING, DANGLING, PENDING-MERGE or
-#                                WRONG-LINK (the default verb)
+#   claude-memory-link --check   print each row that is not LINKED or NO-STORE, then a summary line:
+#                                  <n> linked, <n> to fix, <n> unmapped, <n> without a store
+#                                the last being the NO-STORE keys whose memory is a real directory
+#                                holding a file; exit 1 if any key is REAL-DIR, MISSING, DANGLING,
+#                                PENDING-MERGE or WRONG-LINK (the default verb)
 #   claude-memory-link --list    print every key as TSV: key, state, store, store-relative directory,
 #                                source directory (the path the key comes from; the last three are
 #                                empty for a key no candidate claims). A backslash, tab or newline in
@@ -229,7 +241,8 @@ CANDIDATE_SOURCE_DIRS=()
 CHECKOUT_KIND=''              # what classify_directory found: plain | ordinary | submodule | worktree
 SUBMODULE_GIT_DIR=''          # and, for a submodule, its git dir
 GLOB_MATCHES=()               # what expand_home_glob found
-# The report, as parallel arrays: each row's state, and its line as printed.
+# The report, as parallel arrays: each row's key, its state, and its line as printed.
+ROW_KEYS=()
 ROW_STATES=()
 ROW_LINES=()
 UNMARKED_REPLACED_DIRS=()     # what load_unmarked_replaced_dirs found
@@ -240,6 +253,7 @@ KEPT_BOTH_COUNT=0
 # A dry run copies nothing, so a later file with the same target compares against this: store path →
 # the source a run would have copied there. It spans keys, since a submodule's two keys share a store.
 declare -A PLANNED_SOURCE_OF_TARGET=()
+PHYSICAL_STORE_CHECKOUT=''    # the physical path of the checkout of the store apply_key is on
 PHYSICAL_STORE_DIR=''         # what resolve_store_directory found; empty when it does not exist yet
 
 usage() { sed -n '/^# Usage:/,/^# Exit:/p' "$SELF" | sed '$d; s/^# \{0,1\}//'; }
@@ -568,9 +582,21 @@ path_is_free() { [[ ! -e "$1" && ! -L "$1" ]]; }
 # is_regular_file PATH — true for a regular file itself, not a symlink to one.
 is_regular_file() { [[ -f "$1" && ! -L "$1" ]]; }
 
+# holds_file_newer_than_marker REPLACED_DIR — true when a regular file there is newer than the marker,
+# leaving out what the merge leaves out. A walk that fails proves nothing, so it answers yes too, and
+# the merge's own walk reports why. The marker is written after the last file, so a merge never trips
+# this by itself.
+holds_file_newer_than_marker() {
+    local replaced_dir=$1 first_newer_file
+    first_newer_file=$(find "$replaced_dir" -type f -newer "$replaced_dir/$MERGED_MARKER_NAME" \
+        ! -name "$PARTIAL_COPY_NAME_GLOB" -print -quit 2>/dev/null) || return 0
+    [[ -n "$first_newer_file" ]]
+}
+
 # load_unmarked_replaced_dirs KEY_DIR — set UNMARKED_REPLACED_DIRS to the replaced directories there
-# that lack the marker, oldest first, since the stamp sorts by time. A marker is a regular file: this
-# script writes no other kind, and a symlink there must not read as merged.
+# that lack the marker or hold a file newer than it, oldest first, since the stamp sorts by time. A
+# marker is a regular file: this script writes no other kind, and a symlink there must not read as
+# merged.
 load_unmarked_replaced_dirs() {
     local key_dir=$1 replaced_dirs=() replaced_dir
     UNMARKED_REPLACED_DIRS=()
@@ -578,7 +604,8 @@ load_unmarked_replaced_dirs() {
     replaced_dirs=("$key_dir/$MEMORY_ENTRY_NAME$REPLACED_DIR_INFIX"*)
     shopt -u nullglob
     for replaced_dir in "${replaced_dirs[@]}"; do
-        if [[ -d "$replaced_dir" && ! -L "$replaced_dir" ]] && ! is_regular_file "$replaced_dir/$MERGED_MARKER_NAME"; then
+        [[ -d "$replaced_dir" && ! -L "$replaced_dir" ]] || continue
+        if ! is_regular_file "$replaced_dir/$MERGED_MARKER_NAME" || holds_file_newer_than_marker "$replaced_dir"; then
             UNMARKED_REPLACED_DIRS+=("$replaced_dir")
         fi
     done
@@ -645,15 +672,20 @@ state_of_mapped_key() {
     fi
 }
 
-# state_of_unclaimed_key KEY — print the state of a key no candidate claims, or nothing. The `! -L`
-# states the rule, that only a real directory can be unmapped. directory_holds_a_file also answers no
-# for a symlink, so a mutant dropping `! -L` alone is equivalent.
+# key_holds_real_memory KEY — true when KEY's memory entry is a real directory holding a file. The
+# `! -L` states the rule, that only a real directory counts. directory_holds_a_file also answers no for
+# a symlink, so a mutant dropping `! -L` alone is equivalent.
+key_holds_real_memory() {
+    local memory_path="$PROJECTS_DIR/$1/$MEMORY_ENTRY_NAME"
+    [[ -d "$memory_path" && ! -L "$memory_path" ]] && directory_holds_a_file "$memory_path"
+}
+
+# state_of_unclaimed_key KEY — print the state of a key no candidate claims, or nothing.
 state_of_unclaimed_key() {
-    local key_dir="$PROJECTS_DIR/$1" memory_path="$PROJECTS_DIR/$1/$MEMORY_ENTRY_NAME"
-    require_readable_if_present "$key_dir"
-    if has_unmerged_replaced_dir "$key_dir"; then
+    require_readable_if_present "$PROJECTS_DIR/$1"
+    if has_unmerged_replaced_dir "$PROJECTS_DIR/$1"; then
         printf 'PENDING-MERGE'
-    elif [[ -d "$memory_path" && ! -L "$memory_path" ]] && directory_holds_a_file "$memory_path"; then
+    elif key_holds_real_memory "$1"; then
         printf 'UNMAPPED'
     fi
 }
@@ -801,11 +833,31 @@ keep_both() {
     fi
 }
 
+# path_resolves_inside PATH PHYSICAL_ANCHOR — false when the deepest part of PATH that exists resolves
+# outside PHYSICAL_ANCHOR, or does not resolve at all. Asked before anything reads or writes there,
+# since mkdir -p, >> and cp all follow a symlink. A plain file in the way leads nowhere, and mkdir -p
+# reports it.
+path_resolves_inside() {
+    local existing_ancestor=$1 physical_anchor=$2 physical_ancestor
+    while [[ -n "$existing_ancestor" ]] && path_is_free "$existing_ancestor"; do
+        existing_ancestor=${existing_ancestor%/*}
+    done
+    if is_regular_file "$existing_ancestor"; then return 0; fi
+    physical_ancestor=$(cd -P -- "$existing_ancestor" 2>/dev/null && pwd -P) || return 1
+    [[ "$physical_ancestor" == "$physical_anchor" || "$physical_ancestor" == "$physical_anchor"/* ]]
+}
+
 # resolve_store_directory STORE_DIR — set PHYSICAL_STORE_DIR, making the directory first on a real
-# run. On a dry run one that does not exist yet stays empty: nothing in it can lead anywhere.
+# run. On a dry run one that does not exist yet stays empty: nothing in it can lead anywhere. A store
+# directory that leads out of its checkout is refused here, before the mkdir that would follow it. So
+# every path to the directory comes through here first, and a refusal leaves the key as it was.
 resolve_store_directory() {
     local store_dir=$1
     PHYSICAL_STORE_DIR=''
+    if ! path_resolves_inside "$store_dir" "$PHYSICAL_STORE_CHECKOUT"; then
+        report_failure "refusing $store_dir: it resolves outside the store checkout $PHYSICAL_STORE_CHECKOUT"
+        return 1
+    fi
     if (( ! IS_DRY_RUN )) && ! mkdir -p -- "$store_dir"; then
         report_failure "could not create $store_dir"
         return 1
@@ -815,19 +867,11 @@ resolve_store_directory() {
     PHYSICAL_STORE_DIR=$(physical_path_of "$store_dir") || return 1
 }
 
-# target_parent_is_inside_store PARENT — false when the deepest part of PARENT that exists resolves
-# outside the store directory, or does not resolve at all. Asked before anything reads or writes
-# there, since mkdir -p, >> and cp all follow a symlink. A plain file in the way leads nowhere, and
-# mkdir -p reports it.
+# target_parent_is_inside_store PARENT — path_resolves_inside for a file's directory, against the store
+# directory, which resolve_store_directory has already held inside its checkout.
 target_parent_is_inside_store() {
-    local existing_ancestor=$1 physical_ancestor
     [[ -n "$PHYSICAL_STORE_DIR" ]] || return 0
-    while [[ -n "$existing_ancestor" ]] && path_is_free "$existing_ancestor"; do
-        existing_ancestor=${existing_ancestor%/*}
-    done
-    if is_regular_file "$existing_ancestor"; then return 0; fi
-    physical_ancestor=$(cd -P -- "$existing_ancestor" 2>/dev/null && pwd -P) || return 1
-    [[ "$physical_ancestor" == "$PHYSICAL_STORE_DIR" || "$physical_ancestor" == "$PHYSICAL_STORE_DIR"/* ]]
+    path_resolves_inside "$1" "$PHYSICAL_STORE_DIR"
 }
 
 # merge_file_into_store SOURCE TARGET — bring one file of a replaced directory into the store, or
@@ -871,13 +915,15 @@ merge_file_into_store() {
     keep_both "$source_file" "$target_file" "$existing_file"
 }
 
-# merge_directory_into_store SOURCE_DIR STORE_DIR — every file under SOURCE_DIR, NUL-safe, but a
-# leftover partial and the directory's own marker. A file that fails stops only itself, and a walk that
-# fails partway still merges what it listed; either returns 1, so the marker stays unwritten.
+# merge_directory_into_store SOURCE_DIR STORE_DIR [FIND_TEST…] — every file under SOURCE_DIR, NUL-safe,
+# that passes FIND_TEST, but a leftover partial and the directory's own marker. A file that fails stops
+# only itself, and a walk that fails partway still merges what it listed; either returns 1, so the
+# marker stays as it was.
 merge_directory_into_store() {
     local source_dir=$1 store_dir=$2 source_files=() source_file has_failed=0
+    shift 2
     resolve_store_directory "$store_dir" || return 1
-    if ! read_nul_items source_files find "$source_dir" -mindepth 1 ! -type d ! -name "$PARTIAL_COPY_NAME_GLOB" -print0; then
+    if ! read_nul_items source_files find "$source_dir" -mindepth 1 ! -type d ! -name "$PARTIAL_COPY_NAME_GLOB" "$@" -print0; then
         report_failure "could not read $source_dir"
         has_failed=1
     fi
@@ -888,12 +934,17 @@ merge_directory_into_store() {
     return "$has_failed"
 }
 
-# write_merged_marker REPLACED_DIR — the marker, never through a symlink at its path. A dry run asks
-# the same question and writes nothing.
+# write_merged_marker REPLACED_DIR — the marker, never through a symlink at its path and never into
+# anything else that is not a regular file: opening a fifo blocks this run, under the lock, until a
+# reader comes. A dry run asks the same questions and writes nothing.
 write_merged_marker() {
     local marker_path="$1/$MERGED_MARKER_NAME"
     if [[ -L "$marker_path" ]]; then
         report_failure "refusing to write the marker through the symlink $marker_path"
+        return 1
+    fi
+    if ! path_is_free "$marker_path" && ! is_regular_file "$marker_path"; then
+        report_failure "refusing to write the marker at $marker_path: it is not a regular file"
         return 1
     fi
     (( ! IS_DRY_RUN )) || return 0
@@ -901,12 +952,18 @@ write_merged_marker() {
 }
 
 # merge_unmarked_replaced_dirs KEY_DIR STORE_DIR — merge each replaced directory lacking the marker,
-# and write the marker only in one that merged whole.
+# and write the marker only in one that merged whole. Where a marker stands, what load_unmarked_replaced_dirs
+# found is a file newer than it, and only those go: the rest merged when the marker was written, and the
+# store has been free to move on from it since.
 merge_unmarked_replaced_dirs() {
-    local key_dir=$1 store_dir=$2 replaced_dir has_failed=0
+    local key_dir=$1 store_dir=$2 replaced_dir has_failed=0 newer_than_marker
     load_unmarked_replaced_dirs "$key_dir"
     for replaced_dir in "${UNMARKED_REPLACED_DIRS[@]}"; do
-        if merge_directory_into_store "$replaced_dir" "$store_dir"; then
+        newer_than_marker=()
+        if is_regular_file "$replaced_dir/$MERGED_MARKER_NAME"; then
+            newer_than_marker=(-newer "$replaced_dir/$MERGED_MARKER_NAME")
+        fi
+        if merge_directory_into_store "$replaced_dir" "$store_dir" "${newer_than_marker[@]}"; then
             write_merged_marker "$replaced_dir" || has_failed=1
         else
             has_failed=1
@@ -961,7 +1018,7 @@ swap_real_directory_for_link() {
         merge_directory_into_store "$key_dir/$MEMORY_ENTRY_NAME" "$store_dir"
         return
     fi
-    mkdir -p -- "$store_dir" || { report_failure "could not create $store_dir"; return 1; }
+    resolve_store_directory "$store_dir" || return 1
     stamp=$(date -u "$REPLACED_STAMP_FORMAT") || { report_failure "could not read the clock"; return 1; }
     rename_memory_aside "$key_dir" "$stamp" || return 1
     link_memory_entry "$key_dir" "$store_dir" "$stamp" || return 1
@@ -972,8 +1029,9 @@ swap_real_directory_for_link() {
 # real directory here too, so this ends with the same merge.
 link_missing_entry() {
     local key_dir=$1 store_dir=$2 stamp
+    resolve_store_directory "$store_dir" || return 1
     (( ! IS_DRY_RUN )) || return 0
-    mkdir -p -- "$key_dir" "$store_dir" || { report_failure "could not create $key_dir or $store_dir"; return 1; }
+    mkdir -p -- "$key_dir" || { report_failure "could not create $key_dir"; return 1; }
     stamp=$(date -u "$REPLACED_STAMP_FORMAT") || { report_failure "could not read the clock"; return 1; }
     link_memory_entry "$key_dir" "$store_dir" "$stamp" || return 1
     merge_unmarked_replaced_dirs "$key_dir" "$store_dir"
@@ -991,6 +1049,8 @@ apply_key() {
     ( require_readable_if_present "$key_dir" ) || return 1
     # Pending or not: with no store here, a merge has nowhere it may go.
     [[ -e "$STORES_ROOT/$store/.git" ]] || return 0
+    # It dies inside the command substitution, having said why.
+    PHYSICAL_STORE_CHECKOUT=$(physical_path_of "$STORES_ROOT/$store") || return 1
     COPIED_COUNT=0
     IDENTICAL_COUNT=0
     KEPT_BOTH_COUNT=0
@@ -1006,11 +1066,7 @@ apply_key() {
     case "$state" in
         REAL-DIR) swap_real_directory_for_link "$key_dir" "$store_dir" || has_failed=1 ;;
         MISSING)  link_missing_entry "$key_dir" "$store_dir" || has_failed=1 ;;
-        DANGLING)
-            if (( ! IS_DRY_RUN )) && ! mkdir -p -- "$store_dir"; then
-                report_failure "could not create $store_dir"
-                has_failed=1
-            fi ;;
+        DANGLING) resolve_store_directory "$store_dir" || has_failed=1 ;;
         WRONG-LINK)
             (( had_unmerged )) || return 0
             report_verb=merged ;;
@@ -1070,6 +1126,7 @@ escaped_for_one_line() {
 # add_row STATE KEY STORE RELATIVE_DIR SOURCE_DIR — record a row: its state, and its TSV line.
 add_row() {
     local field escaped_fields=()
+    ROW_KEYS+=("$2")
     ROW_STATES+=("$1")
     for field in "$2" "$1" "$3" "$4" "$5"; do
         escaped_fields+=("$(escaped_for_one_line "$field")")
@@ -1107,19 +1164,25 @@ print_list() {
     if (( ${#ROW_LINES[@]} )); then printf '%s\n' "${ROW_LINES[@]}"; fi
 }
 
-# print_check — each row that is not LINKED or NO-STORE, then the summary; exit 1 if any is to fix.
+# print_check — each row that is not LINKED or NO-STORE, then the summary; exit 1 if any is to fix. A
+# NO-STORE key is no row, but one holding memory counts: with no store here it is what "0 linked" hides.
 print_check() {
-    local index linked_count=0 to_fix_count=0 unmapped_count=0
+    local index linked_count=0 to_fix_count=0 unmapped_count=0 without_store_count=0
     for (( index = 0; index < ${#ROW_STATES[@]}; index++ )); do
         case "${ROW_STATES[index]}" in
             LINKED)   linked_count=$(( linked_count + 1 )); continue ;;
-            NO-STORE) continue ;;
+            NO-STORE)
+                if key_holds_real_memory "${ROW_KEYS[index]}"; then
+                    without_store_count=$(( without_store_count + 1 ))
+                fi
+                continue ;;
             UNMAPPED) unmapped_count=$(( unmapped_count + 1 )) ;;
             *)        to_fix_count=$(( to_fix_count + 1 )) ;;
         esac
         printf '%s\n' "${ROW_LINES[index]}"
     done
-    printf '%s: %d linked, %d to fix, %d unmapped\n' "$SCRIPT_NAME" "$linked_count" "$to_fix_count" "$unmapped_count"
+    printf '%s: %d linked, %d to fix, %d unmapped, %d without a store\n' \
+        "$SCRIPT_NAME" "$linked_count" "$to_fix_count" "$unmapped_count" "$without_store_count"
     (( to_fix_count == 0 )) || exit "$EXIT_ATTENTION"
 }
 

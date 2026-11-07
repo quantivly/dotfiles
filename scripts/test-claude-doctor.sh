@@ -3787,24 +3787,24 @@ DROOT="$MEMORY_ROOT" run_doctor
 want_out "no store table is a note, not a finding" "· no memory stores configured (~/.dotfiles-local/claude/memory-stores.json)"
 if [[ ! -s "$MEMORY_CALLS" ]]; then ok "...and the link script is not run"; else bad "...and the link script is not run — it was: $(cat "$MEMORY_CALLS")"; fi
 
-new_home ms2; write_cred; mk_memory_table; mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped\n' ''
+new_home ms2; write_cred; mk_memory_table; mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
-want_out "exit 0 with the summary alone is a ✓ carrying the counts" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped)"
+want_out "exit 0 with the summary alone is a ✓ carrying the counts" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped, 0 without a store)"
 no_out   "...and is not reported as could-not-run" "memory stores could not be checked"
 
 new_home ms3; write_cred; mk_memory_table
-mk_link_stub 1 "$REAL_DIR_ROW"$'\n'"$WRONG_LINK_ROW"$'\nclaude-memory-link: 7 linked, 2 to fix, 0 unmapped\n' ''
+mk_link_stub 1 "$REAL_DIR_ROW"$'\n'"$WRONG_LINK_ROW"$'\nclaude-memory-link: 7 linked, 2 to fix, 0 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
-want_out "exit 1 is a ✗ carrying the counts and how to see the fix" "✗ memory directories are not linked into their stores (7 linked, 2 to fix, 0 unmapped) — scripts/claude-memory-link.sh --apply --dry-run shows what --apply would do"
+want_out "exit 1 is a ✗ carrying the counts and how to see the fix" "✗ memory directories are not linked into their stores (7 linked, 2 to fix, 0 unmapped, 0 without a store) — scripts/claude-memory-link.sh --apply --dry-run shows what --apply would do"
 want_out "...with its first row shown whole"                 "    $REAL_DIR_ROW"
 want_out "...and its second, whose backslash survives"       "    $WRONG_LINK_ROW"
 no_out   "...and never the ✓"                                "every memory directory is linked"
 want_rc  "...and the doctor exits non-zero on it"            1
 
 new_home ms4; write_cred; mk_memory_table
-mk_link_stub 0 "$UNMAPPED_ROW"$'\nclaude-memory-link: 7 linked, 0 to fix, 1 unmapped\n' ''
+mk_link_stub 0 "$UNMAPPED_ROW"$'\nclaude-memory-link: 7 linked, 0 to fix, 1 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
-want_out "exit 0 with an UNMAPPED row is a ⚠ naming the table's fix" "⚠ memory directories no table entry claims (7 linked, 0 to fix, 1 unmapped) — add them to checkout_globs or plain_dirs"
+want_out "exit 0 with an UNMAPPED row is a ⚠ giving both remedies: the table's, and by hand when the directory is gone" "⚠ memory directories no table entry claims (7 linked, 0 to fix, 1 unmapped, 0 without a store) — a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory aside, or the row is permanent"
 want_out "...with the row shown whole, empty fields and all"  "    $UNMAPPED_ROW"
 no_out   "...and never the ✓ of the summary-only exit 0"      "every memory directory is linked"
 want_rc  "...and an UNMAPPED key alone does not fail the doctor" 0
@@ -3828,7 +3828,7 @@ new_home ms5c; write_cred; mk_memory_table; mk_link_stub 2 '' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "an exit 2 with nothing on stderr still says it could not run" "⚠ memory stores could not be checked: exit 2"
 
-new_home ms6; write_cred; mk_memory_table; mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped\n' ''
+new_home ms6; write_cred; mk_memory_table; mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 if [[ "$(cat "$MEMORY_CALLS")" == "--check" ]]; then ok "the script is asked by --check alone: the doctor never applies"; else bad "the script is asked by --check alone — the stub saw: $(cat "$MEMORY_CALLS")"; fi
 
@@ -3842,9 +3842,9 @@ want_out "a dangling store table goes to the script, not to the note" "⚠ memor
 no_out   "...and is not called unconfigured" "no memory stores configured"
 
 new_home ms8; write_cred; mkdir -p "$FHOME/other"; printf '{"stores":{}}\n' > "$FHOME/other/table.json"
-mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped\n' ''
+mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" PRELUDE="export CLAUDE_MEMORY_CONFIG='$FHOME/other/table.json'" run_doctor
-want_out "CLAUDE_MEMORY_CONFIG names the table the doctor looks for, as it does for the script" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped)"
+want_out "CLAUDE_MEMORY_CONFIG names the table the doctor looks for, as it does for the script" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped, 0 without a store)"
 
 # Exit 0 is not enough for the ✓: the summary is what says the check got to the end.
 new_home ms9; write_cred; mk_memory_table; mk_link_stub 0 '' ''
@@ -3855,6 +3855,59 @@ no_out   "...and never the ✓"            "every memory directory is linked"
 new_home ms10; write_cred; mk_memory_table; rm -f "$MEMORY_STUB"
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "a link script that is not there is a ⚠, not a silence" "⚠ memory stores could not be checked:"
+
+# The one window in which the feature is inert: a host with the table and no store
+# cloned yet. Every key is NO-STORE and exit 0, and a ✓ would be false of the real
+# directories those keys hold.
+new_home ms11; write_cred; mk_memory_table
+mk_link_stub 0 $'claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 3 without a store\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "no store checked out, with keys waiting for one, is a ⚠ naming how many" "⚠ no memory store is checked out on this host (3 keys wait for one)"
+no_out   "...and never the ✓"                  "every memory directory is linked"
+want_rc  "...and it does not fail the doctor"  0
+
+# A store here and another not is a host working as configured, and the counts say so.
+new_home ms12; write_cred; mk_memory_table
+mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 2 without a store\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "keys waiting beside linked ones is the ✓, carrying the count" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped, 2 without a store)"
+no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+
+# Nothing waits for anything: a host with the table and no memory yet is no finding.
+new_home ms13; write_cred; mk_memory_table
+mk_link_stub 0 $'claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 0 without a store\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "nothing linked and nothing waiting is the ✓" "✓ every memory directory is linked (0 linked, 0 to fix, 0 unmapped, 0 without a store)"
+no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+
+# Each has its own remedy, so one must not hide the other.
+new_home ms14; write_cred; mk_memory_table
+mk_link_stub 0 "$UNMAPPED_ROW"$'\nclaude-memory-link: 0 linked, 0 to fix, 1 unmapped, 3 without a store\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "an UNMAPPED row and no store here are two ⚠: the first" "⚠ memory directories no table entry claims (0 linked, 0 to fix, 1 unmapped, 3 without a store)"
+want_out "...and the second"                   "⚠ no memory store is checked out on this host (3 keys wait for one)"
+no_out   "...and never the ✓"                  "every memory directory is linked"
+
+# Exit 1 keeps its ✗ whatever else is waiting: what is to fix comes first.
+new_home ms15; write_cred; mk_memory_table
+mk_link_stub 1 "$REAL_DIR_ROW"$'\nclaude-memory-link: 0 linked, 1 to fix, 0 unmapped, 3 without a store\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "exit 1 with keys waiting is the ✗"   "✗ memory directories are not linked into their stores (0 linked, 1 to fix, 0 unmapped, 3 without a store)"
+no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+
+# The counts go through arithmetic, so a summary is only one whose counts are numbers.
+# The stale three-count shape and a word for a count both read as no summary at all.
+new_home ms16; write_cred; mk_memory_table
+mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "the three-count summary is no summary"  "(no summary)"
+no_out   "...and never the ✓"                  "every memory directory is linked"
+
+new_home ms17; write_cred; mk_memory_table
+mk_link_stub 0 $'claude-memory-link: x linked, 0 to fix, 0 unmapped, 3 without a store\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "a word for a count is no summary"    "(no summary)"
+no_out   "...and is not read as zero"          "no memory store is checked out"
 
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
@@ -3874,7 +3927,7 @@ want_out "a link script that is not there is a ⚠, not a silence" "⚠ memory s
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=568
+EXPECTED_ROWS=584
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
