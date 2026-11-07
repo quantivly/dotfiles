@@ -25,10 +25,10 @@
   - **(M8) Merge, never rebase.** D7 says `pull --rebase`. A rebase removes every unpushed file from the working tree while it replays, and a session writing in that window stops it in a state `--abort` cannot leave (probed). The sync integrates with one `git merge`.
 - **The symlink bet is tested** (pilot, Claude Code 2.1.319, 2026-11-06): with `memory` a symlink to a directory outside `~/.claude`, the index loads at session start, and Write, Read and Edit succeed headlessly in `auto` mode with no `Refusing to write into symlinked directory`. In `default` mode a memory write asks, as it does today.
 - **Never lose a write.** Neither script deletes or overwrites a memory file. The only content changes are the line union of an index file and a conflict copy written beside the original. A replaced real directory is renamed to `memory.replaced-<UTC yyyymmddThhmmssZ>` beside the link and never pruned.
-- **The link step is resumable.** A replaced directory counts as merged only once it holds the marker file `.merged-into-store`, written after its last file is handled. Any run finishes every unmarked replaced directory first, and `--check` reports one as a failure.
+- **The link step is resumable.** A replaced directory counts as merged only once it holds the marker file `.merged-into-store`, written after its last file is handled, and while it holds no regular file newer than that marker. Any run finishes every unmarked replaced directory first, and `--check` reports one as a failure.
 - **Act only where configured.** No `memory-stores.json`: exit 0, one note line, nothing touched. A key whose store is not checked out on this host is left alone.
 - **A store pushes only to its own remote.** Every sync run compares `git remote get-url origin` with the table's `remote` for that store and refuses (could-not-run) on a difference.
-- **No ignore rule decides what is memory.** The sync stages with `git add -A -f`. `git add -A` skips ignored paths silently, and a global ignore file, `.git/info/exclude` and a nested `.gitignore` all apply otherwise (probed).
+- **No ignore rule decides what is memory.** The sync stages with `git add -A -f`, with a pathspec that excludes the link script's temporaries at every depth (`:(exclude,glob)**/.*.link-partial`), and holding `<state dir>/link.lock` — the link script's lock — from stage to commit, so a copy not yet verified whole is never committed and an index mid-write never staged. `git add -A` skips ignored paths silently, and a global ignore file, `.git/info/exclude` and a nested `.gitignore` all apply otherwise (probed).
 - **Exit codes, both scripts:** `0` ok · `1` attention on `--check` and `--scan` only · `2` could not run · `64` usage. `--apply` exits `0` or `2`: a withheld file, a conflict copy, a rejected push, a missing token or an unreachable remote is a status the doctor shows, not a failed unit.
 - **No credential is printed, written or put in argv.** The sync reads a token only from the file `scripts/gh-route` names, exports it to the one git child that needs it, and uses an inline credential helper that answers only the `get` operation, from that variable, and fails when the variable is empty. A withheld file is named; its lines are never printed. Any git stderr kept in a status file passes through `scripts/redact-secrets.sh` first.
 - **Overrides for tests and other hosts:** `CLAUDE_MEMORY_PROJECTS_DIR` (default `~/.claude/projects`), `CLAUDE_MEMORY_STORES_ROOT` (`~/.local/share/claude-memory`), `CLAUDE_MEMORY_CONFIG` (`~/.dotfiles-local/claude/memory-stores.json`), `CLAUDE_MEMORY_STATE_DIR` (`~/.local/state/claude-memory-sync`), `CLAUDE_MEMORY_HOST` (`hostname -s`), `CLAUDE_MEMORY_TENANT_ROUTE` and `CLAUDE_MEMORY_GH_ROUTE` (the sibling `scripts/tenant-route` and `scripts/gh-route`).
@@ -83,7 +83,7 @@ The store table the scripts read (`memory-stores.json`), by shape:
 
 **Interfaces — Produces:**
 - `claude-memory-link.sh --list` prints TSV, one row per listed key: `key<TAB>state<TAB>store<TAB>store-relative dir<TAB>source dir`.
-- `claude-memory-link.sh --check` (the default) prints every row that is not `LINKED` or `NO-STORE`, then `claude-memory-link: <n> linked, <n> to fix, <n> unmapped`. Exit 1 when any `REAL-DIR`, `MISSING`, `DANGLING`, `PENDING-MERGE` or `WRONG-LINK` exists. `UNMAPPED` alone is exit 0, and its rows are still printed.
+- `claude-memory-link.sh --check` (the default) prints every row that is not `LINKED` or `NO-STORE`, then `claude-memory-link: <n> linked, <n> to fix, <n> unmapped, <n> without a store` (the last: `NO-STORE` keys whose `memory` is a real directory holding a file). Exit 1 when any `REAL-DIR`, `MISSING`, `DANGLING`, `PENDING-MERGE` or `WRONG-LINK` exists. `UNMAPPED` alone is exit 0, and its rows are still printed.
 - Functions later tasks use: `project_key_of_path PATH`, `store_dir_of_candidate DIR` (prints `<store>/<relative dir>`), `load_store_table`.
 
 States:
@@ -94,7 +94,7 @@ States:
 | `REAL-DIR` | `memory` is a real directory, the key is mapped, the store is checked out |
 | `MISSING` | no `memory` entry, and the mapped store directory holds a file (M5) |
 | `DANGLING` | the right symlink, but its target directory does not exist |
-| `PENDING-MERGE` | a `memory.replaced-*` directory without the marker exists |
+| `PENDING-MERGE` | a `memory.replaced-*` directory exists without the marker, or holding a regular file newer than it |
 | `WRONG-LINK` | `memory` is a symlink to anywhere else |
 | `NO-STORE` | mapped, but that store is not checked out on this host |
 | `UNMAPPED` | a real `memory` directory holding a file, under a key no candidate claims |
@@ -169,7 +169,7 @@ WRONG-LINK, NO-STORE, UNMAPPED: never touched
   - `apply: a memory directory recreated before the link is merged too`: an `ln` stub creates a real `memory/` holding `recreated.md` once, then runs the real `ln`; the key ends `LINKED` and `recreated.md` is in the store.
   - `resume: an unmarked replaced directory makes --check exit 1` (Review Focus 2)
   - `resume: the next --apply merges it and writes the marker`
-  - `resume: a marked replaced directory is not merged again` (a file added to it afterwards stays out of the store)
+  - `resume: a marked replaced directory is not merged again` (a file older than the marker stays out of the store; a newer one is the one case the marker does not settle, and only it is merged)
   - `apply: MISSING gets a link`, `apply: DANGLING gets its target back`
   - `apply: NO-STORE, WRONG-LINK and UNMAPPED are left alone`, one row each
   - `apply: a second run prints nothing`
@@ -210,6 +210,7 @@ Why a flag and not a marker count: the by-name rule runs last and overwrites a s
   - `ms4` exit 0 with `UNMAPPED` rows → ⚠, each row shown (never the ✓ of `ms2`)
   - `ms5` exit 2 → ⚠ with the last stderr line, whole
   - `ms6` the doctor passes only `--check`
+  - `ms11` exit 0, nothing linked, keys holding memory without a store → ⚠ `no memory store is checked out on this host (<n> keys wait for one)`, never the ✓
 - [ ] **Step 2: Implement** the "Memory stores" section after "Rendered settings". Unlike that section it must keep stdout: the rows are the report. stderr goes into a `local -a` array as there.
 - [ ] **Step 3: One audit row,** `collect: a memory directory that is a symlink is collected by content`. The collector already does this (read and confirmed); the row pins it. If it fails, stop and report: do not change the collector in this task.
 - [ ] **Step 4: Docs.** "Memory stores" in `docs/CLAUDE_SETUP.md`: the layout, the eight states, what `--apply` does and never does, where a replaced directory goes and what its marker means, how to add a directory to the table, and the pilot's finding that a `default`-mode session is asked on a memory write. One cross-reference line in `docs/CLAUDE_ACCOUNTS.md`. CHANGELOG entry.
@@ -225,6 +226,7 @@ Why a flag and not a marker count: the by-name rule runs last and overwrites a s
 - `claude-memory-sync.sh --check [--store <name>]`: per checked-out store, the count of files that would be committed, the names of files that would be withheld, and `ahead <n> behind <n>` against the last-fetched `origin` ref. Never writes, never fetches. Exit 1 when anything is pending or withheld.
 - `claude-memory-sync.sh --scan [--store <name>] [--rev <rev>]`: the names of files in that revision's tree (default `HEAD`) whose content changes under `redact-secrets.sh --shapes-only`, each with the rule labels, never the lines. Exit 1 when any is found. This is the gate for commits the sync did not make itself.
 - `claude-memory-sync.sh --apply [--store <name>]`: this task implements the origin check, stage, gate, commit and the status file; Task 6 adds the network half.
+- Staging is `git add -A -f` with a pathspec that excludes the link script's temporaries at every depth (`:(exclude,glob)**/.*.link-partial`), holding `<state dir>/link.lock` — the link script's lock — from stage to commit, so a copy not yet verified whole is never committed and an index mid-write never staged.
 - Status: `<state dir>/<store>.status`, one line `epoch<TAB>outcome<TAB>detail`. Outcomes: `ok`, `ok-local-only`, `withheld`, `kept-both`, `blocked`, `push-rejected`, `skipped-no-token`, `unreachable`, `auth-failed`, `could-not-run`. `<state dir>/<store>.last-ok` holds the epoch of the last run whose push or up-to-date check succeeded.
 - Commit message `<host>: <n> files`, made with `--no-gpg-sign`.
 
@@ -235,6 +237,8 @@ Why a flag and not a marker count: the by-name rule runs last and overwrites a s
   - `commit: a file the global ignore file names is still committed`
   - `commit: a file .git/info/exclude names is still committed`
   - `commit: a file a nested .gitignore names is still committed`
+  - `commit: a .<name>.link-partial is never staged`
+  - `lock: the sync waits for link.lock`
   - `gate: a file with a token shape is withheld and the others are committed`
   - `gate: the token value is in neither stdout nor stderr`
   - `gate: the token value is in no commit` (`git log -p` of the fixture)
@@ -249,7 +253,7 @@ Why a flag and not a marker count: the by-name rule runs last and overwrites a s
   - `store: --store limits the run`, `store: a configured store with no checkout is skipped silently`
   - `config: absent is exit 0 with the note`
 - [ ] **Step 2: Run.** Expected: all FAIL on the missing script.
-- [ ] **Step 3: Implement.** The gate: for each staged path with content, compare the staged blob with its `--shapes-only` output; a difference unstages the path (`git reset -q -- <path>`).
+- [ ] **Step 3: Implement.** Stage with `git add -A -f -- . ':(exclude,glob)**/.*.link-partial'` (probed on git 2.53: a partial at every depth stays out, an ignored file goes in), holding `<state dir>/link.lock` from stage to commit, so a copy not yet verified whole is never committed and an index mid-write never staged. The gate: for each staged path with content, compare the staged blob with its `--shapes-only` output; a difference unstages the path (`git reset -q -- <path>`).
 - [ ] **Step 4: Run.** Expected: all pass.
 - [ ] **Step 5: Commit** (`feat(memory): commit a memory store, withholding files with credential shapes (DO-…)`).
 
@@ -328,7 +332,7 @@ The threshold is `stale_after_minutes[<host>]`, else `.default`, else `STALE_AFT
 - [ ] **Step 2: Run.** Expected: the new rows FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** Expected: all pass.
-- [ ] **Step 5: Mutation sweep:** drop the gate; rebase in place of merge (killed by the mtime row); overwrite in place of a conflict copy; push without fetch; treat `skipped-no-token` as `ok`; token into argv; reset on a merge in progress; leave `MERGE_HEAD` on the unknown-status path; a missing `last-ok` read as healthy.
+- [ ] **Step 5: Mutation sweep:** drop the gate; stage partials too; rebase in place of merge (killed by the mtime row); overwrite in place of a conflict copy; push without fetch; treat `skipped-no-token` as `ok`; token into argv; reset on a merge in progress; leave `MERGE_HEAD` on the unknown-status path; a missing `last-ok` read as healthy.
 - [ ] **Step 6: Commit** (`feat(memory): sync a memory store both ways, keeping both copies on a conflict (DO-…)`).
 
 ### Task 7: Units, doctor rows, docs, CI and PR 2
