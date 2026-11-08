@@ -372,6 +372,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`claude-cred-reconcile.timer` no longer stops for a whole boot when the user manager starts
+  late.** With `Persistent=true`, an `OnBootSec=2min` already past at manager start was dropped,
+  and `OnUnitActiveSec=` had no run to count from, so the timer sat `elapsed` with no next run and
+  restarting it did not help. On 2026-11-07 that stopped the reconciler for 22 hours. `Persistent=`
+  only catches up `OnCalendar=` timers, so it is gone from this one, and
+  `scripts/test-timer-health.sh` now refuses it on any timer without `OnCalendar=`.
 - **A new dotfiles worktree no longer starts with mise's trust error, and mise works in it.**
   `~/.dotfiles/.mise.toml` is the global config, so every worktree carried a copy at its root that
   mise read as an untrusted project config: every new shell printed the error and every `mise`

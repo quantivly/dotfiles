@@ -814,10 +814,25 @@ check "old systemd, armed but SKIPPED: exit 1" "$RC" 1
 grep_ok "$OUT" "SKIPPED since $(TZ=Asia/Jerusalem date -d "@$((NOW-600))" '+%Y-%m-%d %H:%M')" \
         "old systemd: the skip is dated from the converted timestamp"
 
+# --- Persistent= only alongside OnCalendar= ------------------------------------
+# On a monotonic timer it catches nothing up and can wedge the timer on a late
+# boot (docs/TIMER_HEALTH.md). Reads the real units, and a glob that matched
+# nothing is a could-not-run rather than a pass.
+timer_units=("$DOTFILES"/systemd/*.timer)
+[[ -f "${timer_units[0]}" ]] || fatal "no timer units under $DOTFILES/systemd"
+persistent_without_calendar=""
+for timer_unit in "${timer_units[@]}"; do
+    if grep -q '^Persistent=true' "$timer_unit" && ! grep -q '^OnCalendar=' "$timer_unit"; then
+        persistent_without_calendar+="${timer_unit##*/} "
+    fi
+done
+check "no timer sets Persistent=true without OnCalendar= (it wedges on a late boot)" \
+      "$persistent_without_calendar" ""
+
 # ---------------------------------------------------------------------------
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=133
+EXPECTED_ROWS=134
 
 # --- the count this suite is documented as running ---------------------------
 # docs_claim pins the number the prose quotes to EXPECTED_ROWS above: it greps
