@@ -289,8 +289,9 @@ mise trust ~/.dotfiles/.mise.toml  # Trust dotfiles config (one-time)
 ```
 
 **`~/.config/mise/config.toml` is a SYMLINK to `~/.dotfiles/.mise.toml`, not a copy** — `mise use -g`
-writes *through* it to the repo file, so the two cannot diverge, which is the whole point.
-Per-project overrides go in a project-root `.mise.toml` and need `mise trust`.
+writes *through* it to the repo file, so the two cannot diverge.
+Per-project overrides go in a project-root `.mise.toml` and need `mise trust`. A dotfiles
+worktree's copy is ignored: a branch's edit is inert until deployed.
 
 **Run `scripts/verify-tools.sh` after any mise change.** Two failure modes here are stable, silent
 and self-perpetuating: `./install` keeps a pre-existing *differing* `config.toml` forever after one
@@ -625,8 +626,9 @@ Commands are `audit-setup` / `audit-status` / `audit-sweeps`, listed below. Why 
 ## VPN Resilience
 
 `vpn-failfast.service` (system, root) makes VPN-only destinations FAIL instead of hanging while
-the tunnel is DOWN, and (armed by `vpn-setup --block-ipv6`) blocks IPv6 egress while it is UP —
-opposite polarities, because the tunnel carries no v6. `vpn-notify.service` (user; arm it by hand)
+the tunnel is DOWN. Its IPv6 egress block (`vpn-setup --block-ipv6`, UP polarity) fits a full
+tunnel only; the endpoint is split tunnel since 2026-11-08, so it is disarmed. `vpn-notify.service`
+(user; arm it by hand)
 notifies. Root pieces come from `vpn-setup`, **copied never symlinked**; `./install` links only
 the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
 [docs/VPN_INTERNALS.md](docs/VPN_INTERNALS.md) · `scripts/test-vpn-failfast.sh`,
@@ -689,7 +691,6 @@ Quick fixes for common issues. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTIN
 - **Slow startup:** `time zsh -i -c exit` (target: <250ms). Caches at `~/.cache/{quanticli-paths,gh-token-cache,p10k-pr-cache}/`
 - **Function not found:** Check symlink (`ls -la ~/.zshrc`), re-run `./install`
 - **Tool not loading:** `command -v toolname`, then `source ~/.zshrc`
-- **mise trust:** `mise trust ~/.dotfiles/.mise.toml`
 - **Alias conflicts:** `type commandname` to inspect, `\commandname` to bypass
 - **Git auth:** `gh-doctor` (declared vs *effective* account — `gh auth status` reports only the declared one), then `gh auth login`
 - **Claude logged out / MCP servers dropping:** `claude-doctor`. These are usually the *same* fault — the claude.ai connectors ride on the login token. Heed its DIFFERS warning before any `clauth switch` (see the Claude section). If several sessions were logged out *at the same moment*, the cause is a write to the shared file, not your session: check the doctor's concurrency groups for how many are still on it.

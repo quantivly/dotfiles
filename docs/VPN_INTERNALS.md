@@ -25,8 +25,10 @@ Restricting to the 10-day window with full coverage and excluding two overnight 
 
 ## 2. Why API calls hang for 2–3 minutes
 
-Full tunnel: `0.0.0.0/1` and `128.0.0.0/1` via `tun0`. On a drop the client deletes both and the
-LAN default takes over, so traffic reaches AWS from an unauthorised source address and the
+Full tunnel (until 2026-11-08): `0.0.0.0/1` and `128.0.0.0/1` via `tun0`; since then a split tunnel,
+one `/32` per allowlisted host plus the VPC range, with the same failure shape. On a drop the client
+deletes its routes and the LAN default takes over, so traffic reaches AWS from an unauthorised source
+address and the
 security groups drop it silently. Measured with the tunnel **up**, using `SO_BINDTODEVICE` to
 reproduce the tunnel-down path without touching the tunnel:
 
@@ -451,6 +453,11 @@ every one of the 39 spans has an `AUTH_FAILED` strictly inside it, checked direc
 
 ## 10. The IPv6 leak, and the block that closes it (DO-704)
 
+**Superseded 2026-11-08.** The endpoint became a split tunnel that day (fixed public addresses and a
+`/32` route per allowlisted server made it possible), so IPv4 internet traffic leaves via the ISP as
+well and the leak this section closes no longer exists. The block is disarmed here and kept for
+full-tunnel endpoints; what follows is the full-tunnel-era record.
+
 The endpoint is `SplitTunnel=False`, but **only IPv4 is tunnelled**. The client installs the
 classic `0.0.0.0/1` + `128.0.0.0/1` pair over `tun0` and *nothing at all* for IPv6, so the v6
 default route still points at the ISP. Measured on a connected client: `curl -4 ifconfig.me`
@@ -515,7 +522,7 @@ Nothing that should keep working is caught by the `/1` pair, measured rather tha
 | Tailscale `fd7a:115c:a1e0::/48` | rule **5270 → table 52**, evaluated *before* `32766 → main` |
 
 Verified: `ip -6 route get fd7a:115c:a1e0::53` → `dev tailscale0 table 52`. The pair is also the
-exact mirror of the `0.0.0.0/1` + `128.0.0.0/1` the client installs for IPv4, which makes it
+exact mirror of the `0.0.0.0/1` + `128.0.0.0/1` a full-tunnel client installs for IPv4, which makes it
 self-explanatory in a routing table.
 
 ### `expires` is ACCEPTED on an `unreachable` v6 route and silently not applied

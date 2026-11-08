@@ -208,6 +208,29 @@ jobs:
       - name: Run the duf and cheat gate state table
         run: ./scripts/test-tool-alias-gates.sh
 
+  mise-worktree-test:
+    name: Mise Worktree Config State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install zsh
+        uses: ./.github/actions/apt-install
+        with:
+          packages: zsh
+
+      - name: Install mise
+        run: |
+          curl https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Real mise, unlike the stubbed tables above: what this pins is mise's own
+      # behaviour, so a release that changes it should fail here. Every row runs
+      # under env -i, because mise trusts all configs when it detects CI.
+      - name: Run the mise worktree config state table
+        run: ./scripts/test-mise-worktree.sh
+
   dotfiles-guard-test:
     name: Dotfiles Live-Config Guard State Table
     runs-on: ubuntu-latest

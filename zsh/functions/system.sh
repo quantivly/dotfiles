@@ -3308,8 +3308,9 @@ audit-sweeps() {
 # would cost a row in CLAUDE.md's Function Modules table and a line in its
 # loading order, and the context budget cannot pay for either.
 #
-# The AWS Client VPN here is a full tunnel. When it drops, the client deletes
-# 0.0.0.0/1 and 128.0.0.0/1 and the LAN default silently takes over, so traffic
+# The AWS Client VPN here pushes routes to the Quantivly servers (split tunnel
+# since 2026-11-08, a full tunnel before). When it drops those routes go and
+# the LAN default silently takes over, so traffic
 # to a Quantivly server leaves from an unauthorised address and is dropped with
 # no RST and no ICMP — a ~127 second hang, not an error. That is also why a dead
 # tunnel went unnoticed for up to 8.8 hours: nothing fails, it hangs.
@@ -3872,8 +3873,8 @@ vpn-doctor() {
               printf '      %s\n' ${=v6_owned}
               _doctor_bad "  Remove now:  sudo ${_VPN_SCRIPT_ETC} --clear" ;;
     not-armed)
-              _doctor_note "IPv6 is NOT blocked — the tunnel carries no v6, so v6 traffic leaves via the ISP (DO-704)"
-              _doctor_note "  Arm it with: vpn-setup --block-ipv6" ;;
+              _doctor_note "IPv6 block disarmed — the endpoint is a split tunnel since 2026-11-08, so v4 leaves via the ISP too (DO-704)"
+              _doctor_note "  For a full-tunnel endpoint only, arm it with: vpn-setup --block-ipv6" ;;
   esac
 
   if (( v6_armed )); then

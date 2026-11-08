@@ -35,6 +35,8 @@
 #                    configured from this file: its destinations are constants in
 #                    scripts/vpn-failfast.sh and it is armed with
 #                    `vpn-setup --block-ipv6`. Do not look for it in this list.
+#                    (Full-tunnel endpoints only; disarmed here since the
+#                    2026-11-08 split tunnel.)
 #   127.0.0.1        Loopback. Refused.
 #
 # A malformed entry makes the unit exit 2 and install NOTHING — never a partial

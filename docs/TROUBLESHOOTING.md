@@ -63,6 +63,33 @@ Trust the config file: `mise trust ~/.dotfiles/.mise.toml`
 
 See the [Trust Configuration](../CLAUDE.md#mise-version-manager) section for full details.
 
+### In a dotfiles worktree
+
+**Do not run `mise trust` here: open a new shell.** A shell in a worktree that prints this started
+before `MISE_IGNORED_CONFIG_PATHS` was in its environment. In a new one, `mise config ls` names only
+`~/.config/mise/config.toml`.
+
+`~/.dotfiles/.mise.toml` is the global config, so every worktree carries a copy of it at its root,
+where mise reads it as an untrusted project config. Every new shell printed the error and every
+`mise` lookup in the worktree failed. The copy adds nothing, because the global config already
+applies there, so `zsh/zshrc.conditionals` tells mise to ignore it. Ignoring also beats trusting: a
+branch's changed config is never parsed, where a trusted path would run it unreviewed.
+
+- **A branch's edit to `.mise.toml` is inert in its worktree** until it is deployed. `mise use` there
+  refuses with the same trust error and writes nothing; it does not fall through to the global file.
+- **It is an env var because the TOML key does nothing.** On mise 2026.6.14 `ignored_config_paths`
+  in `[settings]` parses, and `mise settings get` shows it, but the config is still refused. All six
+  spellings tried failed: `~`, absolute, trailing slash, exact directory, exact file, `{{env.HOME}}`.
+- **It is exported before activation** because `mise activate` runs its hook at eval time.
+- **herdr-draft's `inherit_trust` cannot cover this.** `mise trust --show` prints no row for a config
+  it classes as global, so the main clone reads as untrusted
+  ([herdr-draft#369](https://github.com/ZviBaratz/herdr-draft/issues/369)). Fixing that would still
+  race the first prompt, and would miss worktrees cut by anything else.
+- **`DOTFILES_WORKTREES` in `~/.zshrc.local` is read too late**, since that file loads after this
+  module. Set it in the environment that starts the shell.
+
+`scripts/test-mise-worktree.sh` pins this against real mise (CI `mise-worktree-test`).
+
 ## Command not found after adding tool
 
 ```bash

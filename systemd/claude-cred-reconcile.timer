@@ -10,9 +10,13 @@
 # time; anything much shorter spends wakeups to no purpose, since the work is a
 # stat and a compare per account and is a no-op in the healthy state.
 #
-# Persistent=true so a laptop that was asleep reconciles once on resume rather
-# than waiting for the next tick — the resume case is exactly when a stale store
-# is most likely.
+# NOT Persistent=true. It only catches up OnCalendar= timers, so it never did
+# anything for a resume here, and the next tick is at most 2 minutes away anyway.
+# What it did do is keep the last trigger across boots, and with that kept, an
+# OnBootSec= already past when the user manager starts is dropped, not fired.
+# OnUnitActiveSec= then has no run to count from, so the timer sits elapsed with
+# no next run, and restarting it does not help. On 2026-11-07 that stopped this
+# timer for 22 hours. Evidence: docs/TIMER_HEALTH.md.
 
 [Unit]
 Description=Reconcile Claude account-dir credentials periodically
@@ -21,7 +25,6 @@ Documentation=file://%h/.dotfiles/scripts/claude-account-dirs.sh
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=2min
-Persistent=true
 AccuracySec=30s
 
 [Install]

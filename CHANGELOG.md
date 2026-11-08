@@ -306,6 +306,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The VPN docs and comments stop describing a full tunnel.** The Client VPN endpoint has been a
+  split tunnel since 2026-11-08: one `/32` route per allowlisted server plus the VPC range, pushed
+  with a gateway, so `tunnel_up()` in vpn-failfast and vpn-notify is unchanged and measured correct
+  on the new shape (the state table gains that row). The DO-704 IPv6 egress block only fits a full
+  tunnel and is documented as superseded, to be disarmed with `vpn-setup --no-block-ipv6`; the doctor's
+  disarmed note says so instead of suggesting to arm it.
+
 - **The rabota precompute timer runs 07:00–23:00 every day (DO-873).** It ran Mon–Fri 07:00–18:30,
   so the rank Sol's home is about to show was Friday's until Monday morning and last night's until
   07:00, while the phone is looked at in the evening and at weekends. Still every 30 minutes,
@@ -388,6 +395,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`claude-cred-reconcile.timer` no longer stops for a whole boot when the user manager starts
+  late.** With `Persistent=true`, an `OnBootSec=2min` already past at manager start was dropped,
+  and `OnUnitActiveSec=` had no run to count from, so the timer sat `elapsed` with no next run and
+  restarting it did not help. On 2026-11-07 that stopped the reconciler for 22 hours. `Persistent=`
+  only catches up `OnCalendar=` timers, so it is gone from this one, and
+  `scripts/test-timer-health.sh` now refuses it on any timer without `OnCalendar=`.
+- **A new dotfiles worktree no longer starts with mise's trust error, and mise works in it.**
+  `~/.dotfiles/.mise.toml` is the global config, so every worktree carried a copy at its root that
+  mise read as an untrusted project config: every new shell printed the error and every `mise`
+  lookup there failed. herdr-draft's `inherit_trust` could not cover it, because `mise trust --show`
+  prints no row for a config it classes as global
+  ([herdr-draft#369](https://github.com/ZviBaratz/herdr-draft/issues/369)). `zshrc.conditionals` now
+  exports `MISE_IGNORED_CONFIG_PATHS` for the worktree base before activating mise, so the copy is
+  never parsed and the global config applies. A branch's edit to `.mise.toml` is therefore inert
+  until deployed. `scripts/test-mise-worktree.sh` pins it against real mise, in CI's
+  `mise-worktree-test`.
 - **Nothing on dev starts a stray `ssh-agent` any more.** An agent a shell starts outlives it,
   and on 2026-11-03 dev had one orphan under pid 1 per dev-sync run, and one more inside
   `herdr-server.service`. Four paths reached `eval "$(ssh-agent -s)"`:

@@ -9,8 +9,9 @@
 The AWS Client VPN on this machine drops several times a day. Two things then happen, and the
 second is the expensive one.
 
-**API calls hang instead of failing.** It is a full tunnel (`redirect-gateway def1`): the client
-installs `0.0.0.0/1` and `128.0.0.0/1` via `tun0`. On a drop it *deletes both*, the LAN default
+**API calls hang instead of failing.** The client pushes routes to the Quantivly servers via
+`tun0` (a full tunnel, `0.0.0.0/1` + `128.0.0.0/1`, until 2026-11-08; a split tunnel with one `/32`
+per allowlisted host plus the VPC range since). On a drop it *deletes them*, the LAN default
 silently takes over, and packets aimed at a Quantivly server leave the machine from an
 unauthorised source address. The security groups drop them with no RST and no ICMP, so nothing
 fails — it hangs, for about 127 seconds on a new connection and up to 15 minutes on an
@@ -82,6 +83,12 @@ A malformed entry means **nothing is installed** — not a partial set, and neve
 destinations", which is indistinguishable from a healthy tunnel.
 
 ## Blocking the IPv6 leak (DO-704)
+
+**Superseded on 2026-11-08.** The endpoint is a split tunnel since then: IPv4 internet traffic
+leaves via the ISP as well, so there is no leak and nothing for this block to close. It is disarmed
+on this machine (`vpn-setup --no-block-ipv6`) and kept for full-tunnel endpoints. The rest of this
+section describes the full-tunnel era; the "split tunnel would break SSH" objection below was
+answered by giving every allowlisted server a fixed public address and a `/32` route.
 
 The tunnel is a full tunnel **for IPv4 only**. The client installs `0.0.0.0/1` + `128.0.0.0/1` over
 `tun0` and nothing at all for IPv6, so while you are connected every v6 packet still leaves via
