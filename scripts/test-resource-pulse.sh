@@ -156,6 +156,8 @@ check "extension.js tears down in guarded steps (runEveryStep), destroying the c
   "$teardown_destroy_order|$(grep -c -F 'runEveryStep([' "$EXTENSION_JS" 2>/dev/null)" "card indicator sampler |1"
 check "extension.js hands its rate-limited logger to every sampler, so the limit spans enables (each blank and lock)" \
   "$(grep -c -F 'errorLog: this._errorLog' "$EXTENSION_JS" 2>/dev/null)" 1
+check "indicator.js re-places a shown hover label when its width or the display scale changes" \
+  "$(grep -c -E "'notify::(width|scale-factor)'" "$EXT_DIR/indicator.js" 2>/dev/null)" 2
 check "extension.js says a failed start removed Resource Pulse, not just the indicator" \
   "$(grep -c -E "^const START_FAILURE_MESSAGE = '.*Resource Pulse.*removed" "$EXTENSION_JS" 2>/dev/null)" 1
 
@@ -791,7 +793,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=219
+EXPECTED_ROWS=220
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

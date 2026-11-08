@@ -45,9 +45,9 @@ const STAGE_LEFT_EDGE_PX = 0;
 export const PulseIndicator = GObject.registerClass(
 class PulseIndicator extends PanelMenu.Button {
     /**
-     * Builds the graphs, the click and the hover label, and starts listening to the sampler. The hover label is
-     * added to the chrome only after everything that could throw, so a failed construction leaves nothing in
-     * the shell.
+     * Builds the graphs, the click and the hover label, and starts listening to the sampler and to the display
+     * scale. The hover label is added to the chrome, and the outside signals connected, only after everything
+     * that could throw, so a failed construction leaves nothing in the shell.
      *
      * @param {import('./sampler.js').Sampler} sampler - The one sampler; the indicator draws its histories.
      * @returns {void}
@@ -76,8 +76,15 @@ class PulseIndicator extends PanelMenu.Button {
         this.connect('notify::mapped', () => this._syncHoverLabel());
 
         this._hoverLabel = new St.Label({style_class: HOVER_LABEL_STYLE_CLASS, visible: false});
+        // The label's first width after it is shown can be stale: one hidden across a display-scale change
+        // measures at the old scale until it is allocated again. Placing it again once its width settles (and
+        // when the scale changes while it is up) keeps it centred. The label is destroyed with the indicator,
+        // and its handlers with it.
+        this._hoverLabel.connect('notify::width', () => this._placeShownHoverLabel());
         Main.layoutManager.addTopChrome(this._hoverLabel);
         this._snapshotListenerId = sampler.addListener(snapshot => this._onSnapshot(snapshot));
+        St.ThemeContext.get_for_stage(global.stage).connectObject(
+            'notify::scale-factor', () => this._placeShownHoverLabel(), this);
     }
 
     /**
@@ -226,6 +233,16 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
+     * Places the hover label again if it is up; a no-op while it is hidden or once the indicator is destroyed.
+     *
+     * @returns {void}
+     */
+    _placeShownHoverLabel() {
+        if (this._isHoverLabelShown && this._hoverLabel !== null)
+            this._placeHoverLabel();
+    }
+
+    /**
      * Centres the hover label below the indicator, kept inside the indicator's monitor (lib/layout.js
      * hoverLabelPosition). Called only after the label's text is set, and it measures the label's natural width
      * for that text: get_width() can still answer with the allocation of the previous text, which put the label
@@ -269,13 +286,15 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
-     * Removes everything the indicator added outside itself: the hover label's pending show, its sampler listener
-     * and the label itself (destroying it also takes it out of the chrome). Runs on the 'destroy' signal, which
-     * PanelMenu.Button connects, so it runs however the indicator is destroyed.
+     * Removes everything the indicator added outside itself: the display-scale handler, the hover label's pending
+     * show, its sampler listener and the label itself (destroying it also takes it out of the chrome, with its own
+     * handlers). Runs on the 'destroy' signal, which PanelMenu.Button connects, so it runs however the indicator
+     * is destroyed.
      *
      * @returns {void}
      */
     _onDestroy() {
+        St.ThemeContext.get_for_stage(global.stage).disconnectObject(this);
         this._cancelHoverLabelTimeout();
         if (this._snapshotListenerId !== null) {
             this._sampler.removeListener(this._snapshotListenerId);
