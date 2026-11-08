@@ -340,7 +340,8 @@ printf '\nresource-pulse-nested.sh (hermetic: no gnome-shell, nothing is started
 # here. These rows cover what it decides before anything starts: its usage,
 # the bus configs it renders, the environment allowlist, and its refusals. Every
 # run of it here has busctl, gsettings and gnome-shell replaced by stubs that
-# only record the call, and RESOURCE_PULSE_NESTED_BASE pointed at an empty
+# only record the call (jq too: CI does not install it, and no row here needs
+# it to really run), and RESOURCE_PULSE_NESTED_BASE pointed at an empty
 # directory, so a row that must refuse proves it reached none of them.
 #
 # That directory's name is deliberately longer than the script allows a run
@@ -357,7 +358,7 @@ UNSAFE_MODE_HELPER_UUID="resource-pulse-nested-unsafe-mode@local"
 mkdir -p "$NESTED_BASE" "$NESTED_STUB_BIN" || fatal "cannot create the nested-harness fixture directories"
 # A base directory must be private to the user, as `start` requires of one.
 chmod 700 "$NESTED_BASE" || fatal "cannot make the nested-harness base private"
-for stubbed_tool in busctl gsettings gnome-shell; do
+for stubbed_tool in busctl gsettings gnome-shell jq; do
   # shellcheck disable=SC2016  # The stub's own source: its $* and $NESTED_STUB_CALLS expand when it runs.
   printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" %s "$*" >>"$NESTED_STUB_CALLS"\nexit 1\n' "$stubbed_tool" \
     >"$NESTED_STUB_BIN/$stubbed_tool"

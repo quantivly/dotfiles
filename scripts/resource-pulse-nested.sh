@@ -1011,8 +1011,10 @@ eval_subcommand() {
     local code="$1" address
     [[ "$code" == - ]] && code="$(cat)"
     [[ -n "$code" ]] || usage_error "eval needs JavaScript"
-    require_tools busctl jq stat
+    require_tools stat
     address="$(live_run_session_address)" || exit "$EXIT_REFUSED"
+    # Looked for only now: a refusal above never depends on which tools are installed.
+    require_tools busctl jq
     eval_in_nested_shell "$address" "$code"
 }
 
@@ -1041,9 +1043,11 @@ screenshot_subcommand() {
                 || usage_error "an area's width and height must be above 0" ;;
         *) usage_error "screenshot takes a name, then either no area or x y width height" ;;
     esac
-    require_tools busctl jq stat
+    require_tools stat
     address="$(live_run_session_address)" || exit "$EXIT_REFUSED"
     run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
+    # Looked for only now: a refusal above never depends on which tools are installed.
+    require_tools busctl jq
     shot_path="$run_dir/shots/$shot_name"
     if (( ${#area[@]} == 0 )); then
         reply="$(busctl --address="$address" --json=short call org.gnome.Shell.Screenshot \
