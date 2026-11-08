@@ -19,11 +19,11 @@
 # <stores root>/<name>/.git exists; one that is not is skipped without a word, since a host carries
 # only the stores of the tenants it serves.
 #
-# A STORE PUSHES ONLY TO ITS OWN REMOTE. Before anything is staged, every fetch and push URL of the
-# store's `origin` must be the table's `remote`: a difference is could-not-run for that store, with
-# nothing staged. The URLs are git's own answer (`git remote get-url [--push] --all origin`, insteadOf
-# applied), since those are the ones a push would use. A URL is never printed: it can carry a
-# credential. A store with no `origin` at all is local-only.
+# A STORE PUSHES ONLY TO ITS OWN REMOTE. Every verb first checks that every fetch and push URL of the
+# store's `origin` is the table's `remote`: a difference is could-not-run for that store, with nothing
+# staged, counted or scanned. The URLs are git's own answer (`git remote get-url [--push] --all
+# origin`, insteadOf applied), since those are the ones a push would use. A URL is never printed: it
+# can carry a credential. A store with no `origin` at all is local-only.
 #
 # NO IGNORE RULE DECIDES WHAT IS MEMORY. `git add -A` skips ignored paths without a word, and a global
 # ignore file, .git/info/exclude and a nested .gitignore all apply otherwise, so the stage is
@@ -31,20 +31,37 @@
 # .<name>.link-partial, at every depth, so a copy not yet verified whole is never committed; --check
 # counts with the same pathspec, so a leftover partial never reads as pending. The stage, the gate and
 # the commit run holding <state dir>/link.lock, the link script's own lock, so an index mid-write is
-# never staged. The lock is released after the commit: the network half must not hold up a link run.
+# never staged. A run waits for it CLAUDE_MEMORY_LOCK_WAIT_SECONDS at most (120 by default), then
+# gives up on that store as could-not-run. The lock is released after the commit: the network half
+# must not hold up a link run. Every git call is made with the lock's descriptor closed in git's own
+# process, so nothing git starts (a hook, a file-system monitor, a detached maintenance) can hold the
+# lock past the end of this run and stop every later link run.
 #
-# THE GATE withholds files; it never refuses the commit (M6). Each staged path with content has its
-# staged blob passed through `scripts/redact-secrets.sh --shapes-only`, and compared by digest. When
-# the redactor changes it, the path is unstaged (`git reset`) and named with the labels of the shapes
-# found, never a line of it, and the rest is committed. The file stays in the working tree, so every
-# run stages it, finds it and names it again until someone edits it. Shapes only: the by-name rules
-# would withhold ordinary prose such as `FOO_TOKEN=value` forever. The stage wrote the withheld
-# blob to the object database; it is in no commit, so no push carries it, and git's gc prunes it.
+# NO HOOK RUNS. Every git call that writes to a store is made with core.hooksPath=/dev/null and
+# core.fsmonitor=false (GIT_WRITE_SAFETY_OPTIONS), and the commit also with --no-verify. A host's
+# hooks would otherwise run between the gate and the commit, and a hook can stage a file the gate
+# held back; the global pre-commit this repository installs (config/git/hooks) runs `pre-commit run`
+# in any repository holding a .pre-commit-config.yaml, which would make a memory file a program every
+# host's timer runs. On git 2.53 core.hooksPath alone keeps every hook off; --no-verify is a second
+# switch on the hooks a commit runs, should a later git define hooks where core.hooksPath does not
+# reach.
+#
+# THE GATE withholds files; it never refuses the commit (M6). Each staged path has its name, then its
+# staged blob (a submodule has a name alone), passed through `scripts/redact-secrets.sh
+# --shapes-only` in one read, and the two compared by digest. When the redactor changes either, the
+# path is unstaged (`git reset`) and named with the labels of the shapes found, never a line of it,
+# and the rest is committed. A name is redacted wherever it is printed or written, the status
+# included. The file stays in the working tree, so every run stages it, finds it and names it again
+# until someone edits or renames it. Shapes only: the by-name rules would withhold ordinary prose such
+# as `FOO_TOKEN=value` forever. The stage wrote the withheld blob to the object database; it is in no
+# commit, so no push carries it, and git's gc prunes it. The gate reads the blob git stores: where the
+# host configures a clean filter for a path (git-lfs, say), that is the filter's output, a pointer,
+# and not the file's content.
 #
 # THE COMMIT is named `<host>: <n> files`, n counting every path it changes, deletions included, and
-# is made with --no-gpg-sign: a timer has no one to unlock a signing key. Commit hooks run. The
-# maintenance a commit may start runs in the foreground (autoDetach off), so that no child of the
-# commit is left holding the lock's descriptor once this script lets go of it.
+# is made with --no-gpg-sign: a timer has no one to unlock a signing key. The maintenance a commit may
+# start runs in the foreground (autoDetach off), so the run ends when its git work has, and a unit
+# that stops every process it started when the run ends never cuts one short.
 #
 # THE STATUS of a store is <state dir>/<store>.status, one line: epoch<TAB>outcome<TAB>detail, with
 # a backslash, tab or newline in the detail written \\, \t or \n. The outcomes, the network half's
@@ -72,8 +89,9 @@
 #                    is pending or withheld (the default verb)
 #   claude-memory-sync --scan [--store <name>] [--rev <rev>]
 #                    `<store>: <path> (<labels>)` for each file in that revision's tree (default HEAD;
-#                    a store with no commit has nothing to scan) that carries a credential shape: the
-#                    gate, for commits this script did not make. Exit 1 when any is found
+#                    a store with no commit has nothing to scan) whose name or content carries a
+#                    credential shape: the gate, for commits this script did not make. Exit 1 when any
+#                    is found
 #   claude-memory-sync --apply [--store <name>]
 #                    the origin check, the stage, the gate and the commit, store by store: a line
 #                    `<store>: withheld <path> (<labels>)` for each file held back, then
@@ -86,14 +104,16 @@
 #       1 attention on --check and --scan
 #       2 could not run (HOME unset, no jq, git or sha256sum, a bad store table, an unknown --store, a
 #         revision that does not resolve, an origin that is not the table's remote; on --apply also no
-#         flock, an unusable host name, and a lock, stage, gate, commit or status write that failed,
-#         reported once the other stores have run)
+#         flock, an unusable host name or lock wait, a lock still held when the wait ran out, and a
+#         lock, stage, gate, commit or status write that failed, reported once the other stores have
+#         run)
 #       64 usage
 #   --apply exits only 0 or 2: a withheld file is a status for the doctor, not a failed unit.
 #
 # Overrides: CLAUDE_MEMORY_STORES_ROOT (default ~/.local/share/claude-memory), CLAUDE_MEMORY_CONFIG
 # (~/.dotfiles-local/claude/memory-stores.json), CLAUDE_MEMORY_STATE_DIR
-# (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the host in a commit message).
+# (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the host in a commit message),
+# CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long --apply waits for link.lock; a whole number above 0).
 
 set -uo pipefail
 
@@ -107,6 +127,14 @@ STATE_DIR_RELATIVE='.local/state/claude-memory-sync'
 REDACTOR_RELATIVE='scripts/redact-secrets.sh'
 REDACTOR_SHAPES_ONLY_FLAG='--shapes-only'
 LINK_LOCK_FILE_NAME='link.lock'
+LOCK_WAIT_SECONDS_DEFAULT=120
+LOCK_WAIT_SECONDS_RE='^[1-9][0-9]*$'
+# flock's status when -w runs out with the lock still held (its default conflict exit code).
+FLOCK_TIMED_OUT_STATUS=1
+# take_link_lock: the wait ran out.
+LOCK_WAIT_RAN_OUT=2
+# Every git call that writes to a store: no hook runs and no file-system monitor starts.
+GIT_WRITE_SAFETY_OPTIONS=(-c core.hooksPath=/dev/null -c core.fsmonitor=false)
 # The link script's copy on its way to <name> is .<name>.link-partial until it is known to be whole.
 PARTIAL_COPY_SUFFIX='.link-partial'
 PARTIAL_COPY_NAME_GLOB=".*$PARTIAL_COPY_SUFFIX"
@@ -136,6 +164,14 @@ REDACTION_MARKER_SUFFIX='>'
 REDACTION_MARKER_ERE='<REDACTED:[a-z0-9-]+>'
 # The redactor changed the content but left no marker this script could read.
 UNLABELLED_SHAPE='unlabelled shape'
+# What stands for a path the redactor could not read: never the path itself.
+UNREDACTABLE_PATH_TEXT='<a path the redactor could not read>'
+# Ends a command substitution's output, so the substitution cannot strip a newline that ends a path.
+OUTPUT_END_SENTINEL='.'
+# One line of sha256sum's output for stdin.
+STDIN_DIGEST_LINE_RE='^[0-9a-f]{64}  -$'
+# `git status --porcelain=v1` puts "XY " before each path.
+PORCELAIN_STATUS_PREFIX_LENGTH=3
 # A submodule's entry in a tree or an index: a commit id, with no blob to read.
 GITLINK_MODE='160000'
 # git's documented status for "that remote does not exist", against 128 for "git could not run".
@@ -153,6 +189,8 @@ EXIT_USAGE=64
 STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-${HOME:-}/$STORES_ROOT_RELATIVE}"
 CONFIG_PATH="${CLAUDE_MEMORY_CONFIG:-${HOME:-}/$CONFIG_RELATIVE}"
 STATE_DIR="${CLAUDE_MEMORY_STATE_DIR:-${HOME:-}/$STATE_DIR_RELATIVE}"
+LINK_LOCK_PATH="$STATE_DIR/$LINK_LOCK_FILE_NAME"
+LOCK_WAIT_SECONDS="${CLAUDE_MEMORY_LOCK_WAIT_SECONDS:-$LOCK_WAIT_SECONDS_DEFAULT}"
 REDACTOR="$DOTFILES/$REDACTOR_RELATIVE"
 
 MODE=''                         # check | scan | apply
@@ -165,7 +203,7 @@ FAILED_STORES=()                # stores that could not run, reported at the end
 NEEDS_ATTENTION=0               # --check or --scan found something
 LINK_LOCK_FD=''                 # the open descriptor of link.lock while it is held
 STORE_HAS_ORIGIN=0              # what check_origin found
-WITHHELD_PATHS=()               # what gate_staged_paths held back
+WITHHELD_REDACTED_PATHS=()      # what gate_staged_paths held back, each with its shapes redacted
 COMMITTED_COUNT=0               # how many paths commit_staged_paths committed
 
 usage() { sed -n '/^# Usage:/,/^# Exit:/p' "$SELF" | sed '$d; s/^# \{0,1\}//'; }
@@ -240,6 +278,44 @@ escaped_for_one_line() {
     printf '%s' "$text"
 }
 
+# git_in_store STORE_DIR ARGS… — git, in the store. While this run holds link.lock, the lock's
+# descriptor is closed in git's own process and this shell keeps it: nothing git starts can then hold
+# the lock past the end of the run.
+git_in_store() {
+    local store_dir=$1
+    shift
+    if [[ -n "$LINK_LOCK_FD" ]]; then
+        git -C "$store_dir" "$@" {LINK_LOCK_FD}>&-
+    else
+        git -C "$store_dir" "$@"
+    fi
+}
+
+# redact_path_into VARIABLE PATH — set VARIABLE to PATH with each credential shape the redactor finds
+# replaced by its marker: a name can carry a credential as well as a body can. A path the redactor
+# cannot read becomes UNREDACTABLE_PATH_TEXT, never itself.
+# shellcheck disable=SC2034  # redacted_path_target is a nameref: assigning it sets the caller's variable
+redact_path_into() {
+    local -n redacted_path_target="$1"
+    local path=$2 redacted_output
+    # The newline printf adds lets sed read the last line whole, and is taken off again; the sentinel
+    # keeps the command substitution from stripping a newline the path itself ends with.
+    if ! redacted_output=$(printf '%s\n' "$path" | "$REDACTOR" "$REDACTOR_SHAPES_ONLY_FLAG" \
+        && printf '%s' "$OUTPUT_END_SENTINEL"); then
+        redacted_path_target=$UNREDACTABLE_PATH_TEXT
+        return 0
+    fi
+    redacted_output=${redacted_output%"$OUTPUT_END_SENTINEL"}
+    redacted_path_target=${redacted_output%$'\n'}
+}
+
+# printable_path PATH — PATH as a line of output shows it: redacted, then kept on one line.
+printable_path() {
+    local redacted_path
+    redact_path_into redacted_path "$1"
+    escaped_for_one_line "$redacted_path"
+}
+
 # What is wrong with the shape of the table, or nothing. Only what this script reads is checked.
 # shellcheck disable=SC2016  # jq's own $variables, not the shell's
 JQ_TABLE_PROBLEM='
@@ -305,7 +381,7 @@ report_store_failure() {
 run_git_reporting_errors() {
     local store_dir=$1 git_errors git_status
     shift
-    git_errors=$(git -C "$store_dir" "$@" 2>&1 >/dev/null)
+    git_errors=$(git_in_store "$store_dir" "$@" 2>&1 >/dev/null)
     git_status=$?
     if (( git_status != 0 )) && [[ -n "$git_errors" ]]; then
         printf '%s\n' "$git_errors" | "$REDACTOR" >&2
@@ -319,14 +395,14 @@ check_origin() {
     local store=$1 store_dir=$2 fetch_urls push_urls get_url_status
     local table_remote=${REMOTE_OF_STORE[$store]}
     STORE_HAS_ORIGIN=0
-    fetch_urls=$(git -C "$store_dir" remote get-url --all "$ORIGIN_REMOTE_NAME" 2>/dev/null)
+    fetch_urls=$(git_in_store "$store_dir" remote get-url --all "$ORIGIN_REMOTE_NAME" 2>/dev/null)
     get_url_status=$?
     if (( get_url_status == GIT_EXIT_NO_SUCH_REMOTE )); then return 0; fi
     if (( get_url_status != 0 )); then
         report_store_failure "$store" "git could not read the origin (exit $get_url_status)"
         return 1
     fi
-    if ! push_urls=$(git -C "$store_dir" remote get-url --push --all "$ORIGIN_REMOTE_NAME" 2>/dev/null); then
+    if ! push_urls=$(git_in_store "$store_dir" remote get-url --push --all "$ORIGIN_REMOTE_NAME" 2>/dev/null); then
         report_store_failure "$store" "git could not read the origin's push URL"
         return 1
     fi
@@ -339,27 +415,45 @@ check_origin() {
 
 # head_is_unborn STORE_DIR — status 0 when HEAD names a branch with no commit yet.
 head_is_unborn() {
-    git -C "$1" symbolic-ref -q HEAD >/dev/null && ! git -C "$1" rev-parse -q --verify HEAD >/dev/null
+    git_in_store "$1" symbolic-ref -q HEAD >/dev/null && ! git_in_store "$1" rev-parse -q --verify HEAD >/dev/null
 }
 
 # base_tree_of STORE_DIR — print the tree a commit would change: HEAD's, or the empty tree when HEAD
 # has no commit yet.
 base_tree_of() {
     if head_is_unborn "$1"; then
-        git -C "$1" hash-object -t tree --stdin < /dev/null
+        git_in_store "$1" hash-object -t tree --stdin < /dev/null
     else
-        git -C "$1" rev-parse -q --verify 'HEAD^{tree}'
+        git_in_store "$1" rev-parse -q --verify 'HEAD^{tree}'
     fi
 }
 
 # content_has_credential_shape COMMAND… — status 0 when the redactor's shape rules change what COMMAND
-# prints, 1 when they do not, 2 when it could not be read or filtered. Compared by digest, so the
-# content is never held in a variable.
+# prints, 1 when they do not, 2 when it could not be read or filtered. COMMAND runs once, so a file a
+# session writes to cannot read one way for the digest of the content and another for the digest of
+# its redaction. Compared by digest, so the content is never held in a variable.
 content_has_credential_shape() {
-    local original_digest redacted_digest
-    original_digest=$("$@" | sha256sum) || return "$SHAPE_CHECK_FAILED"
-    redacted_digest=$("$@" | "$REDACTOR" "$REDACTOR_SHAPES_ONLY_FLAG" | sha256sum) || return "$SHAPE_CHECK_FAILED"
-    [[ "$original_digest" != "$redacted_digest" ]]
+    local digests_text digest_lines=()
+    # tee hands the one read to a digest of its own, written to fd 3, while the redactor's output is
+    # digested on stdout; both land in the substitution. The two lines arrive in either order, which an
+    # equality test does not mind; anything but two digest lines is a failure.
+    digests_text=$( { "$@" | tee >(sha256sum >&3) | "$REDACTOR" "$REDACTOR_SHAPES_ONLY_FLAG" | sha256sum; } 3>&1 ) \
+        || return "$SHAPE_CHECK_FAILED"
+    mapfile -t digest_lines <<< "$digests_text"
+    if (( ${#digest_lines[@]} != 2 )) || [[ ! "${digest_lines[0]}" =~ $STDIN_DIGEST_LINE_RE ]] \
+        || [[ ! "${digest_lines[1]}" =~ $STDIN_DIGEST_LINE_RE ]]; then
+        return "$SHAPE_CHECK_FAILED"
+    fi
+    [[ "${digest_lines[0]}" != "${digest_lines[1]}" ]]
+}
+
+# print_name_then_content PATH [COMMAND…] — PATH on a line of its own, then what COMMAND prints (no
+# COMMAND: the name alone), so one shape check and one set of labels cover a file's name and body. The
+# redactor reads line by line, so no shape spans the two.
+print_name_then_content() {
+    printf '%s\n' "$1"
+    shift
+    if (( $# )); then "$@"; fi
 }
 
 # redaction_marker_labels — the label of every redaction marker on stdin, one per line.
@@ -376,7 +470,8 @@ redaction_marker_labels() {
 
 # shape_labels_of COMMAND… — the labels of the shapes the redactor finds in what COMMAND prints,
 # sorted and joined by ", ": the markers in its output less those the content already held, so a
-# memory file that quotes a marker does not name a shape it lacks. Labels only, never a line.
+# memory file that quotes a marker does not name a shape it lacks. Labels only, never a line. COMMAND
+# runs again here, after the verdict: a write in between can change a label, never the verdict.
 shape_labels_of() {
     local -A marker_balance=()
     local label found_labels=() sorted_labels
@@ -394,11 +489,11 @@ shape_labels_of() {
     printf '%s' "${sorted_labels//$'\n'/, }"
 }
 
-# print_withheld_line STORE PATH LABELS — the line that names a withheld file.
+# print_withheld_line STORE PATH LABELS — the line that names a withheld file, its name redacted.
 print_withheld_line() {
-    local escaped_path
-    escaped_path=$(escaped_for_one_line "$2")
-    printf '%s: withheld %s (%s)\n' "$1" "$escaped_path" "$3"
+    local shown_path
+    shown_path=$(printable_path "$2")
+    printf '%s: withheld %s (%s)\n' "$1" "$shown_path" "$3"
 }
 
 # print_link_target PATH — what git stores for a symlink: its target, with no newline.
@@ -412,15 +507,19 @@ print_link_target() {
 # --apply: stage, gate and commit, holding the link script's lock.
 # ---------------------------------------------------------------------------------------------
 
-# take_link_lock — wait for <state dir>/link.lock, the link script's lock, and hold it in
-# LINK_LOCK_FD. Returns 1 when it cannot.
+# take_link_lock — wait LOCK_WAIT_SECONDS at most for <state dir>/link.lock, the link script's lock,
+# and hold it in LINK_LOCK_FD. Returns LOCK_WAIT_RAN_OUT when another run still held it at the end of
+# the wait, 1 when it could not be opened or locked.
 take_link_lock() {
+    local flock_status
     mkdir -p -- "$STATE_DIR" || return 1
-    exec {LINK_LOCK_FD}>> "$STATE_DIR/$LINK_LOCK_FILE_NAME" || return 1
-    if ! flock "$LINK_LOCK_FD"; then
-        release_link_lock
-        return 1
-    fi
+    exec {LINK_LOCK_FD}>> "$LINK_LOCK_PATH" || return 1
+    flock -w "$LOCK_WAIT_SECONDS" "$LINK_LOCK_FD"
+    flock_status=$?
+    (( flock_status != 0 )) || return 0
+    release_link_lock
+    if (( flock_status == FLOCK_TIMED_OUT_STATUS )); then return "$LOCK_WAIT_RAN_OUT"; fi
+    return 1
 }
 
 # release_link_lock — close the lock's descriptor, which lets go of the lock.
@@ -429,14 +528,14 @@ release_link_lock() {
     LINK_LOCK_FD=''
 }
 
-# gate_staged_paths STORE STORE_DIR BASE_TREE — unstage each staged path whose blob carries a
-# credential shape, naming it and recording it in WITHHELD_PATHS. Returns 1, having reported the
-# store, when a blob could not be read or a path could not be unstaged.
+# gate_staged_paths STORE STORE_DIR BASE_TREE — unstage each staged path whose name or blob carries a
+# credential shape, naming it and recording it, redacted, in WITHHELD_REDACTED_PATHS. Returns 1,
+# having reported the store, when a blob could not be read or a path could not be unstaged.
 gate_staged_paths() {
     local store=$1 store_dir=$2 base_tree=$3 raw_items=() index metadata path blob_mode blob_id labels
-    local shape_status
-    WITHHELD_PATHS=()
-    if ! read_nul_items raw_items git -C "$store_dir" diff-index --cached --raw -z --no-abbrev \
+    local shape_status redacted_path name_and_content_command=()
+    WITHHELD_REDACTED_PATHS=()
+    if ! read_nul_items raw_items git_in_store "$store_dir" diff-index --cached --raw -z --no-abbrev \
         --no-renames --diff-filter=d "$base_tree" --; then
         report_store_failure "$store" "git could not list the staged files"
         return 1
@@ -446,20 +545,26 @@ gate_staged_paths() {
         metadata=${raw_items[index]}
         path=${raw_items[index + 1]}
         read -r _ blob_mode _ blob_id _ <<< "$metadata"
-        [[ "$blob_mode" != "$GITLINK_MODE" ]] || continue
-        content_has_credential_shape git -C "$store_dir" cat-file blob "$blob_id"
+        # A submodule's entry is a commit id with no blob to read: its name is all there is to gate.
+        name_and_content_command=(print_name_then_content "$path")
+        if [[ "$blob_mode" != "$GITLINK_MODE" ]]; then
+            name_and_content_command+=(git_in_store "$store_dir" cat-file blob "$blob_id")
+        fi
+        content_has_credential_shape "${name_and_content_command[@]}"
         shape_status=$?
         (( shape_status != 1 )) || continue
         if (( shape_status != 0 )); then
-            report_store_failure "$store" "could not read the staged $(escaped_for_one_line "$path")"
+            report_store_failure "$store" "could not read the staged $(printable_path "$path")"
             return 1
         fi
-        labels=$(shape_labels_of git -C "$store_dir" cat-file blob "$blob_id")
-        if ! run_git_reporting_errors "$store_dir" --literal-pathspecs reset -q -- "$path"; then
-            report_store_failure "$store" "could not unstage the withheld $(escaped_for_one_line "$path")"
+        labels=$(shape_labels_of "${name_and_content_command[@]}")
+        if ! run_git_reporting_errors "$store_dir" "${GIT_WRITE_SAFETY_OPTIONS[@]}" --literal-pathspecs \
+            reset -q -- "$path"; then
+            report_store_failure "$store" "could not unstage the withheld $(printable_path "$path")"
             return 1
         fi
-        WITHHELD_PATHS+=("$path")
+        redact_path_into redacted_path "$path"
+        WITHHELD_REDACTED_PATHS+=("$redacted_path")
         print_withheld_line "$store" "$path" "$labels"
     done
 }
@@ -469,15 +574,16 @@ gate_staged_paths() {
 commit_staged_paths() {
     local store=$1 store_dir=$2 base_tree=$3 staged_paths=() commit_message
     COMMITTED_COUNT=0
-    if ! read_nul_items staged_paths git -C "$store_dir" diff-index --cached --name-only -z \
+    if ! read_nul_items staged_paths git_in_store "$store_dir" diff-index --cached --name-only -z \
         --no-renames "$base_tree" --; then
         report_store_failure "$store" "git could not count the staged files"
         return 1
     fi
     (( ${#staged_paths[@]} )) || return 0
     commit_message="$HOST_NAME: ${#staged_paths[@]} files"
-    if ! run_git_reporting_errors "$store_dir" -c maintenance.autoDetach=false -c gc.autoDetach=false \
-        commit -q --no-gpg-sign -m "$commit_message"; then
+    if ! run_git_reporting_errors "$store_dir" "${GIT_WRITE_SAFETY_OPTIONS[@]}" \
+        -c maintenance.autoDetach=false -c gc.autoDetach=false \
+        commit -q --no-verify --no-gpg-sign -m "$commit_message"; then
         report_store_failure "$store" "git commit failed"
         return 1
     fi
@@ -487,7 +593,8 @@ commit_staged_paths() {
 # stage_gate_and_commit STORE STORE_DIR — the part of a run that holds the lock.
 stage_gate_and_commit() {
     local store=$1 store_dir=$2 base_tree
-    if ! run_git_reporting_errors "$store_dir" add -A -f -- "${STAGE_PATHSPEC[@]}"; then
+    if ! run_git_reporting_errors "$store_dir" "${GIT_WRITE_SAFETY_OPTIONS[@]}" add -A -f -- \
+        "${STAGE_PATHSPEC[@]}"; then
         report_store_failure "$store" "git add failed"
         return 1
     fi
@@ -502,10 +609,15 @@ stage_gate_and_commit() {
 # apply_store STORE STORE_DIR — the origin check, then stage, gate and commit under the lock, then the
 # status. Returns 1 when the store could not run.
 apply_store() {
-    local store=$1 store_dir=$2 locked_status joined_paths withheld_path local_only_detail
+    local store=$1 store_dir=$2 lock_status locked_status joined_paths withheld_path local_only_detail
     check_origin "$store" "$store_dir" || return 1
-    if ! take_link_lock; then
-        report_store_failure "$store" "could not take the lock $STATE_DIR/$LINK_LOCK_FILE_NAME"
+    take_link_lock
+    lock_status=$?
+    if (( lock_status == LOCK_WAIT_RAN_OUT )); then
+        report_store_failure "$store" "the lock $LINK_LOCK_PATH was still held after $LOCK_WAIT_SECONDS s"
+        return 1
+    elif (( lock_status != 0 )); then
+        report_store_failure "$store" "could not take the lock $LINK_LOCK_PATH"
         return 1
     fi
     stage_gate_and_commit "$store" "$store_dir"
@@ -514,9 +626,9 @@ apply_store() {
     (( locked_status == 0 )) || return 1
 
     if (( COMMITTED_COUNT )); then printf '%s: committed %d files\n' "$store" "$COMMITTED_COUNT"; fi
-    if (( ${#WITHHELD_PATHS[@]} )); then
+    if (( ${#WITHHELD_REDACTED_PATHS[@]} )); then
         joined_paths=''
-        for withheld_path in "${WITHHELD_PATHS[@]}"; do
+        for withheld_path in "${WITHHELD_REDACTED_PATHS[@]}"; do
             joined_paths+="${joined_paths:+, }$withheld_path"
         done
         write_status "$store" "$OUTCOME_WITHHELD" "$joined_paths" || { FAILED_STORES+=("$store"); return 1; }
@@ -535,21 +647,21 @@ apply_store() {
 # current branch, or NO_FETCHED_ORIGIN_TEXT when there is none. Never fetches.
 ahead_behind_text() {
     local store_dir=$1 branch tracking_ref counts ahead behind
-    if ! branch=$(git -C "$store_dir" symbolic-ref -q --short HEAD); then
+    if ! branch=$(git_in_store "$store_dir" symbolic-ref -q --short HEAD); then
         printf '%s' "$NO_FETCHED_ORIGIN_TEXT"
         return 0
     fi
     tracking_ref="refs/remotes/$ORIGIN_REMOTE_NAME/$branch"
-    if ! git -C "$store_dir" rev-parse -q --verify "$tracking_ref^{commit}" >/dev/null; then
+    if ! git_in_store "$store_dir" rev-parse -q --verify "$tracking_ref^{commit}" >/dev/null; then
         printf '%s' "$NO_FETCHED_ORIGIN_TEXT"
         return 0
     fi
     if head_is_unborn "$store_dir"; then
-        behind=$(git -C "$store_dir" rev-list --count "$tracking_ref") || return 1
+        behind=$(git_in_store "$store_dir" rev-list --count "$tracking_ref") || return 1
         printf 'ahead 0 behind %s' "$behind"
         return 0
     fi
-    counts=$(git -C "$store_dir" rev-list --left-right --count "HEAD...$tracking_ref") || return 1
+    counts=$(git_in_store "$store_dir" rev-list --left-right --count "HEAD...$tracking_ref") || return 1
     read -r ahead behind <<< "$counts"
     printf 'ahead %s behind %s' "$ahead" "$behind"
 }
@@ -558,32 +670,33 @@ ahead_behind_text() {
 # is from its fetched origin. Returns 1 when the store could not be read.
 check_store() {
     local store=$1 store_dir=$2 status_entries=() status_entry path full_path
-    local content_command=() shape_status labels withheld_lines=() pending_count position
+    local name_and_content_command=() shape_status labels withheld_lines=() pending_count position
     check_origin "$store" "$store_dir" || return 1
     # The stage's pathspec, so that what is counted is what would be staged: every changed tracked path
     # and every untracked one, ignored ones included, one entry each ("XY <path>"). `git status` and not
     # `git diff <tree>`: under GIT_OPTIONAL_LOCKS=0 status leaves the index alone, and diff still writes
     # back the entries it refreshes (probed, git 2.53).
-    if ! read_nul_items status_entries git -C "$store_dir" status --porcelain=v1 -z --no-renames \
+    if ! read_nul_items status_entries git_in_store "$store_dir" status --porcelain=v1 -z --no-renames \
         --untracked-files=all --ignored=traditional -- "${STAGE_PATHSPEC[@]}"; then
         report_store_failure "$store" "git could not list the changed files"
         return 1
     fi
     for status_entry in "${status_entries[@]}"; do
-        path=${status_entry:3}
+        path=${status_entry:PORCELAIN_STATUS_PREFIX_LENGTH}
         full_path="$store_dir/$path"
-        if [[ -L "$full_path" ]]; then content_command=(print_link_target "$full_path")
-        elif [[ -f "$full_path" ]]; then content_command=(cat -- "$full_path")
-        else continue   # a deletion, or a nested repository: nothing to read
-        fi
-        content_has_credential_shape "${content_command[@]}"
+        name_and_content_command=(print_name_then_content "$path")
+        if [[ -L "$full_path" ]]; then name_and_content_command+=(print_link_target "$full_path")
+        elif [[ -f "$full_path" ]]; then name_and_content_command+=(cat -- "$full_path")
+        elif [[ ! -e "$full_path" ]]; then continue   # a deletion: its name leaves the tree
+        fi   # else a nested repository: its name is all a commit would carry
+        content_has_credential_shape "${name_and_content_command[@]}"
         shape_status=$?
         (( shape_status != 1 )) || continue
         if (( shape_status != 0 )); then
-            report_store_failure "$store" "could not read $(escaped_for_one_line "$path")"
+            report_store_failure "$store" "could not read $(printable_path "$path")"
             return 1
         fi
-        labels=$(shape_labels_of "${content_command[@]}")
+        labels=$(shape_labels_of "${name_and_content_command[@]}")
         withheld_lines+=("$(print_withheld_line "$store" "$path" "$labels")")
     done
     pending_count=$(( ${#status_entries[@]} - ${#withheld_lines[@]} ))
@@ -596,50 +709,57 @@ check_store() {
     if (( pending_count || ${#withheld_lines[@]} )); then NEEDS_ATTENTION=1; fi
 }
 
-# scan_store STORE STORE_DIR — name each file in the scanned revision's tree that carries a credential
-# shape. Returns 1 when the revision or a blob could not be read.
+# scan_store STORE STORE_DIR — name each file in the scanned revision's tree whose name or content
+# carries a credential shape. Returns 1 when the origin is not the table's remote, or the revision or a
+# blob could not be read.
 scan_store() {
     local store=$1 store_dir=$2 tree_id tree_items=() item metadata path object_type object_id
-    local shape_status labels escaped_path
+    local shape_status labels shown_path name_and_content_command=()
+    check_origin "$store" "$store_dir" || return 1
     if [[ -n "$SCAN_REVISION" ]]; then
-        if ! tree_id=$(git -C "$store_dir" rev-parse -q --verify "$SCAN_REVISION^{tree}"); then
+        if ! tree_id=$(git_in_store "$store_dir" rev-parse -q --verify "$SCAN_REVISION^{tree}"); then
             report_store_failure "$store" "revision $SCAN_REVISION does not resolve to a tree"
             return 1
         fi
     elif head_is_unborn "$store_dir"; then
         return 0
-    elif ! tree_id=$(git -C "$store_dir" rev-parse -q --verify 'HEAD^{tree}'); then
+    elif ! tree_id=$(git_in_store "$store_dir" rev-parse -q --verify 'HEAD^{tree}'); then
         report_store_failure "$store" "git could not read HEAD"
         return 1
     fi
-    if ! read_nul_items tree_items git -C "$store_dir" ls-tree -r -z "$tree_id"; then
+    if ! read_nul_items tree_items git_in_store "$store_dir" ls-tree -r -z "$tree_id"; then
         report_store_failure "$store" "git could not list the tree of ${SCAN_REVISION:-HEAD}"
         return 1
     fi
-    # Each item: "<mode> <type> <id>", a tab, then the path.
+    # Each item: "<mode> <type> <id>", a tab, then the path. A submodule (type commit) has a name alone.
     for item in "${tree_items[@]}"; do
         metadata=${item%%$'\t'*}
         path=${item#*$'\t'}
         read -r _ object_type object_id <<< "$metadata"
-        [[ "$object_type" == blob ]] || continue
-        content_has_credential_shape git -C "$store_dir" cat-file blob "$object_id"
+        name_and_content_command=(print_name_then_content "$path")
+        if [[ "$object_type" == blob ]]; then
+            name_and_content_command+=(git_in_store "$store_dir" cat-file blob "$object_id")
+        fi
+        content_has_credential_shape "${name_and_content_command[@]}"
         shape_status=$?
         (( shape_status != 1 )) || continue
-        escaped_path=$(escaped_for_one_line "$path")
+        shown_path=$(printable_path "$path")
         if (( shape_status != 0 )); then
-            report_store_failure "$store" "could not read $escaped_path"
+            report_store_failure "$store" "could not read $shown_path"
             return 1
         fi
-        labels=$(shape_labels_of git -C "$store_dir" cat-file blob "$object_id")
-        printf '%s: %s (%s)\n' "$store" "$escaped_path" "$labels"
+        labels=$(shape_labels_of "${name_and_content_command[@]}")
+        printf '%s: %s (%s)\n' "$store" "$shown_path" "$labels"
         NEEDS_ATTENTION=1
     done
 }
 
-# prepare_apply — settle the host name the commit message carries.
+# prepare_apply — settle the host name the commit message carries and the lock wait.
 prepare_apply() {
     HOST_NAME=${CLAUDE_MEMORY_HOST:-$(hostname -s)}
     [[ "$HOST_NAME" =~ $HOST_NAME_RE ]] || die "host name '$HOST_NAME' cannot go in a commit message"
+    [[ "$LOCK_WAIT_SECONDS" =~ $LOCK_WAIT_SECONDS_RE ]] \
+        || die "CLAUDE_MEMORY_LOCK_WAIT_SECONDS '$LOCK_WAIT_SECONDS' is not a whole number of seconds above 0"
 }
 
 main() {
