@@ -513,6 +513,21 @@ jobs:
       - name: Run the dock Wi-Fi guard state table
         run: ./scripts/test-dock-wifi.sh
 
+  resource-pulse-test:
+    name: Resource Pulse State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install gjs
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gjs
+
+      - name: Run the Resource Pulse state table
+        run: ./scripts/test-resource-pulse.sh
+
   dev-link-test:
     name: Dev Link State Table
     runs-on: ubuntu-latest
