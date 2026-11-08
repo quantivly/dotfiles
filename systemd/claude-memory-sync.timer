@@ -1,0 +1,35 @@
+# systemd/claude-memory-sync.timer
+# ================================
+# Runs claude-memory-sync.service every 10 minutes. See that unit's header for
+# what one tick does, and for why the unit is linked and not enabled.
+#
+# WHY EVERY 10 MINUTES. A memory write on one host should reach the next host's
+# session soon, and each tick is cheap when nothing changed: a commit with
+# nothing staged is skipped, and the network work per store is one fetch and,
+# only when there is something to send, one push. The doctor calls a store stale
+# after stale_after_minutes (60 by default), so six ticks can fail before it says
+# so.
+#
+# WHY A CALENDAR SPEC AND PERSISTENT. OnCalendar= with Persistent=true runs a tick
+# missed while the host was asleep once, on resume, so a laptop that slept through
+# the afternoon syncs on waking. Persistent= is allowed here only beside
+# OnCalendar=: on a monotonic timer it wedges on a late boot
+# (docs/TIMER_HEALTH.md), and scripts/test-timer-health.sh enforces that.
+# RandomizedDelaySec spreads hosts that share a store across the minute, so two
+# pushes to one remote collide less often; one that does is push-rejected, and
+# the next tick fetches and pushes again.
+
+[Unit]
+Description=Every 10 minutes: link Claude Code memory and sync its stores
+Documentation=file://%h/.dotfiles/docs/CLAUDE_SETUP.md
+
+[Timer]
+OnCalendar=*:0/10
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK — run ./install, never
+# `systemctl --user reenable`, which would delete the dotbot symlink that IS the
+# unit. See systemd/herdr-server.service's [Install] note for the full account.
+WantedBy=default.target

@@ -1231,7 +1231,9 @@ _claude_doctor_rendered_settings() {
 # Claude Code's memory in git-backed stores, and this asks the read-only --check
 # of scripts/claude-memory-link.sh how far each key is from a link into its store.
 # --apply is never run from here: the doctor writes nothing. Without the table the
-# memory directories are plain ones, which is a fact about the host, not a finding.
+# memory directories are plain ones, which is a fact about the host, not a finding,
+# and neither script is asked. With it, the link rows are followed by the sync's
+# (_claude_doctor_memory_sync_status, below).
 #
 # Unlike the section above this keeps stdout, since the rows are the report. And
 # an exit 0 is not yet the ✓: UNMAPPED rows alone do not fail --check, so the ✓
@@ -1242,7 +1244,7 @@ _claude_doctor_memory_stores() {
   local store_table="${CLAUDE_MEMORY_CONFIG:-$HOME/.dotfiles-local/claude/memory-stores.json}"
   local link_script="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-memory-link.sh"
   local summary_prefix='claude-memory-link: '
-  local unmapped_remedy='a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory aside, or the row is permanent'
+  local unmapped_remedy='a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory out of the projects directory, or the row is permanent'
   local captured_streams link_stdout link_rc last_stderr_line report_line reported_row summary_counts=''
   local -i linked_count=0 without_store_count=0 has_no_store_here=0
   local -a stream_parts link_stderr_lines report_lines reported_rows
@@ -1282,7 +1284,9 @@ _claude_doctor_memory_stores() {
         _doctor_warn "memory directories no table entry claims (${summary_counts:-no summary}) — $unmapped_remedy"
       fi
       if (( has_no_store_here )); then
-        _doctor_warn "no memory store is checked out on this host ($without_store_count keys wait for one)"
+        # Of the stores these keys map to, not of every store: another one checked out
+        # here with nothing mapped to it leaves this true.
+        _doctor_warn "no store that these keys map to is checked out here ($without_store_count keys wait for one)"
       fi
       if (( ${#reported_rows} == 0 && ! has_no_store_here )); then
         if [[ -n "$summary_counts" ]]; then
@@ -1298,6 +1302,91 @@ _claude_doctor_memory_stores() {
   for reported_row in "${reported_rows[@]}"; do
     printf '    %s\n' "$reported_row"
   done
+  _claude_doctor_memory_sync_status
+}
+
+# The sync half of the "--- Memory stores ---" section (DO-892), after the link
+# rows. scripts/claude-memory-sync.sh --status reads each checked-out store's last
+# outcome and prints <store><TAB><level><TAB><message>, one line or more per
+# store; each becomes a row through the emitter its level names, ok ✓, warn ⚠,
+# bad ✗, with the message whole. Only --status is ever asked: it never writes,
+# never fetches and takes no lock. The script's header says which outcome is
+# which level.
+#
+# It is asked whatever the link rows said, and its empty answer is tolerated:
+# only --status knows which stores are checked out, and a store no key maps to
+# can be checked out on a host whose keys wait for another. With no store here it
+# prints nothing at exit 0, which adds no row, and the link rows' ⚠ already says
+# no store is checked out. A line the doctor cannot read is shown whole as a ⚠,
+# never dropped. A store --status cannot read is its own bad line, so an exit
+# other than 0 means it could read nothing: a ⚠ with the last stderr line and
+# every line before it indented under it, after any rows it did print.
+_claude_doctor_memory_sync_status() {
+  local sync_script="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-memory-sync.sh"
+  local captured_streams status_stdout status_rc last_stderr_line status_line
+  local store level message after_store status_stderr_line
+  local -a stream_parts status_stderr_lines status_lines
+  # The link rows' two-stream capture: see the comments there.
+  captured_streams="$( ( status_stdout="$("$sync_script" --status)"; status_rc=$?; printf '\0%s\0%d' "$status_stdout" "$status_rc" ) 2>&1 )"
+  stream_parts=("${(@ps:\0:)captured_streams}")
+  status_rc="${stream_parts[3]}"
+  status_stderr_lines=(${(f)stream_parts[1]})
+  last_stderr_line="${status_stderr_lines[-1]}"
+  status_lines=(${(f)stream_parts[2]})
+  for status_line in "${status_lines[@]}"; do
+    # A line with no tab leaves all three as the whole line, so it reads as an
+    # unknown level below.
+    store="${status_line%%$'\t'*}"
+    after_store="${status_line#*$'\t'}"
+    level="${after_store%%$'\t'*}"
+    message="${after_store#*$'\t'}"
+    case "$level" in
+      ok)   _doctor_ok   "memory store ${store}: $message" ;;
+      warn) _doctor_warn "memory store ${store}: $message" ;;
+      bad)  _doctor_bad  "memory store ${store}: $message" ;;
+      *)    _doctor_warn "memory sync status printed a line the doctor cannot read: $status_line" ;;
+    esac
+  done
+  if [[ "$status_rc" != 0 ]]; then
+    _doctor_warn "memory sync status could not be read: ${last_stderr_line:-exit $status_rc}"
+    # Every line before the last, which the ⚠ carries, indented under it as the
+    # link rows print theirs: a reason given on an earlier line is never lost.
+    # printf, never echo: zsh's echo would turn an escaped \t back into a tab.
+    for status_stderr_line in "${(@)status_stderr_lines[1,-2]}"; do
+      printf '    %s\n' "$status_stderr_line"
+    done
+  fi
+  _claude_doctor_memory_sync_timer
+}
+
+# The last row of the sync half: the tick itself. ./install links
+# claude-memory-sync.timer and never enables it (a host arms it by hand), so a
+# host can hold a store with an origin and a timer nothing started, and its rows
+# above only age into "never synced" with no word of why. A ⚠ when the unit is
+# linked, systemd does not say it is active (no answer at all included: with no
+# user manager nothing fires it either), and a checked-out store has an origin;
+# a host whose stores are all local-only has nothing to sync yet. Without
+# systemctl or git it cannot ask, and says nothing. `git remote get-url` reads
+# the store's config and writes nothing.
+_claude_doctor_memory_sync_timer() {
+  local timer_unit_name='claude-memory-sync.timer'
+  local timer_unit_link="$HOME/.config/systemd/user/$timer_unit_name"
+  local stores_root="${CLAUDE_MEMORY_STORES_ROOT:-$HOME/.local/share/claude-memory}"
+  local timer_state store_git_entry
+  local -i has_store_with_origin=0
+  [[ -e "$timer_unit_link" || -L "$timer_unit_link" ]] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  timer_state="$(systemctl --user is-active "$timer_unit_name" 2>/dev/null)"
+  [[ "$timer_state" == active ]] && return 0
+  command -v git >/dev/null 2>&1 || return 0
+  for store_git_entry in "$stores_root"/*/.git(N); do
+    if git -C "${store_git_entry:h}" remote get-url origin >/dev/null 2>&1; then
+      has_store_with_origin=1
+      break
+    fi
+  done
+  (( has_store_with_origin )) || return 0
+  _doctor_warn "$timer_unit_name is linked but not active; nothing syncs until it is armed"
 }
 
 # The Linear API-key plugin, the "--- Linear ---" section of claude-doctor

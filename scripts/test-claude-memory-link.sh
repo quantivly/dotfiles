@@ -30,6 +30,8 @@ mkdir -p "$HOME"
 export HOME
 # A row run from a git hook would otherwise point every fixture git at the hook's repository.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+# The caller's lock wait would otherwise reach every --apply; the row about it sets its own.
+unset CLAUDE_MEMORY_LOCK_WAIT_SECONDS
 GIT_CONFIG_GLOBAL="$TMPROOT/gitconfig-global"
 GIT_CONFIG_SYSTEM="$TMPROOT/gitconfig-system"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
@@ -894,6 +896,16 @@ run_sut --check
 check "check: the summary counts the NO-STORE keys holding memory, and no other" "$RC|$OUT" \
     "0|claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 2 without a store"
 
+# A store removed after its keys were linked leaves each memory a link into a checkout that is gone.
+# The key is NO-STORE and holds no real directory, yet nothing Claude Code writes is kept: uncounted,
+# it would be the doctor's ✓ over a host keeping no memory at all.
+reset_scene
+add_state LINKED
+rm -rf "${STORES_ROOT:?}/$ALPHA_STORE"
+run_sut --check
+check "check: a key linked into a store that is gone counts as without a store" "$RC|$OUT" \
+    "0|claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 1 without a store"
+
 # A count that cannot be taken is no smaller count.
 reset_scene
 add_state NO-STORE
@@ -1701,6 +1713,32 @@ PATH="$STUB_BIN:$PATH" run_sut --apply
 check "lock: a lock that cannot be taken is exit 2, with nothing touched" \
     "$RC|$(contains "$OUT" "could not take the lock $STATE_DIR/link.lock")|$(tree_fingerprint)" "2|yes|$tree_before"
 
+# The wait is bounded, so a link step on the sync's timer cannot spend the sync's time on a lock a
+# by-hand run holds. The holder keeps the lock past the row's wait of one second.
+LOCK_WAIT_ROW_SECONDS=1
+LOCK_HOLD_PAST_WAIT_SECONDS=3
+apply_scene lock-wait-runs-out
+write_file "$memory_dir/MEMORY.md" '- index'
+mkdir -p "$STATE_DIR" || fatal "could not create the state dir"
+lock_taken_file="$TMPROOT/lock-taken"
+rm -f "$lock_taken_file"
+# shellcheck disable=SC2016  # expanded by the bash -c, not this one
+flock "$STATE_DIR/link.lock" bash -c ': > "$1"; sleep "$2"' _ "$lock_taken_file" "$LOCK_HOLD_PAST_WAIT_SECONDS" &
+lock_holder_pid=$!
+for (( lock_wait_step = 0; lock_wait_step < 100; lock_wait_step++ )); do
+    [[ -e "$lock_taken_file" ]] && break
+    sleep 0.05
+done
+[[ -e "$lock_taken_file" ]] || fatal "the row's lock holder never took the lock"
+tree_before=$(tree_fingerprint)
+CLAUDE_MEMORY_LOCK_WAIT_SECONDS=$LOCK_WAIT_ROW_SECONDS run_sut_bounded --apply
+held_lock_result="$RC|$(contains "$OUT" "still held the lock $STATE_DIR/link.lock")|$(tree_fingerprint)"
+CLAUDE_MEMORY_LOCK_WAIT_SECONDS=soon run_sut_bounded --apply
+check "lock: a lock still held when the wait runs out is exit 2 naming it, with nothing renamed; a wait that is not whole seconds is exit 2" \
+    "$held_lock_result|$RC|$(contains "$OUT" 'CLAUDE_MEMORY_LOCK_WAIT_SECONDS')|$(tree_fingerprint)" \
+    "2|yes|$tree_before|2|yes|$tree_before"
+wait "$lock_holder_pid"
+
 printf 'apply: a failure stops only what failed\n'
 apply_scene bad-file-keeps-going
 write_file "$store_dir/aa" 'a file in the way'
@@ -2125,6 +2163,58 @@ check "apply: a store directory that is itself a symlink out of the checkout is 
     "$apply_result|$(outside_entry_count "$outside_store_dir")|$(row_of_key "$key" | cut -f2)" \
     "2|yes|0|REAL-DIR"
 
+# Inside the checkout and still refused: git runs what lies under its .git, so a memory file named like
+# a hook would land as one that the sync's `git merge` runs. The hooks directory is made, not assumed:
+# what `git init` puts there depends on the host's template directory.
+apply_scene hooks-trap
+write_file "$memory_dir/post-merge" '#!/bin/sh'
+chmod 755 "$memory_dir/post-merge"
+store_git_dir="$STORES_ROOT/$ALPHA_STORE/.git"
+mkdir -p "$store_git_dir/hooks" "$(dirname "$store_dir")"
+ln -s ../../.git/hooks "$store_dir" || fatal "could not plant the link into the store's .git"
+hooks_manifest_before=$(file_manifest "$store_git_dir/hooks")
+run_sut --apply
+apply_result="$RC|$(contains "$OUT" "refusing $store_dir: it resolves into the store checkout's git directory $store_git_dir")"
+run_sut --list
+check "apply: a store directory that resolves into the store checkout's .git is refused: no hook lands, the key stays REAL-DIR" \
+    "$apply_result|$([[ -e "$store_git_dir/hooks/post-merge" ]] && printf 'hook landed')|$(file_manifest "$store_git_dir/hooks")|$(row_of_key "$key" | cut -f2)" \
+    "2|yes||$hooks_manifest_before|REAL-DIR"
+
+# linked_scene REPO — a key already linked into its store directory, which holds one file.
+linked_scene() {
+    apply_scene "$1"
+    rmdir "$memory_dir" || fatal "could not clear the memory directory of $1"
+    write_file "$store_dir/MEMORY.md" 'store memory'
+    link_memory "$key" "$store_dir"
+}
+
+# --check holds a LINKED key to the same containment as --apply: a link planted above the store
+# directory after the key was linked sends Claude Code's writes out of the store while the text of the
+# key's own link stays right. --apply then leaves it, as it leaves any WRONG-LINK.
+linked_scene relinked-outside
+moved_owner_dir="$TMPROOT/owner-moved-outside"
+rm -rf "$moved_owner_dir"
+mv "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" "$moved_owner_dir" || fatal "could not move the owner directory"
+ln -s "$moved_owner_dir" "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" || fatal "could not plant the link"
+moved_owner_manifest_before=$(file_manifest "$moved_owner_dir")
+run_sut --check
+check_result="$RC|$OUT"
+run_sut --apply
+check "check: a LINKED key whose store directory now resolves outside the checkout is WRONG-LINK, and --apply leaves it" \
+    "$check_result|$RC|$OUT|$(memory_kind "$memory_dir")|$(file_manifest "$moved_owner_dir")" \
+    "1|$(row_line "$key" WRONG-LINK "$ALPHA_STORE" "repos/$FIXTURE_OWNER/relinked-outside" "$HOME/code/relinked-outside")
+claude-memory-link: 0 linked, 1 to fix, 0 unmapped, 0 without a store|0||link to $store_dir|$moved_owner_manifest_before"
+
+linked_scene relinked-into-git
+store_git_dir="$STORES_ROOT/$ALPHA_STORE/.git"
+mv "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" "$store_git_dir/planted-owner" || fatal "could not move the owner directory"
+ln -s ../.git/planted-owner "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" || fatal "could not plant the link"
+run_sut --check
+check "check: a LINKED key whose store directory now resolves into the store checkout's .git is WRONG-LINK" \
+    "$RC|$OUT" \
+    "1|$(row_line "$key" WRONG-LINK "$ALPHA_STORE" "repos/$FIXTURE_OWNER/relinked-into-git" "$HOME/code/relinked-into-git")
+claude-memory-link: 0 linked, 1 to fix, 0 unmapped, 0 without a store"
+
 pending_scene marker-dangling
 write_file "$replaced_dir/topic.md" 'pending body'
 marker_target="$TMPROOT/no-such-marker-target"
@@ -2366,7 +2456,7 @@ done
 check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
 
 printf '\n'
-EXPECTED_ROWS=201
+EXPECTED_ROWS=206
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
