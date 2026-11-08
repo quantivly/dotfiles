@@ -299,6 +299,37 @@ cost_run "$TWO_SHELLS_ROOT" --rss-kib
 check "cost: two gnome-shell candidates exit 2" "$COST_EXIT" 2
 cost_run "$NO_SHELL_ROOT" --rss-kib
 check "cost: no gnome-shell candidate exits 2" "$COST_EXIT" 2
+
+# --cpu-percent over a fake window: `sleep` and `getconf` are stubs on PATH.
+# The sleep stub records the window and moves the fake gnome-shell's stat on,
+# as the window would; getconf says CLK_TCK is 250, so a hard-coded 100 Hz
+# shows. utime (field 14) goes 100 -> 160 and stime (15) 50 -> 80: 90 ticks
+# over 2 s at 250 Hz is 18.00% of one core. The neighbours move by other
+# amounts (cmajflt 13: +37, cutime 16: +50, cstime 17: +90), so reading the
+# wrong fields gives another number, as does dividing by the wrong thing.
+CPU_PROC_ROOT="$WIRING_TMP/proc-cpu"
+COST_STUB_BIN="$WIRING_TMP/cost-bin"
+COST_SLEEP_CALLS="$WIRING_TMP/cost-sleep-calls"
+COST_STAT_AFTER="$WIRING_TMP/cost-stat-after"
+COST_WINDOW_SECONDS=2
+make_fake_proc "$CPU_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+printf '4242 (gnome-shell) S 1 1 1 0 -1 0 0 0 0 3 100 50 7 9 20 0 1 0 1 0 0\n' >"$CPU_PROC_ROOT/4242/stat"
+printf '4242 (gnome-shell) S 1 1 1 0 -1 0 0 0 5 40 160 80 57 99 20 0 1 0 1 0 0\n' >"$COST_STAT_AFTER"
+mkdir -p "$COST_STUB_BIN"
+# shellcheck disable=SC2016  # The stubs' own source: their variables expand when they run.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$COST_SLEEP_CALLS"\ncp "$COST_STAT_AFTER" "$COST_STAT_PATH"\n' \
+  >"$COST_STUB_BIN/sleep"
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\n[[ "$1" == CLK_TCK ]] && echo 250\n' >"$COST_STUB_BIN/getconf"
+chmod +x "$COST_STUB_BIN/sleep" "$COST_STUB_BIN/getconf"
+: >"$COST_SLEEP_CALLS"
+cpu_percent_output="$(PATH="$COST_STUB_BIN:$PATH" GNOME_SHELL_PID=4242 PROC_ROOT="$CPU_PROC_ROOT" \
+  COST_SLEEP_CALLS="$COST_SLEEP_CALLS" COST_STAT_AFTER="$COST_STAT_AFTER" COST_STAT_PATH="$CPU_PROC_ROOT/4242/stat" \
+  bash "$COST_SCRIPT" --cpu-percent "$COST_WINDOW_SECONDS" 2>&1)"
+cpu_percent_exit=$?
+check "cost: --cpu-percent is Δ(utime+stime) / (CLK_TCK × window) × 100, over the window it was given" \
+  "exit=$cpu_percent_exit percent=$cpu_percent_output slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
+  "exit=0 percent=18.00 slept=$COST_WINDOW_SECONDS "
 # Spelled by pieces so this row's own source is not what it finds in the script.
 FORBIDDEN_READS_PATTERN="cmd""line|env""iron\\b|pgre""p|\\bps -"
 check "cost: the script never reads an argument list or environment, or runs ps" \
@@ -587,7 +618,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=207
+EXPECTED_ROWS=208
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
