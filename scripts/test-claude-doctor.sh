@@ -268,6 +268,9 @@ run_doctor() {
     # is no clauth anywhere on this PATH — see the SYSBIN note above.
     p="$base"
     [[ "${WITH_CLAUTH:-0}" == 1 ]] && p="$STUBBIN:$base"
+    # A row that needs a tool the base PATH leaves out (a systemctl stub, git)
+    # names a directory holding it with EXTRA_BIN.
+    [[ -n "${EXTRA_BIN:-}" ]] && p="$EXTRA_BIN:$p"
     local -a pre=()
     # Never the real key: env inherits this shell's, and a session that runs the
     # suite has one. A row that wants it set says so with LKEY. The `-u` options go
@@ -277,9 +280,10 @@ run_doctor() {
     # Never the caller's host-profile marker: exported, it would make the
     # no-profile row fail and route every other row through the real renderer.
     pre=(-u CLAUDE_SETTINGS_RENDER_MARKER "${pre[@]}")
-    # Never the caller's memory-store table either: every row but one reaches the
-    # table by the default path, which HOME puts inside the fixture.
-    pre=(-u CLAUDE_MEMORY_CONFIG "${pre[@]}")
+    # Never the caller's memory-store table or stores root either: every row but one
+    # reaches the table, and every row the stores, by the default path, which HOME
+    # puts inside the fixture.
+    pre=(-u CLAUDE_MEMORY_CONFIG -u CLAUDE_MEMORY_STORES_ROOT "${pre[@]}")
     # DOTFILES_ROOT is THIS tree, so the doctor reads this tree's
     # scripts/claude-account-dirs.data-entries (DO-835) -- system.sh would
     # otherwise default it to the fixture's own, empty, ~/.dotfiles. A row that
@@ -4004,6 +4008,55 @@ new_home ms22; write_cred; mk_link_stub 0 '' ''; mk_sync_stub 0 "$SYNC_OK_LINE"$
 DROOT="$MEMORY_ROOT" run_doctor
 if [[ ! -s "$SYNC_CALLS" ]]; then ok "sync: no store table and the sync script is not run"; else bad "sync: no store table and the sync script is not run — it was: $(cat "$SYNC_CALLS")"; fi
 
+# The timer is linked by ./install and armed by hand, so a host can carry a store
+# with an origin and a timer nothing started: its sync rows then age into "never
+# synced" with no word of why. The ⚠ needs all three: the unit linked, systemd
+# not saying active, a checked-out store with an origin. ms23 has all three; each
+# row after it takes one away. The systemctl stub answers active only for
+# exactly `--user is-active claude-memory-sync.timer`, and only when its state
+# file says so; git is the real one, which the base PATH leaves out.
+MEMORY_TIMER_BIN="$TMPROOT/memory-timer-bin"
+SYSTEMCTL_STUB_STATE_FILE="$MEMORY_TIMER_BIN/timer-state"
+MEMORY_TIMER_WARNING='⚠ claude-memory-sync.timer is linked but not active; nothing syncs until it is armed'
+mkdir -p "$MEMORY_TIMER_BIN"
+# shellcheck disable=SC2016  # $* and $(cat …) are the stub's own, expanded when it runs
+printf '#!/bin/sh\nif [ "$*" = "--user is-active claude-memory-sync.timer" ] && [ "$(cat %s)" = active ]; then echo active; exit 0; fi\necho inactive\nexit 3\n' \
+    "$SYSTEMCTL_STUB_STATE_FILE" > "$MEMORY_TIMER_BIN/systemctl"
+chmod +x "$MEMORY_TIMER_BIN/systemctl"
+ln -sf "$(command -v git)" "$MEMORY_TIMER_BIN/git"
+# mk_memory_timer_scene UNIT_LINKED TIMER_STATE STORE_HAS_ORIGIN — the table, the
+# link and sync stubs, the timer unit linked or not (yes|no), the stub's answer,
+# and one store checked out with an origin or without one (yes|no).
+mk_memory_timer_scene() {
+    local timer_unit_dir="$FHOME/.config/systemd/user" store_dir="$FHOME/.local/share/claude-memory/alpha"
+    mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''; mk_sync_stub 0 "$SYNC_OK_LINE"$'\n' ''
+    if [[ "$1" == yes ]]; then mkdir -p "$timer_unit_dir"; : > "$timer_unit_dir/claude-memory-sync.timer"; fi
+    printf '%s\n' "$2" > "$SYSTEMCTL_STUB_STATE_FILE"
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git init -q "$store_dir" \
+        || fatal "could not create the fixture store"
+    if [[ "$3" == yes ]]; then
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+            git -C "$store_dir" remote add origin https://example.invalid/alpha-memory.git \
+            || fatal "could not give the fixture store an origin"
+    fi
+}
+
+new_home ms23; write_cred; mk_memory_timer_scene yes inactive yes
+EXTRA_BIN="$MEMORY_TIMER_BIN" DROOT="$MEMORY_ROOT" run_doctor
+want_out "timer: linked, not active, and a store with an origin is a ⚠ saying nothing syncs" "$MEMORY_TIMER_WARNING"
+
+new_home ms24; write_cred; mk_memory_timer_scene yes active yes
+EXTRA_BIN="$MEMORY_TIMER_BIN" DROOT="$MEMORY_ROOT" run_doctor
+no_out "timer: an active timer is no ⚠" "$MEMORY_TIMER_WARNING"
+
+new_home ms25; write_cred; mk_memory_timer_scene no inactive yes
+EXTRA_BIN="$MEMORY_TIMER_BIN" DROOT="$MEMORY_ROOT" run_doctor
+no_out "timer: a timer that is not linked is no ⚠: the host has not taken the sync" "$MEMORY_TIMER_WARNING"
+
+new_home ms26; write_cred; mk_memory_timer_scene yes inactive no
+EXTRA_BIN="$MEMORY_TIMER_BIN" DROOT="$MEMORY_ROOT" run_doctor
+no_out "timer: stores with no origin are no ⚠: nothing has anywhere to sync to yet" "$MEMORY_TIMER_WARNING"
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
 # loop, an unset variable under `set -u`. Every row that still ran would pass
@@ -4022,7 +4075,7 @@ if [[ ! -s "$SYNC_CALLS" ]]; then ok "sync: no store table and the sync script i
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=599
+EXPECTED_ROWS=603
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

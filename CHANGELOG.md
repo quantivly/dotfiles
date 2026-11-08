@@ -18,8 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git add -A -f`, each file whose name or content carries a credential shape is withheld and named
   (`scripts/redact-secrets.sh --shapes-only`), and the rest is committed; origin is merged, never
   rebased, keeping both copies on a conflict (origin's copy keeps the name and ours becomes a
-  `.conflict-<host>` copy, an index takes the union of its lines, an edit beats a deletion); then one
-  push. A run starts no network work past 240 s and never cuts a step short. Each store's outcome,
+  `.conflict-<host>` copy, an index takes the union of its lines, each once and origin's first, an edit
+  beats a deletion); then one push. Every git call reads attributes from the store's empty tree
+  (`--attr-source`), so the stores' own `MEMORY.md merge=union` lines, or any `merge=`, `filter=` or
+  eol attribute a host commits, never change what the sync does. A store on a branch the fetched
+  origin lacks while origin has another (a second host that `git init`ed on `master` against a remote
+  whose other hosts push `main`) is `could-not-run` naming both, never two branches each reading ✓. A
+  run starts no network work past 240 s and never cuts a step short. Each store's outcome,
   one of ten, goes to `~/.local/state/claude-memory-sync/<store>.status`, and `--apply` exits 0 for
   every one but `could-not-run`; `--check`, `--scan` and `--status` only read. `--status` reports a
   store it cannot read (an origin that is not the table's remote, say) as a bad line naming the
@@ -29,11 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   8 min. The link script's own wait for `link.lock` is bounded too, 120 s by default
   (`CLAUDE_MEMORY_LOCK_WAIT_SECONDS`), then exit 2 naming the lock. `install.conf.yaml` gains two
   links for them and enables neither: a host arms the timer by hand. `claude-doctor`'s "Memory
-  stores" section gains a row per `--status` line (✓ ok, ⚠ warn, ✗ bad, the message whole), and a ⚠
-  when `--status` could not run, with every stderr line under it. Guide: `docs/CLAUDE_SETUP.md`
-  ("Syncing a store", "The tick"). State table: `scripts/test-claude-memory-sync.sh` (103 rows,
-  hermetic: local bare repositories as remotes, a stub `gh-route`; CI `claude-memory-sync-test`), and
-  15 rows in `scripts/test-claude-doctor.sh`.
+  stores" section gains a row per `--status` line (✓ ok, ⚠ warn, ✗ bad, the message whole), a ⚠
+  when `--status` could not run, with every stderr line under it, and a ⚠ when the timer is linked but
+  not active while a store has an origin. Guide: `docs/CLAUDE_SETUP.md` ("Syncing a store", "The
+  tick"). State table: `scripts/test-claude-memory-sync.sh` (109 rows, hermetic: local bare
+  repositories as remotes, a stub `gh-route`; CI `claude-memory-sync-test`), and 19 rows in
+  `scripts/test-claude-doctor.sh`.
 
 - **`scripts/claude-memory-link.sh` links Claude Code's memory directories into git-backed stores,
   on a host with a store table (DO-891).** The link half of D7 in the shared-configuration design

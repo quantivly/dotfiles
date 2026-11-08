@@ -69,15 +69,29 @@
 # The maintenance a call may start runs in the foreground (autoDetach off), so the run ends when its
 # git work has, and a unit that stops every process it started when the run ends never cuts one short.
 #
+# NO ATTRIBUTE THE STORE HOLDS APPLIES. Every git call in a store but the first runs with
+# --attr-source=<the store's empty tree> (git 2.40 and later), so a .gitattributes in the store is never
+# read. It is store content, which any host can commit, and it would change what every host's sync
+# does: a `merge=` driver resolves a file inside the merge, a `filter=` decides what the stage stores, an
+# eol rule rewrites it. The stores were seeded with `MEMORY.md merge=union` and `INDEX_*.md merge=union`;
+# read, git's own union resolves every index inside the merge, ours first and a line both sides added
+# twice, so the sync's union (below) never runs. The first call hashes an empty tree read from stdin,
+# which looks up no attribute; a source that does not resolve stops git, so a store this cannot name is
+# could-not-run, never synced under its own attributes. The host's own attributes (core.attributesFile,
+# .git/info/attributes) still apply: they are the host's choice, not the store's content. A merge made
+# by hand in a store still reads the store's .gitattributes.
+#
 # AUTH. Before any git call for a store, `scripts/gh-route <store dir>` says which GitHub account the
 # directory routes to (M7: the keyring is keyed by host and cannot choose one):
 #   could not answer (exit 2)        could-not-run, and the store is not touched
-#   matched or default, with a       the token is read from the file gh-route names into this
-#     token in the file it names     process, and given to the fetch and the push alone, in their
-#                                    environment (CLAUDE_MEMORY_GIT_TOKEN, with GH_CONFIG_DIR), never
-#                                    in an argument; each runs with every configured credential
-#                                    helper cleared and one inline helper that answers only `get`,
-#                                    from that variable, and fails when it is empty
+#   matched or default, with a       the token is read from the file gh-route names (the cache of the
+#     token in the file it names     gh config dir it routed to: that dir decides which file) into
+#                                    this process, and given to the fetch and the push alone, in their
+#                                    environment (CLAUDE_MEMORY_GIT_TOKEN), never in an argument; each
+#                                    runs with every configured credential helper cleared and one
+#                                    inline helper that answers only `get`, from that variable, and
+#                                    fails when it is empty. The config dir itself is not passed: git
+#                                    reads nothing of gh's
 #   matched or default, the file     skipped-no-token: the store is committed, and nothing is fetched
 #     missing, empty or unreadable   or pushed
 #   none, no-repo or no-remotes      git's own credential helpers, unpinned
@@ -95,6 +109,11 @@
 #            conflict markers and a commit would conclude the operation. A person finishes or aborts it
 #   fetch    failure: auth-failed when git's error names an auth or not-found failure, unreachable for
 #            anything else. The store is still committed
+#   branch   could-not-run, naming both, when the last-fetched origin has no <branch> but has another
+#            branch, before the lock and with nothing staged: a store `git init`ed on another name than
+#            the remote's would merge from and push to a branch no other host pushes, every run saying
+#            ok. A second host clones the remote; a store seeded by hand is `git init -b <the remote's
+#            branch>`. An origin with no branch at all is no mismatch: the push makes the store's
 #   merge    unless HEAD already holds origin/<branch>: one `git merge` (M8: a rebase empties the tree
 #            of every unpushed file while it replays). Renames are off, so a rename is a deletion and
 #            an addition; unrelated histories are allowed, so a store that committed before its first
@@ -111,7 +130,10 @@
 #              changed here, deleted there  ours: an edit beats a deletion
 #              anything else                `git merge --abort`, could-not-run
 #            Every resolution is staged from the blobs the merge produced, never from the working
-#            tree, so nothing the gate has not seen is committed. The commit is named `<host>: merge,
+#            tree, so nothing the gate has not seen is committed. The resolved blob is then written over
+#            the conflict markers git left in the tree (checkout-index -f): a session that wrote to that
+#            path in the sub-second between git writing the markers and that write loses its write
+#            (ours is kept, in the conflict copy or the union). The commit is named `<host>: merge,
 #            kept both for <n> files`, and the outcome is kept-both. No run leaves MERGE_HEAD behind:
 #            a merge that fails is aborted
 #   push     once, HEAD to origin's branch, unless origin already holds HEAD. A rejection is
@@ -126,9 +148,10 @@
 # included. The file stays in the working tree, so every run stages it, finds it and names it again
 # until someone edits or renames it. Shapes only: the by-name rules would withhold ordinary prose such
 # as `FOO_TOKEN=value` forever. The stage wrote the withheld blob to the object database; it is in no
-# commit, so no push carries it, and git's gc prunes it. The gate reads the blob git stores: where the
-# host configures a clean filter for a path (git-lfs, say), that is the filter's output, a pointer,
-# and not the file's content.
+# commit, so no push carries it, and git's gc prunes it. The gate reads the blob git stores, which is the
+# file's content: no filter the store's own .gitattributes names (git-lfs's, say) runs (see above).
+# Only a clean filter the host's own attributes name for a path (core.attributesFile,
+# .git/info/attributes) would make it the filter's output, and not the content.
 #
 # THE COMMIT is named `<host>: <n> files`, n counting every path it changes, deletions included, and
 # is made with --no-gpg-sign: a timer has no one to unlock a signing key.
@@ -156,7 +179,8 @@
 #          reason; or the store has an origin and its last-ok is missing or older than the threshold,
 #          with the last outcome and detail; or the store cannot be read at all (an origin that is not
 #          the table's remote, an origin git cannot read, a status or last-ok file this script did not
-#          write, a tree it cannot search), naming the reason through the redactor, and nothing else is
+#          write, a tree it cannot search) or is on a branch the last-fetched origin lacks while it has
+#          another (as --apply refuses it), naming the reason through the redactor, and nothing else is
 #          said about that store. A store the table names that is not checked out here is skipped,
 #          never a bad line: a host carries only the stores of the tenants it serves
 #   warn   the last outcome is ok-local-only (no remote yet); push-rejected, unreachable or
@@ -182,8 +206,8 @@
 #                    credential shape: the gate, for commits this script did not make. Exit 1 when any
 #                    is found
 #   claude-memory-sync --apply [--store <name>]
-#                    the route, the origin check, the fetch, then the stage, the gate, the commit and the
-#                    merge under the lock, then the push, store by store: a line
+#                    the route, the origin check, the fetch and the branch check, then the stage, the
+#                    gate, the commit and the merge under the lock, then the push, store by store: a line
 #                    `<store>: withheld <path> (<labels>)` for each file held back, then
 #                    `<store>: committed <n> files` when there was something to commit,
 #                    `<store>: merged origin/<branch>[, kept both for <n> files]`, `<store>: pushed`, and
@@ -201,12 +225,14 @@
 # Exit: 0 ok, or no store table here (nothing to do)
 #       1 attention on --check and --scan
 #       2 could not run (HOME unset, no jq, git or sha256sum, a bad store table, an unknown --store, a
-#         revision that does not resolve, an origin that is not the table's remote (but on --status a
-#         bad line), an unusable host name; on --apply also no flock or timeout, a gh-route that is not executable or could not
-#         answer in time, an unusable lock wait, run deadline or gh-route limit, a lock still held when
-#         the wait ran out, a merge, cherry-pick, revert or rebase in progress, unmerged index entries
-#         or a detached HEAD, a conflict the sync does not resolve, and a lock, stage, gate, commit,
-#         merge, status or last-ok write that failed, reported once the other stores have run)
+#         revision that does not resolve, a store whose empty tree git cannot name, an origin that is not
+#         the table's remote (but on --status a bad line), an unusable host name; on --apply also no
+#         flock or timeout, a gh-route that is not executable or could not answer in time, an unusable
+#         lock wait, run deadline or gh-route limit, a lock still held when the wait ran out, a merge,
+#         cherry-pick, revert or rebase in progress, unmerged index entries or a detached HEAD, a branch
+#         origin lacks while it has another, a conflict the sync does not resolve, and a lock, stage,
+#         gate, commit, merge, status or last-ok write that failed, reported once the other stores have
+#         run)
 #       64 usage
 #   --apply exits only 0 or 2: a withheld file, a conflict copy, a blocked merge, a rejected push, a
 #   missing token or an unreachable remote is a status for the doctor, not a failed unit. --status
@@ -245,6 +271,15 @@ LOCK_WAIT_RAN_OUT=2
 # a call may start stays in the foreground.
 GIT_SAFETY_OPTIONS=(-c core.hooksPath=/dev/null -c core.fsmonitor=false -c maintenance.autoDetach=false
     -c gc.autoDetach=false)
+# Every git call in a store but the first reads attributes from the store's empty tree, never from the
+# .gitattributes the store holds (see ATTRIBUTES in the header). The id is asked of each store, since a
+# SHA-256 store's differs, and git refuses a call whose source does not resolve.
+ATTRIBUTE_SOURCE_OPTION_PREFIX='--attr-source='
+OBJECT_ID_RE='^[0-9a-f]{40}([0-9a-f]{24})?$'
+# for-each-ref over refs/remotes/origin/: each branch the last fetch left, as its name on origin
+# (refs/remotes/origin/<name>, three components stripped), and an empty line for a symbolic ref
+# (origin/HEAD, which names one of the others).
+FETCHED_BRANCH_NAME_FORMAT='%(if)%(symref)%(then)%(else)%(refname:lstrip=3)%(end)'
 # A fetch or a push is cut off after this long, and killed this long after that (gh-route as well).
 NETWORK_TIMEOUT_SECONDS=60
 NETWORK_KILL_AFTER_SECONDS=5
@@ -411,13 +446,13 @@ RUN_STARTED_CENTISECONDS=''     # the uptime when main began, in hundredths: the
 STORE_IS_PAST_DEADLINE=0        # decided once per store, before its first network step
 LAST_OK_FAILURE_DETAIL=''       # why last-ok could not be written, for the status detail
 GIT_RUNNER_PREFIX=()            # what runs git: empty, or timeout for a network call
+STORE_ATTRIBUTE_SOURCE_OPTIONS=()   # --attr-source=<the store's empty tree>, set by settle_attribute_source
 STORE_HAS_ORIGIN=0              # what check_origin found
 CURRENT_BRANCH=''               # the branch HEAD names, set by refuse_unfinished_operation
 WITHHELD_REDACTED_PATHS=()      # what gate_staged_paths held back, each with its shapes redacted
 COMMITTED_COUNT=0               # how many paths commit_staged_paths committed
 ROUTE_MODE=''                   # a ROUTE_MODE_* set by resolve_route; empty past the run deadline
 ROUTED_TOKEN=''                 # the pinned account's token: never printed, written or put in an argument
-ROUTED_GH_CONFIG_DIR=''         # the pinned account's gh config dir
 NO_TOKEN_DETAIL=''              # why a pinned route has no token
 NETWORK_OUTCOME=''              # a fetch or push that failed: its outcome
 NETWORK_DETAIL=''               # and why, redacted
@@ -502,7 +537,8 @@ escaped_for_one_line() {
     printf '%s' "$text"
 }
 
-# git_in_store STORE_DIR ARGS… — git, in the store, with GIT_SAFETY_OPTIONS on every call, run by
+# git_in_store STORE_DIR ARGS… — git, in the store, with GIT_SAFETY_OPTIONS on every call and the
+# store's empty tree as its attribute source once settle_attribute_source has named it, run by
 # GIT_RUNNER_PREFIX when a caller sets one. While this run holds link.lock, the lock's descriptor is
 # closed in git's own process and this shell keeps it: nothing git starts can then hold the lock past the
 # end of the run.
@@ -510,19 +546,37 @@ git_in_store() {
     local store_dir=$1
     shift
     if [[ -n "$LINK_LOCK_FD" ]]; then
-        "${GIT_RUNNER_PREFIX[@]}" git -C "$store_dir" "${GIT_SAFETY_OPTIONS[@]}" "$@" {LINK_LOCK_FD}>&-
+        "${GIT_RUNNER_PREFIX[@]}" git -C "$store_dir" "${STORE_ATTRIBUTE_SOURCE_OPTIONS[@]}" \
+            "${GIT_SAFETY_OPTIONS[@]}" "$@" {LINK_LOCK_FD}>&-
     else
-        "${GIT_RUNNER_PREFIX[@]}" git -C "$store_dir" "${GIT_SAFETY_OPTIONS[@]}" "$@"
+        "${GIT_RUNNER_PREFIX[@]}" git -C "$store_dir" "${STORE_ATTRIBUTE_SOURCE_OPTIONS[@]}" \
+            "${GIT_SAFETY_OPTIONS[@]}" "$@"
     fi
+}
+
+# settle_attribute_source STORE STORE_DIR — name the store's empty tree as the attribute source of every
+# later git call in it (STORE_ATTRIBUTE_SOURCE_OPTIONS). The one call made without it hashes an empty
+# tree read from stdin, which looks up no attribute. Returns 1, having reported the store, when git
+# could not name it.
+settle_attribute_source() {
+    local store=$1 store_dir=$2 empty_tree_id
+    STORE_ATTRIBUTE_SOURCE_OPTIONS=()
+    if ! empty_tree_id=$(git_in_store "$store_dir" hash-object -t tree --stdin < /dev/null) \
+        || [[ ! "$empty_tree_id" =~ $OBJECT_ID_RE ]]; then
+        report_store_failure "$store" "git could not name the store's empty tree"
+        return 1
+    fi
+    STORE_ATTRIBUTE_SOURCE_OPTIONS=("$ATTRIBUTE_SOURCE_OPTION_PREFIX$empty_tree_id")
 }
 
 # network_git_in_store STORE_DIR ARGS… — git_in_store for a call that reaches the remote: cut off after
 # NETWORK_TIMEOUT_SECONDS, in the C locale (its errors are read), with no prompt and no askpass program,
 # and with any trace git writes redacted (main has unset the trace variables already; this is a second
 # switch, for one a later git reads).
-# When the route pinned an account, the token and the account's config dir are in this one git
-# process's environment, and every configured credential helper is cleared for the one that reads it.
-# The token is never in an argument. Only a route that said unpinned runs with git's own helpers: any
+# When the route pinned an account, the token is in this one git process's environment, and every
+# configured credential helper is cleared for the one that reads it. The token is never in an argument.
+# The account's gh config dir is not passed: git reads nothing of gh's, and the helper that would
+# (gh auth git-credential) is among those cleared. Only a route that said unpinned runs with git's own helpers: any
 # other mode, an empty one included, is refused (UNROUTED_NETWORK_CALL_STATUS, having said so), since
 # falling back to the host's helpers for a store gh-route would have pinned is a push as the wrong account.
 network_git_in_store() {
@@ -533,8 +587,7 @@ network_git_in_store() {
     local GIT_RUNNER_PREFIX=(timeout --kill-after="$NETWORK_KILL_AFTER_SECONDS" "$NETWORK_TIMEOUT_SECONDS")
     case "$ROUTE_MODE" in
         "$ROUTE_MODE_PINNED")
-            CLAUDE_MEMORY_GIT_TOKEN=$ROUTED_TOKEN GH_CONFIG_DIR=$ROUTED_GH_CONFIG_DIR \
-                LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GIT_TRACE_REDACT=1 \
+            CLAUDE_MEMORY_GIT_TOKEN=$ROUTED_TOKEN LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GIT_TRACE_REDACT=1 \
                 git_in_store "$store_dir" -c "$CLEARED_CREDENTIAL_HELPERS" \
                     -c "credential.helper=$PINNED_CREDENTIAL_HELPER" "$@" ;;
         "$ROUTE_MODE_UNPINNED")
@@ -547,9 +600,17 @@ network_git_in_store() {
 }
 
 # stderr_redacted COMMAND… — COMMAND, with what it says on stderr passed through the redactor's shape
-# rules: a warning that names a path can carry a credential as well as a body can.
+# rules: a warning that names a path can carry a credential as well as a body can. Returns COMMAND's
+# status once the redactor has finished, so what it prints lands before this script's next line.
 stderr_redacted() {
-    "$@" 2> >("$REDACTOR" "$REDACTOR_SHAPES_ONLY_FLAG" >&2)
+    local command_status
+    # The braces make this shell, and not the child it forks for an external COMMAND, perform the
+    # redirection, so the redactor is this shell's own child and $! names it (bash 5.3: on a bare
+    # external command $! is never set, and the redactor cannot be waited for).
+    { "$@"; } 2> >("$REDACTOR" "$REDACTOR_SHAPES_ONLY_FLAG" >&2)
+    command_status=$?
+    wait "$!"
+    return "$command_status"
 }
 
 # redacted_text TEXT — TEXT through the full redactor, its final newline dropped; UNREDACTABLE_TEXT when
@@ -956,14 +1017,15 @@ route_fields_of() {
 }
 
 # resolve_route STORE STORE_DIR — ask gh-route which account the store's directory routes to, before any
-# git call, and set ROUTE_MODE: pinned (the token read into ROUTED_TOKEN, the config dir into
-# ROUTED_GH_CONFIG_DIR), unpinned, or no-token (NO_TOKEN_DETAIL says why). gh-route's own errors pass
-# through the redactor. gh-route gets GH_ROUTE_TIMEOUT_SECONDS. Returns 1, having reported the store,
-# when gh-route could not answer, did not answer in time, or gave an answer this script does not know.
+# git call, and set ROUTE_MODE: pinned (the token read into ROUTED_TOKEN from the file gh-route names for
+# the account's config dir), unpinned, or no-token (NO_TOKEN_DETAIL says why). gh-route's own errors
+# pass through the redactor. gh-route gets GH_ROUTE_TIMEOUT_SECONDS. Returns 1, having reported the
+# store, when gh-route could not answer, did not answer in time, or gave an answer this script does not
+# know (a pinned state with no config dir among them).
 resolve_route() {
     local store=$1 store_dir=$2 route_json route_status route_fields=() state config_dir token_file
     local shown_token_file
-    ROUTE_MODE='' ROUTED_TOKEN='' ROUTED_GH_CONFIG_DIR='' NO_TOKEN_DETAIL=''
+    ROUTE_MODE='' ROUTED_TOKEN='' NO_TOKEN_DETAIL=''
     route_json=$(stderr_redacted timeout --kill-after="$NETWORK_KILL_AFTER_SECONDS" "$GH_ROUTE_TIMEOUT_SECONDS" \
         "$GH_ROUTE" "$store_dir")
     route_status=$?
@@ -987,7 +1049,6 @@ resolve_route() {
         report_store_failure "$store" "gh-route answered a state this script does not know: $(escaped_for_one_line "$state")"
         return 1
     fi
-    ROUTED_GH_CONFIG_DIR=$config_dir
     # The shell reads the same file the same way: its whole body, less the final newlines.
     if [[ -n "$token_file" && -f "$token_file" && -r "$token_file" ]]; then
         ROUTED_TOKEN=$(< "$token_file")
@@ -1038,6 +1099,31 @@ refuse_unfinished_operation() {
     else
         report_store_failure "$store" "git could not read HEAD"
     fi
+    return 1
+}
+
+# refuse_branch_mismatch STORE STORE_DIR BRANCH — returns 1, having reported the store, when the
+# last-fetched origin has no BRANCH but does have another branch: a store `git init`ed on another name
+# than the remote's, whose merge and push would both aim at a branch no other host pushes, every run
+# saying ok. An origin with no branch at all is no mismatch: the first push makes the store's. It reads
+# the refs the last fetch left, and nothing else.
+refuse_branch_mismatch() {
+    local store=$1 store_dir=$2 branch=$3 fetched_branch_names fetched_branch_name other_branch_names=''
+    local shown_branch
+    git_in_store "$store_dir" rev-parse -q --verify "refs/remotes/$ORIGIN_REMOTE_NAME/$branch^{commit}" >/dev/null \
+        && return 0
+    if ! fetched_branch_names=$(git_in_store "$store_dir" for-each-ref --format="$FETCHED_BRANCH_NAME_FORMAT" \
+        "refs/remotes/$ORIGIN_REMOTE_NAME/"); then
+        report_store_failure "$store" "git could not list the branches fetched from origin"
+        return 1
+    fi
+    while IFS= read -r fetched_branch_name; do
+        [[ -n "$fetched_branch_name" ]] || continue
+        other_branch_names+="${other_branch_names:+, }$(printable_path "$fetched_branch_name")"
+    done <<< "$fetched_branch_names"
+    [[ -n "$other_branch_names" ]] || return 0
+    shown_branch=$(printable_path "$branch")
+    report_store_failure "$store" "origin has no branch $shown_branch, only $other_branch_names: the store's branch is not the remote's; rename it to the remote's (git branch -m <that branch>)"
     return 1
 }
 
@@ -1428,18 +1514,21 @@ commit_and_integrate() {
     integrate_origin "$1" "$2"
 }
 
-# sync_store STORE STORE_DIR — the route, the origin check and the refusal of an unfinished operation;
-# the fetch; stage, gate, commit and merge under the lock; the push; then the status. Whether the store
-# does network work at all is decided once, before its first network step: past the run deadline the
-# route is not asked and nothing is fetched or pushed. Returns 1 when the store could not run.
+# sync_store STORE STORE_DIR — the route, the attribute source, the origin check and the refusal of an
+# unfinished operation; the fetch, then the refusal of a branch origin does not have; stage, gate,
+# commit and merge under the lock; the push; then the status. Whether the store does network work at all
+# is decided once, before its first network step: past the run deadline the route is not asked and
+# nothing is fetched or pushed. Returns 1 when the store could not run.
 sync_store() {
     local store=$1 store_dir=$2 has_fetched=0 locked_status fetch_status push_status
     NETWORK_OUTCOME='' NETWORK_DETAIL='' INTEGRATION_OUTCOME='' INTEGRATION_DETAIL='' MERGED_FROM_ORIGIN=0
     KEPT_BOTH_COUNT=0 PUSHED=0 COMMITTED_COUNT=0 WITHHELD_REDACTED_PATHS=() LAST_OK_FAILURE_DETAIL=''
-    ROUTE_MODE='' STORE_IS_PAST_DEADLINE=0
+    # Past the deadline resolve_route is not called, so the route of the store before stays unless reset.
+    ROUTE_MODE='' ROUTED_TOKEN='' NO_TOKEN_DETAIL='' STORE_IS_PAST_DEADLINE=0
     if run_deadline_has_passed; then STORE_IS_PAST_DEADLINE=1; fi
     # Past the deadline nothing reaches the network, so the route that serves it is not asked either.
     if (( ! STORE_IS_PAST_DEADLINE )); then resolve_route "$store" "$store_dir" || return 1; fi
+    settle_attribute_source "$store" "$store_dir" || return 1
     check_origin "$store" "$store_dir" || return 1
     refuse_unfinished_operation "$store" "$store_dir" || return 1
     if (( STORE_HAS_ORIGIN )); then
@@ -1453,6 +1542,9 @@ sync_store() {
             if (( fetch_status == NETWORK_STEP_COULD_NOT_RUN )); then return 1; fi
             if (( fetch_status == 0 )); then has_fetched=1; fi
         fi
+        # On the refs this fetch left, or the last one's when it failed or did not run: --status reads
+        # the same.
+        refuse_branch_mismatch "$store" "$store_dir" "$CURRENT_BRANCH" || return 1
     fi
     take_link_lock_reporting "$store" || return 1
     commit_and_integrate "$store" "$store_dir" "$has_fetched"
@@ -1600,8 +1692,13 @@ read_status_file() {
 # store, when it could not be read.
 status_store() {
     local store=$1 store_dir=$2 last_ok_path="$STATE_DIR/$1$LAST_OK_FILE_SUFFIX" last_ok='' now
-    local age_minutes=0 is_fresh=0 last_outcome_text printed_lines=0 conflict_copy_count
+    local age_minutes=0 is_fresh=0 last_outcome_text printed_lines=0 conflict_copy_count branch
+    settle_attribute_source "$store" "$store_dir" || return 1
     check_origin "$store" "$store_dir" || return 1
+    # A detached HEAD has no branch to compare; --apply refuses it on its own.
+    if (( STORE_HAS_ORIGIN )) && branch=$(git_in_store "$store_dir" symbolic-ref -q --short HEAD); then
+        refuse_branch_mismatch "$store" "$store_dir" "$branch" || return 1
+    fi
     if ! read_status_file "$store"; then
         report_store_failure "$store" "the status file is not one this script writes"
         return 1
@@ -1699,6 +1796,7 @@ ahead_behind_text() {
 check_store() {
     local store=$1 store_dir=$2 status_entries=() status_entry path full_path
     local name_and_content_command=() shape_status labels withheld_lines=() pending_count position
+    settle_attribute_source "$store" "$store_dir" || return 1
     check_origin "$store" "$store_dir" || return 1
     # The stage's pathspec, so that what is counted is what would be staged: every changed tracked path
     # and every untracked one, ignored ones included, one entry each ("XY <path>"). `git status` and not
@@ -1744,6 +1842,7 @@ check_store() {
 scan_store() {
     local store=$1 store_dir=$2 tree_id tree_items=() item metadata path object_type object_id
     local shape_status labels shown_path name_and_content_command=()
+    settle_attribute_source "$store" "$store_dir" || return 1
     check_origin "$store" "$store_dir" || return 1
     if [[ -n "$SCAN_REVISION" ]]; then
         if ! tree_id=$(git_in_store "$store_dir" rev-parse -q --verify "$SCAN_REVISION^{tree}"); then

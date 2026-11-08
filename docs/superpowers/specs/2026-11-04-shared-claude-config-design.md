@@ -290,7 +290,9 @@ follow the account (none on dev's token).
 repos/<owner>/<repo>/      one dir per git remote (owner/repo lowercased, as dev-sync's
                            repo_of_url does), holding MEMORY.md + topic files
 dirs/<slug>/               non-repo working dirs (today: ~/, ~/Projects, ~/quantivly/handoffs …)
-.gitattributes             MEMORY.md merge=union
+.gitattributes             MEMORY.md merge=union (unnecessary, and ignored by the sync: every
+                           git call it makes reads attributes from the empty tree and it runs
+                           its own index union; only a merge made by hand in a store reads it)
 ```
 
 The tenant of a checkout is answered by the tenants file's route (`tenants.route`, the

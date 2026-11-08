@@ -163,6 +163,23 @@ SHORT_THRESHOLD_MINUTES=30
 LONG_THRESHOLD_MINUTES=180
 SECONDS_PER_MINUTE=60
 TAB=$'\t'
+# The attributes the real stores carry at their root: git's own union driver for every index.
+STORE_UNION_ATTRIBUTES="MEMORY.md merge=union${NL}INDEX_*.md merge=union"
+TOPIC_INDEX_NAME='INDEX_topics.md'
+# What both hosts append to an index under those attributes, overlapping on the middle line: the other
+# host the first two, this one the last two.
+INDEX_LINE_ONLY_REMOTE='- [X](x.md) — only the remote host wrote this'
+INDEX_LINE_BOTH_HOSTS='- [Y](y.md) — both hosts wrote this'
+INDEX_LINE_ONLY_LOCAL='- [Z](z.md) — only this host wrote this'
+# The branch a hand-made second checkout is on, where the remote's other host pushes main, and what the
+# sync says of it.
+OTHER_BRANCH='master'
+BRANCH_MISMATCH_REASON="origin has no branch $OTHER_BRANCH, only main: the store's branch is not the remote's; rename it to the remote's (git branch -m <that branch>)"
+# The redactor runs sed. This one waits first, so a run that does not wait for the redactor says its
+# next line before the redacted one.
+SLOW_SED_DIR="$TMPROOT/slow-sed-bin"
+SLOW_SED_SECONDS=1
+GH_ROUTE_FIXTURE_ERROR='gh-route: fixture: the tables are malformed'
 
 mkdir -p "$(dirname "$ROUTE_STUB")"
 printf '#!/usr/bin/env bash\nprintf "stub route: not for the sync\\n" >&2\nexit 3\n' > "$ROUTE_STUB"
@@ -174,14 +191,17 @@ case "$FIXTURE_GH_ROUTE_MODE" in
     none)    jq -cn '{state: "none", dir: "", token_file: "", why: "fixture: no route"}' ;;
     matched) jq -cn --arg dir "$FIXTURE_GH_CONFIG_DIR" --arg token_file "$FIXTURE_TOKEN_FILE" \
                  '{state: "matched", dir: $dir, token_file: $token_file, why: "fixture: matched"}' ;;
-    fail)    printf 'gh-route: fixture: the tables are malformed\n' >&2; exit 2 ;;
+    fail)    printf '%s\n' "$GH_ROUTE_FIXTURE_ERROR" >&2; exit 2 ;;
     hang)    exec sleep "$FIXTURE_GH_ROUTE_HANG_SECONDS" ;;
 esac
 STUB
 chmod +x "$ROUTE_STUB" "$SIGNING_STUB" "$GH_ROUTE_STUB"
 mkdir -p "$FIXTURE_GH_CONFIG_DIR" "$(dirname "$FIXTURE_TOKEN_FILE")"
 export FIXTURE_GH_ROUTE_CALLS FIXTURE_GH_CONFIG_DIR FIXTURE_TOKEN_FILE FIXTURE_GH_ROUTE_MODE \
-    FIXTURE_GH_ROUTE_HANG_SECONDS
+    FIXTURE_GH_ROUTE_HANG_SECONDS GH_ROUTE_FIXTURE_ERROR
+mkdir -p "$SLOW_SED_DIR"
+printf '#!/usr/bin/env bash\nsleep %q\nexec %q "$@"\n' "$SLOW_SED_SECONDS" "$(command -v sed)" > "$SLOW_SED_DIR/sed"
+chmod +x "$SLOW_SED_DIR/sed"
 
 # A third global config whose core.hooksPath holds hooks that stage the withheld file and leave a mark:
 # pre-commit and post-index-change can each put a file into the commit the gate just kept it out of.
@@ -1131,6 +1151,29 @@ check "integrate: index lines added on both sides are unioned with no conflict c
     "$RC|$(committed_body_of "MEMORY.md")|$(conflict_copies "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(remote_head)|$(tree_state)" \
     "0|$SEED_INDEX_LINE${NL}$REMOTE_INDEX_LINE${NL}$LOCAL_INDEX_LINE||kept-both|$(local_head)|tree is HEAD"
 
+# The layout the real stores have: a .gitattributes naming git's union driver for every index. Read, it
+# resolves each index inside the merge, ours first and the line both hosts wrote twice, and the sync's
+# own union never runs.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$SEED_DIR/.gitattributes" "$STORE_UNION_ATTRIBUTES"
+write_file "$SEED_DIR/$TOPIC_INDEX_NAME" "$SEED_INDEX_LINE"
+fixture_commit "$SEED_DIR" 'union attributes and a topic index'
+git -C "$SEED_DIR" push -q "$REMOTES_DIR/$ALPHA_STORE.git" main || fatal "could not push the attributes"
+pull_into_alpha
+for index_name in MEMORY.md "$TOPIC_INDEX_NAME"; do
+    printf '%s\n%s\n' "$INDEX_LINE_ONLY_REMOTE" "$INDEX_LINE_BOTH_HOSTS" >> "$SEED_DIR/$index_name"
+    printf '%s\n%s\n' "$INDEX_LINE_BOTH_HOSTS" "$INDEX_LINE_ONLY_LOCAL" >> "$ALPHA_DIR/$index_name"
+done
+fixture_commit "$SEED_DIR" 'remote index lines'
+git -C "$SEED_DIR" push -q "$REMOTES_DIR/$ALPHA_STORE.git" main || fatal "could not push the remote index lines"
+run_sut --apply
+union_index_body="$SEED_INDEX_LINE${NL}$INDEX_LINE_ONLY_REMOTE${NL}$INDEX_LINE_BOTH_HOSTS${NL}$INDEX_LINE_ONLY_LOCAL"
+check "integrate: under the stores' own merge=union attributes, MEMORY.md takes the sync's union, origin's lines first and each once" \
+    "$RC|$(committed_body_of MEMORY.md)|$(conflict_copies "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(status_field_of "$ALPHA_STORE" 3)|$(remote_head)|$(tree_state)" \
+    "0|$union_index_body||kept-both|kept both for 2 files|$(local_head)|tree is HEAD"
+check "integrate: ...and an INDEX_*.md takes it likewise" "$(committed_body_of "$TOPIC_INDEX_NAME")" "$union_index_body"
+
 reset_scene
 make_tracked_store "$ALPHA_STORE"
 seed_write_push seed.md 'remote edit'
@@ -1205,6 +1248,30 @@ run_sut --apply
 check "integrate: an origin that shares no history with the store is merged, keeping both" \
     "$RC|$(committed_body_of "seed.md")|$(committed_body_of "seed.conflict-$FIXTURE_HOST.md")|$(head_files "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(remote_head)|$(tree_state)" \
     "0|seed body|local seed body|MEMORY.md own.md seed.conflict-$FIXTURE_HOST.md seed.md |kept-both|$(local_head)|tree is HEAD"
+
+printf 'branch: the store and its remote on one branch\n'
+# A second host that ran `git init` against the remote on another branch name: its merge and its push
+# would both aim at origin/<its branch>, which no other host pushes, and every run would say ok.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+rm -rf "$ALPHA_DIR"
+git init -q -b "$OTHER_BRANCH" "$ALPHA_DIR" || fatal "could not create the alpha store"
+git -C "$ALPHA_DIR" remote add origin "$REMOTES_DIR/$ALPHA_STORE.git" || fatal "could not add the origin"
+write_file "$ALPHA_DIR/own.md" 'own body'
+run_sut --apply
+check "branch: a store on a branch origin lacks, while origin has another, is could-not-run naming both, with nothing committed or pushed" \
+    "$RC|$(contains "$OUT" "$ALPHA_STORE: $BRANCH_MISMATCH_REASON")|$(commit_count "$ALPHA_DIR")|$(git -C "$REMOTES_DIR/$ALPHA_STORE.git" for-each-ref --format='%(refname)' refs/heads/)|$(status_field_of "$ALPHA_STORE" 2)|$(status_field_of "$ALPHA_STORE" 3)" \
+    "2|yes|0|refs/heads/main|could-not-run|$BRANCH_MISMATCH_REASON"
+
+# The first host to push to an empty remote: origin has no branch at all, and the push makes the store's.
+reset_scene
+git init -q --bare -b main "$REMOTES_DIR/$ALPHA_STORE.git" || fatal "could not create an empty remote"
+git -C "$ALPHA_DIR" remote add origin "$REMOTES_DIR/$ALPHA_STORE.git" || fatal "could not add the origin"
+set_store_remote "$ALPHA_STORE" "$REMOTES_DIR/$ALPHA_STORE.git"
+write_file "$ALPHA_DIR/own.md" 'own body'
+run_sut --apply
+check "branch: an origin with no branch at all is no mismatch: the push makes the store's branch" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(remote_head)" "0|ok|$(local_head)"
 
 printf 'apply: an operation left unfinished\n'
 reset_scene
@@ -1334,6 +1401,20 @@ check "auth: gh-route exit 2 is could-not-run and git is never called" \
     "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(cat "$FIXTURE_GIT_CALL_LOG")|$(contains "$OUT" "$ALPHA_STORE: gh-route could not answer")|$(commit_count "$ALPHA_DIR")" \
     "2|could-not-run||yes|1"
 
+# gh-route's own stderr reaches the output through the redactor. Made slow, it shows whether the run
+# waits for it or says its next line first.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+PATH="$SLOW_SED_DIR:$PATH" FIXTURE_GH_ROUTE_MODE=fail run_sut --apply
+route_error_line=0 could_not_answer_line=0 output_line_number=0
+while IFS= read -r output_line; do
+    output_line_number=$(( output_line_number + 1 ))
+    if [[ "$output_line" == "$GH_ROUTE_FIXTURE_ERROR" ]]; then route_error_line=$output_line_number; fi
+    if [[ "$output_line" == *"$ALPHA_STORE: gh-route could not answer"* ]]; then could_not_answer_line=$output_line_number; fi
+done <<< "$OUT"
+check "auth: gh-route's own error, redacted, is printed before the line saying it could not answer" \
+    "$RC|$(( route_error_line > 0 && route_error_line < could_not_answer_line ))" "2|1"
+
 reset_scene
 make_tracked_store "$ALPHA_STORE"
 write_file "$ALPHA_DIR/a.md" 'a body'
@@ -1356,9 +1437,11 @@ while IFS= read -r logged_call; do
     if [[ "$logged_call" != *" token:unset "* ]]; then calls_with_token+="${logged_call%% *}:${logged_call#* token:} "; fi
 done < "$FIXTURE_GIT_ENV_LOG"
 fetch_call=$(grep -F ' fetch ' "$FIXTURE_GIT_CALL_LOG")
+# GH_CONFIG_DIR is not among what they are given: git reads none of gh's config, and the helper that
+# would (gh auth git-credential) is cleared. The routed config dir decides only which token file is read.
 check "auth: the token is in no argv, no output and no status, and only the fetch and the push are given it" \
     "$RC|$(contains "$(cat "$FIXTURE_GIT_CALL_LOG")" "$FAKE_TOKEN")|$(contains "$OUT" "$FAKE_TOKEN")|$(contains "$(status_line_of "$ALPHA_STORE")" "$FAKE_TOKEN")|$calls_with_token|$(contains "$fetch_call" ' -c credential.helper= -c credential.helper=!')|$(remote_head)" \
-    "0|no|no|no|fetch:expected gh-config:$FIXTURE_GH_CONFIG_DIR push:expected gh-config:$FIXTURE_GH_CONFIG_DIR |yes|$(local_head)"
+    "0|no|no|no|fetch:expected gh-config:unset push:expected gh-config:unset |yes|$(local_head)"
 
 # The helper the run gave git, run as git runs one: `sh -c '<helper> <operation>'`, its request on stdin.
 helper_snippet=$(cat "$FIXTURE_CREDENTIAL_HELPER_FILE" 2>/dev/null)
@@ -1594,6 +1677,17 @@ check "status: a store with an origin whose last-ok is missing or past the thres
     "$status_never_synced|$RC|$OUT" \
     "0|$ALPHA_STORE${TAB}bad${TAB}never synced; last outcome skipped-no-token: no token|0|$ALPHA_STORE${TAB}bad${TAB}last synced $STALE_ROW_AGE_MINUTES min ago, past the $SHORT_THRESHOLD_MINUTES min threshold; last outcome ok"
 
+# Fetched by hand and never synced, so no status file can carry the reason: the line is --status's own.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+rm -rf "$ALPHA_DIR"
+git init -q -b "$OTHER_BRANCH" "$ALPHA_DIR" || fatal "could not create the alpha store"
+git -C "$ALPHA_DIR" remote add origin "$REMOTES_DIR/$ALPHA_STORE.git" || fatal "could not add the origin"
+git -C "$ALPHA_DIR" fetch -q origin || fatal "could not fetch into the alpha store"
+run_sut --status
+check "status: a store on a branch the last-fetched origin lacks, while it has another, is one bad line naming both" \
+    "$RC|$OUT" "0|$ALPHA_STORE${TAB}bad${TAB}$BRANCH_MISMATCH_REASON"
+
 reset_scene
 make_tracked_store "$ALPHA_STORE"
 write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus "$STALE_ROW_AGE_MINUTES")"
@@ -1740,7 +1834,7 @@ check "install.conf.yaml links the timer" \
     "$(grep -c '^    ~/.config/systemd/user/claude-memory-sync.timer: systemd/claude-memory-sync.timer$' "$DOTFILES/install.conf.yaml")" 1
 
 printf '\n'
-EXPECTED_ROWS=103
+EXPECTED_ROWS=109
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

@@ -1356,6 +1356,37 @@ _claude_doctor_memory_sync_status() {
       printf '    %s\n' "$status_stderr_line"
     done
   fi
+  _claude_doctor_memory_sync_timer
+}
+
+# The last row of the sync half: the tick itself. ./install links
+# claude-memory-sync.timer and never enables it (a host arms it by hand), so a
+# host can hold a store with an origin and a timer nothing started, and its rows
+# above only age into "never synced" with no word of why. A ⚠ when the unit is
+# linked, systemd does not say it is active (no answer at all included: with no
+# user manager nothing fires it either), and a checked-out store has an origin;
+# a host whose stores are all local-only has nothing to sync yet. Without
+# systemctl or git it cannot ask, and says nothing. `git remote get-url` reads
+# the store's config and writes nothing.
+_claude_doctor_memory_sync_timer() {
+  local timer_unit_name='claude-memory-sync.timer'
+  local timer_unit_link="$HOME/.config/systemd/user/$timer_unit_name"
+  local stores_root="${CLAUDE_MEMORY_STORES_ROOT:-$HOME/.local/share/claude-memory}"
+  local timer_state store_git_entry
+  local -i has_store_with_origin=0
+  [[ -e "$timer_unit_link" || -L "$timer_unit_link" ]] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  timer_state="$(systemctl --user is-active "$timer_unit_name" 2>/dev/null)"
+  [[ "$timer_state" == active ]] && return 0
+  command -v git >/dev/null 2>&1 || return 0
+  for store_git_entry in "$stores_root"/*/.git(N); do
+    if git -C "${store_git_entry:h}" remote get-url origin >/dev/null 2>&1; then
+      has_store_with_origin=1
+      break
+    fi
+  done
+  (( has_store_with_origin )) || return 0
+  _doctor_warn "$timer_unit_name is linked but not active; nothing syncs until it is armed"
 }
 
 # The Linear API-key plugin, the "--- Linear ---" section of claude-doctor

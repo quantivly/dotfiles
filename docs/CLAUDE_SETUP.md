@@ -472,7 +472,11 @@ order (the script's header has the full rules):
    written anywhere**: no new file, no argument, no output, no status. A route that pins an account
    whose token file is missing, empty or unreadable is `skipped-no-token`; a directory with no
    route uses git's own credential helpers.
-3. **Fetch**, with no prompt, cut off after 60 s.
+3. **Fetch**, with no prompt, cut off after 60 s. Then a store whose branch the fetched origin does
+   not have, while origin has another, is `could-not-run`, naming both: it would merge from and push
+   to a branch no other host pushes, every run reading ✓. A second host **clones** the store's remote
+   and never `git init`s against it; a store seeded by hand uses `git init -b <the remote's branch>`.
+   An origin with no branch at all is not one: the first push makes it.
 4. **Under the link script's lock** (`~/.local/state/claude-memory-sync/link.lock`, so an index
    mid-write is never staged): stage every file but the link script's `.<name>.link-partial`
    copies, with `git add -A -f`, since no ignore rule decides what is memory; **withhold** each
@@ -489,7 +493,7 @@ addition.
 |---|---|---|
 | modified | modified | origin's copy keeps the name, and ours becomes a conflict copy |
 | added | added | the same |
-| a `MEMORY.md` or `INDEX_*.md`, changed | changed | origin's lines, plus each line only ours has |
+| a `MEMORY.md` or `INDEX_*.md`, changed | changed | origin's lines, plus each line only ours has, each once |
 | deleted | modified | origin's copy |
 | modified | deleted | ours: an edit beats a deletion |
 | anything else (a submodule, a file against a directory) | | `git merge --abort`, and `could-not-run` |
@@ -497,6 +501,14 @@ addition.
 A conflict copy is named as the link step names one (`x.md` → `x.conflict-<host>.md`), and the merge
 commit says `<host>: merge, kept both for <n> files`. Each resolution is staged from the blobs the
 merge produced, never from the working tree, so nothing the gate has not seen is committed.
+
+**A store's own `.gitattributes` is never read by the sync**: every git call runs with
+`--attr-source=<the store's empty tree>`, since an attribute is store content any host can commit,
+and a `merge=`, `filter=` or eol rule would change what every host's sync does. The stores were seeded
+with `MEMORY.md merge=union` and `INDEX_*.md merge=union`. The sync does not need them and ignores
+them: honoured, git's own union resolves an index inside the merge, ours first and a line both hosts
+added twice, so the union above would never run. Only a merge made by hand in a store still reads
+them. The host's own attributes (`core.attributesFile`, `.git/info/attributes`) still apply.
 
 **The run deadline.** All the stores together get 240 s (`RUN_DEADLINE_SECONDS`, measured on the
 kernel's monotonic uptime). A store that begins past it does no network work: it commits and records
@@ -512,14 +524,14 @@ exits 0 for every one but `could-not-run`: the rest are the doctor's to show.
 |---|---|---|
 | `ok` | committed, merged with origin and pushed, or origin already held it | nothing |
 | `kept-both` | the same, after a conflict that left a conflict copy or an index line union | resolve the conflict copy (below) |
-| `ok-local-only` | the store has no `origin`; whatever was pending is committed | give it the table's `remote` as `origin` |
+| `ok-local-only` | the store has no `origin`; whatever was pending is committed | give it the table's `remote` as `origin`, on the remote's branch: on a second host, clone the remote instead of `git init`ing against it, or rename the store's branch to the remote's (`git branch -m <that branch>`) before the next tick |
 | `withheld` | the gate held a file back; the detail names it and its shape | release it (below) |
 | `blocked` | the merge would not start, a local file in its way: usually a withheld one that origin also has | release that file; the next tick merges, keeping both copies if they differ |
 | `push-rejected` | origin refused the push, usually because another host pushed first | nothing: the next tick fetches, merges and pushes again. One that outlasts the threshold is the remote refusing this account or this branch |
 | `skipped-no-token` | the route pins an account and its token file is missing, empty or unreadable; the store was committed and nothing went over the network | refresh the shell's token cache (`gh-refresh-tokens`) |
 | `unreachable` | the fetch or the push failed, or ran out of time (the run deadline included), for a reason not naming auth | nothing while it is brief; past the threshold, look at the network and GitHub |
 | `auth-failed` | git's error named an auth or a not-found failure | `gh-doctor` in the store checkout: the account it routes to must be able to push to the store's repo |
-| `could-not-run` | the store could not be synced; the detail says why | what the detail names: finish or abort an operation by hand in the store, point `origin` back at the table's `remote`, merge a conflict the sync does not resolve by hand, or set a git identity |
+| `could-not-run` | the store could not be synced; the detail says why: an operation left unfinished, an `origin` that is not the table's `remote`, a branch origin does not have, a conflict the sync does not resolve, the lock still held when the wait ran out, gh-route not answering, or a commit that failed | what the detail names: finish or abort an operation by hand in the store, point `origin` back at the table's `remote`, rename the store's branch to the remote's (`git branch -m <that branch>`: the next tick merges the two), merge a conflict the sync does not resolve by hand, let the link run that holds the lock finish (the next tick retries), fix the routing tables gh-route reads (`gh-doctor` in the store), or set a git identity |
 
 **What `claude-doctor` shows.** After the link rows, the section asks `scripts/claude-memory-sync.sh
 --status`, which only reads, and shows each line it prints as a row, `memory store <store>:
@@ -529,8 +541,9 @@ exits 0 for every one but `could-not-run`: the rest are the doctor's to show.
   with an origin has not synced within the threshold (`never synced; …`, or `last synced <n> min
   ago, past the <t> min threshold; …`, naming the last outcome); or when `--status` cannot read the
   store at all, naming the reason (an origin that is not the table's `remote`, an origin git cannot
-  read, a status or last-ok file the sync did not write, a tree it cannot search), and nothing else
-  about that store;
+  read, a status or last-ok file the sync did not write, a tree it cannot search), or the store is on
+  a branch the last-fetched origin does not have while it has another (`origin has no branch <ours>,
+  only <theirs>: …`), and nothing else about that store;
 - ⚠ for `no remote yet` (`ok-local-only`); `push-rejected`, `unreachable` or `skipped-no-token`
   while the last success is still within the threshold; `no run recorded yet` for a store with no
   origin; `<n> conflict copies in the tree`; and, per directory, an index line naming a missing file
@@ -545,6 +558,13 @@ said so. `--status` exits 2 only when it could read nothing (no jq, a bad table 
 dir that exists and cannot be read); the row is then ⚠ `memory sync status could not be read: <last
 stderr line>`, with every stderr line before it printed indented under it. A line the doctor cannot
 read is shown whole as a ⚠.
+
+Last, the section's own ⚠ `claude-memory-sync.timer is linked but not active; nothing syncs until it is
+armed`, when the unit is linked (`~/.config/systemd/user/claude-memory-sync.timer` exists), `systemctl
+--user is-active` does not answer `active`, and a checked-out store has an `origin`: the timer is
+linked by `./install` and armed by hand ("The tick", below), and without this row an unarmed host's
+stores only age into `never synced`. A host whose stores are all local-only has nothing to sync yet,
+and gets no ⚠.
 
 **Resolving a conflict copy.** `x.conflict-<host>.md` beside `x.md` holds this host's body, where
 origin's took the name. Merge the two bodies into `x.md` by hand, delete the copy, and let the next
@@ -602,7 +622,7 @@ An armed timer on a host whose `~/.local/share/claude-memory` has gone is skippe
 `CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS` override the sync's paths, host, route and limits.
 
 State tables: `scripts/test-claude-memory-link.sh` (206 rows) and `scripts/test-claude-memory-sync.sh`
-(103 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
+(109 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
 sync local bare repositories as remotes and a stub `gh-route` (CI `claude-memory-link-test` and
 `claude-memory-sync-test`). The doctor's rows are section AA of `scripts/test-claude-doctor.sh`, and
 `scripts/test-claude-config-audit.sh` pins that `claude-config-audit.sh` collects a linked `memory`
