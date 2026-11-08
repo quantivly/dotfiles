@@ -30,10 +30,15 @@
 #                extension dir, where both extensions are copied, without it
 #   unsafe mode  only through a throwaway helper extension copied into the run's data dir,
 #                which refuses to act in any shell but this one
+#   identity     a run's launcher, supervisor and gnome-shell are recorded by pid AND start
+#                time (stat field 22), and count only while both match: a pid alone can be
+#                reused once its process ends
 #   requests     eval and screenshot go only to a live run: its supervisor running, and its
 #                recorded gnome-shell running, as gnome-shell, in the run's own session
-#   lifetime     setsid + timeout --kill-after; stop tears down by the recorded PIDs, and
-#                only ever signals processes in the run's own session
+#   lifetime     setsid + timeout --kill-after. stop signals only the run's own session, and
+#                only while that session is still led by the run's recorded launcher
+#                (timeout, same pid and start time); a run whose session is gone is only
+#                cleaned up
 #
 # Everything it creates is under the run directory. Any isolation step that
 # fails stops the run: exit 2, and nothing left running.
@@ -134,6 +139,8 @@ readonly EVAL_REFUSED_REPLY_PREFIX='{"type":"bs","data":[false,'
 # /proc/<pid>/stat after the last ") ": state (field 3), ppid, pgrp, session (field 6).
 readonly STAT_STATE_INDEX_AFTER_COMM=0
 readonly STAT_SESSION_INDEX_AFTER_COMM=3
+# Field 22, the start time in clock ticks after boot: with the pid it names one process, even after a reuse.
+readonly STAT_STARTTIME_INDEX_AFTER_COMM=19
 readonly DEAD_PROCESS_STATES='ZX'
 # A run's launcher: `setsid timeout ...` makes timeout the leader of the run's session.
 readonly LAUNCHER_COMM='timeout'
@@ -249,6 +256,19 @@ session_id_of_process() {
 }
 
 #######################################
+# Print a running process's start time (stat field 22); fail when it is not
+# running.
+# Arguments:
+#   $1 - proc root
+#   $2 - pid
+#######################################
+starttime_of_process() {
+    read_stat_fields "$1" "$2" || return 1
+    [[ "${STAT_FIELDS_AFTER_COMM[$STAT_STARTTIME_INDEX_AFTER_COMM]:-}" =~ $WHOLE_NUMBER_PATTERN ]] || return 1
+    printf '%s' "${STAT_FIELDS_AFTER_COMM[$STAT_STARTTIME_INDEX_AFTER_COMM]}"
+}
+
+#######################################
 # Fill SESSION_PIDS with every running pid under a proc root whose session is
 # the given one. It runs in the calling shell and never in a subshell: a
 # subshell of a process inside that session is itself a member, so a sweep
@@ -303,6 +323,22 @@ is_session_empty() {
 #######################################
 record_run_value() {
     printf '%s=%s\n' "$2" "$3" >>"$1/state/run.values"
+}
+
+#######################################
+# Record one of the run's processes by pid and start time (<name> and
+# <name>-starttime), so a later check can tell it from a process that reused
+# its pid.
+# Arguments:
+#   $1 - run directory
+#   $2 - name (launcher, supervisor, gnome-shell)
+#   $3 - pid
+#######################################
+record_running_process() {
+    local run_dir="$1" process_name="$2" pid="$3" starttime
+    starttime="$(starttime_of_process /proc "$pid")" || starttime=""
+    record_run_value "$run_dir" "$process_name" "$pid"
+    record_run_value "$run_dir" "$process_name-starttime" "$starttime"
 }
 
 #######################################
@@ -567,12 +603,19 @@ verified_session_address() {
 }
 
 #######################################
-# Succeed while a process is running (not gone, not a zombie).
+# Succeed while a recorded process of the run is still the process recorded:
+# its pid runs, with the start time recorded for it. A process recorded with
+# no start time never counts.
 # Arguments:
-#   $1 - pid
+#   $1 - run directory
+#   $2 - name (launcher, supervisor, gnome-shell)
 #######################################
-is_process_running() {
-    [[ -n "$1" ]] && session_id_of_process /proc "$1" >/dev/null
+is_recorded_process_running() {
+    local run_dir="$1" process_name="$2" pid recorded_starttime
+    pid="$(recorded_run_value "$run_dir" "$process_name")"
+    recorded_starttime="$(recorded_run_value "$run_dir" "$process_name-starttime")"
+    [[ -n "$pid" && -n "$recorded_starttime" ]] || return 1
+    [[ "$(starttime_of_process /proc "$pid")" == "$recorded_starttime" ]]
 }
 
 #######################################
@@ -582,8 +625,7 @@ is_process_running() {
 #   $1 - run directory
 #######################################
 is_run_alive() {
-    is_process_running "$(recorded_run_value "$1" supervisor)" ||
-        is_process_running "$(recorded_run_value "$1" launcher)"
+    is_recorded_process_running "$1" supervisor || is_recorded_process_running "$1" launcher
 }
 
 #######################################
@@ -600,6 +642,10 @@ is_nested_shell_live() {
     shell_pid="$(recorded_run_value "$run_dir" gnome-shell)"
     if ! [[ "$session_id" =~ $POSITIVE_WHOLE_NUMBER_PATTERN && "$shell_pid" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]]; then
         note "the run has no recorded session or gnome-shell"
+        return 1
+    fi
+    if ! is_recorded_process_running "$run_dir" gnome-shell; then
+        note "the recorded gnome-shell ($shell_pid) is not running, or its pid now belongs to another process"
         return 1
     fi
     if [[ "$(session_id_of_process /proc "$shell_pid")" != "$session_id" ]]; then
@@ -677,10 +723,10 @@ eval_in_nested_shell() {
 
 #######################################
 # Succeed when a session is still led by this run's launcher: its leader (the
-# process whose pid is the session id) is running, leads that session, is the
-# launcher the run recorded, and is `timeout`. A session id is a pid: once a
-# run's processes are all gone, another session can take the same id, and that
-# session must never be signalled as the run's.
+# process whose pid is the session id) is the launcher the run recorded (same
+# pid and start time), leads that session, and is `timeout`. A session id is a
+# pid: once a run's processes are all gone, another session can take the same
+# id, and that session must never be signalled as the run's.
 # Arguments:
 #   $1 - run directory
 #   $2 - session id
@@ -688,6 +734,7 @@ eval_in_nested_shell() {
 is_session_led_by_run_launcher() {
     local run_dir="$1" session_id="$2" leader_comm=""
     [[ "$(recorded_run_value "$run_dir" launcher)" == "$session_id" ]] || return 1
+    is_recorded_process_running "$run_dir" launcher || return 1
     [[ "$(session_id_of_process /proc "$session_id")" == "$session_id" ]] || return 1
     read -r leader_comm 2>/dev/null <"/proc/$session_id/comm"
     [[ "$leader_comm" == "$LAUNCHER_COMM" ]]
@@ -821,7 +868,7 @@ supervise_run() {
     [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || refuse_run "$run_dir" "the supervisor inherited a session bus"
     own_session_id="$(session_id_of_process /proc "$$")" || refuse_run "$run_dir" "cannot read the supervisor's session"
     [[ "$own_session_id" == "$PPID" ]] || refuse_run "$run_dir" "the supervisor is not in the session setsid made"
-    record_run_value "$run_dir" supervisor "$$"
+    record_running_process "$run_dir" supervisor "$$"
     record_run_value "$run_dir" session "$own_session_id"
     # run_dir and own_session_id are checked above to hold no quote or space, so expanding them now is safe.
     # shellcheck disable=SC2064
@@ -905,7 +952,7 @@ run_inside_private_session_bus() {
         || refuse_run "$run_dir" "the session bus is not this run's private one: '${DBUS_SESSION_BUS_ADDRESS:-}'"
     write_nested_settings || refuse_run "$run_dir" "a nested setting could not be written"
     [[ -s "$XDG_CONFIG_HOME/dconf/user" ]] || refuse_run "$run_dir" "the settings did not land in the nested dconf"
-    record_run_value "$run_dir" gnome-shell "$$"
+    record_running_process "$run_dir" gnome-shell "$$"
     printf '%s\n' "$DBUS_SESSION_BUS_ADDRESS" >"$run_dir/state/session.addr"
     exec gnome-shell --headless --wayland --no-x11 --virtual-monitor "$NESTED_MONITOR_SIZE" \
         --wayland-display "$NESTED_WAYLAND_DISPLAY" --mode "$NESTED_SESSION_MODE"
@@ -1053,7 +1100,7 @@ start_subcommand() {
 
     "${ISOLATED_ENV_COMMAND[@]}" setsid timeout --kill-after="$KILL_AFTER_SECONDS" "$lifetime_seconds" \
         bash "$SCRIPT_PATH" __supervise "$run_dir" </dev/null >"$run_dir/log/supervisor.log" 2>&1 &
-    record_run_value "$run_dir" launcher "$!"
+    record_running_process "$run_dir" launcher "$!"
     if ! wait_for_nested_shell "$run_dir"; then
         stop_run "$run_dir"
         exit "$EXIT_REFUSED"
@@ -1102,7 +1149,8 @@ stop_run() {
         refuse_unstoppable_session "$session_id"
         if is_session_led_by_run_launcher "$run_dir" "$session_id"; then
             shell_pid="$(recorded_run_value "$run_dir" gnome-shell)"
-            if [[ -n "$shell_pid" && "$(session_id_of_process /proc "$shell_pid")" == "$session_id" ]]; then
+            if is_recorded_process_running "$run_dir" gnome-shell &&
+                [[ "$(session_id_of_process /proc "$shell_pid")" == "$session_id" ]]; then
                 kill -TERM "$shell_pid" 2>/dev/null
             fi
             if ! wait_until "$STOP_GRACE_SECONDS" is_session_empty "$session_id"; then

@@ -454,6 +454,23 @@ is_running() {
   read -r stat_line 2>/dev/null <"/proc/$1/stat" || return 1
   [[ "${stat_line##*) }" != Z* ]]
 }
+# starttime_of <pid> prints a process's start time (stat field 22), parsed here
+# independently of the script (whose own parser a row pins against this one).
+starttime_of() {
+  local stat_line
+  local -a stat_fields
+  read -r stat_line 2>/dev/null <"/proc/$1/stat" || return 0
+  read -r -a stat_fields <<<"${stat_line##*) }"
+  printf '%s' "${stat_fields[19]:-}"
+}
+# kill_sacrifice <pid> <comm> <start time> sends SIGTERM only while that pid is
+# still the same sacrificial process: same comm, same start time.
+kill_sacrifice() {
+  local current_comm=""
+  read -r current_comm 2>/dev/null <"/proc/$1/comm" || return 0
+  [[ "$current_comm" == "$2" && "$(starttime_of "$1")" == "$3" && -n "$3" ]] || return 0
+  kill "$1" 2>/dev/null
+}
 # start_sacrificial_session <command...> starts the command as the leader of a
 # new session (setsid, then exec), waits until it runs, and prints its pid,
 # which is also the session id. Only rows that must never touch a real session
@@ -531,7 +548,8 @@ done
 test_session_id="$(nested_call session_id_of_process /proc "$$")"
 # eval_stale_run <supervisor> <session> <gnome-shell pid> prints refused or reached-busctl.
 eval_stale_run() {
-  printf 'supervisor=%s\nsession=%s\ngnome-shell=%s\n' "$1" "$2" "$3" >"$STALE_RUN/state/run.values"
+  printf 'supervisor=%s\nsupervisor-starttime=%s\nsession=%s\ngnome-shell=%s\ngnome-shell-starttime=%s\n' \
+    "$1" "$(starttime_of "$1")" "$2" "$3" "$(starttime_of "$3")" >"$STALE_RUN/state/run.values"
   NESTED_RUN_DIR="$STALE_RUN" nested_run eval '1 + 1'
   if [[ $NESTED_EXIT == 2 && $(nested_stub_call_count) == 0 ]]; then printf refused
   elif (( $(nested_stub_call_count) > 0 )); then printf reached-busctl
@@ -553,9 +571,62 @@ eval_stale_run "$$" "$test_session_id" "$fake_shell_pid" >/dev/null
 nested_run eval '1 + 1'
 check "nested: looking for the live run skips one whose supervisor and launcher are gone" \
   "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'several live runs' <<<"$NESTED_OUTPUT")" "2:1:0"
+rm -rf "$ENDED_RUN"
+
+# A run marked ended (its supervisor's exit) or stopped, whose recorded
+# processes still look live (the same pids and start times as the live run):
+# only the marker can make looking for a live run skip it.
+mv "$STALE_RUN" "$NESTED_BASE/rpn.Marked01"
+MARKED_ENDED_RUN="$NESTED_BASE/rpn.Marked01"
+: >"$MARKED_ENDED_RUN/state/ended"
+printf '%s\n' Marked01 >"$MARKED_ENDED_RUN/.resource-pulse-nested"
+MARKED_STOPPED_RUN="$NESTED_BASE/rpn.Marked02"
+cp -a "$MARKED_ENDED_RUN" "$MARKED_STOPPED_RUN"
+rm -f "$MARKED_STOPPED_RUN/state/ended"
+: >"$MARKED_STOPPED_RUN/state/stopped"
+printf '%s\n' Marked02 >"$MARKED_STOPPED_RUN/.resource-pulse-nested"
+nested_run eval '1 + 1'
+check "nested: looking for the live run skips a run marked ended or stopped, however live its pids look" \
+  "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'no live run' <<<"$NESTED_OUTPUT")" "2:0:1"
+rm -rf "$MARKED_ENDED_RUN" "$MARKED_STOPPED_RUN"
+
+# A pid can be reused once its process ends. A recorded process counts only
+# while the same pid runs with the start time recorded for it, so a different
+# start time (a reused pid) must never pass: (a) stop leaves a session led by
+# a `timeout` it did not record; (b) eval refuses a shell it did not record;
+# (c) looking for a live run skips a run whose supervisor is someone else.
+reused_pid_session_id="$(start_sacrificial_session timeout 60 sleep 60)"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ "$(cat "/proc/$reused_pid_session_id/comm" 2>/dev/null)" == timeout ]] && break
+  sleep 0.1
+done
+reused_pid_starttime="$(starttime_of "$reused_pid_session_id")"
+REUSED_PID_RUN="$NESTED_BASE/rpn.ReusePid"
+make_run_dir "$REUSED_PID_RUN" "launcher=$reused_pid_session_id" "launcher-starttime=$((reused_pid_starttime + 1))" \
+  "session=$reused_pid_session_id" "supervisor=$reused_pid_session_id" \
+  "supervisor-starttime=$((reused_pid_starttime + 1))"
+NESTED_RUN_DIR="$REUSED_PID_RUN" nested_run stop
+reused_pid_summary="stop=$(is_running "$reused_pid_session_id" && printf left-running || printf signalled)"
+kill_sacrifice "$reused_pid_session_id" timeout "$reused_pid_starttime"
+SHELL_REUSED_RUN="$NESTED_BASE/rpn.ShellPid"
+make_run_dir "$SHELL_REUSED_RUN" "supervisor=$$" "supervisor-starttime=$(starttime_of "$$")" "session=$test_session_id" \
+  "gnome-shell=$fake_shell_pid" "gnome-shell-starttime=$(( $(starttime_of "$fake_shell_pid") + 1 ))"
+printf '%s\n' "unix:path=$SHELL_REUSED_RUN/bus/session.sock,guid=0123456789abcdef" >"$SHELL_REUSED_RUN/state/session.addr"
+NESTED_RUN_DIR="$SHELL_REUSED_RUN" nested_run eval '1 + 1'
+reused_pid_summary+=" eval=$([[ $NESTED_EXIT == 2 && $(nested_stub_call_count) == 0 ]] && printf refused || printf 'exit-%s' "$NESTED_EXIT")"
+SUPERVISOR_REUSED_RUN="$NESTED_BASE/rpn.SupvPid1"
+make_run_dir "$SUPERVISOR_REUSED_RUN" "supervisor=$$" "supervisor-starttime=$(( $(starttime_of "$$") + 1 ))" \
+  "session=$test_session_id" "gnome-shell=$fake_shell_pid" "gnome-shell-starttime=$(starttime_of "$fake_shell_pid")"
+printf '%s\n' "unix:path=$SUPERVISOR_REUSED_RUN/bus/session.sock,guid=0123456789abcdef" \
+  >"$SUPERVISOR_REUSED_RUN/state/session.addr"
+rm -rf "$SHELL_REUSED_RUN"
+nested_run eval '1 + 1'
+reused_pid_summary+=" discovery=$(grep -c -F 'no live run' <<<"$NESTED_OUTPUT")"
+check "nested: a recorded pid with another start time (a reused pid) passes nowhere: stop, eval, or looking for a run" \
+  "$reused_pid_summary" "stop=left-running eval=refused discovery=1"
+rm -rf "$REUSED_PID_RUN" "$SUPERVISOR_REUSED_RUN"
 kill "$fake_shell_pid" 2>/dev/null
 wait "$fake_shell_pid" 2>/dev/null
-rm -rf "$STALE_RUN" "$ENDED_RUN"
 
 # `stop` signals a session only while its leader is this run's recorded
 # launcher, `timeout`: a session id is a pid, and once a run's processes are all
@@ -565,13 +636,15 @@ rm -rf "$STALE_RUN" "$ENDED_RUN"
 # (1) A session led by something else (a reused id): `stop` must leave it
 # running, and just clean the run up.
 reused_session_id="$(start_sacrificial_session sleep 60)"
+reused_session_starttime="$(starttime_of "$reused_session_id")"
 REUSED_RUN="$NESTED_BASE/rpn.Reused01"
-make_run_dir "$REUSED_RUN" "launcher=$reused_session_id" "session=$reused_session_id" \
-  "supervisor=$reused_session_id" "gnome-shell=$reused_session_id"
+make_run_dir "$REUSED_RUN" "launcher=$reused_session_id" "launcher-starttime=$reused_session_starttime" \
+  "session=$reused_session_id" "supervisor=$reused_session_id" "supervisor-starttime=$reused_session_starttime" \
+  "gnome-shell=$reused_session_id" "gnome-shell-starttime=$reused_session_starttime"
 NESTED_RUN_DIR="$REUSED_RUN" nested_run stop
 reused_summary="exit=$NESTED_EXIT left-running=$(is_running "$reused_session_id" && printf yes || printf no)"
 reused_summary+=" stopped=$([[ -e "$REUSED_RUN/state/stopped" ]] && printf yes || printf no)"
-kill "$reused_session_id" 2>/dev/null
+kill_sacrifice "$reused_session_id" sleep "$reused_session_starttime"
 check "nested: stop leaves a session alone once its leader is not the run's timeout (a reused id), and cleans up" \
   "$reused_summary" "exit=0 left-running=yes stopped=yes"
 # (2) A session still led by the run's timeout: `stop` must end all of it.
@@ -580,17 +653,19 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   [[ "$(cat "/proc/$timeout_session_id/comm" 2>/dev/null)" == timeout ]] && break
   sleep 0.1
 done
+timeout_session_starttime="$(starttime_of "$timeout_session_id")"
 TIMEOUT_RUN="$NESTED_BASE/rpn.Timeout1"
 # Recorded as the run's gnome-shell too, so `stop` sends its first SIGTERM to it (timeout passes it on to its child).
-make_run_dir "$TIMEOUT_RUN" "launcher=$timeout_session_id" "session=$timeout_session_id" \
-  "supervisor=$timeout_session_id" "gnome-shell=$timeout_session_id"
+make_run_dir "$TIMEOUT_RUN" "launcher=$timeout_session_id" "launcher-starttime=$timeout_session_starttime" \
+  "session=$timeout_session_id" "supervisor=$timeout_session_id" "supervisor-starttime=$timeout_session_starttime" \
+  "gnome-shell=$timeout_session_id" "gnome-shell-starttime=$timeout_session_starttime"
 NESTED_RUN_DIR="$TIMEOUT_RUN" nested_run stop
 timeout_summary="exit=$NESTED_EXIT leader-running=$(is_running "$timeout_session_id" && printf yes || printf no)"
 timeout_summary+=" session-empty=$([[ -z "$(nested_call pids_in_session /proc "$timeout_session_id")" ]] && printf yes || printf no)"
 check "nested: stop ends a session still led by the run's recorded timeout" "$timeout_summary" \
   "exit=0 leader-running=no session-empty=yes"
 # Whatever stop did, nothing of the sacrificial session outlives the row (timeout passes the TERM to its child).
-kill "$timeout_session_id" 2>/dev/null
+kill_sacrifice "$timeout_session_id" timeout "$timeout_session_starttime"
 # (3) The caller's own session, and a session id of 1: refused, nothing signalled.
 # The caller runs inside a sandbox session led by `timeout` and recorded as the
 # launcher, so only the refusal stands between `stop` and that session.
@@ -602,7 +677,10 @@ cat >"$SACRIFICE_DIR/stop-own-session.sh" <<'SANDBOX'
 run_dir="$1" script="$2"
 read -r stat_line <"/proc/$$/stat"
 read -r -a stat_fields <<<"${stat_line##*) }"
-printf 'launcher=%s\nsession=%s\nsupervisor=%s\n' "$PPID" "${stat_fields[3]}" "$PPID" >"$run_dir/state/run.values"
+read -r parent_stat_line <"/proc/$PPID/stat"
+read -r -a parent_stat_fields <<<"${parent_stat_line##*) }"
+printf 'launcher=%s\nlauncher-starttime=%s\nsession=%s\nsupervisor=%s\nsupervisor-starttime=%s\n' "$PPID" \
+  "${parent_stat_fields[19]}" "${stat_fields[3]}" "$PPID" "${parent_stat_fields[19]}" >"$run_dir/state/run.values"
 RESOURCE_PULSE_NESTED_DIR="$run_dir" bash "$script" stop
 printf 'stop-exit=%s\n' "$?"
 SANDBOX
@@ -789,6 +867,20 @@ make_fake_stat() {
 make_fake_stat 500 gnome-shell 500
 make_fake_stat 501 'odd) S 1 9 9 (name' 500
 make_fake_stat 502 bash 777
+mkdir -p "$NESTED_FAKE_PROC/503"
+printf '503 (odd) S 1 9 9 (name) S 1 503 503 0 -1 4194304 1 2 3 4 5 6 7 8 20 0 1 0 98765 0 0\n' \
+  >"$NESTED_FAKE_PROC/503/stat"
+# What start, the supervisor and the in-bus stage call to record a process:
+# it must write <name> and <name>-starttime, and then count as running.
+RECORD_RUN="$WIRING_TMP/record-run"
+mkdir -p "$RECORD_RUN/state"
+# shellcheck disable=SC2016  # Expanded by the child bash.
+recorded_check="$(bash -c 'source "$1" || exit 99; record_running_process "$2" probe "$3" &&
+  is_recorded_process_running "$2" probe && printf running' record-check "$NESTED_SCRIPT" "$RECORD_RUN" "$$")"
+recorded_values="$(tr '\n' ' ' <"$RECORD_RUN/state/run.values" 2>/dev/null)"
+check "nested: start times are read from stat field 22, even past a comm holding ') ', as this suite reads them" \
+  "fake=$(nested_call starttime_of_process "$NESTED_FAKE_PROC" 503) self=$([[ "$(nested_call starttime_of_process /proc "$$")" == "$(starttime_of "$$")" && -n "$(starttime_of "$$")" ]] && printf match || printf differs) recorded=$recorded_check values=$recorded_values" \
+  "fake=98765 self=match recorded=running values=probe=$$ probe-starttime=$(starttime_of "$$") "
 check "nested: the teardown sweep finds exactly the run's session, even past a comm holding ') '" \
   "$(nested_call pids_in_session "$NESTED_FAKE_PROC" 500 | sort -n | tr '\n' ' ')" "500 501 "
 
@@ -867,7 +959,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=221
+EXPECTED_ROWS=224
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
