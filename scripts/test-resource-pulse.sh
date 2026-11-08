@@ -542,6 +542,8 @@ timeout_summary="exit=$NESTED_EXIT leader-running=$(is_running "$timeout_session
 timeout_summary+=" session-empty=$([[ -z "$(nested_call pids_in_session /proc "$timeout_session_id")" ]] && printf yes || printf no)"
 check "nested: stop ends a session still led by the run's recorded timeout" "$timeout_summary" \
   "exit=0 leader-running=no session-empty=yes"
+# Whatever stop did, nothing of the sacrificial session outlives the row (timeout passes the TERM to its child).
+kill "$timeout_session_id" 2>/dev/null
 # (3) The caller's own session, and a session id of 1: refused, nothing signalled.
 # The caller runs inside a sandbox session led by `timeout` and recorded as the
 # launcher, so only the refusal stands between `stop` and that session.
