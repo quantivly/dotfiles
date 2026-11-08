@@ -206,6 +206,19 @@ check "metadata.json: no session-modes key, so the lock screen disables it" "$me
 # Every genable_extension row runs apply-gnome-settings.sh against a STATEFUL
 # gsettings stub on PATH (values under $WIRING_TMP/gsettings/<schema>/<key>), so
 # nothing here can reach the real session's dconf database.
+#
+# A stub is only a stub while it is there: if one failed to install, the real
+# tool would run on the live session. So every stub is installed by
+# install_stub (exit 2 unless it is an executable file, and unless PATH with its
+# directory first resolves the tool to it), and every row that runs code which
+# can write settings runs it behind LIVE_SETTINGS_BARRIER:
+#   - a dead session bus address, so GLib cannot reach the live bus (dconf's
+#     writes all go through it);
+#   - a private XDG_RUNTIME_DIR, because with no address at all GLib falls back
+#     to $XDG_RUNTIME_DIR/bus, which is the live bus;
+#   - the in-memory GSettings backend, so even the real gsettings would write
+#     to nothing. apply-gnome-settings.sh unsets that one on purpose (it guards
+#     against snap terminals forcing it), so for its rows the bus is what holds.
 # ---------------------------------------------------------------------------
 APPLY_SCRIPT="$DOTFILES/scripts/apply-gnome-settings.sh"
 COST_SCRIPT="$DOTFILES/scripts/resource-pulse-cost.sh"
@@ -213,14 +226,37 @@ EXTENSION_UUID="resource-pulse@dotfiles"
 SHELL_SCHEMA="org.gnome.shell"
 WIRING_TMP="$(mktemp -d)" || fatal "mktemp -d failed"
 trap 'rm -rf "$WIRING_TMP"' EXIT
+LIVE_SETTINGS_BARRIER_RUNTIME_DIR="$WIRING_TMP/barrier-runtime"
+LIVE_SETTINGS_BARRIER_BUS="unix:path=$WIRING_TMP/barrier-no-session-bus"
+if ! mkdir -p "$LIVE_SETTINGS_BARRIER_RUNTIME_DIR" || ! chmod 700 "$LIVE_SETTINGS_BARRIER_RUNTIME_DIR"; then
+  fatal "cannot create the barrier's private runtime dir"
+fi
+LIVE_SETTINGS_BARRIER=(GSETTINGS_BACKEND=memory "DBUS_SESSION_BUS_ADDRESS=$LIVE_SETTINGS_BARRIER_BUS"
+  "XDG_RUNTIME_DIR=$LIVE_SETTINGS_BARRIER_RUNTIME_DIR")
+# install_stub <dir> <tool> <source>: writes an executable stub, then exits 2
+# unless it is one and PATH with <dir> first resolves <tool> to it.
+install_stub() {
+  local stub_dir="$1" tool_name="$2" stub_source="$3" resolved_path
+  if ! mkdir -p "$stub_dir" || ! printf '%s\n' "$stub_source" >"$stub_dir/$tool_name" || ! chmod +x "$stub_dir/$tool_name"
+  then
+    fatal "cannot install the $tool_name stub in $stub_dir"
+  fi
+  [[ -f "$stub_dir/$tool_name" && -x "$stub_dir/$tool_name" ]] || fatal "the $tool_name stub in $stub_dir is not executable"
+  # shellcheck disable=SC2016  # Expanded by the child bash, with the stub dir first on its PATH.
+  resolved_path="$(env PATH="$stub_dir:$PATH" bash -c 'command -v "$1"' resolve-stub "$tool_name")"
+  [[ "$resolved_path" == "$stub_dir/$tool_name" ]] \
+    || fatal "PATH with $stub_dir first finds $tool_name at '$resolved_path', not the stub"
+}
 STUB_BIN="$WIRING_TMP/bin"
 STUB_STATE="$WIRING_TMP/gsettings"
 mkdir -p "$STUB_BIN" "$STUB_STATE" || fatal "cannot create the gsettings stub directory"
-cat >"$STUB_BIN/gsettings" <<'STUB'
+GENABLE_GSETTINGS_STUB="$(cat <<'STUB'
 #!/usr/bin/env bash
 # Stateful gsettings stand-in: get/set/list-schemas over files under $STUB_STATE.
-# Every call is logged to $STUB_CALLS, so a row can prove the stub was the one used.
+# Every call is logged to $STUB_CALLS, so a row can prove the stub was the one used,
+# and the session bus it was given to $STUB_BUS_SEEN, so a row can prove the barrier held.
 printf '%s\n' "$*" >>"$STUB_CALLS"
+printf '%s\n' "${DBUS_SESSION_BUS_ADDRESS-unset}" >>"$STUB_BUS_SEEN"
 case "$1" in
   list-schemas) cat "$STUB_STATE/schemas" 2>/dev/null ;;
   get)
@@ -236,10 +272,12 @@ case "$1" in
   *) exit 1 ;;
 esac
 STUB
-chmod +x "$STUB_BIN/gsettings"
+)"
+install_stub "$STUB_BIN" gsettings "$GENABLE_GSETTINGS_STUB"
 printf 'genable_extension %s\n' "$EXTENSION_UUID" >"$WIRING_TMP/local-overrides"
 
 STUB_CALLS_LOG="$WIRING_TMP/stub-calls"
+STUB_BUS_SEEN_LOG="$WIRING_TMP/stub-bus-seen"
 
 # Reset the stub to a state, run the apply script, leave its stderr+stdout in
 # APPLY_OUTPUT and its exit status in APPLY_EXIT.
@@ -253,7 +291,9 @@ run_apply_against_stub() {
   printf '%s\n' "$3" >"$STUB_STATE/$SHELL_SCHEMA/disable-user-extensions"
   printf '%s' "$4" >"$STUB_STATE/schemas"
   : >"$STUB_CALLS_LOG"
-  APPLY_OUTPUT="$(PATH="$STUB_BIN:$PATH" STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" XDG_CURRENT_DESKTOP=GNOME \
+  : >"$STUB_BUS_SEEN_LOG"
+  APPLY_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$STUB_BIN:$PATH" STUB_STATE="$STUB_STATE" \
+    STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" XDG_CURRENT_DESKTOP=GNOME \
     GNOME_LOCAL_OVERRIDES="$WIRING_TMP/local-overrides" bash "$APPLY_SCRIPT" 2>&1)"
   APPLY_EXIT=$?
 }
@@ -332,13 +372,13 @@ COST_WINDOW_SECONDS=2
 make_fake_proc "$CPU_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
 printf '4242 (gnome-shell) S 1 1 1 0 -1 0 0 0 0 3 100 50 7 9 20 0 1 0 1 0 0\n' >"$CPU_PROC_ROOT/4242/stat"
 printf '4242 (gnome-shell) S 1 1 1 0 -1 0 0 0 5 40 160 80 57 99 20 0 1 0 1 0 0\n' >"$COST_STAT_AFTER"
-mkdir -p "$COST_STUB_BIN"
 # shellcheck disable=SC2016  # The stubs' own source: their variables expand when they run.
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$COST_SLEEP_CALLS"\ncp "$COST_STAT_AFTER" "$COST_STAT_PATH"\n' \
-  >"$COST_STUB_BIN/sleep"
+install_stub "$COST_STUB_BIN" sleep '#!/usr/bin/env bash
+printf "%s\n" "$*" >>"$COST_SLEEP_CALLS"
+cp "$COST_STAT_AFTER" "$COST_STAT_PATH"'
 # shellcheck disable=SC2016
-printf '#!/usr/bin/env bash\n[[ "$1" == CLK_TCK ]] && echo 250\n' >"$COST_STUB_BIN/getconf"
-chmod +x "$COST_STUB_BIN/sleep" "$COST_STUB_BIN/getconf"
+install_stub "$COST_STUB_BIN" getconf '#!/usr/bin/env bash
+[[ "$1" == CLK_TCK ]] && echo 250'
 : >"$COST_SLEEP_CALLS"
 cpu_percent_output="$(PATH="$COST_STUB_BIN:$PATH" GNOME_SHELL_PID=4242 PROC_ROOT="$CPU_PROC_ROOT" \
   COST_SLEEP_CALLS="$COST_SLEEP_CALLS" COST_STAT_AFTER="$COST_STAT_AFTER" COST_STAT_PATH="$CPU_PROC_ROOT/4242/stat" \
@@ -377,9 +417,7 @@ mkdir -p "$NESTED_BASE" "$NESTED_STUB_BIN" || fatal "cannot create the nested-ha
 chmod 700 "$NESTED_BASE" || fatal "cannot make the nested-harness base private"
 for stubbed_tool in busctl gsettings gnome-shell jq; do
   # shellcheck disable=SC2016  # The stub's own source: its $* and $NESTED_STUB_CALLS expand when it runs.
-  printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" %s "$*" >>"$NESTED_STUB_CALLS"\nexit 1\n' "$stubbed_tool" \
-    >"$NESTED_STUB_BIN/$stubbed_tool"
-  chmod +x "$NESTED_STUB_BIN/$stubbed_tool"
+  install_stub "$NESTED_STUB_BIN" "$stubbed_tool" "$(printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" %s "$*" >>"$NESTED_STUB_CALLS"\nexit 1' "$stubbed_tool")"
 done
 nested_stub_call_count() { printf '%d' "$(wc -l <"$NESTED_STUB_CALLS")"; }
 # nested_run <args...> runs the script against the stubs and the empty base;
@@ -387,7 +425,8 @@ nested_stub_call_count() { printf '%d' "$(wc -l <"$NESTED_STUB_CALLS")"; }
 # run directory (RESOURCE_PULSE_NESTED_DIR); otherwise the script looks for one.
 nested_run() {
   : >"$NESTED_STUB_CALLS"
-  NESTED_OUTPUT="$(env -u RESOURCE_PULSE_NESTED_DIR ${NESTED_RUN_DIR:+RESOURCE_PULSE_NESTED_DIR="$NESTED_RUN_DIR"} \
+  NESTED_OUTPUT="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" \
+    ${NESTED_RUN_DIR:+RESOURCE_PULSE_NESTED_DIR="$NESTED_RUN_DIR"} \
     PATH="$NESTED_STUB_BIN:$PATH" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" RESOURCE_PULSE_NESTED_BASE="$NESTED_BASE" \
     bash "$NESTED_SCRIPT" "$@" 2>&1)"
   NESTED_EXIT=$?
@@ -613,7 +652,7 @@ rm -rf "$SWEEP_RUN"
 PUBLIC_BASE="$WIRING_TMP/public-base-named-longer-than-any-run-directory-may-be"
 mkdir -p "$PUBLIC_BASE" && chmod 755 "$PUBLIC_BASE"
 : >"$NESTED_STUB_CALLS"
-public_base_output="$(env -u RESOURCE_PULSE_NESTED_DIR PATH="$NESTED_STUB_BIN:$PATH" \
+public_base_output="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" PATH="$NESTED_STUB_BIN:$PATH" \
   NESTED_STUB_CALLS="$NESTED_STUB_CALLS" RESOURCE_PULSE_NESTED_BASE="$PUBLIC_BASE" \
   bash "$NESTED_SCRIPT" start 2>&1)"
 public_base_exit=$?
@@ -751,19 +790,27 @@ check "nested: the teardown sweep finds exactly the run's session, even past a c
 # `start` can never succeed. A gsettings stub that records and succeeds stands in.
 NESTED_SETTINGS_STUB_BIN="$WIRING_TMP/nested-settings-bin"
 NESTED_SETTINGS_CALLS="$WIRING_TMP/nested-settings-calls"
-mkdir -p "$NESTED_SETTINGS_STUB_BIN"
+NESTED_SETTINGS_BUS_SEEN="$WIRING_TMP/nested-settings-bus-seen"
 # shellcheck disable=SC2016  # The stub's own source.
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$NESTED_SETTINGS_CALLS"\n' >"$NESTED_SETTINGS_STUB_BIN/gsettings"
-chmod +x "$NESTED_SETTINGS_STUB_BIN/gsettings"
+install_stub "$NESTED_SETTINGS_STUB_BIN" gsettings '#!/usr/bin/env bash
+printf "%s\n" "$*" >>"$NESTED_SETTINGS_CALLS"
+printf "%s %s\n" "${GSETTINGS_BACKEND-unset}" "${DBUS_SESSION_BUS_ADDRESS-unset}" >>"$NESTED_SETTINGS_BUS_SEEN"'
 : >"$NESTED_SETTINGS_CALLS"
-PATH="$NESTED_SETTINGS_STUB_BIN:$PATH" NESTED_SETTINGS_CALLS="$NESTED_SETTINGS_CALLS" nested_call write_nested_settings
+: >"$NESTED_SETTINGS_BUS_SEEN"
+# write_nested_settings has no guard of its own (the in-bus stage guards it), so the barrier is what stands
+# between it and the live dconf should the stub ever be missing.
+# shellcheck disable=SC2016  # Expanded by the child bash.
+env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$NESTED_SETTINGS_STUB_BIN:$PATH" NESTED_SETTINGS_CALLS="$NESTED_SETTINGS_CALLS" \
+  NESTED_SETTINGS_BUS_SEEN="$NESTED_SETTINGS_BUS_SEEN" \
+  bash -c 'source "$1" || exit 99; write_nested_settings' nested-settings "$NESTED_SCRIPT"
 nested_settings_summary="exit=$?"
 nested_settings_summary+=" enabled=$(grep -c -x -F "set org.gnome.shell enabled-extensions ['$UNSAFE_MODE_HELPER_UUID', 'resource-pulse@dotfiles']" "$NESTED_SETTINGS_CALLS")"
 nested_settings_summary+=" installation-off=$(grep -c -F 'allow-extension-installation false' "$NESTED_SETTINGS_CALLS")"
+nested_settings_summary+=" barrier=$(sort -u "$NESTED_SETTINGS_BUS_SEEN" | tr '\n' ' ')"
 USER_EXTENSIONS_DIR="$PREPARED_RUN/data/gnome-shell/extensions"
 nested_settings_summary+=" in-user-dir=$([[ -f "$USER_EXTENSIONS_DIR/$UNSAFE_MODE_HELPER_UUID/metadata.json" && -f "$USER_EXTENSIONS_DIR/resource-pulse@dotfiles/metadata.json" ]] && printf both || printf missing)"
 check "nested: no nested setting hides the user extension dir, where both extensions are copied" \
-  "$nested_settings_summary" "exit=0 enabled=1 installation-off=0 in-user-dir=both"
+  "$nested_settings_summary" "exit=0 enabled=1 installation-off=0 barrier=memory $LIVE_SETTINGS_BARRIER_BUS  in-user-dir=both"
 
 # `start` polls the shell's unsafe mode over busctl. A shell that answers with
 # unsafe mode off (Eval's (false, '')) is up but the helper did not load, which
@@ -779,13 +826,16 @@ check "nested: start tells a shell that answers with unsafe mode off from one th
 # one of them: (a) the live environment with the run's private bus address
 # claimed, and (b) the run's isolated environment with no private bus. Each
 # must refuse on its own guard, writing no setting and starting no shell.
+# Both run behind the barrier; (b) keeps the run's own runtime dir, which is
+# already private, so that only its missing private bus is wrong.
 : >"$NESTED_STUB_CALLS"
-live_env_in_bus_output="$(env -u RESOURCE_PULSE_NESTED_DIR PATH="$NESTED_STUB_BIN:$PATH" \
+live_env_in_bus_output="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" PATH="$NESTED_STUB_BIN:$PATH" \
   NESTED_STUB_CALLS="$NESTED_STUB_CALLS" DBUS_SESSION_BUS_ADDRESS="unix:path=$PREPARED_RUN/bus/session.sock" \
   bash "$NESTED_SCRIPT" __inside-session-bus "$PREPARED_RUN" 2>&1)"
 live_env_in_bus_exit=$?
 no_bus_in_bus_output="$(nested_call run_isolated "$PREPARED_RUN" \
-  env PATH="$NESTED_STUB_BIN:/usr/bin:/bin" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" \
+  env GSETTINGS_BACKEND=memory DBUS_SESSION_BUS_ADDRESS="$LIVE_SETTINGS_BARRIER_BUS" \
+  PATH="$NESTED_STUB_BIN:/usr/bin:/bin" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" \
   bash "$NESTED_SCRIPT" __inside-session-bus "$PREPARED_RUN" 2>&1)"
 no_bus_in_bus_exit=$?
 in_bus_summary="live-env=$live_env_in_bus_exit/$(grep -c -F 'the in-bus stage is not isolated' <<<"$live_env_in_bus_output")"
@@ -797,8 +847,9 @@ check "nested: the in-bus stage refuses a live environment and a missing private
 
 printf '\nthe stub, never the real session, answered gsettings\n'
 run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
-check "the apply script called the stub gsettings to set enabled-extensions" \
-  "$(grep -c -x -F "set $SHELL_SCHEMA enabled-extensions ['$EXTENSION_UUID']" "$STUB_CALLS_LOG")" 1
+check "the apply script called the stub gsettings to set enabled-extensions, behind the dead-bus barrier" \
+  "$(grep -c -x -F "set $SHELL_SCHEMA enabled-extensions ['$EXTENSION_UUID']" "$STUB_CALLS_LOG"):$(sort -u "$STUB_BUS_SEEN_LOG" | tr '\n' ' ')" \
+  "1:$LIVE_SETTINGS_BARRIER_BUS "
 
 # The guide must state this suite's own row count, as test-dock-wifi.sh does.
 docs_claim() {
