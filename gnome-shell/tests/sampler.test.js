@@ -4,6 +4,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
 import {Sampler, groupOfCgroup} from '../extensions/resource-pulse@dotfiles/sampler.js';
+import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
 import {
     APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, ERROR_LOG_REPEAT_INTERVAL_USEC, KERNEL_AND_OTHER_LABEL,
     LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
@@ -569,3 +570,20 @@ test('sampler: paused before start(), a real 1 s timer calls no listener in 2.5 
     sampler.destroy();
     assertEqual(listenerCalls, 0);
 });
+
+test('sampler: an injected logger keeps its rate limit across samplers, one per enable (every blank and lock)',
+    async () => {
+        const clock = {nowUsec: 0};
+        const written = [];
+        const errorLog = new RateLimitedLogger({nowUsec: () => clock.nowUsec, write: line => written.push(line)});
+        for (const _enable of [1, 2]) {
+            const sampler = new Sampler({fsRoot: fixtureRoot('root-no-stat'), nowUsec: () => clock.nowUsec,
+                clockLabel: () => FIXTURE_CLOCK_LABEL, errorLog});
+            await sampler.sampleOnce();
+            sampler.destroy();
+            clock.nowUsec += SAMPLE_SPACING_USEC;
+        }
+        // The same failure (proc/stat unreadable) from two samplers inside 10 minutes is one line.
+        assertEqual([written.length, written[0]?.startsWith(LOG_PREFIX), written[0]?.includes('proc/stat')],
+            [1, true, true]);
+    });

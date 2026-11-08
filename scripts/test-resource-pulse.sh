@@ -154,6 +154,8 @@ teardown_destroy_order="$(grep -E "run: \(\) => (card|indicator|sampler)\?\.dest
   | sed -E 's/.*=> ([a-z]+)\?\.destroy.*/\1/' | tr '\n' ' ')"
 check "extension.js tears down in guarded steps (runEveryStep), destroying the card, then the indicator, then the sampler" \
   "$teardown_destroy_order|$(grep -c -F 'runEveryStep([' "$EXTENSION_JS" 2>/dev/null)" "card indicator sampler |1"
+check "extension.js hands its rate-limited logger to every sampler, so the limit spans enables (each blank and lock)" \
+  "$(grep -c -F 'errorLog: this._errorLog' "$EXTENSION_JS" 2>/dev/null)" 1
 check "extension.js says a failed start removed Resource Pulse, not just the indicator" \
   "$(grep -c -E "^const START_FAILURE_MESSAGE = '.*Resource Pulse.*removed" "$EXTENSION_JS" 2>/dev/null)" 1
 
@@ -789,7 +791,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=217
+EXPECTED_ROWS=219
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

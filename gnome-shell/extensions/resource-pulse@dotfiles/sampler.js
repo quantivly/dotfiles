@@ -305,7 +305,11 @@ export class Sampler {
      * @param {(desktopId: string) => string|null} [options.resolveAppName] - Real name of a `.desktop` id.
      * @param {() => number} [options.nowUsec] - Monotonic microseconds.
      * @param {() => string} [options.clockLabel] - Wall-clock 'HH:MM'.
-     * @param {(message: string) => void} [options.log] - Where rate-limited error lines go.
+     * @param {(message: string) => void} [options.log] - Where rate-limited error lines go, when no errorLog is
+     *     given.
+     * @param {RateLimitedLogger} [options.errorLog] - The rate-limited logger to use. The extension passes its own,
+     *     which outlives every sampler: it makes a new one on each enable (every blank and every lock), and a
+     *     limiter per sampler would let a lasting failure be logged once per enable, not once per 10 minutes.
      * @param {number} [options.sampleIntervalSeconds] - Seconds between ticks.
      */
     constructor({
@@ -314,6 +318,7 @@ export class Sampler {
         nowUsec = () => GLib.get_monotonic_time(),
         clockLabel = () => GLib.DateTime.new_now_local().format(CLOCK_LABEL_FORMAT),
         log = message => console.warn(message),
+        errorLog = new RateLimitedLogger({nowUsec, write: log}),
         sampleIntervalSeconds = SAMPLE_INTERVAL_SECONDS,
     } = {}) {
         this.fsRoot = fsRoot;
@@ -347,7 +352,7 @@ export class Sampler {
         this._memoryHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
         this._listeners = new Map();
         this._nextListenerId = 1;
-        this._errorLog = new RateLimitedLogger({nowUsec, write: log});
+        this._errorLog = errorLog;
     }
 
     /** @returns {Snapshot|null} The most recent snapshot, or null before the first. */

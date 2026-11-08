@@ -76,8 +76,8 @@ export default class ResourcePulseExtension extends Extension {
         this._sampler = null;
         this._indicator = null;
         this._card = null;
-        // Kept across enable() and disable(), so a failure that repeats on every enable (every unlock and blank)
-        // is still logged at most once per 10 minutes.
+        // Kept across enable() and disable(), and handed to every sampler, so a failure that repeats on every
+        // enable (every unlock and blank) is still logged at most once per 10 minutes.
         this._errorLog = new RateLimitedLogger({
             nowUsec: () => GLib.get_monotonic_time(),
             write: line => console.error(line),
@@ -99,7 +99,7 @@ export default class ResourcePulseExtension extends Extension {
         const enableToken = {};
         this._enableToken = enableToken;
         try {
-            this._sampler = new Sampler({resolveAppName: lookUpAppName});
+            this._sampler = new Sampler({resolveAppName: lookUpAppName, errorLog: this._errorLog});
             this._followOverviewWithAppScan();
             this._indicator = new PulseIndicator(this._sampler);
             Main.panel.addToStatusArea(this.uuid, this._indicator, systemMenuPanelIndex(), PANEL_BOX);
