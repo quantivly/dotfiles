@@ -446,6 +446,32 @@ jobs:
       - name: Run the claude-memory-link state table
         run: ./scripts/test-claude-memory-link.sh
 
+  claude-memory-sync-test:
+    name: Claude Memory Sync State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install jq
+        uses: ./.github/actions/apt-install
+        with:
+          packages: jq
+
+      # The subject commits, merges and pushes stores, so the whole table runs
+      # under a fixture HOME and names its stores root, store table, state dir,
+      # host, lock wait, run deadline and gh-route stub on every call; a remote is
+      # a local bare repository, so nothing reaches the network, and git reads
+      # only the fixture's config files. The table exits 2 as root, since its
+      # unreadable-file rows would assert nothing there; GitHub-hosted runners run
+      # as `runner`. git, flock, sha256sum, timeout and base64 are stock, and so is
+      # systemd-analyze, which its unit rows run on a copy of the service whose
+      # commands point at this checkout; it exits 2 if any required tool is missing.
+      - name: Run the claude-memory-sync state table
+        run: ./scripts/test-claude-memory-sync.sh
+
   timer-health-test:
     name: Repo-Owned Timer Health State Table
     runs-on: ubuntu-latest

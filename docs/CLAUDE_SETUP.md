@@ -296,7 +296,8 @@ path on one machine, so memory neither survives a new host nor follows a repo be
 `scripts/claude-memory-link.sh` maps each project key to a directory in a git-backed store and makes
 its `memory` entry a symlink there. It is the link half of D7 in the
 [shared-configuration design](superpowers/specs/2026-11-04-shared-claude-config-design.md), as
-amended (M1-M8). The link alone commits and pushes nothing; syncing a store is a separate step.
+amended (M1-M8). The link itself commits and pushes nothing: `scripts/claude-memory-sync.sh` does
+that, on a timer once a host arms it ([Syncing a store](#syncing-a-store-do-892), below).
 
 **The layout.** A store is a git checkout at `~/.local/share/claude-memory/<store>`, keyed by repo
 identity rather than by path:
@@ -315,13 +316,19 @@ The slug is the path relative to `$HOME`, `/` becoming `-`, lowercased, and `hom
 {
   "stores": {"<store>": {"remote": "https://github.com/<owner>/<repo>.git", "tenants": ["<tenant>"]}},
   "checkout_globs": ["<path relative to $HOME, may hold *>"],
-  "plain_dirs": ["<path relative to $HOME; the empty string is $HOME>"]
+  "plain_dirs": ["<path relative to $HOME; the empty string is $HOME>"],
+  "stale_after_minutes": {"default": 60, "<host>": 120}
 }
 ```
 
+`stale_after_minutes` is optional and read by the sync alone: how long a store may go without a
+successful sync before the doctor calls it stale, per host (`hostname -s`), else `default`, else 60.
+
 **A host without the table is not touched**: one line and exit 0, before the script even looks for
-jq. A store in the table that is not checked out on this host is left alone too. `./install` does
-not run this script: a table and a by-hand `--apply` are the only way a link appears.
+jq. A store in the table that is not checked out on this host is left alone too. `./install` runs
+neither script: it links the `claude-memory-sync` timer and does not enable it. Until a host arms
+that timer, a by-hand `--apply` is the only way a link appears; once armed, every tick runs
+`--apply` before it syncs ([The tick](#the-tick), below).
 
 **Which directory a key names.** The key of a path is the physical path with every character outside
 `[A-Za-z0-9]` replaced by `-`, and the candidates are every directory matching a `checkout_globs`
@@ -437,7 +444,8 @@ directory outside `~/.claude`, the index loads at session start, and Write, Read
 `default`-mode session is asked on a memory write, as it was before the link; an `auto`-mode one is
 not.
 
-**Who runs it.** `claude-doctor`'s "Memory stores" section runs `--check`, and nothing else: a note
+**Who runs it.** A person, and every tick of an armed timer, which runs `--apply` before each sync.
+`claude-doctor`'s "Memory stores" section runs `--check`, and nothing else: a note
 with no table, ✓ with the counts, ✗ with each row on exit 1 (`--apply --dry-run` shows what `--apply`
 would do), ⚠ with each row and both remedies when an exit 0 carries `UNMAPPED` rows, ⚠
 `no store that these keys map to is checked out here (<n> keys wait for one)` when nothing is linked
@@ -447,7 +455,144 @@ and keys hold memory waiting for a store, and ⚠ with the last stderr line when
 `CLAUDE_MEMORY_TENANT_ROUTE` override the paths, the host in a conflict copy's name and the tenant
 lookup.
 
-State table: `scripts/test-claude-memory-link.sh` (hermetic: fixture `HOME`, every path named, real
-`git init` checkouts; CI `claude-memory-link-test`). The doctor's rows are section AA of
-`scripts/test-claude-doctor.sh`, and `scripts/test-claude-config-audit.sh` pins that
-`claude-config-audit.sh` collects a linked `memory` by content.
+### Syncing a store (DO-892)
+
+`scripts/claude-memory-sync.sh` turns the writes the link lands in a store checkout into commits,
+and carries them between hosts through the store's remote. For each checked-out store, in this
+order (the script's header has the full rules):
+
+1. **Refuse what it must not touch.** Every fetch and push URL of `origin` must be the table's
+   `remote`, so a store pushes only to its own. A merge, cherry-pick, revert or rebase in progress,
+   unmerged index entries or a detached HEAD is `could-not-run`, and is never reset.
+2. **Route.** `scripts/gh-route <store dir>` names the GitHub account that directory routes to, and
+   the shell's existing token cache file for it (M7: the keyring is keyed by host and cannot choose
+   an account). The token is read from that file and handed to the fetch and the push alone, in
+   their environment, through an inline credential helper that answers only `get`. **No token is
+   written anywhere**: no new file, no argument, no output, no status. A route that pins an account
+   whose token file is missing, empty or unreadable is `skipped-no-token`; a directory with no
+   route uses git's own credential helpers.
+3. **Fetch**, with no prompt, cut off after 60 s.
+4. **Under the link script's lock** (`~/.local/state/claude-memory-sync/link.lock`, so an index
+   mid-write is never staged): stage every file but the link script's `.<name>.link-partial`
+   copies, with `git add -A -f`, since no ignore rule decides what is memory; **withhold** each
+   file whose name or content carries a credential shape (`scripts/redact-secrets.sh
+   --shapes-only`), naming it with the shape's label and never a line of it; commit the rest as
+   `<host>: <n> files`, with no hook and no signature; then **merge** origin's branch. Never a
+   rebase: one empties the tree of every unpushed file while it replays, and sessions write there.
+5. **Push** once, unless origin already holds HEAD.
+
+**The merge rules**, for a file both sides changed. Renames are off, so a rename is a deletion and an
+addition.
+
+| this host | origin | result |
+|---|---|---|
+| modified | modified | origin's copy keeps the name, and ours becomes a conflict copy |
+| added | added | the same |
+| a `MEMORY.md` or `INDEX_*.md`, changed | changed | origin's lines, plus each line only ours has |
+| deleted | modified | origin's copy |
+| modified | deleted | ours: an edit beats a deletion |
+| anything else (a submodule, a file against a directory) | | `git merge --abort`, and `could-not-run` |
+
+A conflict copy is named as the link step names one (`x.md` → `x.conflict-<host>.md`), and the merge
+commit says `<host>: merge, kept both for <n> files`. Each resolution is staged from the blobs the
+merge produced, never from the working tree, so nothing the gate has not seen is committed.
+
+**The run deadline.** All the stores together get 240 s (`RUN_DEADLINE_SECONDS`, measured on the
+kernel's monotonic uptime). A store that begins past it does no network work: it commits and records
+`unreachable`, `run deadline`. The deadline never cuts a step short, so a gh-route call and a fetch
+that began just before it can add 90 s: about 330 s at worst, which is why the unit allows 6 min.
+
+**The ten outcomes.** A store's last one is in `~/.local/state/claude-memory-sync/<store>.status`,
+and `<store>.last-ok` holds the time of the last push, or up-to-date check, that succeeded. `--apply`
+exits 0 for every one but `could-not-run`: the rest are the doctor's to show.
+
+| outcome | what it means | what to do |
+|---|---|---|
+| `ok` | committed, merged with origin and pushed, or origin already held it | nothing |
+| `kept-both` | the same, after a conflict that left a conflict copy or an index line union | resolve the conflict copy (below) |
+| `ok-local-only` | the store has no `origin`; whatever was pending is committed | give it the table's `remote` as `origin` |
+| `withheld` | the gate held a file back; the detail names it and its shape | release it (below) |
+| `blocked` | the merge would not start, a local file in its way: usually a withheld one that origin also has | release that file; the next tick merges, keeping both copies if they differ |
+| `push-rejected` | origin refused the push, usually because another host pushed first | nothing: the next tick fetches, merges and pushes again. One that outlasts the threshold is the remote refusing this account or this branch |
+| `skipped-no-token` | the route pins an account and its token file is missing, empty or unreadable; the store was committed and nothing went over the network | refresh the shell's token cache (`gh-refresh-tokens`) |
+| `unreachable` | the fetch or the push failed, or ran out of time (the run deadline included), for a reason not naming auth | nothing while it is brief; past the threshold, look at the network and GitHub |
+| `auth-failed` | git's error named an auth or a not-found failure | `gh-doctor` in the store checkout: the account it routes to must be able to push to the store's repo |
+| `could-not-run` | the store could not be synced; the detail says why | what the detail names: finish or abort an operation by hand in the store, point `origin` back at the table's `remote`, merge a conflict the sync does not resolve by hand, or set a git identity |
+
+**What `claude-doctor` shows.** After the link rows, the section asks `scripts/claude-memory-sync.sh
+--status`, which only reads, and shows each line it prints as a row, `memory store <store>:
+<message>`:
+
+- ✗ when the last outcome is `withheld`, `blocked`, `auth-failed` or `could-not-run`; or when a store
+  with an origin has not synced within the threshold (`never synced; …`, or `last synced <n> min
+  ago, past the <t> min threshold; …`, naming the last outcome);
+- ⚠ for `no remote yet` (`ok-local-only`); `push-rejected`, `unreachable` or `skipped-no-token`
+  while the last success is still within the threshold; `no run recorded yet` for a store with no
+  origin; `<n> conflict copies in the tree`; and, per directory, an index line naming a missing file
+  or one file named by two index lines;
+- ✓ `last synced <n> min ago` otherwise.
+
+The threshold is the table's `stale_after_minutes`. When no store is checked out `--status` prints
+nothing and the doctor adds no row, the link rows' ⚠ having said so. When it could not run the row is
+⚠ `memory sync status could not be read: <last stderr line>`, and a line the doctor cannot read is
+shown whole as a ⚠.
+
+**Resolving a conflict copy.** `x.conflict-<host>.md` beside `x.md` holds this host's body, where
+origin's took the name. Merge the two bodies into `x.md` by hand, delete the copy, and let the next
+tick commit and push: the ⚠ clears when no copy is left. An index file gets no copy, since it took
+the union of the lines; the doctor's index ⚠ names a directory whose index now lists a missing file,
+or one file twice.
+
+**Releasing a withheld file.** The gate leaves the file in the working tree, so every tick names it
+again until it changes. Edit the credential out of it (`--check` names the file and the shape's
+label), or, when it is the NAME that carries the shape, rename the file: a kebab-case name beginning
+`xoxb-` matches the Slack shape, for one. The next tick commits it. `--scan` runs the same gate over a
+committed tree, for history this script did not write.
+
+**A git identity.** The sync commits as the host's own `user.name` and `user.email` (on these
+dotfiles, from `~/.gitconfig.local`, or the store's own config). With neither, every commit fails and
+the store reads `could-not-run: git commit failed`.
+
+### The tick
+
+`systemd/claude-memory-sync.service` and `.timer`, linked by `./install` and **not enabled**. Every
+10 minutes (`OnCalendar=*:0/10`, up to 60 s later at random, and a tick missed asleep runs once on
+resume) it runs `scripts/claude-memory-link.sh --apply`, then `scripts/claude-memory-sync.sh
+--apply`, within 6 min. The link step is `ExecStartPre=-`: its failure never stops the sync and never
+fails the unit, so it shows only in the doctor's link row. The service runs only where
+`~/.local/share/claude-memory` exists. Both units' headers say why each value is what it is.
+
+**Arming**, by hand on each host, once the table and a store are there:
+
+```bash
+~/.dotfiles/scripts/claude-memory-link.sh --apply --dry-run   # what the first tick's link step will do
+~/.dotfiles/scripts/claude-memory-sync.sh --check             # exit 2 if an origin is not the table's remote; names each file it would withhold
+systemctl --user daemon-reload
+systemctl --user enable --now claude-memory-sync.timer
+```
+
+Before the first tick `--check` exits 1 whenever something is pending, which is normal: read its
+lines, not its exit status.
+
+**Disarming.** Never `systemctl --user disable` or `reenable`: either one deletes the dotbot link
+that is the unit (the note at the top of `scripts/reconcile-systemd-units.sh`). Stop the timer and
+remove its `.wants` link by hand:
+
+```bash
+systemctl --user stop claude-memory-sync.timer
+rm ~/.config/systemd/user/default.target.wants/claude-memory-sync.timer && systemctl --user daemon-reload
+```
+
+An armed timer on a host whose `~/.local/share/claude-memory` has gone is skipped, and
+`scripts/check-timer-health.sh` reports that as the fault it is: memory stopped travelling.
+
+`CLAUDE_MEMORY_STORES_ROOT`, `CLAUDE_MEMORY_CONFIG`, `CLAUDE_MEMORY_STATE_DIR`, `CLAUDE_MEMORY_HOST`,
+`CLAUDE_MEMORY_GH_ROUTE`, `CLAUDE_MEMORY_LOCK_WAIT_SECONDS`, `CLAUDE_MEMORY_RUN_DEADLINE_SECONDS` and
+`CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS` override the sync's paths, host, route and limits.
+
+State tables: `scripts/test-claude-memory-link.sh` (205 rows) and `scripts/test-claude-memory-sync.sh`
+(99 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
+sync local bare repositories as remotes and a stub `gh-route` (CI `claude-memory-link-test` and
+`claude-memory-sync-test`). The doctor's rows are section AA of `scripts/test-claude-doctor.sh`, and
+`scripts/test-claude-config-audit.sh` pins that `claude-config-audit.sh` collects a linked `memory`
+by content.
