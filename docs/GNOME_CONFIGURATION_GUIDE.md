@@ -146,8 +146,10 @@ for extension updates, and the extension-update apps masked. Unsafe mode (which 
 `screenshot` need) comes from a throwaway helper extension that exists only in that directory and
 refuses to act anywhere else, and `eval` and `screenshot` refuse a run whose supervisor and
 recorded gnome-shell are not both running in its own session. A run lives at most 20 minutes
-(`setsid timeout`), and `stop` signals only processes in the run's own session. Any isolation step
-that fails stops the run with exit 2. It needs gnome-shell and a GPU, so CI does not run it; its
+(`setsid timeout`). `stop` signals only processes in the run's own session, and only while that
+session is still led by the run's own `timeout`: a run that already ended is just cleaned up, since
+its session id may since belong to something else. Any isolation step that fails stops the run with
+exit 2, and a shell whose unsafe-mode helper did not load is reported within 15 s. It needs gnome-shell and a GPU, so CI does not run it; its
 hermetic rows are in the suite below.
 
 ### What it costs
@@ -167,7 +169,7 @@ skipped unit types.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (208 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (217 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.

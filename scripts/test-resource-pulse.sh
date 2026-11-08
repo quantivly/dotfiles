@@ -366,13 +366,46 @@ for stubbed_tool in busctl gsettings gnome-shell jq; do
 done
 nested_stub_call_count() { printf '%d' "$(wc -l <"$NESTED_STUB_CALLS")"; }
 # nested_run <args...> runs the script against the stubs and the empty base;
-# leaves NESTED_OUTPUT and NESTED_EXIT.
+# leaves NESTED_OUTPUT and NESTED_EXIT. With NESTED_RUN_DIR set it names that
+# run directory (RESOURCE_PULSE_NESTED_DIR); otherwise the script looks for one.
 nested_run() {
   : >"$NESTED_STUB_CALLS"
-  NESTED_OUTPUT="$(env -u RESOURCE_PULSE_NESTED_DIR PATH="$NESTED_STUB_BIN:$PATH" \
-    NESTED_STUB_CALLS="$NESTED_STUB_CALLS" RESOURCE_PULSE_NESTED_BASE="$NESTED_BASE" \
+  NESTED_OUTPUT="$(env -u RESOURCE_PULSE_NESTED_DIR ${NESTED_RUN_DIR:+RESOURCE_PULSE_NESTED_DIR="$NESTED_RUN_DIR"} \
+    PATH="$NESTED_STUB_BIN:$PATH" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" RESOURCE_PULSE_NESTED_BASE="$NESTED_BASE" \
     bash "$NESTED_SCRIPT" "$@" 2>&1)"
   NESTED_EXIT=$?
+}
+# make_run_dir <dir> writes a run directory's marker (from its name) and,
+# with more arguments, its run.values lines (name=value).
+make_run_dir() {
+  local run_dir="$1"
+  shift
+  mkdir -p "$run_dir/state" && chmod 700 "$run_dir"
+  printf '%s\n' "${run_dir##*/rpn.}" >"$run_dir/.resource-pulse-nested"
+  if (( $# > 0 )); then printf '%s\n' "$@" >"$run_dir/state/run.values"; fi
+}
+# is_running <pid> succeeds while the process exists and is not a zombie.
+is_running() {
+  local stat_line
+  read -r stat_line 2>/dev/null <"/proc/$1/stat" || return 1
+  [[ "${stat_line##*) }" != Z* ]]
+}
+# start_sacrificial_session <command...> starts the command as the leader of a
+# new session (setsid, then exec), waits until it runs, and prints its pid,
+# which is also the session id. Only rows that must never touch a real session
+# signal these.
+SACRIFICE_DIR="$WIRING_TMP/sacrifices"
+mkdir -p "$SACRIFICE_DIR"
+start_sacrificial_session() {
+  local pid_file
+  pid_file="$(mktemp "$SACRIFICE_DIR/leader.XXXXXX")"
+  # shellcheck disable=SC2016  # Expanded by the new session's own bash.
+  setsid bash -c 'printf "%s\n" "$$" >"$1"; shift; exec "$@"' sacrifice "$pid_file" "$@" </dev/null >/dev/null 2>&1 &
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$pid_file" ]] && break
+    sleep 0.1
+  done
+  cat "$pid_file"
 }
 # nested_call <function> <args...> sources the script (which then runs nothing)
 # and calls one of its functions. A missing script exits 99, never 0.
@@ -400,7 +433,8 @@ TAMPERED_RUN="$NESTED_BASE/rpn.$TAMPERED_SUFFIX"
 mkdir -p "$TAMPERED_RUN/state" && chmod 700 "$TAMPERED_RUN"
 printf '%s\n' "$TAMPERED_SUFFIX" >"$TAMPERED_RUN/.resource-pulse-nested"
 printf '%s\n' "unix:path=/run/user/$(id -u)/bus" >"$TAMPERED_RUN/state/session.addr"
-nested_run eval '1 + 1'
+# Named, not looked for: looking skips a run with no live supervisor, which this one has none of.
+NESTED_RUN_DIR="$TAMPERED_RUN" nested_run eval '1 + 1'
 check "nested: a run whose recorded address is not its private bus is refused before busctl" \
   "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F "not this run's private session bus" <<<"$NESTED_OUTPUT")" "2:0:1"
 rm -rf "$TAMPERED_RUN"
@@ -434,7 +468,7 @@ test_session_id="$(nested_call session_id_of_process /proc "$$")"
 # eval_stale_run <supervisor> <session> <gnome-shell pid> prints refused or reached-busctl.
 eval_stale_run() {
   printf 'supervisor=%s\nsession=%s\ngnome-shell=%s\n' "$1" "$2" "$3" >"$STALE_RUN/state/run.values"
-  nested_run eval '1 + 1'
+  NESTED_RUN_DIR="$STALE_RUN" nested_run eval '1 + 1'
   if [[ $NESTED_EXIT == 2 && $(nested_stub_call_count) == 0 ]]; then printf refused
   elif (( $(nested_stub_call_count) > 0 )); then printf reached-busctl
   else printf 'exit-%s' "$NESTED_EXIT"; fi
@@ -443,11 +477,118 @@ stale_summary="supervisor-gone=$(eval_stale_run "$NEVER_RUNNING_PID" "$test_sess
 stale_summary+=" other-session=$(eval_stale_run "$$" "$NEVER_RUNNING_PID" "$fake_shell_pid")"
 stale_summary+=" not-gnome-shell=$(eval_stale_run "$$" "$test_session_id" "$$")"
 stale_summary+=" live=$(eval_stale_run "$$" "$test_session_id" "$fake_shell_pid")"
-kill "$fake_shell_pid" 2>/dev/null
-wait "$fake_shell_pid" 2>/dev/null
 check "nested: eval refuses a run that is not live: supervisor gone, shell in another session, or not gnome-shell" \
   "$stale_summary" "supervisor-gone=refused other-session=refused not-gnome-shell=refused live=reached-busctl"
-rm -rf "$STALE_RUN"
+
+# A run that ended without `stop` (its lifetime ran out, or it crashed) next to
+# a live one: looking for the live run must skip it, not report "several live
+# runs" and steer the user to stop the ended one.
+ENDED_RUN="$NESTED_BASE/rpn.Ended001"
+make_run_dir "$ENDED_RUN" "launcher=$NEVER_RUNNING_PID" "session=$NEVER_RUNNING_PID" "supervisor=$NEVER_RUNNING_PID"
+eval_stale_run "$$" "$test_session_id" "$fake_shell_pid" >/dev/null
+nested_run eval '1 + 1'
+check "nested: looking for the live run skips one whose supervisor and launcher are gone" \
+  "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'several live runs' <<<"$NESTED_OUTPUT")" "2:1:0"
+kill "$fake_shell_pid" 2>/dev/null
+wait "$fake_shell_pid" 2>/dev/null
+rm -rf "$STALE_RUN" "$ENDED_RUN"
+
+# `stop` signals a session only while its leader is this run's recorded
+# launcher, `timeout`: a session id is a pid, and once a run's processes are all
+# gone another session can take the same id. Each case below runs `stop` on a
+# fixture run against a sacrificial session, so even a mutant can only ever
+# signal a session made for the row.
+# (1) A session led by something else (a reused id): `stop` must leave it
+# running, and just clean the run up.
+reused_session_id="$(start_sacrificial_session sleep 60)"
+REUSED_RUN="$NESTED_BASE/rpn.Reused01"
+make_run_dir "$REUSED_RUN" "launcher=$reused_session_id" "session=$reused_session_id" \
+  "supervisor=$reused_session_id" "gnome-shell=$reused_session_id"
+NESTED_RUN_DIR="$REUSED_RUN" nested_run stop
+reused_summary="exit=$NESTED_EXIT left-running=$(is_running "$reused_session_id" && printf yes || printf no)"
+reused_summary+=" stopped=$([[ -e "$REUSED_RUN/state/stopped" ]] && printf yes || printf no)"
+kill "$reused_session_id" 2>/dev/null
+check "nested: stop leaves a session alone once its leader is not the run's timeout (a reused id), and cleans up" \
+  "$reused_summary" "exit=0 left-running=yes stopped=yes"
+# (2) A session still led by the run's timeout: `stop` must end all of it.
+timeout_session_id="$(start_sacrificial_session timeout 60 sleep 60)"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ "$(cat "/proc/$timeout_session_id/comm" 2>/dev/null)" == timeout ]] && break
+  sleep 0.1
+done
+TIMEOUT_RUN="$NESTED_BASE/rpn.Timeout1"
+# Recorded as the run's gnome-shell too, so `stop` sends its first SIGTERM to it (timeout passes it on to its child).
+make_run_dir "$TIMEOUT_RUN" "launcher=$timeout_session_id" "session=$timeout_session_id" \
+  "supervisor=$timeout_session_id" "gnome-shell=$timeout_session_id"
+NESTED_RUN_DIR="$TIMEOUT_RUN" nested_run stop
+timeout_summary="exit=$NESTED_EXIT leader-running=$(is_running "$timeout_session_id" && printf yes || printf no)"
+timeout_summary+=" session-empty=$([[ -z "$(nested_call pids_in_session /proc "$timeout_session_id")" ]] && printf yes || printf no)"
+check "nested: stop ends a session still led by the run's recorded timeout" "$timeout_summary" \
+  "exit=0 leader-running=no session-empty=yes"
+# (3) The caller's own session, and a session id of 1: refused, nothing signalled.
+# The caller runs inside a sandbox session led by `timeout` and recorded as the
+# launcher, so only the refusal stands between `stop` and that session.
+OWN_RUN="$NESTED_BASE/rpn.OwnSess1"
+make_run_dir "$OWN_RUN"
+cat >"$SACRIFICE_DIR/stop-own-session.sh" <<'SANDBOX'
+#!/bin/bash
+# Records this sandbox's own session (led by its parent, timeout) as the run's, then runs `stop` from inside it.
+run_dir="$1" script="$2"
+read -r stat_line <"/proc/$$/stat"
+read -r -a stat_fields <<<"${stat_line##*) }"
+printf 'launcher=%s\nsession=%s\nsupervisor=%s\n' "$PPID" "${stat_fields[3]}" "$PPID" >"$run_dir/state/run.values"
+RESOURCE_PULSE_NESTED_DIR="$run_dir" bash "$script" stop
+printf 'stop-exit=%s\n' "$?"
+SANDBOX
+own_session_output="$(setsid timeout 60 bash "$SACRIFICE_DIR/stop-own-session.sh" "$OWN_RUN" "$NESTED_SCRIPT" 2>&1)"
+SESSION_ONE_RUN="$NESTED_BASE/rpn.SessOne1"
+make_run_dir "$SESSION_ONE_RUN" "launcher=1" "session=1" "supervisor=1"
+NESTED_RUN_DIR="$SESSION_ONE_RUN" nested_run stop
+refusal_summary="own-session=$(grep -c -x -F 'stop-exit=2' <<<"$own_session_output")/$(grep -c -F "the caller's own session" <<<"$own_session_output")"
+refusal_summary+=" session-1=$NESTED_EXIT/$(grep -c -F 'a session id must be above 1' <<<"$NESTED_OUTPUT")"
+check "nested: stop refuses the caller's own session and session 1, signalling nothing" \
+  "$refusal_summary" "own-session=1/1 session-1=2/1"
+# (4) Bash reads a script as it runs it: a run's supervisor waits inside main
+# for up to 20 minutes, so the script must exit before reading past main, or an
+# edit made meanwhile would run. A copy with a line appended after main must
+# never reach that line.
+SCRIPT_COPY="$WIRING_TMP/script-copy/scripts/resource-pulse-nested.sh"
+mkdir -p "${SCRIPT_COPY%/*}" && cp "$NESTED_SCRIPT" "$SCRIPT_COPY"
+printf 'printf "READ-PAST-MAIN\\n" >&2\n' >>"$SCRIPT_COPY"
+ENDED_COPY_RUN="$NESTED_BASE/rpn.CopyRun1"
+make_run_dir "$ENDED_COPY_RUN" "launcher=$NEVER_RUNNING_PID" "session=$NEVER_RUNNING_PID"
+copy_output="$(RESOURCE_PULSE_NESTED_DIR="$ENDED_COPY_RUN" bash "$SCRIPT_COPY" stop 2>&1)"
+copy_exit=$?
+check "nested: the script exits before reading past main, so an edit made while a run waits never runs" \
+  "$copy_exit:$(grep -c -F 'READ-PAST-MAIN' <<<"$copy_output")" "0:0"
+rm -rf "$REUSED_RUN" "$TIMEOUT_RUN" "$OWN_RUN" "$SESSION_ONE_RUN" "$ENDED_COPY_RUN"
+
+# The supervisor's exit sweep runs inside the session it sweeps, so it must not
+# count itself (or a subshell of itself) as a member left behind: in a sandbox
+# session with one child, the sweep must find the session empty and return 0,
+# and mark the run ended.
+SWEEP_RUN="$NESTED_BASE/rpn.Sweep001"
+make_run_dir "$SWEEP_RUN"
+cat >"$SACRIFICE_DIR/sweep-own-session.sh" <<'SANDBOX'
+#!/bin/bash
+# Leads its own session (setsid), starts one child, then runs the supervisor's exit sweep from inside it.
+script="$1" run_dir="$2"
+source "$script" || exit 99
+sleep 60 &
+child_pid=$!
+session_id="$(session_id_of_process /proc "$$")"
+signal_session "$session_id" TERM 1 "$$" "$PPID"
+printf 'signal-exit=%s\n' "$?"
+end_supervised_session "$run_dir" "$session_id"
+printf 'child-running=%s\n' "$(kill -0 "$child_pid" 2>/dev/null && [[ "$(cut -d' ' -f3 "/proc/$child_pid/stat" 2>/dev/null)" != Z ]] && echo yes || echo no)"
+SANDBOX
+sweep_output="$(setsid bash "$SACRIFICE_DIR/sweep-own-session.sh" "$NESTED_SCRIPT" "$SWEEP_RUN" 2>&1)"
+sweep_summary="$(grep -x -E 'signal-exit=[0-9]+|child-running=(yes|no)' <<<"$sweep_output" | tr '\n' ' ')"
+sweep_summary+="ended=$([[ -e "$SWEEP_RUN/state/ended" ]] && printf yes || printf no)"
+sweep_summary+=" outlived-note=$(grep -c -F 'outlived SIGKILL' <<<"$sweep_output")"
+check "nested: the supervisor's exit sweep sees its own session empty, returns 0 and marks the run ended" \
+  "$sweep_summary" "signal-exit=0 child-running=no ended=yes outlived-note=0"
+rm -rf "$SWEEP_RUN"
 
 # A base directory others can read would make run directories discoverable.
 PUBLIC_BASE="$WIRING_TMP/public-base-named-longer-than-any-run-directory-may-be"
@@ -585,6 +726,35 @@ make_fake_stat 502 bash 777
 check "nested: the teardown sweep finds exactly the run's session, even past a comm holding ') '" \
   "$(nested_call pids_in_session "$NESTED_FAKE_PROC" 500 | sort -n | tr '\n' ' ')" "500 501 "
 
+# GNOME 50 scans the user extension dir only while allow-extension-installation
+# is on (extensionSystem.js _loadExtensions), and both extensions are copied
+# there. So no nested setting may turn it off, or neither extension loads and
+# `start` can never succeed. A gsettings stub that records and succeeds stands in.
+NESTED_SETTINGS_STUB_BIN="$WIRING_TMP/nested-settings-bin"
+NESTED_SETTINGS_CALLS="$WIRING_TMP/nested-settings-calls"
+mkdir -p "$NESTED_SETTINGS_STUB_BIN"
+# shellcheck disable=SC2016  # The stub's own source.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$NESTED_SETTINGS_CALLS"\n' >"$NESTED_SETTINGS_STUB_BIN/gsettings"
+chmod +x "$NESTED_SETTINGS_STUB_BIN/gsettings"
+: >"$NESTED_SETTINGS_CALLS"
+PATH="$NESTED_SETTINGS_STUB_BIN:$PATH" NESTED_SETTINGS_CALLS="$NESTED_SETTINGS_CALLS" nested_call write_nested_settings
+nested_settings_summary="exit=$?"
+nested_settings_summary+=" enabled=$(grep -c -x -F "set org.gnome.shell enabled-extensions ['$UNSAFE_MODE_HELPER_UUID', 'resource-pulse@dotfiles']" "$NESTED_SETTINGS_CALLS")"
+nested_settings_summary+=" installation-off=$(grep -c -F 'allow-extension-installation false' "$NESTED_SETTINGS_CALLS")"
+USER_EXTENSIONS_DIR="$PREPARED_RUN/data/gnome-shell/extensions"
+nested_settings_summary+=" in-user-dir=$([[ -f "$USER_EXTENSIONS_DIR/$UNSAFE_MODE_HELPER_UUID/metadata.json" && -f "$USER_EXTENSIONS_DIR/resource-pulse@dotfiles/metadata.json" ]] && printf both || printf missing)"
+check "nested: no nested setting hides the user extension dir, where both extensions are copied" \
+  "$nested_settings_summary" "exit=0 enabled=1 installation-off=0 in-user-dir=both"
+
+# `start` polls the shell's unsafe mode over busctl. A shell that answers with
+# unsafe mode off (Eval's (false, '')) is up but the helper did not load, which
+# must fail fast with its own message, not as "did not answer" after 120 s.
+probe_summary="ready=$(nested_call classify_unsafe_mode_probe 0 '{"type":"bs","data":[true,"true"]}')"
+probe_summary+=" unsafe-off=$(nested_call classify_unsafe_mode_probe 0 '{"type":"bs","data":[false,""]}')"
+probe_summary+=" no-shell=$(nested_call classify_unsafe_mode_probe 1 'Call failed: The name org.gnome.Shell was not provided')"
+check "nested: start tells a shell that answers with unsafe mode off from one that has not answered yet" \
+  "$probe_summary" "ready=ready unsafe-off=unsafe-mode-off no-shell=not-answering"
+
 # The stage that runs inside the private bus writes settings and starts
 # gnome-shell (both stubs here). It has two guards, so each call below defeats
 # one of them: (a) the live environment with the run's private bus address
@@ -619,7 +789,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=208
+EXPECTED_ROWS=217
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

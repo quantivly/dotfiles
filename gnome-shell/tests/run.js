@@ -11,6 +11,7 @@ import './format.test.js';
 import './sampler.test.js';
 import './graph.test.js';
 import './lifecycle.test.js';
+import './nestedHarness.test.js';
 
 const EXIT_CODE_TEST_FAILURE = 1;
 const EXIT_CODE_HARNESS_ERROR = 2;

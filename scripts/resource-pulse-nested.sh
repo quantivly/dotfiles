@@ -23,9 +23,11 @@
 #                org.gnome.DisplayManager on it
 #   environment  env -i with an explicit allowlist: no token, no WAYLAND_DISPLAY or DISPLAY,
 #                no live bus; HOME, TMPDIR and every XDG dir inside the run directory
-#   settings     the nested dconf only: no lock, no idle blank, a dead proxy, no location,
-#                no extension installation (which also turns the update check off)
-#   apps         the extension-update apps masked, so the shell sees no updater
+#   settings     the nested dconf only: no lock, no idle blank, a dead proxy, no location
+#   apps         the extension-update apps masked, so the shell sees no updater and never
+#                checks extensions.gnome.org (updatesSupported is false, which start confirms);
+#                allow-extension-installation stays on, because GNOME 50 skips the user
+#                extension dir, where both extensions are copied, without it
 #   unsafe mode  only through a throwaway helper extension copied into the run's data dir,
 #                which refuses to act in any shell but this one
 #   requests     eval and screenshot go only to a live run: its supervisor running, and its
@@ -112,6 +114,9 @@ readonly DEAD_PROXY_PORT=9
 readonly DEFAULT_LIFETIME_SECONDS=1200
 readonly KILL_AFTER_SECONDS=10
 readonly STARTUP_TIMEOUT_SECONDS=120
+# Once the shell answers on its bus, how long the unsafe-mode helper gets to turn unsafe mode on (it loads with
+# the other extensions, about a second after the shell does) before start reports that it did not load.
+readonly HELPER_ENABLE_GRACE_SECONDS=15
 readonly FAKE_SYSTEM_BUS_TIMEOUT_SECONDS=10
 readonly STOP_GRACE_SECONDS=15
 readonly SWEEP_GRACE_SECONDS=3
@@ -122,15 +127,27 @@ readonly WHOLE_NUMBER_PATTERN='^[0-9]+$'
 readonly POSITIVE_WHOLE_NUMBER_PATTERN='^[1-9][0-9]*$'
 readonly DBUS_GUID_SUFFIX_PATTERN=',guid=[0-9a-f]+'
 readonly PNG_SUFFIX='.png'
+# busctl --json=short replies to Eval('global.context.unsafe_mode'): unsafe mode on, and Eval refused because it
+# is off (GNOME 50's Eval answers (false, '') then).
+readonly UNSAFE_MODE_ON_REPLY='{"type":"bs","data":[true,"true"]}'
+readonly EVAL_REFUSED_REPLY_PREFIX='{"type":"bs","data":[false,'
 # /proc/<pid>/stat after the last ") ": state (field 3), ppid, pgrp, session (field 6).
 readonly STAT_STATE_INDEX_AFTER_COMM=0
 readonly STAT_SESSION_INDEX_AFTER_COMM=3
 readonly DEAD_PROCESS_STATES='ZX'
+# A run's launcher: `setsid timeout ...` makes timeout the leader of the run's session.
+readonly LAUNCHER_COMM='timeout'
+# Markers in a run's state/: `stop` ran on it; its supervisor exited (the run ended, stopped or not).
+readonly RUN_STOPPED_MARKER='state/stopped'
+readonly RUN_ENDED_MARKER='state/ended'
 
 # The one environment every nested process gets, filled by build_isolated_env_command.
 ISOLATED_ENV_COMMAND=()
 # The fields of the last stat line read_stat_fields read, from the state (field 3) on.
 STAT_FIELDS_AFTER_COMM=()
+# The pids collect_session_pids found, and how many of them count_remaining_session_pids left in.
+SESSION_PIDS=()
+REMAINING_SESSION_PID_COUNT=0
 
 #######################################
 # Print a message to stderr.
@@ -232,22 +249,39 @@ session_id_of_process() {
 }
 
 #######################################
+# Fill SESSION_PIDS with every running pid under a proc root whose session is
+# the given one. It runs in the calling shell and never in a subshell: a
+# subshell of a process inside that session is itself a member, so a sweep
+# run from inside the session would always find itself left over.
+# Arguments:
+#   $1 - proc root
+#   $2 - session id
+#######################################
+collect_session_pids() {
+    local proc_root="$1" session_id="$2" process_dir pid
+    SESSION_PIDS=()
+    for process_dir in "$proc_root"/[0-9]*; do
+        pid="${process_dir##*/}"
+        read_stat_fields "$proc_root" "$pid" || continue
+        if [[ "${STAT_FIELDS_AFTER_COMM[$STAT_SESSION_INDEX_AFTER_COMM]}" == "$session_id" ]]; then
+            SESSION_PIDS+=("$pid")
+        fi
+    done
+    return 0
+}
+
+#######################################
 # Print, one per line, every running pid under a proc root whose session is
-# the given one.
+# the given one (for a caller outside that session, and the hermetic rows).
 # Arguments:
 #   $1 - proc root
 #   $2 - session id
 #######################################
 pids_in_session() {
-    local proc_root="$1" session_id="$2" process_dir pid
-    for process_dir in "$proc_root"/[0-9]*; do
-        pid="${process_dir##*/}"
-        read_stat_fields "$proc_root" "$pid" || continue
-        if [[ "${STAT_FIELDS_AFTER_COMM[$STAT_SESSION_INDEX_AFTER_COMM]}" == "$session_id" ]]; then
-            printf '%s\n' "$pid"
-        fi
-    done
-    return 0
+    collect_session_pids "$1" "$2"
+    if (( ${#SESSION_PIDS[@]} > 0 )); then
+        printf '%s\n' "${SESSION_PIDS[@]}"
+    fi
 }
 
 #######################################
@@ -256,7 +290,8 @@ pids_in_session() {
 #   $1 - session id
 #######################################
 is_session_empty() {
-    [[ -z "$(pids_in_session /proc "$1")" ]]
+    collect_session_pids /proc "$1"
+    (( ${#SESSION_PIDS[@]} == 0 ))
 }
 
 #######################################
@@ -577,8 +612,10 @@ is_nested_shell_live() {
 
 #######################################
 # Print the run directory eval, screenshot and stop act on:
-# RESOURCE_PULSE_NESTED_DIR, else the one run under the base that is not
-# stopped. Exit 2 when there is none, or more than one.
+# RESOURCE_PULSE_NESTED_DIR, else the one run under the base that is live: not
+# stopped, not ended, and with its supervisor or launcher still running (a run
+# whose lifetime ran out, or that crashed, is skipped). Exit 2 when there is
+# none, or more than one.
 #######################################
 resolve_run_directory() {
     local base_dir marker_path run_dir
@@ -592,8 +629,8 @@ resolve_run_directory() {
     base_dir="$(nested_base_dir)"
     for marker_path in "$base_dir/$RUN_DIR_PREFIX"*/"$RUN_DIR_MARKER_FILE"; do
         run_dir="${marker_path%/*}"
-        [[ -e "$marker_path" && ! -e "$run_dir/state/stopped" ]] || continue
-        verified_run_suffix "$run_dir" >/dev/null && live_run_dirs+=("$run_dir")
+        [[ -e "$marker_path" && ! -e "$run_dir/$RUN_STOPPED_MARKER" && ! -e "$run_dir/$RUN_ENDED_MARKER" ]] || continue
+        verified_run_suffix "$run_dir" >/dev/null && is_run_alive "$run_dir" && live_run_dirs+=("$run_dir")
     done
     case "${#live_run_dirs[@]}" in
         0) die "no live run under $base_dir: start one with: $0 start" ;;
@@ -603,12 +640,14 @@ resolve_run_directory() {
 }
 
 #######################################
-# Print the private bus address of the run eval and screenshot act on; exit 2
-# unless the address is the run's own and the run is live.
+# Print a run's private bus address for eval and screenshot; exit 2 unless the
+# directory is a run directory, the address is the run's own and the run is
+# live.
+# Arguments:
+#   $1 - run directory (from resolve_run_directory)
 #######################################
 live_run_session_address() {
-    local run_dir address
-    run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
+    local run_dir="$1" address
     verified_run_suffix "$run_dir" >/dev/null || die "not a run directory of this script: $run_dir"
     address="$(verified_session_address "$run_dir")" || exit "$EXIT_REFUSED"
     is_nested_shell_live "$run_dir" || die "refusing: the run in $run_dir is not live"
@@ -637,29 +676,60 @@ eval_in_nested_shell() {
 }
 
 #######################################
-# Print the session a run lives in: the one its supervisor recorded, else the
-# launcher's own (setsid makes the launcher a session leader). Prints nothing
-# when neither is known or running.
+# Succeed when a session is still led by this run's launcher: its leader (the
+# process whose pid is the session id) is running, leads that session, is the
+# launcher the run recorded, and is `timeout`. A session id is a pid: once a
+# run's processes are all gone, another session can take the same id, and that
+# session must never be signalled as the run's.
 # Arguments:
 #   $1 - run directory
+#   $2 - session id
 #######################################
-run_session_id() {
-    local recorded_session_id launcher_pid
-    recorded_session_id="$(recorded_run_value "$1" session)"
-    if [[ -n "$recorded_session_id" ]]; then
-        printf '%s' "$recorded_session_id"
-        return 0
-    fi
-    launcher_pid="$(recorded_run_value "$1" launcher)"
-    if [[ -n "$launcher_pid" && "$(session_id_of_process /proc "$launcher_pid")" == "$launcher_pid" ]]; then
-        printf '%s' "$launcher_pid"
-    fi
+is_session_led_by_run_launcher() {
+    local run_dir="$1" session_id="$2" leader_comm=""
+    [[ "$(recorded_run_value "$run_dir" launcher)" == "$session_id" ]] || return 1
+    [[ "$(session_id_of_process /proc "$session_id")" == "$session_id" ]] || return 1
+    read -r leader_comm 2>/dev/null <"/proc/$session_id/comm"
+    [[ "$leader_comm" == "$LAUNCHER_COMM" ]]
+}
+
+#######################################
+# Succeed when a pid is one of the given ones.
+# Arguments:
+#   $1 - pid
+#   $@ - the pids to look in
+#######################################
+is_excluded_pid() {
+    local candidate_pid="$1" excluded_pid
+    shift
+    for excluded_pid in "$@"; do
+        [[ "$candidate_pid" == "$excluded_pid" ]] && return 0
+    done
+    return 1
+}
+
+#######################################
+# Set REMAINING_SESSION_PID_COUNT to how many of the session's pids are not
+# excluded, in the calling shell (see collect_session_pids).
+# Arguments:
+#   $1 - session id
+#   $@ - pids to leave out
+#######################################
+count_remaining_session_pids() {
+    local session_id="$1" session_pid
+    shift
+    REMAINING_SESSION_PID_COUNT=0
+    collect_session_pids /proc "$session_id"
+    for session_pid in "${SESSION_PIDS[@]}"; do
+        is_excluded_pid "$session_pid" "$@" || REMAINING_SESSION_PID_COUNT=$((REMAINING_SESSION_PID_COUNT + 1))
+    done
 }
 
 #######################################
 # Send a signal to every process in a session but the excluded ones, then wait
 # up to a grace period for them to go. Only pids read from /proc as members of
-# that session are ever signalled.
+# that session are ever signalled, and the scan runs in the calling shell, so
+# a caller inside the session sees it empty once only it is left.
 # Arguments:
 #   $1 - session id
 #   $2 - signal name
@@ -670,45 +740,36 @@ signal_session() {
     local session_id="$1" signal_name="$2" grace_seconds="$3" session_pid deadline
     shift 3
     local -a excluded_pids=("$@")
-    for session_pid in $(pids_in_session /proc "$session_id"); do
-        [[ " ${excluded_pids[*]} " == *" $session_pid "* ]] && continue
+    collect_session_pids /proc "$session_id"
+    for session_pid in "${SESSION_PIDS[@]}"; do
+        is_excluded_pid "$session_pid" "${excluded_pids[@]}" && continue
         kill "-$signal_name" "$session_pid" 2>/dev/null
     done
     deadline=$((SECONDS + grace_seconds))
-    while (( SECONDS < deadline )); do
-        [[ -z "$(remaining_session_pids "$session_id" "${excluded_pids[@]}")" ]] && return 0
+    while true; do
+        count_remaining_session_pids "$session_id" "${excluded_pids[@]}"
+        (( REMAINING_SESSION_PID_COUNT == 0 )) && return 0
+        (( SECONDS < deadline )) || return 1
         sleep "$POLL_INTERVAL_SECONDS"
-    done
-    [[ -z "$(remaining_session_pids "$session_id" "${excluded_pids[@]}")" ]]
-}
-
-#######################################
-# Print the session's pids other than the excluded ones.
-# Arguments:
-#   $1 - session id
-#   $@ - pids to leave out
-#######################################
-remaining_session_pids() {
-    local session_id="$1" session_pid
-    shift
-    for session_pid in $(pids_in_session /proc "$session_id"); do
-        [[ " $* " == *" $session_pid "* ]] || printf '%s ' "$session_pid"
     done
 }
 
 #######################################
 # The supervisor's exit: end every process left in its session (SIGTERM, then
-# SIGKILL after a grace), whatever ended the run.
+# SIGKILL after a grace), whatever ended the run, and mark the run ended, so
+# looking for a live run never finds it.
 # Arguments:
 #   $1 - run directory
 #   $2 - session id
 #######################################
 end_supervised_session() {
-    local run_dir="$1" session_id="$2"
+    local run_dir="$1" session_id="$2" ended_at
     signal_session "$session_id" TERM "$SWEEP_GRACE_SECONDS" "$$" "$PPID" \
         || signal_session "$session_id" KILL "$SWEEP_GRACE_SECONDS" "$$" "$PPID" \
         || note "processes outlived SIGKILL in session $session_id"
-    record_run_value "$run_dir" supervisor-exited "$(date -Is)"
+    ended_at="$(date -Is)"
+    record_run_value "$run_dir" supervisor-exited "$ended_at"
+    : >"$run_dir/$RUN_ENDED_MARKER"
 }
 
 #######################################
@@ -802,13 +863,14 @@ set_nested_key() {
 
 #######################################
 # Write the nested shell's settings: the two extensions; what keeps it from
-# locking, blanking, reaching the network or checking for extension updates;
-# and the reference laptop's look (Ubuntu's defaults plus
-# scripts/apply-gnome-settings.sh), so the card is judged against the real theme.
+# locking, blanking or reaching the network; and the reference laptop's look
+# (Ubuntu's defaults plus scripts/apply-gnome-settings.sh), so the card is
+# judged against the real theme. allow-extension-installation is left on: GNOME
+# 50 scans the user extension dir, where both extensions are, only while it is
+# on. The update check stays off through the app masks (see the header).
 #######################################
 write_nested_settings() {
     set_nested_key org.gnome.shell enabled-extensions "['$UNSAFE_MODE_HELPER_UUID', '$EXTENSION_UUID']" &&
-    set_nested_key org.gnome.shell allow-extension-installation false &&
     set_nested_key org.gnome.desktop.screensaver lock-enabled false &&
     set_nested_key org.gnome.desktop.screensaver ubuntu-lock-on-suspend false &&
     set_nested_key org.gnome.desktop.lockdown disable-lock-screen true &&
@@ -850,28 +912,69 @@ run_inside_private_session_bus() {
 }
 
 #######################################
-# Succeed once the nested shell is live and answers Eval with unsafe mode on.
+# Print what the nested shell's answer to the unsafe-mode probe means:
+# "ready" (unsafe mode on), "unsafe-mode-off" (the shell answered, but Eval is
+# refused) or "not-answering" (no shell on the bus yet, or a reply of any other
+# shape). Pure: it reads only busctl's exit status and its --json=short reply.
 # Arguments:
-#   $1 - run directory
+#   $1 - busctl's exit status
+#   $2 - busctl's reply
 #######################################
-does_nested_shell_answer() {
-    local recorded_address=""
-    [[ -r "$1/state/session.addr" ]] && read -r recorded_address <"$1/state/session.addr"
-    is_private_session_bus_address "$recorded_address" "$1" || return 1
-    is_nested_shell_live "$1" 2>/dev/null || return 1
-    [[ "$(eval_in_nested_shell "$recorded_address" 'global.context.unsafe_mode' 2>/dev/null)" == true ]]
+classify_unsafe_mode_probe() {
+    local busctl_status="$1" reply="$2"
+    if (( busctl_status != 0 )); then
+        printf 'not-answering'
+    elif [[ "$reply" == "$UNSAFE_MODE_ON_REPLY" ]]; then
+        printf 'ready'
+    elif [[ "$reply" == "$EVAL_REFUSED_REPLY_PREFIX"* ]]; then
+        printf 'unsafe-mode-off'
+    else
+        printf 'not-answering'
+    fi
 }
 
 #######################################
-# Wait for the nested shell to answer; fail as soon as the run refused or
-# died, or after STARTUP_TIMEOUT_SECONDS.
+# Print the state of a starting nested shell, as classify_unsafe_mode_probe
+# names it; "not-answering" until the run is live and its address recorded.
+# Arguments:
+#   $1 - run directory
+#######################################
+probe_nested_shell() {
+    local run_dir="$1" recorded_address="" reply busctl_status
+    [[ -r "$run_dir/state/session.addr" ]] && read -r recorded_address <"$run_dir/state/session.addr"
+    if ! is_private_session_bus_address "$recorded_address" "$run_dir" || ! is_nested_shell_live "$run_dir" 2>/dev/null
+    then
+        printf 'not-answering'
+        return 0
+    fi
+    reply="$(busctl --address="$recorded_address" --json=short --timeout="$EVAL_TIMEOUT_SECONDS" \
+        call org.gnome.Shell /org/gnome/Shell org.gnome.Shell Eval s 'global.context.unsafe_mode' 2>&1)"
+    busctl_status=$?
+    classify_unsafe_mode_probe "$busctl_status" "$reply"
+}
+
+#######################################
+# Wait for the nested shell to answer with unsafe mode on. Fail as soon as the
+# run refused or died; HELPER_ENABLE_GRACE_SECONDS after the shell first
+# answered with unsafe mode still off (the helper did not load); or after
+# STARTUP_TIMEOUT_SECONDS.
 # Arguments:
 #   $1 - run directory
 #######################################
 wait_for_nested_shell() {
-    local run_dir="$1" deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
+    local run_dir="$1" deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS)) probe_state first_answer_seconds=""
     while (( SECONDS < deadline )); do
-        does_nested_shell_answer "$run_dir" && return 0
+        probe_state="$(probe_nested_shell "$run_dir")"
+        [[ "$probe_state" == ready ]] && return 0
+        if [[ "$probe_state" == unsafe-mode-off ]]; then
+            [[ -n "$first_answer_seconds" ]] || first_answer_seconds=$SECONDS
+            if (( SECONDS - first_answer_seconds >= HELPER_ENABLE_GRACE_SECONDS )); then
+                note "the nested shell answers on its bus, but unsafe mode is still off $HELPER_ENABLE_GRACE_SECONDS s" \
+                    "later: the unsafe-mode helper did not load from $run_dir/data/gnome-shell/extensions" \
+                    "(see $run_dir/log/shell.log)"
+                return 1
+            fi
+        fi
         if [[ -s "$run_dir/state/refused" ]]; then
             note "the run refused: $(<"$run_dir/state/refused")"
             return 1
@@ -966,39 +1069,57 @@ start_subcommand() {
 }
 
 #######################################
+# Exit 2 unless a session id may be stopped at all: a whole number above 1, and
+# not the caller's own session.
+# Arguments:
+#   $1 - session id
+#######################################
+refuse_unstoppable_session() {
+    local session_id="$1" own_session_id
+    [[ "$session_id" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || die "refusing to stop session '$session_id': not a session id"
+    (( session_id > 1 )) || die "refusing to stop session '$session_id': a session id must be above 1"
+    own_session_id="$(session_id_of_process /proc "$$")"
+    [[ "$session_id" != "$own_session_id" ]] \
+        || die "refusing to stop session '$session_id': it is the caller's own session"
+}
+
+#######################################
 # Stop a run: SIGTERM the nested gnome-shell by its recorded pid, wait for the
 # session to empty (the supervisor's exit sweeps it), then signal whatever is
-# left in that session. Never signals outside the run's own session, and never
-# the caller's session. Removes the runtime dir and the bus sockets; keeps logs
-# and shots.
+# left in that session. It signals only while the session is still led by the
+# run's own launcher (is_session_led_by_run_launcher), never the caller's
+# session, and never one numbered 1 or below; a run whose session is gone is
+# only cleaned up. Removes the runtime dir and the bus sockets; keeps logs and
+# shots.
 # Arguments:
 #   $1 - run directory
 #######################################
 stop_run() {
-    local run_dir="$1" session_id own_session_id shell_pid
-    session_id="$(run_session_id "$run_dir")"
+    local run_dir="$1" session_id shell_pid
+    session_id="$(recorded_run_value "$run_dir" session)"
+    [[ -n "$session_id" ]] || session_id="$(recorded_run_value "$run_dir" launcher)"
     if [[ -n "$session_id" ]]; then
-        own_session_id="$(session_id_of_process /proc "$$")"
-        if ! [[ "$session_id" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || (( session_id <= 1 )) ||
-            [[ "$session_id" == "$own_session_id" ]]; then
-            die "refusing to stop session '$session_id': it is not the run's own"
-        fi
-        shell_pid="$(recorded_run_value "$run_dir" gnome-shell)"
-        if [[ -n "$shell_pid" && "$(session_id_of_process /proc "$shell_pid")" == "$session_id" ]]; then
-            kill -TERM "$shell_pid" 2>/dev/null
-        fi
-        if ! wait_until "$STOP_GRACE_SECONDS" is_session_empty "$session_id"; then
-            signal_session "$session_id" TERM "$SWEEP_GRACE_SECONDS" ||
-                signal_session "$session_id" KILL "$SWEEP_GRACE_SECONDS"
-        fi
-        if ! is_session_empty "$session_id"; then
-            note "processes are still running in session $session_id; the run directory is kept: $run_dir"
-            return 1
+        refuse_unstoppable_session "$session_id"
+        if is_session_led_by_run_launcher "$run_dir" "$session_id"; then
+            shell_pid="$(recorded_run_value "$run_dir" gnome-shell)"
+            if [[ -n "$shell_pid" && "$(session_id_of_process /proc "$shell_pid")" == "$session_id" ]]; then
+                kill -TERM "$shell_pid" 2>/dev/null
+            fi
+            if ! wait_until "$STOP_GRACE_SECONDS" is_session_empty "$session_id"; then
+                signal_session "$session_id" TERM "$SWEEP_GRACE_SECONDS" ||
+                    signal_session "$session_id" KILL "$SWEEP_GRACE_SECONDS"
+            fi
+            if ! is_session_empty "$session_id"; then
+                note "processes are still running in session $session_id; the run directory is kept: $run_dir"
+                return 1
+            fi
+        else
+            note "session $session_id is no longer led by this run's launcher ($LAUNCHER_COMM): nothing is signalled"
         fi
     fi
     rm -rf -- "${run_dir:?}/run" "${run_dir:?}/$SESSION_BUS_SOCKET_RELATIVE_PATH" \
         "${run_dir:?}/$SYSTEM_BUS_SOCKET_RELATIVE_PATH"
-    : >"$run_dir/state/stopped"
+    : >"$run_dir/$RUN_STOPPED_MARKER"
     note "stopped; logs and screenshots stay in $run_dir"
 }
 
@@ -1008,11 +1129,12 @@ stop_run() {
 #   $1 - JavaScript, or '-' to read it from stdin
 #######################################
 eval_subcommand() {
-    local code="$1" address
+    local code="$1" run_dir address
     [[ "$code" == - ]] && code="$(cat)"
     [[ -n "$code" ]] || usage_error "eval needs JavaScript"
     require_tools stat
-    address="$(live_run_session_address)" || exit "$EXIT_REFUSED"
+    run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
+    address="$(live_run_session_address "$run_dir")" || exit "$EXIT_REFUSED"
     # Looked for only now: a refusal above never depends on which tools are installed.
     require_tools busctl jq
     eval_in_nested_shell "$address" "$code"
@@ -1044,8 +1166,8 @@ screenshot_subcommand() {
         *) usage_error "screenshot takes a name, then either no area or x y width height" ;;
     esac
     require_tools stat
-    address="$(live_run_session_address)" || exit "$EXIT_REFUSED"
     run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
+    address="$(live_run_session_address "$run_dir")" || exit "$EXIT_REFUSED"
     # Looked for only now: a refusal above never depends on which tools are installed.
     require_tools busctl jq
     shot_path="$run_dir/shots/$shot_name"
@@ -1103,4 +1225,7 @@ main() {
 # Sourced (by the hermetic rows), it only defines functions.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main "$@"
+    # Exit inside this block, which bash has already read: a run's supervisor waits in main for up to 20 minutes,
+    # and on return bash would go on reading this file from where it stopped, through any edit made meanwhile.
+    exit "$?"
 fi
