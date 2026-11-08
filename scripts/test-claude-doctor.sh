@@ -3773,6 +3773,25 @@ mk_link_stub() {
     chmod +x "$MEMORY_STUB"
     : > "$MEMORY_CALLS"
 }
+# The sync half (DO-892): after the link rows the doctor asks
+# scripts/claude-memory-sync.sh --status, which prints one
+# <store><TAB><level><TAB><message> line or more per checked-out store. That
+# script is a stub here too, and its levels and outcomes are its own table's
+# business (scripts/test-claude-memory-sync.sh). Until ms18 every row sees the
+# stub made just below, which prints nothing and exits 0 (a host with no store
+# checked out), so none of them grows a sync row.
+SYNC_CALLS="$TMPROOT/sync-calls.log"
+SYNC_STUB="$MEMORY_ROOT/scripts/claude-memory-sync.sh"
+# mk_sync_stub EXIT_STATUS STDOUT_TEXT STDERR_TEXT — mk_link_stub's shape, for the sync script.
+mk_sync_stub() {
+    printf '%s' "$2" > "$MEMORY_ROOT/sync-stub-stdout"
+    printf '%s' "$3" > "$MEMORY_ROOT/sync-stub-stderr"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncat "%s"\ncat "%s" >&2\nexit %s\n' \
+        "$SYNC_CALLS" "$MEMORY_ROOT/sync-stub-stdout" "$MEMORY_ROOT/sync-stub-stderr" "$1" > "$SYNC_STUB"
+    chmod +x "$SYNC_STUB"
+    : > "$SYNC_CALLS"
+}
+mk_sync_stub 0 '' ''
 mk_memory_table() { mkdir -p "$FHOME/.dotfiles-local/claude"; printf '{"stores":{}}\n' > "$FHOME/.dotfiles-local/claude/memory-stores.json"; }
 # Rows as --check prints them: TSV, key first. The source directory of the second
 # holds a tab as the script escapes it, the two characters \t, which a zsh `echo`
@@ -3909,6 +3928,76 @@ DROOT="$MEMORY_ROOT" run_doctor
 want_out "a word for a count is no summary"    "(no summary)"
 no_out   "...and is not read as zero"          "no store that these keys map to is checked out"
 
+LINKED_SUMMARY=$'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 0 without a store\n'
+# A detail as the sync script escapes it: a tab in it is the two characters \t,
+# which a zsh `echo` would turn back into a tab.
+SYNC_OK_LINE=$'alpha\tok\tlast synced 3 min ago'
+SYNC_WARN_LINE=$'beta\twarn\tpush-rejected: ! [rejected] main -> main (fetch first)'
+SYNC_BAD_LINE=$'gamma\tbad\twithheld: notes/a\\tb.md (slack-token)'
+SYNC_STORE_REASON='claude-memory-sync: alpha: the status file is not one this script writes'
+SYNC_LAST_REASON='claude-memory-sync: could not finish 1 store(s): alpha'
+# memory_section_of_output — the doctor's "Memory stores" section, less its
+# header, the next section's header and blank lines.
+memory_section_of_output() {
+    printf '%s\n' "$OUT" | sed -n '/^--- Memory stores ---$/,/^--- Pools ---$/p' \
+        | grep -v -e '^--- ' -e '^$'
+}
+
+new_home ms18; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 0 "$SYNC_OK_LINE"$'\n'"$SYNC_WARN_LINE"$'\n'"$SYNC_BAD_LINE"$'\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: an ok line is a ✓ naming the store, the message whole" "✓ memory store alpha: last synced 3 min ago"
+want_out "...a warn line a ⚠"                    "⚠ memory store beta: push-rejected: ! [rejected] main -> main (fetch first)"
+want_out "...and a bad line a ✗, its escaped tab kept as written" '✗ memory store gamma: withheld: notes/a\tb.md (slack-token)'
+want_rc  "...and the ✗ fails the doctor"          1
+if [[ "$(cat "$SYNC_CALLS")" == "--status" ]]; then ok "...and the sync script is asked by --status alone: the doctor never applies"; else bad "...and the sync script is asked by --status alone — the stub saw: $(cat "$SYNC_CALLS")"; fi
+
+# Exit 2 is the script's could-not-run: a store it could not read is named on
+# stderr, and the stores it could read are still printed on stdout.
+new_home ms19; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 2 $'beta\tok\tlast synced 1 min ago\n' "$SYNC_STORE_REASON"$'\n'"$SYNC_LAST_REASON"$'\n'
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: exit 2 is a ⚠ carrying the last stderr line" "⚠ memory sync status could not be read: $SYNC_LAST_REASON"
+want_out "...and the stores it did report are still shown"  "✓ memory store beta: last synced 1 min ago"
+
+# Section Z's trap again: one stderr line with no final newline.
+new_home ms19b; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 2 '' "$SYNC_LAST_REASON"
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: a one-line stderr is carried whole" "⚠ memory sync status could not be read: $SYNC_LAST_REASON"
+
+new_home ms19c; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 2 '' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: an exit 2 with nothing on stderr still says it could not be read" "⚠ memory sync status could not be read: exit 2"
+
+# No store checked out: --status is asked all the same, since a store the keys do
+# not map to can still be checked out here and only --status knows which are, and
+# its empty answer adds no row. The link rows' ⚠ is the section's whole report.
+new_home ms20; write_cred; mk_memory_table
+mk_link_stub 0 $'claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 3 without a store\n' ''
+mk_sync_stub 0 '' ''
+DROOT="$MEMORY_ROOT" run_doctor
+memory_section="$(memory_section_of_output)"
+if [[ "$memory_section" == "  ⚠ no store that these keys map to is checked out here (3 keys wait for one)" ]]; then
+    ok "sync: no store checked out leaves the link rows' ⚠ as the section's only line"
+else
+    bad "sync: no store checked out leaves the link rows' ⚠ as the section's only line — the section was: $memory_section"
+fi
+if [[ "$(cat "$SYNC_CALLS")" == "--status" ]]; then ok "...and --status was still asked, its empty answer tolerated"; else bad "...and --status was still asked, its empty answer tolerated — the stub saw: $(cat "$SYNC_CALLS")"; fi
+
+# A line that is not <store><TAB><level><TAB><message> with a level the doctor
+# knows is shown whole, never dropped. The script's own no-table note is one.
+new_home ms21; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 0 $'alpha\tinfo\ta level the doctor does not know\nclaude-memory-sync: no store table at /x; nothing to do\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: a line with an unknown level is a ⚠ carrying it whole" $'⚠ memory sync status printed a line the doctor cannot read: alpha\tinfo\ta level the doctor does not know'
+want_out "...and so is a line with no tabs"      "⚠ memory sync status printed a line the doctor cannot read: claude-memory-sync: no store table at /x; nothing to do"
+
+new_home ms22; write_cred; mk_link_stub 0 '' ''; mk_sync_stub 0 "$SYNC_OK_LINE"$'\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+if [[ ! -s "$SYNC_CALLS" ]]; then ok "sync: no store table and the sync script is not run"; else bad "sync: no store table and the sync script is not run — it was: $(cat "$SYNC_CALLS")"; fi
+
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
 # loop, an unset variable under `set -u`. Every row that still ran would pass
@@ -3927,7 +4016,7 @@ no_out   "...and is not read as zero"          "no store that these keys map to 
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=584
+EXPECTED_ROWS=598
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

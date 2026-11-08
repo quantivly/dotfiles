@@ -1231,7 +1231,9 @@ _claude_doctor_rendered_settings() {
 # Claude Code's memory in git-backed stores, and this asks the read-only --check
 # of scripts/claude-memory-link.sh how far each key is from a link into its store.
 # --apply is never run from here: the doctor writes nothing. Without the table the
-# memory directories are plain ones, which is a fact about the host, not a finding.
+# memory directories are plain ones, which is a fact about the host, not a finding,
+# and neither script is asked. With it, the link rows are followed by the sync's
+# (_claude_doctor_memory_sync_status, below).
 #
 # Unlike the section above this keeps stdout, since the rows are the report. And
 # an exit 0 is not yet the ✓: UNMAPPED rows alone do not fail --check, so the ✓
@@ -1300,6 +1302,53 @@ _claude_doctor_memory_stores() {
   for reported_row in "${reported_rows[@]}"; do
     printf '    %s\n' "$reported_row"
   done
+  _claude_doctor_memory_sync_status
+}
+
+# The sync half of the "--- Memory stores ---" section (DO-892), after the link
+# rows. scripts/claude-memory-sync.sh --status reads each checked-out store's last
+# outcome and prints <store><TAB><level><TAB><message>, one line or more per
+# store; each becomes a row through the emitter its level names, ok ✓, warn ⚠,
+# bad ✗, with the message whole. Only --status is ever asked: it never writes,
+# never fetches and takes no lock. The script's header says which outcome is
+# which level.
+#
+# It is asked whatever the link rows said, and its empty answer is tolerated:
+# only --status knows which stores are checked out, and a store no key maps to
+# can be checked out on a host whose keys wait for another. With no store here it
+# prints nothing at exit 0, which adds no row, and the link rows' ⚠ already says
+# no store is checked out. A line the doctor cannot read is shown whole as a ⚠,
+# never dropped; an exit other than 0 is a ⚠ with the last stderr line, after
+# the rows for the stores it could read.
+_claude_doctor_memory_sync_status() {
+  local sync_script="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-memory-sync.sh"
+  local captured_streams status_stdout status_rc last_stderr_line status_line
+  local store level message after_store
+  local -a stream_parts status_stderr_lines status_lines
+  # The link rows' two-stream capture: see the comments there.
+  captured_streams="$( ( status_stdout="$("$sync_script" --status)"; status_rc=$?; printf '\0%s\0%d' "$status_stdout" "$status_rc" ) 2>&1 )"
+  stream_parts=("${(@ps:\0:)captured_streams}")
+  status_rc="${stream_parts[3]}"
+  status_stderr_lines=(${(f)stream_parts[1]})
+  last_stderr_line="${status_stderr_lines[-1]}"
+  status_lines=(${(f)stream_parts[2]})
+  for status_line in "${status_lines[@]}"; do
+    # A line with no tab leaves all three as the whole line, so it reads as an
+    # unknown level below.
+    store="${status_line%%$'\t'*}"
+    after_store="${status_line#*$'\t'}"
+    level="${after_store%%$'\t'*}"
+    message="${after_store#*$'\t'}"
+    case "$level" in
+      ok)   _doctor_ok   "memory store ${store}: $message" ;;
+      warn) _doctor_warn "memory store ${store}: $message" ;;
+      bad)  _doctor_bad  "memory store ${store}: $message" ;;
+      *)    _doctor_warn "memory sync status printed a line the doctor cannot read: $status_line" ;;
+    esac
+  done
+  if [[ "$status_rc" != 0 ]]; then
+    _doctor_warn "memory sync status could not be read: ${last_stderr_line:-exit $status_rc}"
+  fi
 }
 
 # The Linear API-key plugin, the "--- Linear ---" section of claude-doctor
