@@ -30,3 +30,12 @@ export const LOG_PREFIX = 'resource-pulse:';
 export const KERNEL_AND_OTHER_LABEL = 'kernel & other';
 /** Display names for service units whose own name reads badly, keyed by unit name without suffix. */
 export const UNIT_DISPLAY_ALIASES = {'herdr-server': 'herdr agents', 'org.gnome.Shell': 'GNOME Shell'};
+/** Bytes in one gibibyte (the memory unit shown everywhere). */
+export const BYTES_PER_GIBIBYTE = 1024 ** 3;
+/** Filled and empty cells of the three-cell pressure meter. */
+export const PRESSURE_METER_FILLED_CELL = '▮';
+export const PRESSURE_METER_EMPTY_CELL = '▯';
+/** Number of cells in the pressure meter (one more than the number of band thresholds). */
+export const PRESSURE_METER_CELLS = 3;
+/** What a pressure meter shows when its avg10 is unavailable. */
+export const PRESSURE_METER_NO_DATA = '···';
