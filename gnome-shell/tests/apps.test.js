@@ -103,17 +103,34 @@ test('"kernel & other" stays a CPU candidate while the memory half names a real 
         topMemory: {name: 'app', memoryBytes: 3 * GIB},
     });
 });
-test('"kernel & other" CPU is clamped at 0 when the leaves used more than the root did', () => {
-    const ranking = rankApps(input({'app': [0, 4_000_000, 1]}, {rootCpuDeltaUsec: 1_000_000}));
-    assertEqual(ranking.topCpu, {name: 'app', cpuPercent: 25});
+test('"kernel & other" is the root CPU minus the leaves\', so leaves that used more than the root reported still top CPU',
+    () => {
+        // The pseudo-app gets nothing here (1M − 4M), so the app wins; crediting it the root's 1M plus the leaves'
+        // 4M instead would make it win. Whether its negative share is clamped cannot show here: any leaf with a
+        // delta outranks it. The next row is where the clamp decides.
+        const ranking = rankApps(input({'app': [0, 4_000_000, 1]}, {rootCpuDeltaUsec: 1_000_000}));
+            assertEqual(ranking.topCpu, {name: 'app', cpuPercent: 25});
+    });
+test('a root CPU counter that went backwards gives "kernel & other" 0%, never a negative share', () => {
+    // No leaf has a delta (all new this scan), so the pseudo-app is the only CPU candidate and its clamp decides.
+    const ranking = rankApps(input({'fresh': [null, 1_000_000, 1]}, {rootCpuDeltaUsec: -2_000_000}));
+    assertEqual(ranking.topCpu, {name: KERNEL_AND_OTHER, cpuPercent: 0});
 });
 test('without a root CPU delta there is no "kernel & other"', () => {
     const ranking = rankApps(input({'app': [0, 0, 0]}));
     assertEqual([ranking.topCpu.name, ranking.topMemory.name], ['app', 'app']);
 });
-test('equal values break ties by name ascending, whatever the insertion order', () => {
-    const ranking = rankApps(input({'beta': [0, 1_000_000, 5], 'alpha': [0, 1_000_000, 5]}));
-    assertEqual([ranking.topCpu.name, ranking.topMemory.name], ['alpha', 'alpha']);
+test('equal values break ties by name ascending, in either insertion order', () => {
+    const betaFirst = rankApps(input({'beta': [0, 1_000_000, 5], 'alpha': [0, 1_000_000, 5]}));
+    const alphaFirst = rankApps(input({'alpha': [0, 1_000_000, 5], 'beta': [0, 1_000_000, 5]}));
+    assertEqual([betaFirst.topCpu.name, betaFirst.topMemory.name, alphaFirst.topCpu.name, alphaFirst.topMemory.name],
+        ['alpha', 'alpha', 'alpha', 'alpha']);
+});
+test('a real app tied with "kernel & other" (always ranked last) wins or loses by name, not by being first', () => {
+    // root Δ 2M and the one leaf's Δ 1M: the leaf and the pseudo-app both have 1M.
+    const alphaTie = rankApps(input({'alpha': [0, 1_000_000, 5]}, {rootCpuDeltaUsec: 2_000_000}));
+    const zetaTie = rankApps(input({'zeta': [0, 1_000_000, 5]}, {rootCpuDeltaUsec: 2_000_000}));
+    assertEqual([alphaTie.topCpu.name, zetaTie.topCpu.name], ['alpha', KERNEL_AND_OTHER]);
 });
 test('nothing scanned gives null rankings, not zeros', () =>
     assertEqual(rankApps(input({})), {topCpu: null, topMemory: null}));
