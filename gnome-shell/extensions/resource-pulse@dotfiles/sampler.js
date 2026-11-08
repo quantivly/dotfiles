@@ -422,7 +422,9 @@ export class Sampler {
     }
 
     /**
-     * Starts the timer. Calling it again while started adds nothing.
+     * Starts the timer and runs its first tick at once, so memory and swap show without waiting an interval (CPU
+     * needs a second sample). Calling it again while started adds nothing; while paused or destroyed nothing
+     * runs.
      *
      * @returns {void}
      */
@@ -457,7 +459,8 @@ export class Sampler {
 
     /**
      * Pauses or resumes ticking (while the screen shield is up). On resume the CPU and app baselines restart,
-     * so no delta averages across the pause and no ranking from before it is shown as current.
+     * so no delta averages across the pause and no ranking from before it is shown as current, and the first tick
+     * runs at once.
      *
      * @param {boolean} isPaused - True to pause.
      * @returns {void}
@@ -618,7 +621,8 @@ export class Sampler {
     }
 
     /**
-     * Adds the timer source when it should run and has none, and removes it when it should not run.
+     * Adds the timer source when it should run and has none, running its first tick at once, and removes it when
+     * it should not run.
      *
      * @returns {void}
      */
@@ -627,6 +631,9 @@ export class Sampler {
         if (shouldRun && this._timeoutSourceId === null) {
             this._timeoutSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, this._sampleIntervalSeconds,
                 () => this._onTimeout());
+            // The first tick now, not one interval from now: the timer's own path, so a sample already in flight
+            // makes it a no-op.
+            this._runNextTick();
         } else if (!shouldRun && this._timeoutSourceId !== null) {
             GLib.source_remove(this._timeoutSourceId);
             this._timeoutSourceId = null;
@@ -634,16 +641,25 @@ export class Sampler {
     }
 
     /**
-     * The timer callback. runTick is async, so it cannot throw here, and it does not reject today; should a future
-     * change make it reject, the rejection is logged rather than left unhandled.
+     * The timer callback: runs the next tick.
      *
      * @returns {boolean} GLib.SOURCE_CONTINUE: only source_remove ends the source, so its id is never stale.
      */
     _onTimeout() {
+        this._runNextTick();
+        return GLib.SOURCE_CONTINUE;
+    }
+
+    /**
+     * Runs the next tick without waiting for it. runTick is async, so it cannot throw here, and it does not
+     * reject today; should a future change make it reject, the rejection is logged rather than left unhandled.
+     *
+     * @returns {void}
+     */
+    _runNextTick() {
         const tickNumber = this._nextTickNumber++;
         this.runTick(tickNumber).catch(error =>
             this._logRateLimited(`tick failed: ${describeErrorWithStack(error)}`));
-        return GLib.SOURCE_CONTINUE;
     }
 
     /**

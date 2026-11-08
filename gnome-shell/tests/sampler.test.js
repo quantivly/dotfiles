@@ -477,15 +477,70 @@ test('sampler: the timer callback never throws; a tick whose sample throws publi
             const published = [];
             sampler.addListener(snapshot => published.push(snapshot));
             sampler.start();
+            // start() runs the first tick itself; let it finish, so the callback's own tick is not skipped as
+            // one in flight.
+            await waitMs(TICK_FAILURE_SETTLE_MS);
+            const publishedByStart = published.length;
             const callbackResult = spy.added[0].callback();
             await waitMs(TICK_FAILURE_SETTLE_MS);
             const isStillAttached = isSourceAttached(spy.added[0].sourceId);
             sampler.destroy();
-            assertEqual([callbackResult, isStillAttached, published.length, published[0]?.isComplete,
-                published[0]?.memory, logged.length, logged[0]?.startsWith(LOG_PREFIX),
-                logged[0]?.includes('clock exploded')], [GLib.SOURCE_CONTINUE, true, 1, false, null, 1, true, true]);
+            // How many lines the two failures log depends on their stacks (the rate limit keys on the whole
+            // message, and its own row pins it); here every line must be this failure, prefixed.
+            const isEveryLineThisFailure = logged.length > 0 &&
+                logged.every(line => line.startsWith(LOG_PREFIX) && line.includes('clock exploded'));
+            assertEqual([callbackResult, isStillAttached, publishedByStart, published.length,
+                published[1]?.isComplete, published[1]?.memory, isEveryLineThisFailure],
+            [GLib.SOURCE_CONTINUE, true, 1, 2, false, null, true]);
         });
     });
+
+test('sampler: start() samples at once, so memory shows before the first interval and CPU after it', async () => {
+    await withTimerSpy(async spy => {
+        const {sampler} = makeSampler('root-a', {sampleIntervalSeconds: QUIET_INTERVAL_SECONDS});
+        const published = [];
+        sampler.addListener(snapshot => published.push(snapshot));
+        sampler.start();
+        await waitMs(IN_FLIGHT_SETTLE_MS);
+        const [firstSnapshot] = published;
+        sampler.destroy();
+        sampler.start();
+        await waitMs(IN_FLIGHT_SETTLE_MS);
+        // One sample from start(), none from the 60 s timer, and none from a start() after destroy().
+        assertEqual([published.length, firstSnapshot?.memory !== null, firstSnapshot?.cpuBusyPercent, spy.added.length],
+            [1, true, null, 1]);
+    });
+});
+
+test('sampler: resuming from a pause samples at once; start() while paused samples nothing', async () => {
+    await withTimerSpy(async () => {
+        const {sampler} = makeSampler('root-a', {sampleIntervalSeconds: QUIET_INTERVAL_SECONDS});
+        let listenerCalls = 0;
+        sampler.addListener(() => listenerCalls++);
+        sampler.setPaused(true);
+        sampler.start();
+        await waitMs(IN_FLIGHT_SETTLE_MS);
+        const callsWhilePaused = listenerCalls;
+        sampler.setPaused(false);
+        await waitMs(IN_FLIGHT_SETTLE_MS);
+        sampler.destroy();
+        assertEqual([callsWhilePaused, listenerCalls], [0, 1]);
+    });
+});
+
+test('sampler: start() while a sample is in flight adds no second one (the in-flight guard holds)', async () => {
+    await withTimerSpy(async () => {
+        const {sampler} = makeSampler('root-a', {sampleIntervalSeconds: QUIET_INTERVAL_SECONDS});
+        let listenerCalls = 0;
+        sampler.addListener(() => listenerCalls++);
+        const pendingSample = sampler.sampleOnce();
+        sampler.start();
+        await pendingSample;
+        await waitMs(IN_FLIGHT_SETTLE_MS);
+        sampler.destroy();
+        assertEqual([listenerCalls, sampler.cpuHistory.values().length], [1, 1]);
+    });
+});
 
 test('sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()', async () => {
     const {sampler} = makeSampler('root-a', {sampleIntervalSeconds: TIMER_INTERVAL_SECONDS});
