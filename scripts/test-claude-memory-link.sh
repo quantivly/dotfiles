@@ -894,6 +894,16 @@ run_sut --check
 check "check: the summary counts the NO-STORE keys holding memory, and no other" "$RC|$OUT" \
     "0|claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 2 without a store"
 
+# A store removed after its keys were linked leaves each memory a link into a checkout that is gone.
+# The key is NO-STORE and holds no real directory, yet nothing Claude Code writes is kept: uncounted,
+# it would be the doctor's ✓ over a host keeping no memory at all.
+reset_scene
+add_state LINKED
+rm -rf "${STORES_ROOT:?}/$ALPHA_STORE"
+run_sut --check
+check "check: a key linked into a store that is gone counts as without a store" "$RC|$OUT" \
+    "0|claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 1 without a store"
+
 # A count that cannot be taken is no smaller count.
 reset_scene
 add_state NO-STORE
@@ -2125,6 +2135,58 @@ check "apply: a store directory that is itself a symlink out of the checkout is 
     "$apply_result|$(outside_entry_count "$outside_store_dir")|$(row_of_key "$key" | cut -f2)" \
     "2|yes|0|REAL-DIR"
 
+# Inside the checkout and still refused: git runs what lies under its .git, so a memory file named like
+# a hook would land as one that the sync's `git merge` runs. The hooks directory is made, not assumed:
+# what `git init` puts there depends on the host's template directory.
+apply_scene hooks-trap
+write_file "$memory_dir/post-merge" '#!/bin/sh'
+chmod 755 "$memory_dir/post-merge"
+store_git_dir="$STORES_ROOT/$ALPHA_STORE/.git"
+mkdir -p "$store_git_dir/hooks" "$(dirname "$store_dir")"
+ln -s ../../.git/hooks "$store_dir" || fatal "could not plant the link into the store's .git"
+hooks_manifest_before=$(file_manifest "$store_git_dir/hooks")
+run_sut --apply
+apply_result="$RC|$(contains "$OUT" "refusing $store_dir: it resolves into the store checkout's git directory $store_git_dir")"
+run_sut --list
+check "apply: a store directory that resolves into the store checkout's .git is refused: no hook lands, the key stays REAL-DIR" \
+    "$apply_result|$([[ -e "$store_git_dir/hooks/post-merge" ]] && printf 'hook landed')|$(file_manifest "$store_git_dir/hooks")|$(row_of_key "$key" | cut -f2)" \
+    "2|yes||$hooks_manifest_before|REAL-DIR"
+
+# linked_scene REPO — a key already linked into its store directory, which holds one file.
+linked_scene() {
+    apply_scene "$1"
+    rmdir "$memory_dir" || fatal "could not clear the memory directory of $1"
+    write_file "$store_dir/MEMORY.md" 'store memory'
+    link_memory "$key" "$store_dir"
+}
+
+# --check holds a LINKED key to the same containment as --apply: a link planted above the store
+# directory after the key was linked sends Claude Code's writes out of the store while the text of the
+# key's own link stays right. --apply then leaves it, as it leaves any WRONG-LINK.
+linked_scene relinked-outside
+moved_owner_dir="$TMPROOT/owner-moved-outside"
+rm -rf "$moved_owner_dir"
+mv "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" "$moved_owner_dir" || fatal "could not move the owner directory"
+ln -s "$moved_owner_dir" "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" || fatal "could not plant the link"
+moved_owner_manifest_before=$(file_manifest "$moved_owner_dir")
+run_sut --check
+check_result="$RC|$OUT"
+run_sut --apply
+check "check: a LINKED key whose store directory now resolves outside the checkout is WRONG-LINK, and --apply leaves it" \
+    "$check_result|$RC|$OUT|$(memory_kind "$memory_dir")|$(file_manifest "$moved_owner_dir")" \
+    "1|$(row_line "$key" WRONG-LINK "$ALPHA_STORE" "repos/$FIXTURE_OWNER/relinked-outside" "$HOME/code/relinked-outside")
+claude-memory-link: 0 linked, 1 to fix, 0 unmapped, 0 without a store|0||link to $store_dir|$moved_owner_manifest_before"
+
+linked_scene relinked-into-git
+store_git_dir="$STORES_ROOT/$ALPHA_STORE/.git"
+mv "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" "$store_git_dir/planted-owner" || fatal "could not move the owner directory"
+ln -s ../.git/planted-owner "$STORES_ROOT/$ALPHA_STORE/repos/$FIXTURE_OWNER" || fatal "could not plant the link"
+run_sut --check
+check "check: a LINKED key whose store directory now resolves into the store checkout's .git is WRONG-LINK" \
+    "$RC|$OUT" \
+    "1|$(row_line "$key" WRONG-LINK "$ALPHA_STORE" "repos/$FIXTURE_OWNER/relinked-into-git" "$HOME/code/relinked-into-git")
+claude-memory-link: 0 linked, 1 to fix, 0 unmapped, 0 without a store"
+
 pending_scene marker-dangling
 write_file "$replaced_dir/topic.md" 'pending body'
 marker_target="$TMPROOT/no-such-marker-target"
@@ -2366,7 +2428,7 @@ done
 check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
 
 printf '\n'
-EXPECTED_ROWS=201
+EXPECTED_ROWS=205
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

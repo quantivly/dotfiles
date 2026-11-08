@@ -337,10 +337,10 @@ directory has no state and no row.
 | state | what it means | `--check` | `--apply` |
 |---|---|---|---|
 | `PENDING-MERGE` | a `memory.replaced-*` directory exists without the marker, or holding a file newer than it | to fix | finishes the merge, unless the store is not checked out or no candidate claims the key: then it has nowhere to go and is left |
-| `NO-STORE` | mapped, but that store is not checked out on this host | not shown, but counted as `without a store` when its `memory` is a real directory holding a file | left alone |
-| `LINKED` | a symlink to the mapped store directory, which exists | counted | nothing |
+| `NO-STORE` | mapped, but that store is not checked out on this host | not shown, but counted as `without a store` when its `memory` is a real directory holding a file, or a symlink into that store's checkout (a store removed after linking) | left alone |
+| `LINKED` | a symlink to the mapped store directory, which exists and resolves inside its store checkout, outside the checkout's `.git` | counted | nothing |
 | `DANGLING` | the right symlink, but its target directory does not exist | to fix | creates the directory |
-| `WRONG-LINK` | a symlink to anywhere else | to fix | left alone, to fix by hand (a pending merge still finishes, reported as `merged`) |
+| `WRONG-LINK` | a symlink to anywhere else, or the right one whose target now resolves outside the store checkout or into its `.git` (a link planted above it since) | to fix | left alone, to fix by hand (a pending merge still finishes, reported as `merged`) |
 | `REAL-DIR` | a real directory, the key is mapped, the store is checked out | to fix | swaps it for the link and merges it in |
 | `MISSING` | no `memory` entry, and the mapped store directory holds a file, such as memory another host wrote | to fix | creates the link |
 | `UNMAPPED` | a real `memory` directory holding a file, under a key no candidate claims | shown, exit 0 | not walked: it has no store directory (see **Adding a directory**) |
@@ -357,8 +357,9 @@ directory has no state and no row.
 
     claude-memory-link: <n> linked, <n> to fix, <n> unmapped, <n> without a store
 
-The last count is the `NO-STORE` keys whose `memory` is a real directory holding a file: memory
-waiting for its store to be checked out here. No row of `--check` names them; `--list` does.
+The last count is the `NO-STORE` keys whose `memory` is a real directory holding a file, or a symlink
+into that store's checkout, which is what a store removed after linking leaves: memory waiting for its
+store to be checked out here. No row of `--check` names them; `--list` does.
 
 `--apply` prints one line per key it acted on, and nothing on a second run:
 `linked <key> -> <store dir> (copied <n>, identical <n>, kept-both <n>)`. A real run holds an flock on
@@ -386,8 +387,11 @@ link and is never pruned, and the only changes to a store's existing content are
 lines below. A writer holding an open descriptor or a cwd inside the directory can land after the
 walk; that write stays in the replaced directory, not lost and not merged. Nothing leaves the store
 through a symlink either: a store directory that resolves outside its store checkout (a link planted
-at `repos/<owner>`, say) is exit 2 before anything is made, renamed or written for that key, and a
-target whose directory resolves outside the store directory is refused file by file.
+at `repos/<owner>`, say), or into the checkout's own `.git`, where git would run a memory file named
+like a hook, is exit 2 before anything is made, renamed or written for that key, and a target whose
+directory resolves outside the store directory is refused file by file. `--check` holds a `LINKED`
+key to the same rule, so a link planted above the store directory after the key was linked reads as
+`WRONG-LINK`.
 
 **The marker means "merged".** A replaced directory without `.merged-into-store` reads as
 `PENDING-MERGE`, so a run stopped anywhere fails `--check`, and the next `--apply` finishes the merge
@@ -425,7 +429,8 @@ listing the tenant `scripts/tenant-route <dir>` answers for it. `--check` then s
 
 A key whose directory no longer exists cannot be claimed: a `plain_dirs` entry absent on this host is
 skipped and no glob matches what is gone. Read its memory, move what is worth keeping into the store
-by hand, then move the key directory aside, or the row is permanent.
+by hand, then move the key directory out of the projects directory, or the row is permanent: under a
+new name inside it, the key directory is walked again.
 
 **Permission mode, from the pilot** (Claude Code 2.1.319, 2026-11-06). With `memory` a symlink to a
 directory outside `~/.claude`, the index loads at session start, and Write, Read and Edit work. A
@@ -435,8 +440,8 @@ not.
 **Who runs it.** `claude-doctor`'s "Memory stores" section runs `--check`, and nothing else: a note
 with no table, ✓ with the counts, ✗ with each row on exit 1 (`--apply --dry-run` shows what `--apply`
 would do), ⚠ with each row and both remedies when an exit 0 carries `UNMAPPED` rows, ⚠
-`no memory store is checked out on this host (<n> keys wait for one)` when nothing is linked and keys
-hold memory waiting for a store, and ⚠ with the last stderr line when it could not run.
+`no store that these keys map to is checked out here (<n> keys wait for one)` when nothing is linked
+and keys hold memory waiting for a store, and ⚠ with the last stderr line when it could not run.
 `CLAUDE_MEMORY_PROJECTS_DIR`, `CLAUDE_MEMORY_STORES_ROOT`,
 `CLAUDE_MEMORY_CONFIG`, `CLAUDE_MEMORY_STATE_DIR`, `CLAUDE_MEMORY_HOST` and
 `CLAUDE_MEMORY_TENANT_ROUTE` override the paths, the host in a conflict copy's name and the tenant

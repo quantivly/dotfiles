@@ -1242,7 +1242,7 @@ _claude_doctor_memory_stores() {
   local store_table="${CLAUDE_MEMORY_CONFIG:-$HOME/.dotfiles-local/claude/memory-stores.json}"
   local link_script="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-memory-link.sh"
   local summary_prefix='claude-memory-link: '
-  local unmapped_remedy='a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory aside, or the row is permanent'
+  local unmapped_remedy='a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory out of the projects directory, or the row is permanent'
   local captured_streams link_stdout link_rc last_stderr_line report_line reported_row summary_counts=''
   local -i linked_count=0 without_store_count=0 has_no_store_here=0
   local -a stream_parts link_stderr_lines report_lines reported_rows
@@ -1282,7 +1282,9 @@ _claude_doctor_memory_stores() {
         _doctor_warn "memory directories no table entry claims (${summary_counts:-no summary}) — $unmapped_remedy"
       fi
       if (( has_no_store_here )); then
-        _doctor_warn "no memory store is checked out on this host ($without_store_count keys wait for one)"
+        # Of the stores these keys map to, not of every store: another one checked out
+        # here with nothing mapped to it leaves this true.
+        _doctor_warn "no store that these keys map to is checked out here ($without_store_count keys wait for one)"
       fi
       if (( ${#reported_rows} == 0 && ! has_no_store_here )); then
         if [[ -n "$summary_counts" ]]; then

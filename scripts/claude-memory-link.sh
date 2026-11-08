@@ -65,9 +65,11 @@
 #   PENDING-MERGE a memory.replaced-* directory exists without the marker .merged-into-store, or
 #                 holding a regular file newer than it
 #   NO-STORE      mapped, but that store is not checked out on this host
-#   LINKED        memory is a symlink to the mapped store directory, which exists
+#   LINKED        memory is a symlink to the mapped store directory, which exists and resolves inside
+#                 its store checkout, not into the checkout's .git
 #   DANGLING      the right symlink, but its target directory does not exist
-#   WRONG-LINK    memory is a symlink to anywhere else
+#   WRONG-LINK    memory is a symlink to anywhere else, or the right one whose target now resolves
+#                 outside the store checkout or into its .git (a link planted above it since)
 #   REAL-DIR      memory is a real directory, the key is mapped, the store is checked out
 #   MISSING       no memory entry, and the mapped store directory holds a file
 #   UNMAPPED      a real memory directory holding a file, under a key no candidate claims
@@ -119,7 +121,8 @@
 #                                   adds none.
 # A leftover partial from a stopped run is no store file: nothing counts it, and only the next merge
 # of the same file removes it. A file named like one in a memory directory stays in the replaced
-# directory. A store directory that resolves outside its store checkout is refused before anything is
+# directory. A store directory that resolves outside its store checkout, or into the checkout's own
+# .git, where git runs what it finds (a file named like a hook), is refused before anything is
 # made, renamed or written for that key, and a target whose directory resolves outside the store
 # directory is refused, so nothing is written through a symlink out of the store. A marker path holding
 # anything but a regular file is refused as well: a symlink would be written through, a fifo would
@@ -133,8 +136,9 @@
 #   claude-memory-link --check   print each row that is not LINKED or NO-STORE, then a summary line:
 #                                  <n> linked, <n> to fix, <n> unmapped, <n> without a store
 #                                the last being the NO-STORE keys whose memory is a real directory
-#                                holding a file; exit 1 if any key is REAL-DIR, MISSING, DANGLING,
-#                                PENDING-MERGE or WRONG-LINK (the default verb)
+#                                holding a file, or a symlink into that store's checkout, which is
+#                                gone (a store removed after linking); exit 1 if any key is REAL-DIR,
+#                                MISSING, DANGLING, PENDING-MERGE or WRONG-LINK (the default verb)
 #   claude-memory-link --list    print every key as TSV: key, state, store, store-relative directory,
 #                                source directory (the path the key comes from; the last three are
 #                                empty for a key no candidate claims). A backslash, tab or newline in
@@ -241,9 +245,10 @@ CANDIDATE_SOURCE_DIRS=()
 CHECKOUT_KIND=''              # what classify_directory found: plain | ordinary | submodule | worktree
 SUBMODULE_GIT_DIR=''          # and, for a submodule, its git dir
 GLOB_MATCHES=()               # what expand_home_glob found
-# The report, as parallel arrays: each row's key, its state, and its line as printed.
+# The report, as parallel arrays: each row's key, its state, its store, and its line as printed.
 ROW_KEYS=()
 ROW_STATES=()
+ROW_STORES=()
 ROW_LINES=()
 UNMARKED_REPLACED_DIRS=()     # what load_unmarked_replaced_dirs found
 # What apply_key reports for one key.
@@ -335,6 +340,9 @@ lexically_normal_path() {
 
 # physical_path_of DIR — print DIR with every symlink resolved. Dies when DIR cannot be entered.
 physical_path_of() { (cd -P -- "$1" 2>/dev/null && pwd -P) || die "could not enter $1"; }
+
+# path_is_at_or_under PATH ANCESTOR — true when PATH is ANCESTOR or lies under it, by the text alone.
+path_is_at_or_under() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
 
 # ---------------------------------------------------------------------------------------------
 # The mapping: a path to its key, a directory to its store directory, the table behind them.
@@ -611,7 +619,8 @@ load_unmarked_replaced_dirs() {
     done
 }
 
-# has_unmerged_replaced_dir KEY_DIR — true when a replaced directory there lacks the marker.
+# has_unmerged_replaced_dir KEY_DIR — true when a replaced directory there is unmarked, or holds a
+# regular file newer than its marker.
 has_unmerged_replaced_dir() {
     load_unmarked_replaced_dirs "$1"
     (( ${#UNMARKED_REPLACED_DIRS[@]} ))
@@ -626,18 +635,37 @@ directory_holds_a_file() {
     [[ -n "$first_found" ]]
 }
 
-# state_of_memory_link KEY_DIR STORE_DIR — print the state of KEY_DIR's memory symlink. The target
-# is compared by its text, so a relative link to the right place is the right link.
-state_of_memory_link() {
-    local key_dir=$1 store_dir=$2 link_target
+# normal_memory_link_target KEY_DIR — print the target of KEY_DIR's memory symlink as an absolute,
+# lexically normal path: a relative target is taken from KEY_DIR, as the kernel takes it.
+normal_memory_link_target() {
+    local key_dir=$1 link_target
     link_target=$(readlink -- "$key_dir/$MEMORY_ENTRY_NAME") || die "could not read the link in $key_dir"
     [[ "$link_target" == /* ]] || link_target="$key_dir/$link_target"
-    if [[ "$(lexically_normal_path "$link_target")" != "$(lexically_normal_path "$store_dir")" ]]; then
+    lexically_normal_path "$link_target"
+}
+
+# state_of_memory_link KEY_DIR STORE_DIR STORE_CHECKOUT — print the state of KEY_DIR's memory symlink.
+# The target is compared by its text, so a relative link to the right place is the right link. The
+# right link is LINKED only while the store directory also resolves inside its checkout and outside the
+# checkout's .git, the rule resolve_store_directory holds --apply to: a link planted above the store
+# directory after the key was linked sends every write elsewhere, and the key's own link reads the same.
+state_of_memory_link() {
+    local key_dir=$1 store_dir=$2 store_checkout=$3 link_target physical_store_checkout
+    # Each dies inside its command substitution, having said why.
+    link_target=$(normal_memory_link_target "$key_dir") || exit "$EXIT_COULD_NOT_RUN"
+    if [[ "$link_target" != "$(lexically_normal_path "$store_dir")" ]]; then
         printf 'WRONG-LINK'
-    elif [[ -d "$store_dir" ]]; then
+        return 0
+    fi
+    if [[ ! -d "$store_dir" ]]; then
+        printf 'DANGLING'
+        return 0
+    fi
+    physical_store_checkout=$(physical_path_of "$store_checkout") || exit "$EXIT_COULD_NOT_RUN"
+    if path_resolves_inside "$store_dir" "$physical_store_checkout" "$physical_store_checkout/.git"; then
         printf 'LINKED'
     else
-        printf 'DANGLING'
+        printf 'WRONG-LINK'
     fi
 }
 
@@ -648,7 +676,7 @@ state_of_memory_entry() {
     local key_dir="$PROJECTS_DIR/$1"
     local memory_path="$key_dir/$MEMORY_ENTRY_NAME" store_dir="$STORES_ROOT/$2/$3"
     if [[ -L "$memory_path" ]]; then
-        state_of_memory_link "$key_dir" "$store_dir"
+        state_of_memory_link "$key_dir" "$store_dir" "$STORES_ROOT/$2"
     elif [[ -d "$memory_path" ]]; then
         printf 'REAL-DIR'
     elif [[ -e "$memory_path" ]]; then
@@ -678,6 +706,18 @@ state_of_mapped_key() {
 key_holds_real_memory() {
     local memory_path="$PROJECTS_DIR/$1/$MEMORY_ENTRY_NAME"
     [[ -d "$memory_path" && ! -L "$memory_path" ]] && directory_holds_a_file "$memory_path"
+}
+
+# memory_links_into_store_checkout KEY STORE — true when KEY's memory entry is a symlink whose target
+# lies in STORE's checkout, by its text, dangling or not. Asked of a NO-STORE key, whose store is not
+# checked out here: it is the link a store removed after linking leaves, and nothing written through it
+# is kept.
+memory_links_into_store_checkout() {
+    local key_dir="$PROJECTS_DIR/$1" link_target
+    [[ -L "$key_dir/$MEMORY_ENTRY_NAME" ]] || return 1
+    # It dies inside the command substitution, having said why.
+    link_target=$(normal_memory_link_target "$key_dir") || exit "$EXIT_COULD_NOT_RUN"
+    path_is_at_or_under "$link_target" "$(lexically_normal_path "$STORES_ROOT/$2")"
 }
 
 # state_of_unclaimed_key KEY — print the state of a key no candidate claims, or nothing.
@@ -833,29 +873,37 @@ keep_both() {
     fi
 }
 
-# path_resolves_inside PATH PHYSICAL_ANCHOR — false when the deepest part of PATH that exists resolves
-# outside PHYSICAL_ANCHOR, or does not resolve at all. Asked before anything reads or writes there,
-# since mkdir -p, >> and cp all follow a symlink. A plain file in the way leads nowhere, and mkdir -p
-# reports it.
+# path_resolves_inside PATH PHYSICAL_ANCHOR [PHYSICAL_EXCLUDED] — false when the deepest part of PATH
+# that exists resolves outside PHYSICAL_ANCHOR, or at or under PHYSICAL_EXCLUDED when one is given, or
+# does not resolve at all. Asked before anything reads or writes there, since mkdir -p, >> and cp all
+# follow a symlink. A plain file in the way leads nowhere, and mkdir -p reports it.
 path_resolves_inside() {
-    local existing_ancestor=$1 physical_anchor=$2 physical_ancestor
+    local existing_ancestor=$1 physical_anchor=$2 physical_excluded=${3:-} physical_ancestor
     while [[ -n "$existing_ancestor" ]] && path_is_free "$existing_ancestor"; do
         existing_ancestor=${existing_ancestor%/*}
     done
     if is_regular_file "$existing_ancestor"; then return 0; fi
     physical_ancestor=$(cd -P -- "$existing_ancestor" 2>/dev/null && pwd -P) || return 1
-    [[ "$physical_ancestor" == "$physical_anchor" || "$physical_ancestor" == "$physical_anchor"/* ]]
+    path_is_at_or_under "$physical_ancestor" "$physical_anchor" || return 1
+    [[ -z "$physical_excluded" ]] || ! path_is_at_or_under "$physical_ancestor" "$physical_excluded"
 }
 
 # resolve_store_directory STORE_DIR — set PHYSICAL_STORE_DIR, making the directory first on a real
 # run. On a dry run one that does not exist yet stays empty: nothing in it can lead anywhere. A store
-# directory that leads out of its checkout is refused here, before the mkdir that would follow it. So
-# every path to the directory comes through here first, and a refusal leaves the key as it was.
+# directory that leads out of its checkout, or into the checkout's .git, is refused here, before the
+# mkdir that would follow it. So every path to the directory comes through here first, and a refusal
+# leaves the key as it was.
 resolve_store_directory() {
-    local store_dir=$1
+    local store_dir=$1 physical_git_dir="$PHYSICAL_STORE_CHECKOUT/.git"
     PHYSICAL_STORE_DIR=''
     if ! path_resolves_inside "$store_dir" "$PHYSICAL_STORE_CHECKOUT"; then
         report_failure "refusing $store_dir: it resolves outside the store checkout $PHYSICAL_STORE_CHECKOUT"
+        return 1
+    fi
+    # Inside the checkout and still no place for memory: git runs what lies under .git, so a memory file
+    # named like a hook would become one that the sync's own `git merge` runs.
+    if ! path_resolves_inside "$store_dir" "$PHYSICAL_STORE_CHECKOUT" "$physical_git_dir"; then
+        report_failure "refusing $store_dir: it resolves into the store checkout's git directory $physical_git_dir"
         return 1
     fi
     if (( ! IS_DRY_RUN )) && ! mkdir -p -- "$store_dir"; then
@@ -1128,6 +1176,7 @@ add_row() {
     local field escaped_fields=()
     ROW_KEYS+=("$2")
     ROW_STATES+=("$1")
+    ROW_STORES+=("$3")
     for field in "$2" "$1" "$3" "$4" "$5"; do
         escaped_fields+=("$(escaped_for_one_line "$field")")
     done
@@ -1166,13 +1215,16 @@ print_list() {
 
 # print_check — each row that is not LINKED or NO-STORE, then the summary; exit 1 if any is to fix. A
 # NO-STORE key is no row, but one holding memory counts: with no store here it is what "0 linked" hides.
+# So does one whose link points into its store's checkout: a store removed after linking leaves every
+# key NO-STORE with no real directory, and uncounted that would read as nothing to report.
 print_check() {
     local index linked_count=0 to_fix_count=0 unmapped_count=0 without_store_count=0
     for (( index = 0; index < ${#ROW_STATES[@]}; index++ )); do
         case "${ROW_STATES[index]}" in
             LINKED)   linked_count=$(( linked_count + 1 )); continue ;;
             NO-STORE)
-                if key_holds_real_memory "${ROW_KEYS[index]}"; then
+                if key_holds_real_memory "${ROW_KEYS[index]}" \
+                    || memory_links_into_store_checkout "${ROW_KEYS[index]}" "${ROW_STORES[index]}"; then
                     without_store_count=$(( without_store_count + 1 ))
                 fi
                 continue ;;

@@ -3804,7 +3804,7 @@ want_rc  "...and the doctor exits non-zero on it"            1
 new_home ms4; write_cred; mk_memory_table
 mk_link_stub 0 "$UNMAPPED_ROW"$'\nclaude-memory-link: 7 linked, 0 to fix, 1 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
-want_out "exit 0 with an UNMAPPED row is a ⚠ giving both remedies: the table's, and by hand when the directory is gone" "⚠ memory directories no table entry claims (7 linked, 0 to fix, 1 unmapped, 0 without a store) — a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory aside, or the row is permanent"
+want_out "exit 0 with an UNMAPPED row is a ⚠ giving both remedies: the table's, and by hand when the directory is gone" "⚠ memory directories no table entry claims (7 linked, 0 to fix, 1 unmapped, 0 without a store) — a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory out of the projects directory, or the row is permanent"
 want_out "...with the row shown whole, empty fields and all"  "    $UNMAPPED_ROW"
 no_out   "...and never the ✓ of the summary-only exit 0"      "every memory directory is linked"
 want_rc  "...and an UNMAPPED key alone does not fail the doctor" 0
@@ -3862,7 +3862,7 @@ want_out "a link script that is not there is a ⚠, not a silence" "⚠ memory s
 new_home ms11; write_cred; mk_memory_table
 mk_link_stub 0 $'claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 3 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
-want_out "no store checked out, with keys waiting for one, is a ⚠ naming how many" "⚠ no memory store is checked out on this host (3 keys wait for one)"
+want_out "no store checked out, with keys waiting for one, is a ⚠ naming how many" "⚠ no store that these keys map to is checked out here (3 keys wait for one)"
 no_out   "...and never the ✓"                  "every memory directory is linked"
 want_rc  "...and it does not fail the doctor"  0
 
@@ -3871,21 +3871,21 @@ new_home ms12; write_cred; mk_memory_table
 mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 2 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "keys waiting beside linked ones is the ✓, carrying the count" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped, 2 without a store)"
-no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+no_out   "...and not the no-store ⚠"           "no store that these keys map to is checked out"
 
 # Nothing waits for anything: a host with the table and no memory yet is no finding.
 new_home ms13; write_cred; mk_memory_table
 mk_link_stub 0 $'claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "nothing linked and nothing waiting is the ✓" "✓ every memory directory is linked (0 linked, 0 to fix, 0 unmapped, 0 without a store)"
-no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+no_out   "...and not the no-store ⚠"           "no store that these keys map to is checked out"
 
 # Each has its own remedy, so one must not hide the other.
 new_home ms14; write_cred; mk_memory_table
 mk_link_stub 0 "$UNMAPPED_ROW"$'\nclaude-memory-link: 0 linked, 0 to fix, 1 unmapped, 3 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "an UNMAPPED row and no store here are two ⚠: the first" "⚠ memory directories no table entry claims (0 linked, 0 to fix, 1 unmapped, 3 without a store)"
-want_out "...and the second"                   "⚠ no memory store is checked out on this host (3 keys wait for one)"
+want_out "...and the second"                   "⚠ no store that these keys map to is checked out here (3 keys wait for one)"
 no_out   "...and never the ✓"                  "every memory directory is linked"
 
 # Exit 1 keeps its ✗ whatever else is waiting: what is to fix comes first.
@@ -3893,7 +3893,7 @@ new_home ms15; write_cred; mk_memory_table
 mk_link_stub 1 "$REAL_DIR_ROW"$'\nclaude-memory-link: 0 linked, 1 to fix, 0 unmapped, 3 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "exit 1 with keys waiting is the ✗"   "✗ memory directories are not linked into their stores (0 linked, 1 to fix, 0 unmapped, 3 without a store)"
-no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+no_out   "...and not the no-store ⚠"           "no store that these keys map to is checked out"
 
 # The counts go through arithmetic, so a summary is only one whose counts are numbers.
 # The stale three-count shape and a word for a count both read as no summary at all.
@@ -3907,7 +3907,7 @@ new_home ms17; write_cred; mk_memory_table
 mk_link_stub 0 $'claude-memory-link: x linked, 0 to fix, 0 unmapped, 3 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "a word for a count is no summary"    "(no summary)"
-no_out   "...and is not read as zero"          "no memory store is checked out"
+no_out   "...and is not read as zero"          "no store that these keys map to is checked out"
 
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
