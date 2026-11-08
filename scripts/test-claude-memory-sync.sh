@@ -1646,8 +1646,57 @@ check "status: an index line naming a missing file, or one file named by two ind
     "$RC|$OUT" \
     "0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago${NL}$ALPHA_STORE${TAB}warn${TAB}.: 1 index lines name a missing file, 0 files are named by more than one index line${NL}$ALPHA_STORE${TAB}warn${TAB}repos/$FIXTURE_OWNER/demo: 1 index lines name a missing file, 1 files are named by more than one index line"
 
+# ---------------------------------------------------------------------------------------------
+# units: the tick, and the two links ./install makes for it
+# ---------------------------------------------------------------------------------------------
+
+printf 'units: the service, the timer and their links\n'
+SYNC_SERVICE_UNIT="$DOTFILES/systemd/claude-memory-sync.service"
+SYNC_TIMER_UNIT="$DOTFILES/systemd/claude-memory-sync.timer"
+UNIT_COPIES_DIR="$TMPROOT/units"
+# The directives that carry a decision, as the service must hold them: the dash on ExecStartPre is what
+# lets a failed link step leave the sync to run, and 6 min outlasts the run's worst case of about 330 s.
+EXPECTED_SERVICE_DIRECTIVES="ConditionPathExists=%h/.local/share/claude-memory
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=-%h/.dotfiles/scripts/claude-memory-link.sh --apply
+ExecStart=%h/.dotfiles/scripts/claude-memory-sync.sh --apply
+TimeoutStartSec=6min"
+SERVICE_DIRECTIVE_ERE='^(Condition[A-Za-z]*|Type|Environment|ExecStartPre|ExecStart|TimeoutStartSec)='
+EXPECTED_TIMER_DIRECTIVES="OnCalendar=*:0/10
+RandomizedDelaySec=60
+Persistent=true
+WantedBy=default.target"
+TIMER_DIRECTIVE_ERE='^(On[A-Za-z]*|RandomizedDelaySec|Persistent|WantedBy)='
+check "units: the service runs the link step, which cannot stop it, then the sync's --apply, within 6 min" \
+    "$(grep -E "$SERVICE_DIRECTIVE_ERE" "$SYNC_SERVICE_UNIT")" "$EXPECTED_SERVICE_DIRECTIVES"
+check "units: the timer fires every 10 min, catching up a missed tick, wanted by default.target" \
+    "$(grep -E "$TIMER_DIRECTIVE_ERE" "$SYNC_TIMER_UNIT")" "$EXPECTED_TIMER_DIRECTIVES"
+if command -v systemd-analyze >/dev/null 2>&1; then
+    # verify checks that each command it runs EXISTS, and %h/.dotfiles is not there on a CI runner, so
+    # the service is verified through a copy whose two commands point at this checkout's scripts: the
+    # same unit text, commands that exist. The row above pins the real paths. The timer is verified
+    # next to it, by name.
+    mkdir -p "$UNIT_COPIES_DIR"
+    sed -e "s#^ExecStartPre=-%h/.dotfiles/scripts/#ExecStartPre=-$DOTFILES/scripts/#" \
+        -e "s#^ExecStart=%h/.dotfiles/scripts/#ExecStart=$DOTFILES/scripts/#" "$SYNC_SERVICE_UNIT" \
+        > "$UNIT_COPIES_DIR/claude-memory-sync.service"
+    cp "$SYNC_TIMER_UNIT" "$UNIT_COPIES_DIR/claude-memory-sync.timer"
+    check "units: systemd-analyze verify accepts both (both commands pointed at this checkout)" \
+        "$(systemd-analyze verify --man=no --recursive-errors=no "$UNIT_COPIES_DIR/claude-memory-sync.service" \
+            "$UNIT_COPIES_DIR/claude-memory-sync.timer" >/dev/null 2>&1 && echo ok || echo bad)" ok
+else
+    ok "units: systemd-analyze absent here; CI runs it"
+fi
+# shellcheck disable=SC2088  # the tilde is the literal text of the yaml line, not a path
+check "install.conf.yaml links the service (linked, not enabled)" \
+    "$(grep -c '^    ~/.config/systemd/user/claude-memory-sync.service: systemd/claude-memory-sync.service$' "$DOTFILES/install.conf.yaml")" 1
+# shellcheck disable=SC2088  # same: literal yaml text
+check "install.conf.yaml links the timer" \
+    "$(grep -c '^    ~/.config/systemd/user/claude-memory-sync.timer: systemd/claude-memory-sync.timer$' "$DOTFILES/install.conf.yaml")" 1
+
 printf '\n'
-EXPECTED_ROWS=94
+EXPECTED_ROWS=99
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
