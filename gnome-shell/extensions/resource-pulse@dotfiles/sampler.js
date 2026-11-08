@@ -9,6 +9,8 @@
 // - a sample stuck in flight for more than SAMPLE_STALL_TICKS intervals turns both surfaces to no data, once;
 // - an app scan stuck in flight for more than APP_SCAN_STALL_TICKS intervals drops the ranking, once, so "heaviest"
 //   shows no data instead of the last ranking as if it were live;
+// - a stall note that throws is caught and logged (the log call guarded too), so the timer callback always runs the
+//   next tick and returns SOURCE_CONTINUE: a throw there would end the GLib source silently;
 // - after every await, a destroyed (or restarted-baseline) check comes before any state is touched;
 // - the IO helpers are module functions with no access to sampler state, so only methods can change it;
 // - nothing a tick does can throw out of the timer callback;
@@ -758,17 +760,42 @@ export class Sampler {
 
     /**
      * The timer callback: notes a sample still in flight (see _noteSampleStillInFlight) and an app scan still in
-     * flight (see _noteAppScanStillInFlight), then runs the next tick.
+     * flight (see _noteAppScanStillInFlight), then runs the next tick. Each note runs through _runStallNote, so
+     * nothing a note throws can stop the next tick or end the source.
      *
      * @returns {boolean} GLib.SOURCE_CONTINUE: only source_remove ends the source, so its id is never stale.
      */
     _onTimeout() {
-        if (this._isSampleInFlight)
-            this._noteSampleStillInFlight();
-        if (this._isAppScanInFlight)
-            this._noteAppScanStillInFlight();
+        this._runStallNote('sample stall note', () => {
+            if (this._isSampleInFlight)
+                this._noteSampleStillInFlight();
+        });
+        this._runStallNote('app scan stall note', () => {
+            if (this._isAppScanInFlight)
+                this._noteAppScanStillInFlight();
+        });
         this._runNextTick();
         return GLib.SOURCE_CONTINUE;
+    }
+
+    /**
+     * Runs one stall note so that it cannot throw: a failure is logged, and a failure of that logging is dropped,
+     * since there is nowhere left to report it and the timer must go on.
+     *
+     * @param {string} noteName - What the note is, for the journal line.
+     * @param {function(): void} note - The note to run.
+     * @returns {void}
+     */
+    _runStallNote(noteName, note) {
+        try {
+            note();
+        } catch (error) {
+            try {
+                this._logRateLimited(`${noteName} failed: ${describeErrorWithStack(error)}`);
+            } catch {
+                // The log writer itself is failing; the next tick still has to run.
+            }
+        }
     }
 
     /**

@@ -35,6 +35,8 @@ const LATER_CLOCK_LABEL = '14:04';
 const PROC_STAT_FIXTURE_SUFFIX = '/proc/stat';
 /** The end of the root cgroup's cpu.stat path: the first file an app scan reads after listing the tree. */
 const ROOT_CGROUP_CPU_STAT_FIXTURE_SUFFIX = '/sys/fs/cgroup/cpu.stat';
+/** Thrown by the log writer of the rows that make the stall notes' own logging fail. */
+const LOG_WRITER_FAILURE_MESSAGE = 'log writer exploded';
 /** Linux's errno for "No such device": what reading a removed kernfs (cgroup) file returns. */
 const ENODEV_ERRNO = 19;
 const HERDR_LEAF_NAME = 'herdr-server.service';
@@ -1202,6 +1204,66 @@ test('sampler: once a stuck app scan settles the stall count starts over, so a l
                 [true, true, null]);
         });
     });
+
+/**
+ * A log writer that throws once armed, to stand for any failure inside a stall note.
+ *
+ * @returns {{log: function(string): void, arm: function(): void}} The writer and the switch that arms it.
+ */
+function makeFailingLogWriter() {
+    let isArmed = false;
+    return {
+        log: () => {
+            if (isArmed)
+                throw new Error(LOG_WRITER_FAILURE_MESSAGE);
+        },
+        arm: () => {
+            isArmed = true;
+        },
+    };
+}
+
+test('sampler: a sample stall note that throws (even its own logging) never ends the timer: the callback continues ' +
+    'and the next tick still runs', async () => {
+    await withTimerSpy(async spy => {
+        const failingLog = makeFailingLogWriter();
+        const stuck = makeStuckStatSampler(spy, {log: failingLog.log});
+        stuck.setStatReadStuck(true);
+        stuck.sampler.start();
+        for (let interval = 0; interval < SAMPLE_STALL_TICKS; interval++)
+            stuck.fireTimer();
+        failingLog.arm();
+        const tickCountBeforeStall = stuck.tickRuns.length;
+        const stallCallbackResult = stuck.fireTimer();
+        const tickCountAfterStall = stuck.tickRuns.length;
+        stuck.setStatReadStuck(false);
+        stuck.releaseStuckRead();
+        await stuck.tickRuns[0].tickRun;
+        stuck.sampler.destroy();
+        assertEqual([stallCallbackResult, tickCountAfterStall - tickCountBeforeStall],
+            [GLib.SOURCE_CONTINUE, 1]);
+    });
+});
+
+test('sampler: an app scan stall note that throws (even its own logging) never ends the timer: the callback ' +
+    'continues and the next tick still runs', async () => {
+    await withTimerSpy(async spy => {
+        const failingLog = makeFailingLogWriter();
+        const stuck = makeStuckScanSampler(spy, {log: failingLog.log});
+        const stuckTickIndex = await startWithNextScanStuck(stuck);
+        await fireTimerIntervals(stuck, APP_SCAN_STALL_TICKS);
+        failingLog.arm();
+        const tickCountBeforeStall = stuck.tickRuns.length;
+        const stallCallbackResult = stuck.fireTimer();
+        const tickCountAfterStall = stuck.tickRuns.length;
+        await stuck.tickRuns.at(-1).tickRun;
+        stuck.releaseStuckReads();
+        await stuck.tickRuns[stuckTickIndex].tickRun;
+        stuck.sampler.destroy();
+        assertEqual([stallCallbackResult, tickCountAfterStall - tickCountBeforeStall],
+            [GLib.SOURCE_CONTINUE, 1]);
+    });
+});
 
 test('sampler: a leaf whose file is gone with ENODEV (a scope that exited mid-read) is skipped silently, like ENOENT; ' +
     'any other read error is logged', async () => {
