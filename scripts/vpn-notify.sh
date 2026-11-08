@@ -99,9 +99,10 @@ NOTIFY_ICON='network-vpn-disconnected-symbolic'
 # Kernel state. Identical definition to vpn-failfast.sh, deliberately: two
 # components disagreeing about what "down" means is how one of them ends up
 # permanently wrong. UP means the interface exists, carries the UP flag, and has
-# at least one route through it WITH A GATEWAY -- the client deletes 0.0.0.0/1
-# and 128.0.0.0/1 on a drop while tun0 itself can linger, still flagged UP, with
-# only its own link-scope subnet route left.
+# at least one route through it WITH A GATEWAY -- the client deletes its pushed
+# gateway routes on a drop (the two halves under the full tunnel; the per-host
+# /32s and the VPC range since the 2026-11-08 split tunnel) while tun0 itself
+# can linger, still flagged UP, with only its own link-scope subnet route left.
 tunnel_up() {
     local links routes
     links="$(ip -j link show "$IFACE" 2>/dev/null)" || return 1

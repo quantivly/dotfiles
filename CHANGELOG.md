@@ -290,6 +290,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The VPN docs and comments stop describing a full tunnel.** The Client VPN endpoint has been a
+  split tunnel since 2026-11-08: one `/32` route per allowlisted server plus the VPC range, pushed
+  with a gateway, so `tunnel_up()` in vpn-failfast and vpn-notify is unchanged and measured correct
+  on the new shape (the state table gains that row). The DO-704 IPv6 egress block only fits a full
+  tunnel and is documented as superseded, to be disarmed with `vpn-setup --no-block-ipv6`.
+
 - **The rabota precompute timer runs 07:00–23:00 every day (DO-873).** It ran Mon–Fri 07:00–18:30,
   so the rank Sol's home is about to show was Friday's until Monday morning and last night's until
   07:00, while the phone is looked at in the evening and at weekends. Still every 30 minutes,

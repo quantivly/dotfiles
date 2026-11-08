@@ -9,9 +9,11 @@
 #
 # Why this exists
 # ---------------
-# The AWS Client VPN here is a full tunnel (`redirect-gateway def1`): the client
-# installs 0.0.0.0/1 and 128.0.0.0/1 via tun0. When it drops it DELETES both, and
-# the LAN default silently takes over -- so packets aimed at a Quantivly server
+# The AWS Client VPN here pushes routes to the Quantivly servers via tun0: a
+# full tunnel (0.0.0.0/1 + 128.0.0.0/1) until 2026-11-08, a split tunnel since
+# (one /32 per allowlisted host plus the VPC range). When it drops it DELETES
+# them, and the LAN default silently takes over -- so packets aimed at a
+# Quantivly server
 # still leave the machine, from an unauthorised source address, and the security
 # groups drop them with no RST and no ICMP. Measured on this box, tunnel up,
 # using SO_BINDTODEVICE to reproduce the tunnel-down path without touching the
@@ -101,6 +103,11 @@
 #
 # THE IPv6 BLOCK (DO-704), and why its polarity is the OPPOSITE of the above
 # ---------------------------------------------------------------------------
+# SUPERSEDED 2026-11-08: the endpoint is a split tunnel now, so IPv4 internet
+# traffic leaves via the ISP as well and there is no leak for this to close.
+# Disarmed here (`vpn-setup --no-block-ipv6`); the code stays for a full-tunnel
+# endpoint, where the rest of this section holds as written.
+#
 # The endpoint is SplitTunnel=False but only IPv4 is tunnelled: the client
 # installs the 0.0.0.0/1 + 128.0.0.0/1 pair and NOTHING for IPv6, so while the
 # tunnel is up every v6 packet still leaves via the ISP -- and with no family
@@ -174,8 +181,8 @@ IPV6="${VPN_FAILFAST_IPV6:-off}"
 # 2000::/3 would block nothing at all. Measured here: `ip -6 route get
 # 64:ff9b::1` resolves via the ISP default route.
 #
-# This pair is the exact mirror of the 0.0.0.0/1 + 128.0.0.0/1 the VPN client
-# installs for IPv4, which makes it self-explanatory in a routing table. Nothing
+# This pair is the exact mirror of the 0.0.0.0/1 + 128.0.0.0/1 a full-tunnel
+# client installs for IPv4, which makes it self-explanatory in a routing table. Nothing
 # that should keep working is caught by it, measured rather than assumed:
 # multicast is in `table local` (consulted by rule 0 before anything else),
 # link-local fe80::/64 and the on-link LAN /64 win on prefix length, and
@@ -353,6 +360,12 @@ read_config() {
 #
 # So counting routes on the interface would call a dead tunnel healthy; counting
 # routes WITH A GATEWAY does not.
+#
+# The split tunnel (since 2026-11-08) pushes another shape, and the test is the
+# same: one host route per allowlisted server plus 172.31.0.0/16, each with
+# `"gateway": "172.31.81.33"` (20 gateway routes measured on the first
+# reconnect), and the link-scope /27 without one. That day a drop removed tun0
+# outright; the lingering case above is still what a drop MAY look like.
 tunnel_up() {
     local links routes
     links="$(ip -j link show "$IFACE" 2>/dev/null)" || return 1
