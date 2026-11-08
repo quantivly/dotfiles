@@ -3861,8 +3861,8 @@ vpn-doctor() {
               printf '      %s\n' ${=v6_owned}
               _doctor_bad "  Remove now:  sudo ${_VPN_SCRIPT_ETC} --clear" ;;
     not-armed)
-              _doctor_note "IPv6 is NOT blocked — the tunnel carries no v6, so v6 traffic leaves via the ISP (DO-704)"
-              _doctor_note "  Arm it with: vpn-setup --block-ipv6" ;;
+              _doctor_note "IPv6 block disarmed — the endpoint is a split tunnel since 2026-11-08, so v4 leaves via the ISP too (DO-704)"
+              _doctor_note "  For a full-tunnel endpoint only, arm it with: vpn-setup --block-ipv6" ;;
   esac
 
   if (( v6_armed )); then
