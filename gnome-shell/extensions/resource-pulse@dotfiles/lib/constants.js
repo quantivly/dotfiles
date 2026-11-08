@@ -79,10 +79,20 @@ export const KERNEL_AND_OTHER_LABEL = 'kernel & other';
 export const UNIT_DISPLAY_ALIASES = {'herdr-server': 'herdr agents', 'org.gnome.Shell': 'GNOME Shell'};
 /** Bytes in one gibibyte (the memory unit shown everywhere). */
 export const BYTES_PER_GIBIBYTE = 1024 ** 3;
-/** Filled and empty cells of the three-cell pressure meter. */
-export const PRESSURE_METER_FILLED_CELL = '▮';
-export const PRESSURE_METER_EMPTY_CELL = '▯';
 /** Number of cells in the pressure meter (one more than the number of band thresholds). */
 export const PRESSURE_METER_CELLS = 3;
-/** What a pressure meter shows when its avg10 is unavailable. */
-export const PRESSURE_METER_NO_DATA = '···';
+/** Width of one drawn pressure-meter cell, in logical pixels: whole pixels keep its edges crisp. */
+export const PRESSURE_METER_CELL_WIDTH_PX = 6;
+/** Space between two pressure-meter cells, in logical pixels. */
+export const PRESSURE_METER_CELL_GAP_PX = 2;
+/** Width of a whole pressure meter, in logical pixels: its cells and the gaps between them. */
+export const PRESSURE_METER_WIDTH_PX =
+    PRESSURE_METER_CELLS * PRESSURE_METER_CELL_WIDTH_PX + (PRESSURE_METER_CELLS - 1) * PRESSURE_METER_CELL_GAP_PX;
+/** Height of a pressure meter, in logical pixels: about the cap height of the card's text. */
+export const PRESSURE_METER_HEIGHT_PX = 10;
+/** Thickness of the dash a pressure meter draws for no data, in logical pixels. */
+export const PRESSURE_METER_NO_DATA_DASH_THICKNESS_PX = 2;
+/** Filled pressure-meter cells as [red, green, blue, alpha], each 0–1: the card's value colour. */
+export const PRESSURE_METER_FILL_RGBA = [1, 1, 1, 1];
+/** Empty pressure-meter cells, and the no-data dash, as [red, green, blue, alpha], each 0–1: a visible groove. */
+export const PRESSURE_METER_TRACK_RGBA = [1, 1, 1, 0.25];

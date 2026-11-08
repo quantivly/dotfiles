@@ -6,7 +6,10 @@
 // number is a gap (no data, drawn as nothing), every value is clamped to 0–1, and an area with no size draws
 // nothing. Sizes are in the context's units; St's drawing area hands over logical pixels with the context
 // already scaled to the monitor, so the shapes stay sharp at any scale factor.
-import {GRAPH_BASELINE_THICKNESS_PX} from './lib/constants.js';
+import {
+    GRAPH_BASELINE_THICKNESS_PX, PRESSURE_METER_CELL_GAP_PX, PRESSURE_METER_CELLS,
+    PRESSURE_METER_NO_DATA_DASH_THICKNESS_PX,
+} from './lib/constants.js';
 
 /**
  * Clamps a fraction to 0–1, treating anything that is not a finite number as a gap.
@@ -159,4 +162,83 @@ export function drawUsedBar(cr, widthPx, heightPx, fraction, fillRgba, trackRgba
         cr.rectangle(0, 0, fillWidthPx, heightPx);
         cr.fill();
     }
+}
+
+/**
+ * The cells of a pressure meter, left to right: PRESSURE_METER_CELLS equal, full-height cells with
+ * PRESSURE_METER_CELL_GAP_PX between them.
+ *
+ * @param {number} widthPx - Meter width.
+ * @param {number} heightPx - Meter height.
+ * @returns {Array<[number, number, number, number]>} One [x, y, width, height] per cell; empty when the area has no
+ *     room for them.
+ */
+export function pressureMeterCellRects(widthPx, heightPx) {
+    if (!hasDrawableArea(widthPx, heightPx))
+        return [];
+    const gapsWidthPx = (PRESSURE_METER_CELLS - 1) * PRESSURE_METER_CELL_GAP_PX;
+    const cellWidthPx = (widthPx - gapsWidthPx) / PRESSURE_METER_CELLS;
+    if (cellWidthPx <= 0)
+        return [];
+    return Array.from({length: PRESSURE_METER_CELLS}, (_unused, cellIndex) =>
+        [cellIndex * (cellWidthPx + PRESSURE_METER_CELL_GAP_PX), 0, cellWidthPx, heightPx]);
+}
+
+/**
+ * Turns what the card passes for a pressure band into a cell count, treating anything that is not a finite
+ * number as no data.
+ *
+ * @param {*} band - A band from lib/pressure.js: 0–3, or null for no data.
+ * @returns {number|null} Filled cells, 0 to PRESSURE_METER_CELLS, or null for no data.
+ */
+function filledCellCountOrNoData(band) {
+    if (typeof band !== 'number' || !Number.isFinite(band))
+        return null;
+    return Math.min(PRESSURE_METER_CELLS, Math.max(0, Math.floor(band)));
+}
+
+/**
+ * Fills some rectangles in one colour, as one path.
+ *
+ * @param {Cairo.Context} cr - Where to draw.
+ * @param {Array<[number, number, number, number]>} rects - [x, y, width, height] each.
+ * @param {number[]} rgba - Their colour, as [red, green, blue, alpha], each 0–1.
+ * @returns {void}
+ */
+function fillRects(cr, rects, rgba) {
+    if (rects.length === 0)
+        return;
+    cr.setSourceRGBA(...rgba);
+    for (const rect of rects)
+        cr.rectangle(...rect);
+    cr.fill();
+}
+
+/**
+ * Draws a pressure meter: the first `band` cells in the fill colour and the rest as empty cells in the track
+ * colour. No data draws no cell at all, only a dash across the middle, so it differs from band 0 (three empty
+ * cells) in shape and not only in colour.
+ *
+ * @param {Cairo.Context} cr - Where to draw.
+ * @param {number} widthPx - Meter width.
+ * @param {number} heightPx - Meter height.
+ * @param {0|1|2|3|null} band - Pressure band (clamped to 0–3), or null for no data; anything that is not a finite
+ *     number is no data.
+ * @param {number[]} fillRgba - Filled cells, as [red, green, blue, alpha], each 0–1.
+ * @param {number[]} trackRgba - Empty cells and the no-data dash, as [red, green, blue, alpha], each 0–1.
+ * @returns {void}
+ */
+export function drawPressureMeter(cr, widthPx, heightPx, band, fillRgba, trackRgba) {
+    if (!hasDrawableArea(widthPx, heightPx))
+        return;
+    cr.newPath();
+    const filledCellCount = filledCellCountOrNoData(band);
+    if (filledCellCount === null) {
+        const dashThicknessPx = Math.min(PRESSURE_METER_NO_DATA_DASH_THICKNESS_PX, heightPx);
+        fillRects(cr, [[0, (heightPx - dashThicknessPx) / 2, widthPx, dashThicknessPx]], trackRgba);
+        return;
+    }
+    const cellRects = pressureMeterCellRects(widthPx, heightPx);
+    fillRects(cr, cellRects.slice(0, filledCellCount), fillRgba);
+    fillRects(cr, cellRects.slice(filledCellCount), trackRgba);
 }

@@ -1,7 +1,7 @@
 import {test, assertEqual} from './harness.js';
 import {
-    formatGibibytes, formatWholePercent, memoryLine, swapLine, swapAmount, clusterSuffix, pressureMeter,
-    waitingOnLine, ellipsize, heaviestLine, hoverLabel, cardText,
+    formatGibibytes, formatWholePercent, memoryLine, swapLine, swapAmount, clusterSuffix, waitingOnMeters,
+    ellipsize, heaviestLine, hoverLabel, cardText,
 } from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {cardPosition, hoverLabelPosition} from '../extensions/resource-pulse@dotfiles/lib/layout.js';
 
@@ -75,7 +75,8 @@ const CARD_LABELS = {
 // What the card shows with no numbers at all, before the CPU row's "since".
 const CARD_NO_DATA_VALUES = {
     cpuClusterSuffix: '', memoryValue: 'no data', swapValue: 'no data',
-    waitingOnValue: 'CPU ···  mem ···  io ···', heaviestValue: '—',
+    waitingOnMeters: [{label: 'CPU', band: null}, {label: 'mem', band: null}, {label: 'io', band: null}],
+    heaviestValue: '—',
 };
 
 /**
@@ -113,12 +114,12 @@ test('clusterSuffix with one side null shows only the other', () =>
         clusterSuffix({performancePercent: null, efficiencyPercent: 40}),
         clusterSuffix({performancePercent: null, efficiencyPercent: null})], ['P 80', 'E 40', '']));
 
-test('pressureMeter draws each band and no data', () =>
-    assertEqual([0, 1, 2, 3, null].map(pressureMeter), ['▯▯▯', '▮▯▯', '▮▮▯', '▮▮▮', '···']));
-test('waitingOnLine bands avg10 percents (not bands) and keeps two spaces between groups', () =>
-    assertEqual(waitingOnLine({cpu: 12, memory: 3, io: 0}), 'CPU ▮▯▯  mem ▯▯▯  io ▯▯▯'));
-test('waitingOnLine with a null avg10 shows ···', () =>
-    assertEqual(waitingOnLine({cpu: null, memory: 60, io: 30}), 'CPU ···  mem ▮▮▮  io ▮▮▯'));
+test('waitingOnMeters bands avg10 percents (not bands), labelled CPU, mem and io in that order', () =>
+    assertEqual(waitingOnMeters({cpu: 12, memory: 3, io: 0}),
+        [{label: 'CPU', band: 1}, {label: 'mem', band: 0}, {label: 'io', band: 0}]));
+test('waitingOnMeters: a null avg10 is no data (band null) while the others still band', () =>
+    assertEqual(waitingOnMeters({cpu: null, memory: 60, io: 30}),
+        [{label: 'CPU', band: null}, {label: 'mem', band: 3}, {label: 'io', band: 2}]));
 
 test('ellipsize leaves a name of exactly maxChars alone', () =>
     assertEqual(ellipsize('a'.repeat(18), 18), 'a'.repeat(18)));
@@ -167,7 +168,8 @@ test('cardText with every part: the mockup\'s labels and rows, from the same for
     const expected = {
         ...CARD_LABELS,
         cpuValue: '23%', cpuClusterSuffix: 'P 41 · E 6', memoryValue: '16.4 of 30.3 GiB',
-        swapValue: '1.6 GiB (0.4 in RAM)', waitingOnValue: 'CPU ▮▯▯  mem ▯▯▯  io ▯▯▯',
+        swapValue: '1.6 GiB (0.4 in RAM)',
+        waitingOnMeters: [{label: 'CPU', band: 1}, {label: 'mem', band: 0}, {label: 'io', band: 0}],
         heaviestValue: 'Chromium 31% · herdr agents 15.7 GiB',
     };
     assertEqual(pickFields(cardText(CARD_SNAPSHOT, '14:02'), Object.keys(expected)), expected);

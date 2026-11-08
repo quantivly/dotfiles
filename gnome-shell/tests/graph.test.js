@@ -5,10 +5,12 @@ import Cairo from 'cairo';
 
 import {test, assertEqual} from './harness.js';
 import {
-    areaGraphPolygons, drawAreaGraph, drawUsedBar, padWithLeadingGaps, usedBarFillWidthPx,
+    areaGraphPolygons, drawAreaGraph, drawPressureMeter, drawUsedBar, padWithLeadingGaps, pressureMeterCellRects,
+    usedBarFillWidthPx,
 } from '../extensions/resource-pulse@dotfiles/graph.js';
 import {
-    BASELINE_RGBA, CPU_GRAPH_RGBA, GRAPH_BASELINE_THICKNESS_PX, MEMORY_GRAPH_RGBA, USED_BAR_TRACK_RGBA,
+    BASELINE_RGBA, CPU_GRAPH_RGBA, GRAPH_BASELINE_THICKNESS_PX, MEMORY_GRAPH_RGBA, PRESSURE_METER_FILL_RGBA,
+    PRESSURE_METER_HEIGHT_PX, PRESSURE_METER_TRACK_RGBA, PRESSURE_METER_WIDTH_PX, USED_BAR_TRACK_RGBA,
 } from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 // The top-bar graph's size, as the brief names it for the no-throw rows.
@@ -20,6 +22,10 @@ const SMALL_HEIGHT_PX = 10;
 const TEST_FILL_RGBA = [1, 0, 0, 1];
 const TEST_TRACK_RGBA = [0, 0, 1, 0.5];
 const RGBA_COMPONENT_COUNT = 4;
+// The card's pressure meter: 22×10, three 6 px cells with 2 px gaps (x 0, 8 and 16), and a 2 px no-data dash
+// across the middle (y 4).
+const METER_CELL_RECTS = [[0, 0, 6, 10], [8, 0, 6, 10], [16, 0, 6, 10]];
+const METER_NO_DATA_DASH_RECT = [0, 4, 22, 2];
 
 /**
  * Runs a drawing callback against a real Cairo context on a fresh ARGB32 image surface, then frees both.
@@ -62,6 +68,29 @@ function recordingContext(cr, calls) {
 }
 
 /**
+ * Records the Cairo calls a pressure meter makes for one band, leaving out newPath.
+ *
+ * @param {*} band - What the card would pass: a band, null, or anything else.
+ * @returns {Array<Array<*>>} [methodName, ...args] per call.
+ */
+function pressureMeterCalls(band) {
+    const calls = [];
+    drawOnImageSurface(PRESSURE_METER_WIDTH_PX, PRESSURE_METER_HEIGHT_PX, cr =>
+        drawPressureMeter(recordingContext(cr, calls), PRESSURE_METER_WIDTH_PX, PRESSURE_METER_HEIGHT_PX, band,
+            TEST_FILL_RGBA, TEST_TRACK_RGBA));
+    return calls.filter(([methodName]) => methodName !== 'newPath');
+}
+
+/**
+ * The calls that fill some rectangles in one colour.
+ *
+ * @param {number[]} rgba - The colour.
+ * @param {Array<number[]>} rects - [x, y, width, height] each.
+ * @returns {Array<Array<*>>} setSourceRGBA, one rectangle per rect, then fill.
+ */
+const fillCalls = (rgba, rects) => [['setSourceRGBA', ...rgba], ...rects.map(rect => ['rectangle', ...rect]), ['fill']];
+
+/**
  * Says whether a value is an [red, green, blue, alpha] colour with every component a number from 0 to 1.
  *
  * @param {*} rgba - The candidate colour.
@@ -87,6 +116,11 @@ test('drawAreaGraph on a 30×16 surface does not throw for values above 1', () =
     drawOnImageSurface(SURFACE_WIDTH_PX, SURFACE_HEIGHT_PX, cr =>
         drawAreaGraph(cr, SURFACE_WIDTH_PX, SURFACE_HEIGHT_PX, [1.5, 2, 100, 0.5],
             CPU_GRAPH_RGBA, BASELINE_RGBA)));
+test('drawPressureMeter on a 22×10 surface does not throw for any band, no data, or nonsense', () =>
+    drawOnImageSurface(PRESSURE_METER_WIDTH_PX, PRESSURE_METER_HEIGHT_PX, cr => {
+        for (const band of [0, 1, 2, 3, null, undefined, NaN, Infinity, 4, -1, 1.5, '2'])
+            drawPressureMeter(cr, PRESSURE_METER_WIDTH_PX, PRESSURE_METER_HEIGHT_PX, band, TEST_FILL_RGBA, TEST_TRACK_RGBA);
+    }));
 test('drawUsedBar on a 30×16 surface does not throw for null, NaN, above 1 or below 0', () =>
     drawOnImageSurface(SURFACE_WIDTH_PX, SURFACE_HEIGHT_PX, cr => {
         for (const fraction of [null, NaN, 1.5, -0.5])
@@ -164,9 +198,32 @@ test('drawUsedBar fills the used share in the fill colour and only the rest in t
     ]);
 });
 
+test('pressureMeterCellRects: three equal full-height cells with 2 px gaps; none in a zero-sized area', () => {
+    assertEqual(pressureMeterCellRects(PRESSURE_METER_WIDTH_PX, PRESSURE_METER_HEIGHT_PX), METER_CELL_RECTS);
+    assertEqual(pressureMeterCellRects(0, PRESSURE_METER_HEIGHT_PX), [], 'zero width');
+    assertEqual(pressureMeterCellRects(PRESSURE_METER_WIDTH_PX, 0), [], 'zero height');
+});
+test('drawPressureMeter band 1: the first cell in the fill colour, the other two as empty cells in the track colour',
+    () => assertEqual(pressureMeterCalls(1),
+        [...fillCalls(TEST_FILL_RGBA, METER_CELL_RECTS.slice(0, 1)), ...fillCalls(TEST_TRACK_RGBA, METER_CELL_RECTS.slice(1))]));
+test('drawPressureMeter band 0 draws three empty cells and band 3 three filled ones', () => {
+    assertEqual(pressureMeterCalls(0), fillCalls(TEST_TRACK_RGBA, METER_CELL_RECTS), 'band 0');
+    assertEqual(pressureMeterCalls(3), fillCalls(TEST_FILL_RGBA, METER_CELL_RECTS), 'band 3');
+});
+test('drawPressureMeter with no data draws no cell at all, only a dash across the middle: a shape, not a colour', () =>
+    assertEqual(pressureMeterCalls(null), fillCalls(TEST_TRACK_RGBA, [METER_NO_DATA_DASH_RECT])));
+test('drawPressureMeter clamps a band above 3 or below 0, and draws anything not a finite number as no data', () => {
+    assertEqual(pressureMeterCalls(4), pressureMeterCalls(3), 'above 3');
+    assertEqual(pressureMeterCalls(-1), pressureMeterCalls(0), 'below 0');
+    for (const notABand of [undefined, NaN, Infinity, '2'])
+        assertEqual(pressureMeterCalls(notABand), pressureMeterCalls(null), String(notABand));
+});
+
 test('graph colour constants are [red, green, blue, alpha], each 0–1', () => {
     assertEqual(isRgbaInUnitRange(CPU_GRAPH_RGBA), true, 'CPU_GRAPH_RGBA');
     assertEqual(isRgbaInUnitRange(MEMORY_GRAPH_RGBA), true, 'MEMORY_GRAPH_RGBA');
     assertEqual(isRgbaInUnitRange(BASELINE_RGBA), true, 'BASELINE_RGBA');
     assertEqual(isRgbaInUnitRange(USED_BAR_TRACK_RGBA), true, 'USED_BAR_TRACK_RGBA');
+    assertEqual(isRgbaInUnitRange(PRESSURE_METER_FILL_RGBA), true, 'PRESSURE_METER_FILL_RGBA');
+    assertEqual(isRgbaInUnitRange(PRESSURE_METER_TRACK_RGBA), true, 'PRESSURE_METER_TRACK_RGBA');
 });

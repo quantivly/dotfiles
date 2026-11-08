@@ -70,3 +70,13 @@
 .resource-pulse-card-detail-row {
   spacing: 8px;
 }
+
+/* The "waiting on" meters: wider gaps between the three, a narrow one between each label and its drawn cells
+   (sized from lib/constants.js, since graph.js lays the cells out in that size). */
+.resource-pulse-card-pressure-meters {
+  spacing: 12px;
+}
+
+.resource-pulse-card-pressure-group {
+  spacing: 4px;
+}

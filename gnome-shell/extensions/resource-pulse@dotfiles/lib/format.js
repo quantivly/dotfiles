@@ -1,22 +1,22 @@
-// Every string the top-bar label and the desktop card show. Pure functions; the Shell glue only calls these.
-import {
-    BYTES_PER_GIBIBYTE, PRESSURE_METER_CELLS, PRESSURE_METER_EMPTY_CELL, PRESSURE_METER_FILLED_CELL,
-    PRESSURE_METER_NO_DATA,
-} from './constants.js';
-import {APP_NAME_MAX_CHARS} from './constants.js';
+// Every string the top-bar label and the desktop card show, and the bands of the card's drawn pressure meters.
+// Pure functions; the Shell glue only calls these.
+import {APP_NAME_MAX_CHARS, BYTES_PER_GIBIBYTE} from './constants.js';
 import {pressureBand} from './pressure.js';
 
 const NO_DATA_TEXT = 'no data';
 const SEPARATOR = ' · ';
 const ELLIPSIS = '…';
 const EM_DASH = '—';
-const WAITING_ON_GROUP_SEPARATOR = '  ';
 const SWAP_LABEL = 'swap';
 // The desktop card's row labels, as in the mockup the user picked (the spec's "Decided by the user", item 1).
 const CARD_CPU_LABEL = 'CPU';
 const CARD_MEMORY_LABEL = 'MEM';
 const CARD_WAITING_ON_LABEL = 'waiting on:';
 const CARD_HEAVIEST_LABEL = 'heaviest:';
+// The labels before the card's three "waiting on" meters.
+const WAITING_ON_CPU_LABEL = 'CPU';
+const WAITING_ON_MEMORY_LABEL = 'mem';
+const WAITING_ON_IO_LABEL = 'io';
 const NO_PRESSURE_DATA = {cpu: null, memory: null, io: null};
 
 /**
@@ -102,30 +102,24 @@ export function clusterSuffix(cpuClusters) {
 }
 
 /**
- * Draws a three-cell pressure meter.
- *
- * @param {0|1|2|3|null} band - Pressure band, or null for no data.
- * @returns {string} '▯▯▯' to '▮▮▮', or '···'.
+ * @typedef {object} PressureMeter
+ * @property {string} label - What the meter is for: 'CPU', 'mem' or 'io'.
+ * @property {0|1|2|3|null} band - How many of its three cells are filled, or null for no data (graph.js
+ *     drawPressureMeter draws it).
  */
-export function pressureMeter(band) {
-    if (band === null || band === undefined)
-        return PRESSURE_METER_NO_DATA;
-    return PRESSURE_METER_FILLED_CELL.repeat(band) + PRESSURE_METER_EMPTY_CELL.repeat(PRESSURE_METER_CELLS - band);
-}
 
 /**
- * Describes what the machine is waiting on.
+ * What the machine is waiting on, as the card's three drawn meters: CPU, then memory, then io.
  *
  * @param {{cpu: number|null, memory: number|null, io: number|null}} pressureAvg10 - PSI some avg10 percents.
- * @returns {string} For example 'CPU ▮▯▯  mem ▯▯▯  io ▯▯▯'.
+ * @returns {PressureMeter[]} For example [{label: 'CPU', band: 1}, {label: 'mem', band: 0}, {label: 'io', band: 0}].
  */
-export function waitingOnLine(pressureAvg10) {
-    const meterOf = avg10Percent => pressureMeter(pressureBand(avg10Percent));
+export function waitingOnMeters(pressureAvg10) {
     return [
-        `CPU ${meterOf(pressureAvg10.cpu)}`,
-        `mem ${meterOf(pressureAvg10.memory)}`,
-        `io ${meterOf(pressureAvg10.io)}`,
-    ].join(WAITING_ON_GROUP_SEPARATOR);
+        {label: WAITING_ON_CPU_LABEL, band: pressureBand(pressureAvg10.cpu)},
+        {label: WAITING_ON_MEMORY_LABEL, band: pressureBand(pressureAvg10.memory)},
+        {label: WAITING_ON_IO_LABEL, band: pressureBand(pressureAvg10.io)},
+    ];
 }
 
 /**
@@ -222,14 +216,14 @@ function cardCpuValue(cpuPercent, hasNoNumbers, lastGoodClockLabel) {
  * @property {string} swapLabel - 'swap'.
  * @property {string} swapValue - swapAmount: for example '1.6 GiB (0.4 in RAM)'.
  * @property {string} waitingOnLabel - 'waiting on:'.
- * @property {string} waitingOnValue - waitingOnLine: for example 'CPU ▮▯▯  mem ▯▯▯  io ▯▯▯'.
+ * @property {PressureMeter[]} waitingOnMeters - waitingOnMeters: a label and a band for CPU, memory and io.
  * @property {string} heaviestLabel - 'heaviest:'.
  * @property {string} heaviestValue - heaviestLine: for example 'Chromium 31% · herdr agents 15.7 GiB'.
  */
 
 /**
  * Every string on the desktop card, from one snapshot: a muted label and a value per row, as in the mockup. A
- * missing part says "no data" (or '···', or '—') rather than showing a stale number as live.
+ * missing part says "no data" (or '—', or a meter band of null) rather than showing a stale number as live.
  *
  * @param {import('../sampler.js').Snapshot|null} snapshot - The latest snapshot, or null before the first.
  * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data.
@@ -248,7 +242,7 @@ export function cardText(snapshot, lastGoodClockLabel) {
         swapLabel: SWAP_LABEL,
         swapValue: swapAmount(snapshot?.swap ?? null),
         waitingOnLabel: CARD_WAITING_ON_LABEL,
-        waitingOnValue: waitingOnLine(snapshot?.pressureAvg10 ?? NO_PRESSURE_DATA),
+        waitingOnMeters: waitingOnMeters(snapshot?.pressureAvg10 ?? NO_PRESSURE_DATA),
         heaviestLabel: CARD_HEAVIEST_LABEL,
         heaviestValue: heaviestLine(snapshot?.apps ?? null),
     };
