@@ -78,12 +78,13 @@ export default class ResourcePulseExtension extends Extension {
         this._indicator = null;
         this._card = null;
         this._cardPlacementLaterId = null;
-        // Kept across enable() and disable(), and handed to every sampler, so a failure that repeats on every
-        // enable (every unlock and blank) is still logged at most once per 10 minutes.
-        this._errorLog = new RateLimitedLogger({
-            nowUsec: () => GLib.get_monotonic_time(),
-            write: line => console.error(line),
-        });
+        // Both limiters are kept across enable() and disable(), so a failure that repeats on every enable (every
+        // unlock and blank) is still logged at most once per 10 minutes. The extension's own failures (a start
+        // that failed, a teardown step that threw) leave it broken: errors. The sampler's (an unreadable /proc
+        // file, a failed app scan) heal by themselves: warnings, as they were before the limiter was shared.
+        const nowUsec = () => GLib.get_monotonic_time();
+        this._errorLog = new RateLimitedLogger({nowUsec, write: line => console.error(line)});
+        this._samplerLog = new RateLimitedLogger({nowUsec, write: line => console.warn(line)});
     }
 
     /**
@@ -101,7 +102,7 @@ export default class ResourcePulseExtension extends Extension {
         const enableToken = {};
         this._enableToken = enableToken;
         try {
-            this._sampler = new Sampler({resolveAppName: lookUpAppName, errorLog: this._errorLog});
+            this._sampler = new Sampler({resolveAppName: lookUpAppName, errorLog: this._samplerLog});
             this._followOverviewWithAppScan();
             this._indicator = new PulseIndicator(this._sampler);
             Main.panel.addToStatusArea(this.uuid, this._indicator, systemMenuPanelIndex(), PANEL_BOX);

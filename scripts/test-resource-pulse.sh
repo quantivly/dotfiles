@@ -154,8 +154,11 @@ teardown_destroy_order="$(grep -E "run: \(\) => (card|indicator|sampler)\?\.dest
   | sed -E 's/.*=> ([a-z]+)\?\.destroy.*/\1/' | tr '\n' ' ')"
 check "extension.js tears down in guarded steps (runEveryStep), destroying the card, then the indicator, then the sampler" \
   "$teardown_destroy_order|$(grep -c -F 'runEveryStep([' "$EXTENSION_JS" 2>/dev/null)" "card indicator sampler |1"
-check "extension.js hands its rate-limited logger to every sampler, so the limit spans enables (each blank and lock)" \
-  "$(grep -c -F 'errorLog: this._errorLog' "$EXTENSION_JS" 2>/dev/null)" 1
+# The sampler's own failures are self-healing, so they stay warnings (as they
+# were before the logger was shared); the extension's start and teardown
+# failures are errors. Each kind has one limiter that outlives every enable.
+check "extension.js hands every sampler one rate-limited logger that writes warnings and spans enables" \
+  "$(grep -c -F 'errorLog: this._samplerLog' "$EXTENSION_JS" 2>/dev/null):$(grep -c -E 'this\._samplerLog = new RateLimitedLogger\(\{nowUsec, write: line => console\.warn\(line\)\}\)' "$EXTENSION_JS" 2>/dev/null)" "1:1"
 check "indicator.js re-places a shown hover label when its width or the display scale changes" \
   "$(grep -c -E "'notify::(width|scale-factor)'" "$EXT_DIR/indicator.js" 2>/dev/null)" 2
 # notify::width is emitted during allocation, and moving an actor then makes
