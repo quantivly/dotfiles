@@ -3,10 +3,11 @@
 # scripts/claude-memory-sync.sh
 # =============================
 #
-# Commit each checked-out Claude Code memory store: stage every file in it, withhold each file that
-# carries a credential shape, and commit the rest as one commit. --check reports what a run would
-# commit and withhold; --scan looks for credential shapes in a committed tree. This is the LOCAL
-# half: fetching, merging and pushing are the network half's (DO-892).
+# Sync each checked-out Claude Code memory store with its remote: stage every file in it, withhold
+# each file that carries a credential shape, commit the rest as one commit, fetch, merge the remote in
+# (never rebase), keeping both copies on a conflict, and push. --check reports what a run would commit
+# and withhold; --scan looks for credential shapes in a committed tree; --status reports how each store
+# last synced, for the doctor.
 # Design: docs/superpowers/specs/2026-11-04-shared-claude-config-design.md (D7 and its amendments
 # M1-M8).
 #
@@ -32,19 +33,68 @@
 # counts with the same pathspec, so a leftover partial never reads as pending. The stage, the gate and
 # the commit run holding <state dir>/link.lock, the link script's own lock, so an index mid-write is
 # never staged. A run waits for it CLAUDE_MEMORY_LOCK_WAIT_SECONDS at most (120 by default), then
-# gives up on that store as could-not-run. The lock is released after the commit: the network half
-# must not hold up a link run. Every git call is made with the lock's descriptor closed in git's own
-# process, so nothing git starts (a hook, a file-system monitor, a detached maintenance) can hold the
-# lock past the end of this run and stop every later link run.
+# gives up on that store as could-not-run. The merge runs under the same hold, since it writes into the
+# tree the link script writes into; the fetch runs before the lock and the push after it, so no network
+# wait ever holds up a link run, and the fetch, the lock wait and the push (60 + 120 + 60 s at most) fit
+# a unit's five minutes. Every git call is made with the lock's descriptor closed in git's own process,
+# so nothing git starts (a hook, a file-system monitor, a detached maintenance) can hold the lock past
+# the end of this run and stop every later link run.
 #
-# NO HOOK RUNS. Every git call that writes to a store is made with core.hooksPath=/dev/null and
-# core.fsmonitor=false (GIT_WRITE_SAFETY_OPTIONS), and the commit also with --no-verify. A host's
-# hooks would otherwise run between the gate and the commit, and a hook can stage a file the gate
-# held back; the global pre-commit this repository installs (config/git/hooks) runs `pre-commit run`
-# in any repository holding a .pre-commit-config.yaml, which would make a memory file a program every
-# host's timer runs. On git 2.53 core.hooksPath alone keeps every hook off; --no-verify is a second
-# switch on the hooks a commit runs, should a later git define hooks where core.hooksPath does not
-# reach.
+# NO HOOK RUNS AND NO MONITOR STARTS. Every git call, a read as much as a write, is made with
+# core.hooksPath=/dev/null and core.fsmonitor=false (GIT_SAFETY_OPTIONS, applied by git_in_store), and
+# the commit, the merge and the push also with --no-verify. A host's hooks would otherwise run between
+# the gate and the commit, and a hook can stage a file the gate held back; the global pre-commit this
+# repository installs (config/git/hooks) runs `pre-commit run` in any repository holding a
+# .pre-commit-config.yaml, which would make a memory file a program every host's timer runs. A
+# file-system monitor the host names runs on any call that reads the index, the gate's own reads
+# included, and can stage a file the same way. On git 2.53 core.hooksPath alone keeps every hook off;
+# --no-verify is a second switch, should a later git define hooks where core.hooksPath does not reach.
+# The maintenance a call may start runs in the foreground (autoDetach off), so the run ends when its
+# git work has, and a unit that stops every process it started when the run ends never cuts one short.
+#
+# AUTH. Before any git call for a store, `scripts/gh-route <store dir>` says which GitHub account the
+# directory routes to (M7: the keyring is keyed by host and cannot choose one):
+#   could not answer (exit 2)        could-not-run, and the store is not touched
+#   matched or default, with a       the token is read from the file gh-route names into this
+#     token in the file it names     process, and given to the fetch and the push alone, in their
+#                                    environment (CLAUDE_MEMORY_GIT_TOKEN, with GH_CONFIG_DIR), never
+#                                    in an argument; each runs with every configured credential
+#                                    helper cleared and one inline helper that answers only `get`,
+#                                    from that variable, and fails when it is empty
+#   matched or default, the file     skipped-no-token: the store is committed, and nothing is fetched
+#     missing, empty or unreadable   or pushed
+#   none, no-repo or no-remotes      git's own credential helpers, unpinned
+# The token is in no argument, no output and no status. A network call has no prompt and no askpass
+# program, runs in the C locale (its errors are read), and is cut off after NETWORK_TIMEOUT_SECONDS.
+#
+# ONE ATTEMPT PER RUN, for a store with an origin:
+#   refuse   a merge or a rebase in progress, or a detached HEAD, is could-not-run before anything is
+#            staged, and is never reset: a commit would conclude the merge with whatever the tree
+#            holds. A person finishes or aborts it
+#   fetch    failure: auth-failed when git's error names an auth or not-found failure, unreachable for
+#            anything else. The store is still committed
+#   merge    unless HEAD already holds origin/<branch>: one `git merge` (M8: a rebase empties the tree
+#            of every unpushed file while it replays). Renames are off, so a rename is a deletion and
+#            an addition; unrelated histories are allowed, so a store that committed before its first
+#            fetch is not refused forever. When git will not start because a local file is in the way
+#            (a withheld file, say), the outcome is blocked, naming it. On a conflict, by what each
+#            side did:
+#              both modified, both added    the remote's copy takes the name and ours becomes the
+#                                           conflict copy (M4: x.md -> x.conflict-<host>.md, no
+#                                           extension: appended; a name another body holds is passed
+#                                           over for .conflict-<host>.2, .3, ...). An index (MEMORY.md,
+#                                           INDEX_*.md) instead keeps the remote's lines and gains each
+#                                           line only ours has
+#              deleted here, changed there  the remote's copy
+#              changed here, deleted there  ours: an edit beats a deletion
+#              anything else                `git merge --abort`, could-not-run
+#            Every resolution is staged from the blobs the merge produced, never from the working
+#            tree, so nothing the gate has not seen is committed. The commit is named `<host>: merge,
+#            kept both for <n> files`, and the outcome is kept-both. No run leaves MERGE_HEAD behind:
+#            a merge that fails is aborted
+#   push     once, HEAD to origin's branch, unless origin already holds HEAD. A rejection is
+#            push-rejected; the next run fetches again
+# Every outcome but could-not-run exits 0: a stale store is the doctor's to show, through --status.
 #
 # THE GATE withholds files; it never refuses the commit (M6). Each staged path has its name, then its
 # staged blob (a submodule has a name alone), passed through `scripts/redact-secrets.sh
@@ -59,24 +109,37 @@
 # and not the file's content.
 #
 # THE COMMIT is named `<host>: <n> files`, n counting every path it changes, deletions included, and
-# is made with --no-gpg-sign: a timer has no one to unlock a signing key. The maintenance a commit may
-# start runs in the foreground (autoDetach off), so the run ends when its git work has, and a unit
-# that stops every process it started when the run ends never cuts one short.
+# is made with --no-gpg-sign: a timer has no one to unlock a signing key.
 #
 # THE STATUS of a store is <state dir>/<store>.status, one line: epoch<TAB>outcome<TAB>detail, with
-# a backslash, tab or newline in the detail written \\, \t or \n. The outcomes, the network half's
-# included:
-#   ok, ok-local-only, withheld, kept-both, blocked, push-rejected, skipped-no-token, unreachable,
-#   auth-failed, could-not-run
-# This half writes three:
-#   could-not-run   the store could not be committed; the detail says why
-#   withheld        the gate held a file back; the detail names each one
-#   ok-local-only   the store has no origin, and was committed or had nothing to commit
-# A store WITH an origin that was committed with nothing withheld gets NO status from this half: its
-# outcome is the push's, which the network half writes. Until then a missing status reads as "never
-# synced", which is true, where ok-local-only would read as healthy while nothing leaves the host.
-# <state dir>/<store>.last-ok holds the epoch of the last push or up-to-date check that succeeded. This
-# half does neither, so it never writes that file.
+# a backslash, tab or newline in the detail written \\, \t or \n. The outcomes:
+#   ok                the store is committed, merged with origin and pushed, or origin already held it
+#   kept-both         the same, after a conflict that left a conflict copy or a line union
+#   ok-local-only     the store has no origin, and was committed or had nothing to commit
+#   withheld          the gate held a file back; the detail names each one
+#   blocked           the merge would not start, a local file in its way; the detail names it
+#   push-rejected     origin refused the push
+#   skipped-no-token  the route pins an account and its token file is missing, empty or unreadable
+#   unreachable       the fetch or the push failed, or ran out of time, for no reason naming auth
+#   auth-failed       git's error named an auth or a not-found failure
+#   could-not-run     the store could not be synced; the detail says why
+# A run that withheld a file and then pushed records withheld; one that withheld a file and then
+# failed to fetch or push records that failure, with the withheld files added to its detail. Git's
+# errors in a detail pass through scripts/redact-secrets.sh first.
+# <state dir>/<store>.last-ok holds the epoch of the last push or up-to-date check that succeeded.
+#
+# --status prints `<store><TAB><level><TAB><message>` lines for each checked-out store, levels ok, warn
+# and bad:
+#   bad    the last outcome is withheld, blocked, auth-failed or could-not-run, naming the file or
+#          reason; or the store has an origin and its last-ok is missing or older than the threshold,
+#          with the last outcome and detail
+#   warn   the last outcome is ok-local-only (no remote yet); push-rejected, unreachable or
+#          skipped-no-token while last-ok is still within the threshold; no run recorded for a store
+#          with no origin; any conflict copy in the tree, counted; an index line (MEMORY.md, INDEX_*.md)
+#          naming a file that is not there, or one file named by two index lines, counted per directory
+#   ok     none of the above about the last run: `last synced <n> min ago`
+# The threshold is the table's stale_after_minutes[<host>], else its .default, else
+# STALE_AFTER_MINUTES_DEFAULT minutes.
 #
 # Usage:
 #   claude-memory-sync --check [--store <name>]
@@ -93,27 +156,40 @@
 #                    credential shape: the gate, for commits this script did not make. Exit 1 when any
 #                    is found
 #   claude-memory-sync --apply [--store <name>]
-#                    the origin check, the stage, the gate and the commit, store by store: a line
+#                    the route, the origin check, the fetch, then the stage, the gate, the commit and the
+#                    merge under the lock, then the push, store by store: a line
 #                    `<store>: withheld <path> (<labels>)` for each file held back, then
-#                    `<store>: committed <n> files`, or nothing when there was nothing to commit. A
-#                    store that fails says why on stderr, and the later stores still run
+#                    `<store>: committed <n> files` when there was something to commit,
+#                    `<store>: merged origin/<branch>[, kept both for <n> files]`, `<store>: pushed`, and
+#                    `<store>: <outcome>: <detail>` for blocked, push-rejected, skipped-no-token,
+#                    unreachable and auth-failed. A store that cannot run says why on stderr, and the
+#                    later stores still run
+#   claude-memory-sync --status [--store <name>]
+#                    `<store><TAB><level><TAB><message>` lines, one or more per checked-out store, levels
+#                    ok, warn and bad (this script's header says when each is printed). Never writes,
+#                    never fetches, takes no lock
 #   claude-memory-sync --help    this text
 #   --store limits any verb to that store; a name the table does not hold is exit 2.
 #
 # Exit: 0 ok, or no store table here (nothing to do)
 #       1 attention on --check and --scan
 #       2 could not run (HOME unset, no jq, git or sha256sum, a bad store table, an unknown --store, a
-#         revision that does not resolve, an origin that is not the table's remote; on --apply also no
-#         flock, an unusable host name or lock wait, a lock still held when the wait ran out, and a
-#         lock, stage, gate, commit or status write that failed, reported once the other stores have
-#         run)
+#         revision that does not resolve, an origin that is not the table's remote, an unusable host
+#         name; on --apply also no flock or timeout, a gh-route that is not executable or could not
+#         answer, an unusable lock wait, a lock still held when the wait ran out, a merge or rebase in
+#         progress or a detached HEAD, a conflict the sync does not resolve, and a lock, stage, gate,
+#         commit, merge or status write that failed, reported once the other stores have run)
 #       64 usage
-#   --apply exits only 0 or 2: a withheld file is a status for the doctor, not a failed unit.
+#   --apply exits only 0 or 2: a withheld file, a conflict copy, a blocked merge, a rejected push, a
+#   missing token or an unreachable remote is a status for the doctor, not a failed unit. --status
+#   exits 0 whatever levels it prints.
 #
 # Overrides: CLAUDE_MEMORY_STORES_ROOT (default ~/.local/share/claude-memory), CLAUDE_MEMORY_CONFIG
 # (~/.dotfiles-local/claude/memory-stores.json), CLAUDE_MEMORY_STATE_DIR
-# (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the host in a commit message),
-# CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long --apply waits for link.lock; a whole number above 0).
+# (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the host in a commit message, a
+# conflict copy's name and the staleness threshold), CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long
+# --apply waits for link.lock; a whole number above 0), CLAUDE_MEMORY_GH_ROUTE (the sibling
+# scripts/gh-route).
 
 set -uo pipefail
 
@@ -126,6 +202,7 @@ CONFIG_RELATIVE='.dotfiles-local/claude/memory-stores.json'
 STATE_DIR_RELATIVE='.local/state/claude-memory-sync'
 REDACTOR_RELATIVE='scripts/redact-secrets.sh'
 REDACTOR_SHAPES_ONLY_FLAG='--shapes-only'
+GH_ROUTE_RELATIVE='scripts/gh-route'
 LINK_LOCK_FILE_NAME='link.lock'
 LOCK_WAIT_SECONDS_DEFAULT=120
 LOCK_WAIT_SECONDS_RE='^[1-9][0-9]*$'
@@ -133,8 +210,70 @@ LOCK_WAIT_SECONDS_RE='^[1-9][0-9]*$'
 FLOCK_TIMED_OUT_STATUS=1
 # take_link_lock: the wait ran out.
 LOCK_WAIT_RAN_OUT=2
-# Every git call that writes to a store: no hook runs and no file-system monitor starts.
-GIT_WRITE_SAFETY_OPTIONS=(-c core.hooksPath=/dev/null -c core.fsmonitor=false)
+# Every git call, through git_in_store: no hook runs, no file-system monitor starts, and the maintenance
+# a call may start stays in the foreground.
+GIT_SAFETY_OPTIONS=(-c core.hooksPath=/dev/null -c core.fsmonitor=false -c maintenance.autoDetach=false
+    -c gc.autoDetach=false)
+# A fetch or a push is cut off after this long, and killed this long after that.
+NETWORK_TIMEOUT_SECONDS=60
+NETWORK_KILL_AFTER_SECONDS=5
+# timeout's status when the time ran out, and when it then had to kill.
+TIMEOUT_EXPIRED_STATUS=124
+TIMEOUT_KILLED_STATUS=137
+# The merge: renames off, so a rename meets an edit as a deletion and keeps both; no recorded
+# resolution replayed, and nothing the host configures that would stash, sign, verify or refuse a merge
+# commit. Unrelated histories are merged: a store that committed before its first fetch (two hosts that
+# cloned an empty remote) would otherwise be refused on every run, and both sides' files are kept.
+MERGE_CONFIG_OPTIONS=(-c merge.renames=false -c rerere.enabled=false)
+MERGE_FLAGS=(--no-edit --no-gpg-sign --no-verify --no-autostash --ff --no-verify-signatures
+    --allow-unrelated-histories)
+# gh-route's states: an account is pinned, or no route applies and git's own helpers answer.
+PINNED_ROUTE_STATES=(matched default)
+UNPINNED_ROUTE_STATES=(none no-repo no-remotes)
+# A pinned run gives the fetch and the push this helper alone, after clearing every configured one. It
+# answers `get` only, from the token in its own environment, and fails when there is none. The variable
+# name is written out here and set by network_git_in_store; single quotes, since git's shell expands it.
+# shellcheck disable=SC2016
+PINNED_CREDENTIAL_HELPER='!f() { [ "$1" = get ] || exit 0; [ -n "${CLAUDE_MEMORY_GIT_TOKEN:-}" ] || exit 1; echo username=x-access-token; echo "password=$CLAUDE_MEMORY_GIT_TOKEN"; }; f'
+# An empty helper entry clears every helper configured before it.
+CLEARED_CREDENTIAL_HELPERS='credential.helper='
+# What git says when the remote turned the credential down or will not show the repository to it.
+AUTH_FAILURE_ERE='Authentication failed|could not read Username|Repository not found|error: 40[13]|Permission denied \(publickey'
+# What git says when the remote refused a pushed ref.
+PUSH_REJECTED_ERE='\[(remote )?rejected\]'
+# What git says when the merge would not start because a local file is in its way: either a list, one
+# path per tab-indented line, or a single path in quotes.
+MERGE_BLOCKED_ERE='would be overwritten by merge|not uptodate\. Cannot merge'
+MERGE_BLOCKED_SINGLE_PATH_RE="^error: (Untracked working tree file|Entry) '(.*)' (would be overwritten by merge|not uptodate)"
+# An unmerged path's stages, as a mask (stage 1 the base, 2 ours, 3 theirs): what each side did.
+STAGE_MASK_DELETED_BY_THEM=3    # base and ours: git status UD
+STAGE_MASK_DELETED_BY_US=5      # base and theirs: git status DU
+STAGE_MASK_BOTH_ADDED=6         # ours and theirs: git status AA
+STAGE_MASK_BOTH_MODIFIED=7      # all three: git status UU
+OURS_STAGE=2
+THEIRS_STAGE=3
+# The modes of a regular file: an index unions only these, and anything else in its place is kept
+# both ways as a conflict copy.
+REGULAR_FILE_MODE_RE='^100(644|755)$'
+# The link script's names for an index, whose difference is a line union, and for a conflict copy.
+INDEX_FILE_NAME='MEMORY.md'
+TOPIC_INDEX_FILE_GLOB='INDEX_*.md'
+CONFLICT_INFIX='.conflict-'
+CONFLICT_COPY_NAME_GLOB="*$CONFLICT_INFIX*"
+# A run holds the lock while it looks for a free conflict-copy name, so that search has an end.
+MAX_CONFLICT_COPIES=100
+# A markdown link's target in an index line, and a target that names no file in the store: a URL (any
+# scheme), an anchor or an absolute path.
+INDEX_LINK_RE='\]\(([^)]*)\)'
+NOT_A_STORE_FILE_RE='^([A-Za-z][A-Za-z0-9+.-]*:|#|/)'
+LAST_OK_FILE_SUFFIX='.last-ok'
+STALE_AFTER_MINUTES_DEFAULT=60
+STALE_AFTER_MINUTES_RE='^[1-9][0-9]*$'
+SECONDS_PER_MINUTE=60
+EPOCH_RE='^[0-9]+$'
+STATUS_LEVEL_OK='ok'
+STATUS_LEVEL_WARN='warn'
+STATUS_LEVEL_BAD='bad'
 # The link script's copy on its way to <name> is .<name>.link-partial until it is known to be whole.
 PARTIAL_COPY_SUFFIX='.link-partial'
 PARTIAL_COPY_NAME_GLOB=".*$PARTIAL_COPY_SUFFIX"
@@ -164,8 +303,9 @@ REDACTION_MARKER_SUFFIX='>'
 REDACTION_MARKER_ERE='<REDACTED:[a-z0-9-]+>'
 # The redactor changed the content but left no marker this script could read.
 UNLABELLED_SHAPE='unlabelled shape'
-# What stands for a path the redactor could not read: never the path itself.
+# What stands for a path, or for git's error, that the redactor could not read: never the text itself.
 UNREDACTABLE_PATH_TEXT='<a path the redactor could not read>'
+UNREDACTABLE_TEXT='<an error the redactor could not read>'
 # Ends a command substitution's output, so the substitution cannot strip a newline that ends a path.
 OUTPUT_END_SENTINEL='.'
 # One line of sha256sum's output for stdin.
@@ -192,19 +332,36 @@ STATE_DIR="${CLAUDE_MEMORY_STATE_DIR:-${HOME:-}/$STATE_DIR_RELATIVE}"
 LINK_LOCK_PATH="$STATE_DIR/$LINK_LOCK_FILE_NAME"
 LOCK_WAIT_SECONDS="${CLAUDE_MEMORY_LOCK_WAIT_SECONDS:-$LOCK_WAIT_SECONDS_DEFAULT}"
 REDACTOR="$DOTFILES/$REDACTOR_RELATIVE"
+GH_ROUTE="${CLAUDE_MEMORY_GH_ROUTE:-$DOTFILES/$GH_ROUTE_RELATIVE}"
 
-MODE=''                         # check | scan | apply
+MODE=''                         # check | scan | apply | status
 ONLY_STORE=''                   # --store
 SCAN_REVISION=''                # --scan --rev
-HOST_NAME=''                    # the host in a commit message, set by prepare_apply
+HOST_NAME=''                    # the host in a commit message and a conflict copy, set by settle_host_name
+STALE_AFTER_MINUTES=''          # --status: this host's threshold, set by settle_stale_after_minutes
 STORE_NAMES=()                  # every store the table names, sorted
 declare -A REMOTE_OF_STORE=()   # store → the table's remote
 FAILED_STORES=()                # stores that could not run, reported at the end
 NEEDS_ATTENTION=0               # --check or --scan found something
 LINK_LOCK_FD=''                 # the open descriptor of link.lock while it is held
+GIT_RUNNER_PREFIX=()            # what runs git: empty, or timeout for a network call
 STORE_HAS_ORIGIN=0              # what check_origin found
+CURRENT_BRANCH=''               # the branch HEAD names, set by refuse_unfinished_operation
 WITHHELD_REDACTED_PATHS=()      # what gate_staged_paths held back, each with its shapes redacted
 COMMITTED_COUNT=0               # how many paths commit_staged_paths committed
+ROUTE_MODE=''                   # pinned | unpinned | no-token, set by resolve_route
+ROUTED_TOKEN=''                 # the pinned account's token: never printed, written or put in an argument
+ROUTED_GH_CONFIG_DIR=''         # the pinned account's gh config dir
+NO_TOKEN_DETAIL=''              # why a pinned route has no token
+NETWORK_OUTCOME=''              # a fetch or push that failed: its outcome
+NETWORK_DETAIL=''               # and why, redacted
+MERGED_FROM_ORIGIN=0            # integrate_origin merged origin in
+INTEGRATION_OUTCOME=''          # integrate_origin: blocked, kept-both, or nothing
+INTEGRATION_DETAIL=''           # and the detail of blocked
+KEPT_BOTH_COUNT=0               # how many conflicted paths the merge resolved
+PUSHED=0                        # push_to_origin sent something
+STATUS_OUTCOME=''               # --status: the outcome in the store's status file, set by read_status_file
+STATUS_DETAIL=''                # and its detail
 
 usage() { sed -n '/^# Usage:/,/^# Exit:/p' "$SELF" | sed '$d; s/^# \{0,1\}//'; }
 
@@ -232,9 +389,10 @@ set_mode() {
 parse_args() {
     while (( $# )); do
         case "$1" in
-            --check) set_mode check ;;
-            --scan)  set_mode scan ;;
-            --apply) set_mode apply ;;
+            --check)  set_mode check ;;
+            --scan)   set_mode scan ;;
+            --apply)  set_mode apply ;;
+            --status) set_mode status ;;
             --store)
                 [[ -n "${2:-}" ]] || usage_error "--store needs a store name"
                 ONLY_STORE=$2
@@ -278,17 +436,56 @@ escaped_for_one_line() {
     printf '%s' "$text"
 }
 
-# git_in_store STORE_DIR ARGS… — git, in the store. While this run holds link.lock, the lock's
-# descriptor is closed in git's own process and this shell keeps it: nothing git starts can then hold
-# the lock past the end of the run.
+# git_in_store STORE_DIR ARGS… — git, in the store, with GIT_SAFETY_OPTIONS on every call, run by
+# GIT_RUNNER_PREFIX when a caller sets one. While this run holds link.lock, the lock's descriptor is
+# closed in git's own process and this shell keeps it: nothing git starts can then hold the lock past the
+# end of the run.
 git_in_store() {
     local store_dir=$1
     shift
     if [[ -n "$LINK_LOCK_FD" ]]; then
-        git -C "$store_dir" "$@" {LINK_LOCK_FD}>&-
+        "${GIT_RUNNER_PREFIX[@]}" git -C "$store_dir" "${GIT_SAFETY_OPTIONS[@]}" "$@" {LINK_LOCK_FD}>&-
     else
-        git -C "$store_dir" "$@"
+        "${GIT_RUNNER_PREFIX[@]}" git -C "$store_dir" "${GIT_SAFETY_OPTIONS[@]}" "$@"
     fi
+}
+
+# network_git_in_store STORE_DIR ARGS… — git_in_store for a call that reaches the remote: cut off after
+# NETWORK_TIMEOUT_SECONDS, in the C locale (its errors are read), with no prompt and no askpass program.
+# When the route pinned an account, the token and the account's config dir are in this one git
+# process's environment, and every configured credential helper is cleared for the one that reads it.
+# The token is never in an argument.
+network_git_in_store() {
+    local store_dir=$1
+    shift
+    # Read by git_in_store, which this call reaches: bash scopes a local to the calls it makes.
+    # shellcheck disable=SC2034
+    local GIT_RUNNER_PREFIX=(timeout --kill-after="$NETWORK_KILL_AFTER_SECONDS" "$NETWORK_TIMEOUT_SECONDS")
+    if [[ "$ROUTE_MODE" == pinned ]]; then
+        CLAUDE_MEMORY_GIT_TOKEN=$ROUTED_TOKEN GH_CONFIG_DIR=$ROUTED_GH_CONFIG_DIR \
+            LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' \
+            git_in_store "$store_dir" -c "$CLEARED_CREDENTIAL_HELPERS" \
+                -c "credential.helper=$PINNED_CREDENTIAL_HELPER" "$@"
+    else
+        LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' git_in_store "$store_dir" "$@"
+    fi
+}
+
+# stderr_redacted COMMAND… — COMMAND, with what it says on stderr passed through the redactor's shape
+# rules: a warning that names a path can carry a credential as well as a body can.
+stderr_redacted() {
+    "$@" 2> >("$REDACTOR" "$REDACTOR_SHAPES_ONLY_FLAG" >&2)
+}
+
+# redacted_text TEXT — TEXT through the full redactor, its final newline dropped; UNREDACTABLE_TEXT when
+# the redactor fails, never TEXT itself.
+redacted_text() {
+    local redacted_output
+    if ! redacted_output=$(printf '%s\n' "$1" | "$REDACTOR"); then
+        printf '%s' "$UNREDACTABLE_TEXT"
+        return 0
+    fi
+    printf '%s' "$redacted_output"
 }
 
 # redact_path_into VARIABLE PATH — set VARIABLE to PATH with each credential shape the redactor finds
@@ -320,10 +517,14 @@ printable_path() {
 # shellcheck disable=SC2016  # jq's own $variables, not the shell's
 JQ_TABLE_PROBLEM='
 def is_usable_remote: type == "string" and . != "" and (test("[[:cntrl:]]") | not);
+def is_whole_minutes: type == "number" and . > 0 and . == floor;
 if (.stores | type) != "object" then ".stores is not an object"
 elif any(.stores | keys[]; test($store_name_re) | not) then "a name in .stores is not a plain name"
 elif any(.stores[]; if type == "object" then .remote | is_usable_remote | not else true end)
     then "a store has no remote"
+elif has("stale_after_minutes") and ((.stale_after_minutes | type) != "object"
+    or any(.stale_after_minutes[]; is_whole_minutes | not))
+    then "stale_after_minutes is not an object of whole minutes above 0"
 else empty end'
 
 # load_store_table — set STORE_NAMES and REMOTE_OF_STORE from the table. Dies unless the table is
@@ -496,11 +697,19 @@ print_withheld_line() {
     printf '%s: withheld %s (%s)\n' "$1" "$shown_path" "$3"
 }
 
-# print_link_target PATH — what git stores for a symlink: its target, with no newline.
+# print_link_target PATH — what git stores for a symlink: its target, with no newline. What readlink
+# says on a failure names the path, which can carry a credential, so it is dropped: the caller names
+# the path, redacted.
 print_link_target() {
     local link_target
-    link_target=$(readlink -- "$1") || return 1
+    link_target=$(readlink -- "$1" 2>/dev/null) || return 1
     printf '%s' "$link_target"
+}
+
+# print_file_content PATH — the file's bytes. What cat says on a failure names the path, so it is
+# dropped, as in print_link_target.
+print_file_content() {
+    cat -- "$1" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -558,8 +767,7 @@ gate_staged_paths() {
             return 1
         fi
         labels=$(shape_labels_of "${name_and_content_command[@]}")
-        if ! run_git_reporting_errors "$store_dir" "${GIT_WRITE_SAFETY_OPTIONS[@]}" --literal-pathspecs \
-            reset -q -- "$path"; then
+        if ! run_git_reporting_errors "$store_dir" --literal-pathspecs reset -q -- "$path"; then
             report_store_failure "$store" "could not unstage the withheld $(printable_path "$path")"
             return 1
         fi
@@ -581,9 +789,7 @@ commit_staged_paths() {
     fi
     (( ${#staged_paths[@]} )) || return 0
     commit_message="$HOST_NAME: ${#staged_paths[@]} files"
-    if ! run_git_reporting_errors "$store_dir" "${GIT_WRITE_SAFETY_OPTIONS[@]}" \
-        -c maintenance.autoDetach=false -c gc.autoDetach=false \
-        commit -q --no-verify --no-gpg-sign -m "$commit_message"; then
+    if ! run_git_reporting_errors "$store_dir" commit -q --no-verify --no-gpg-sign -m "$commit_message"; then
         report_store_failure "$store" "git commit failed"
         return 1
     fi
@@ -593,8 +799,7 @@ commit_staged_paths() {
 # stage_gate_and_commit STORE STORE_DIR — the part of a run that holds the lock.
 stage_gate_and_commit() {
     local store=$1 store_dir=$2 base_tree
-    if ! run_git_reporting_errors "$store_dir" "${GIT_WRITE_SAFETY_OPTIONS[@]}" add -A -f -- \
-        "${STAGE_PATHSPEC[@]}"; then
+    if ! run_git_reporting_errors "$store_dir" add -A -f -- "${STAGE_PATHSPEC[@]}"; then
         report_store_failure "$store" "git add failed"
         return 1
     fi
@@ -606,36 +811,664 @@ stage_gate_and_commit() {
     commit_staged_paths "$store" "$store_dir" "$base_tree"
 }
 
-# apply_store STORE STORE_DIR — the origin check, then stage, gate and commit under the lock, then the
-# status. Returns 1 when the store could not run.
-apply_store() {
-    local store=$1 store_dir=$2 lock_status locked_status joined_paths withheld_path local_only_detail
-    check_origin "$store" "$store_dir" || return 1
-    take_link_lock
-    lock_status=$?
-    if (( lock_status == LOCK_WAIT_RAN_OUT )); then
-        report_store_failure "$store" "the lock $LINK_LOCK_PATH was still held after $LOCK_WAIT_SECONDS s"
-        return 1
-    elif (( lock_status != 0 )); then
-        report_store_failure "$store" "could not take the lock $LINK_LOCK_PATH"
+# ---------------------------------------------------------------------------------------------
+# --apply: the route, the unfinished-operation refusal, fetch, merge and push.
+# ---------------------------------------------------------------------------------------------
+
+# is_one_of WORD CANDIDATE… — status 0 when WORD is one of the candidates.
+is_one_of() {
+    local word=$1 candidate
+    shift
+    for candidate in "$@"; do
+        if [[ "$word" == "$candidate" ]]; then return 0; fi
+    done
+    return 1
+}
+
+# route_fields_of ROUTE_JSON — gh-route's state, dir and token_file, each ended by a NUL; fails on any
+# other shape.
+route_fields_of() {
+    printf '%s' "$1" | jq -j 'if type == "object" and (.state | type) == "string"
+        and (.dir | type) == "string" and (.token_file | type) == "string"
+        then .state, "\u0000", .dir, "\u0000", .token_file, "\u0000" else error("not a route") end' 2>/dev/null
+}
+
+# resolve_route STORE STORE_DIR — ask gh-route which account the store's directory routes to, before any
+# git call, and set ROUTE_MODE: pinned (the token read into ROUTED_TOKEN, the config dir into
+# ROUTED_GH_CONFIG_DIR), unpinned, or no-token (NO_TOKEN_DETAIL says why). gh-route's own errors pass
+# through the redactor. Returns 1, having reported the store, when gh-route could not answer or gave an
+# answer this script does not know.
+resolve_route() {
+    local store=$1 store_dir=$2 route_json route_fields=() state config_dir token_file shown_token_file
+    ROUTE_MODE='' ROUTED_TOKEN='' ROUTED_GH_CONFIG_DIR='' NO_TOKEN_DETAIL=''
+    if ! route_json=$(stderr_redacted "$GH_ROUTE" "$store_dir"); then
+        report_store_failure "$store" "gh-route could not answer for the store"
         return 1
     fi
-    stage_gate_and_commit "$store" "$store_dir"
+    if ! read_nul_items route_fields route_fields_of "$route_json" || (( ${#route_fields[@]} != 3 )); then
+        report_store_failure "$store" "gh-route gave an answer that is not a route"
+        return 1
+    fi
+    state=${route_fields[0]} config_dir=${route_fields[1]} token_file=${route_fields[2]}
+    if is_one_of "$state" "${UNPINNED_ROUTE_STATES[@]}"; then
+        ROUTE_MODE=unpinned
+        return 0
+    fi
+    if ! is_one_of "$state" "${PINNED_ROUTE_STATES[@]}" || [[ -z "$config_dir" ]]; then
+        report_store_failure "$store" "gh-route answered a state this script does not know: $(escaped_for_one_line "$state")"
+        return 1
+    fi
+    ROUTED_GH_CONFIG_DIR=$config_dir
+    # The shell reads the same file the same way: its whole body, less the final newlines.
+    if [[ -n "$token_file" && -f "$token_file" && -r "$token_file" ]]; then
+        ROUTED_TOKEN=$(< "$token_file")
+    fi
+    if [[ -n "$ROUTED_TOKEN" ]]; then
+        ROUTE_MODE=pinned
+        return 0
+    fi
+    ROUTE_MODE=no-token
+    shown_token_file=$(printable_path "${token_file:-<none>}")
+    NO_TOKEN_DETAIL="the token file $shown_token_file is missing, empty or unreadable"
+}
+
+# refuse_unfinished_operation STORE STORE_DIR — set CURRENT_BRANCH. Returns 1, having reported the store,
+# when a merge or a rebase is in progress or HEAD is detached: a commit would then conclude the merge with
+# whatever the tree holds, or land on no branch. It never resets anything; a person finishes or aborts it.
+refuse_unfinished_operation() {
+    local store=$1 store_dir=$2 state_name state_path branch_status
+    CURRENT_BRANCH=''
+    for state_name in MERGE_HEAD rebase-merge rebase-apply; do
+        if ! state_path=$(git_in_store "$store_dir" rev-parse --path-format=absolute --git-path "$state_name"); then
+            report_store_failure "$store" "git could not find its own directory"
+            return 1
+        fi
+        [[ -e "$state_path" ]] || continue
+        if [[ "$state_name" == MERGE_HEAD ]]; then
+            report_store_failure "$store" "a merge is in progress: conclude or abort it by hand"
+        else
+            report_store_failure "$store" "a rebase is in progress: conclude or abort it by hand"
+        fi
+        return 1
+    done
+    CURRENT_BRANCH=$(git_in_store "$store_dir" symbolic-ref -q --short HEAD)
+    branch_status=$?
+    (( branch_status != 0 )) || return 0
+    if (( branch_status == 1 )); then
+        report_store_failure "$store" "HEAD is detached: check out the store's branch by hand"
+    else
+        report_store_failure "$store" "git could not read HEAD"
+    fi
+    return 1
+}
+
+# record_network_failure GIT_STATUS GIT_ERRORS OTHERWISE — set NETWORK_OUTCOME and NETWORK_DETAIL for a
+# fetch or push that failed: unreachable when it ran out of time, auth-failed when its error names an
+# auth or a not-found failure, OTHERWISE for anything else. The detail is git's error, redacted.
+record_network_failure() {
+    local git_status=$1 git_errors=$2 otherwise=$3
+    if (( git_status == TIMEOUT_EXPIRED_STATUS || git_status == TIMEOUT_KILLED_STATUS )); then
+        NETWORK_OUTCOME=$OUTCOME_UNREACHABLE
+        NETWORK_DETAIL="no answer within $NETWORK_TIMEOUT_SECONDS s"
+        return 0
+    fi
+    NETWORK_OUTCOME=$otherwise
+    if [[ "$git_errors" =~ $AUTH_FAILURE_ERE ]]; then NETWORK_OUTCOME=$OUTCOME_AUTH_FAILED; fi
+    NETWORK_DETAIL=$(redacted_text "$git_errors")
+}
+
+# fetch_origin STORE_DIR — fetch the store's origin. Returns 1 with NETWORK_OUTCOME and NETWORK_DETAIL
+# set when it failed.
+fetch_origin() {
+    local store_dir=$1 fetch_errors fetch_status
+    fetch_errors=$(network_git_in_store "$store_dir" fetch --quiet --no-recurse-submodules \
+        "$ORIGIN_REMOTE_NAME" 2>&1 >/dev/null)
+    fetch_status=$?
+    (( fetch_status != 0 )) || return 0
+    record_network_failure "$fetch_status" "$fetch_errors" "$OUTCOME_UNREACHABLE"
+    return 1
+}
+
+# merge_is_in_progress STORE_DIR — status 0 while MERGE_HEAD exists.
+merge_is_in_progress() {
+    git_in_store "$1" rev-parse -q --verify MERGE_HEAD >/dev/null
+}
+
+# blocking_paths_of MERGE_OUTPUT — the paths git named as in the merge's way, redacted, joined by ", ".
+blocking_paths_of() {
+    local line blocking_path joined_paths=''
+    while IFS= read -r line; do
+        blocking_path=''
+        if [[ "$line" == $'\t'* ]]; then
+            blocking_path=${line#$'\t'}
+        elif [[ "$line" =~ $MERGE_BLOCKED_SINGLE_PATH_RE ]]; then
+            blocking_path=${BASH_REMATCH[2]}
+        fi
+        [[ -n "$blocking_path" ]] || continue
+        joined_paths+="${joined_paths:+, }$(printable_path "$blocking_path")"
+    done <<< "$1"
+    printf '%s' "$joined_paths"
+}
+
+# index_entry_of STORE_DIR PATH — PATH's stage-0 entry in the index, `<mode> <id>`, or nothing.
+index_entry_of() {
+    local index_line
+    local index_line index_mode index_id index_stage
+    index_line=$(git_in_store "$1" --literal-pathspecs ls-files -s -- "$2") || return 1
+    [[ -n "$index_line" ]] || return 0
+    read -r index_mode index_id index_stage _ <<< "$index_line"
+    if [[ "$index_stage" == 0 ]]; then printf '%s %s' "$index_mode" "$index_id"; fi
+}
+
+# set_index_entry STORE_DIR MODE ID PATH — PATH in the index, at stage 0, as the blob ID: the merge's
+# higher stages for it go. Staged from the blob and never from the tree, which a session may be writing.
+set_index_entry() {
+    run_git_reporting_errors "$1" update-index --add --cacheinfo "$2,$3,$4"
+}
+
+# write_conflict_copy STORE_DIR PATH MODE ID — put the blob ID beside PATH under the first conflict-copy
+# name that is free (M4), in the index and in the tree: x.md -> x.conflict-<host>.md, no extension:
+# appended, then .conflict-<host>.2, .3, … A name whose index entry already is that blob is that copy,
+# and nothing is written. A name anything else holds, in the tree or the index, is passed over: git's
+# checkout-index will not write over a file. Returns 1, having said why, when it could not.
+write_conflict_copy() {
+    local store_dir=$1 path=$2 mode=$3 object_id=$4 parent='' name=$2 name_stem final_extension=''
+    local ordinal=1 infix copy_path existing_entry
+    if [[ "$path" == */* ]]; then parent="${path%/*}/" name=${path##*/}; fi
+    name_stem=$name
+    # .hidden and trailing. have no extension: the infix goes after the whole name.
+    if [[ "$name" == ?*.?* ]]; then
+        name_stem=${name%.*}
+        final_extension=".${name##*.}"
+    fi
+    while (( ordinal <= MAX_CONFLICT_COPIES )); do
+        infix="$CONFLICT_INFIX$HOST_NAME"
+        (( ordinal == 1 )) || infix+=".$ordinal"
+        copy_path="$parent$name_stem$infix$final_extension"
+        ordinal=$(( ordinal + 1 ))
+        existing_entry=$(index_entry_of "$store_dir" "$copy_path") || return 1
+        if [[ "$existing_entry" == "$mode $object_id" ]]; then return 0; fi
+        if [[ -n "$existing_entry" || -e "$store_dir/$copy_path" || -L "$store_dir/$copy_path" ]]; then continue; fi
+        if [[ -n "$(git_in_store "$store_dir" --literal-pathspecs ls-files -u -- "$copy_path")" ]]; then continue; fi
+        set_index_entry "$store_dir" "$mode" "$object_id" "$copy_path" || return 1
+        if git_in_store "$store_dir" checkout-index -- "$copy_path" 2>/dev/null; then return 0; fi
+        # Something took the name between the look and the write: it stays, and the entry goes.
+        run_git_reporting_errors "$store_dir" update-index --force-remove -- "$copy_path" || return 1
+        if [[ ! -e "$store_dir/$copy_path" && ! -L "$store_dir/$copy_path" ]]; then
+            printf '%s: could not write the conflict copy %s\n' "$SCRIPT_NAME" "$(printable_path "$copy_path")" >&2
+            return 1
+        fi
+    done
+    printf '%s: gave up on a conflict copy of %s: %d names are taken\n' "$SCRIPT_NAME" \
+        "$(printable_path "$path")" "$MAX_CONFLICT_COPIES" >&2
+    return 1
+}
+
+# union_index_blob STORE_DIR THEIRS_ID OURS_ID — write to the object database the remote's index, then
+# each line only ours has, in our order and once each, and print the new blob's id. The link script's
+# union: the remote's copy keeps its lines and their order.
+union_index_blob() {
+    local store_dir=$1 theirs_id=$2 ours_id=$3 line union_text=''
+    local -A seen_lines=()
+    # The keys are prefixed because an associative array can refuse an empty subscript, depending on the
+    # bash, and a blank line is one.
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        seen_lines["line:$line"]=1
+        union_text+="$line"$'\n'
+    done < <(git_in_store "$store_dir" cat-file blob "$theirs_id")
+    wait "$!" || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "${seen_lines["line:$line"]:-}" ]] || continue
+        seen_lines["line:$line"]=1
+        union_text+="$line"$'\n'
+    done < <(git_in_store "$store_dir" cat-file blob "$ours_id")
+    wait "$!" || return 1
+    printf '%s' "$union_text" | git_in_store "$store_dir" hash-object -w --no-filters --stdin
+}
+
+# is_index_file_name NAME — true for a file whose difference is a line union, not a conflict copy.
+is_index_file_name() {
+    # shellcheck disable=SC2053  # the glob on the right is the point
+    [[ "$1" == "$INDEX_FILE_NAME" || "$1" == $TOPIC_INDEX_FILE_GLOB ]]
+}
+
+# take_theirs_at STORE_DIR MODE ID PATH — the remote's blob takes PATH, in the index and in the tree,
+# where the merge left its conflict markers.
+take_theirs_at() {
+    set_index_entry "$1" "$2" "$3" "$4" || return 1
+    run_git_reporting_errors "$1" checkout-index -f -- "$4"
+}
+
+# resolve_conflicts STORE STORE_DIR — resolve every unmerged path the merge left, by what each side did
+# (see the header), counting them in KEPT_BOTH_COUNT. Every path is checked before any is touched, so a
+# status the sync does not resolve leaves the merge as git left it. Returns 1, having reported the
+# store, when it could not; the caller aborts the merge.
+resolve_conflicts() {
+    local store=$1 store_dir=$2 unmerged_items=() item metadata path mode object_id stage index position
+    local unmerged_paths=() stage_masks=() ours_modes=() ours_ids=() theirs_modes=() theirs_ids=()
+    local -A position_of_path=()
+    local stage_mask union_id
+    KEPT_BOTH_COUNT=0
+    if ! read_nul_items unmerged_items git_in_store "$store_dir" ls-files -u -z; then
+        report_store_failure "$store" "git could not list the conflicts of the merge"
+        return 1
+    fi
+    # Each item: "<mode> <id> <stage>", a tab, then the path; a path has one item per stage it holds.
+    for item in "${unmerged_items[@]}"; do
+        metadata=${item%%$'\t'*}
+        path=${item#*$'\t'}
+        read -r mode object_id stage <<< "$metadata"
+        position=${position_of_path["$path"]-}
+        if [[ -z "$position" ]]; then
+            position=${#unmerged_paths[@]}
+            position_of_path["$path"]=$position
+            unmerged_paths+=("$path")
+            stage_masks+=(0)
+        fi
+        stage_masks[position]=$(( stage_masks[position] | (1 << (stage - 1)) ))
+        if [[ "$stage" == "$OURS_STAGE" ]]; then ours_modes[position]=$mode ours_ids[position]=$object_id; fi
+        if [[ "$stage" == "$THEIRS_STAGE" ]]; then theirs_modes[position]=$mode theirs_ids[position]=$object_id; fi
+    done
+    for (( index = 0; index < ${#unmerged_paths[@]}; index++ )); do
+        stage_mask=${stage_masks[index]}
+        case "$stage_mask" in
+            "$STAGE_MASK_BOTH_MODIFIED"|"$STAGE_MASK_BOTH_ADDED")
+                if [[ "${ours_modes[index]}" == "$GITLINK_MODE" || "${theirs_modes[index]}" == "$GITLINK_MODE" ]]; then
+                    stage_mask=unknown
+                fi ;;
+            "$STAGE_MASK_DELETED_BY_US"|"$STAGE_MASK_DELETED_BY_THEM") ;;
+            *) stage_mask=unknown ;;
+        esac
+        if [[ "$stage_mask" == unknown ]]; then
+            report_store_failure "$store" "a conflict the sync does not resolve, at $(printable_path "${unmerged_paths[index]}")"
+            return 1
+        fi
+    done
+    for (( index = 0; index < ${#unmerged_paths[@]}; index++ )); do
+        path=${unmerged_paths[index]}
+        case "${stage_masks[index]}" in
+            "$STAGE_MASK_DELETED_BY_US")
+                # Deleted here, changed there: theirs is what the merge left in the tree.
+                set_index_entry "$store_dir" "${theirs_modes[index]}" "${theirs_ids[index]}" "$path" || break ;;
+            "$STAGE_MASK_DELETED_BY_THEM")
+                # Changed here, deleted there: ours is what the merge left in the tree.
+                set_index_entry "$store_dir" "${ours_modes[index]}" "${ours_ids[index]}" "$path" || break ;;
+            *)
+                if is_index_file_name "${path##*/}" && [[ "${ours_modes[index]}" =~ $REGULAR_FILE_MODE_RE \
+                    && "${theirs_modes[index]}" =~ $REGULAR_FILE_MODE_RE ]]; then
+                    union_id=$(union_index_blob "$store_dir" "${theirs_ids[index]}" "${ours_ids[index]}") || break
+                    take_theirs_at "$store_dir" "${theirs_modes[index]}" "$union_id" "$path" || break
+                else
+                    write_conflict_copy "$store_dir" "$path" "${ours_modes[index]}" "${ours_ids[index]}" || break
+                    take_theirs_at "$store_dir" "${theirs_modes[index]}" "${theirs_ids[index]}" "$path" || break
+                fi ;;
+        esac
+        KEPT_BOTH_COUNT=$(( KEPT_BOTH_COUNT + 1 ))
+    done
+    if (( KEPT_BOTH_COUNT != ${#unmerged_paths[@]} )); then
+        report_store_failure "$store" "could not resolve the conflict at $(printable_path "$path")"
+        return 1
+    fi
+}
+
+# abort_merge STORE STORE_DIR — `git merge --abort`, so that no run leaves MERGE_HEAD behind. The store
+# has already been reported; this says only when the abort itself failed.
+abort_merge() {
+    run_git_reporting_errors "$2" merge --abort && return 0
+    printf '%s: %s: git merge --abort failed: a merge is left in progress\n' "$SCRIPT_NAME" "$1" >&2
+}
+
+# integrate_origin STORE STORE_DIR — merge the fetched origin branch into HEAD, unless HEAD already holds
+# it. Sets MERGED_FROM_ORIGIN, INTEGRATION_OUTCOME (blocked or kept-both, or nothing for a clean merge)
+# and INTEGRATION_DETAIL. Returns 1, having reported the store and aborted any merge it started, when it
+# could not.
+integrate_origin() {
+    local store=$1 store_dir=$2 tracking_ref merge_output ancestor_status commit_message
+    MERGED_FROM_ORIGIN=0 INTEGRATION_OUTCOME='' INTEGRATION_DETAIL='' KEPT_BOTH_COUNT=0
+    tracking_ref="refs/remotes/$ORIGIN_REMOTE_NAME/$CURRENT_BRANCH"
+    # An origin with no such branch yet has nothing to merge: the push makes it.
+    git_in_store "$store_dir" rev-parse -q --verify "$tracking_ref^{commit}" >/dev/null || return 0
+    if ! head_is_unborn "$store_dir"; then
+        git_in_store "$store_dir" merge-base --is-ancestor "$tracking_ref" HEAD
+        ancestor_status=$?
+        (( ancestor_status != 0 )) || return 0
+        if (( ancestor_status != 1 )); then
+            report_store_failure "$store" "git could not compare HEAD with $tracking_ref"
+            return 1
+        fi
+    fi
+    merge_output=$(LC_ALL=C git_in_store "$store_dir" "${MERGE_CONFIG_OPTIONS[@]}" merge "${MERGE_FLAGS[@]}" \
+        "$tracking_ref" 2>&1) && { MERGED_FROM_ORIGIN=1; return 0; }
+    if ! merge_is_in_progress "$store_dir"; then
+        if [[ "$merge_output" =~ $MERGE_BLOCKED_ERE ]]; then
+            INTEGRATION_OUTCOME=$OUTCOME_BLOCKED
+            INTEGRATION_DETAIL="a local file is in the way of the merge: $(blocking_paths_of "$merge_output")"
+            return 0
+        fi
+        redacted_text "$merge_output" >&2
+        printf '\n' >&2
+        report_store_failure "$store" "git merge failed"
+        return 1
+    fi
+    if ! resolve_conflicts "$store" "$store_dir"; then
+        abort_merge "$store" "$store_dir"
+        return 1
+    fi
+    commit_message="$HOST_NAME: merge, kept both for $KEPT_BOTH_COUNT files"
+    if ! run_git_reporting_errors "$store_dir" commit -q --no-verify --no-gpg-sign -m "$commit_message"; then
+        report_store_failure "$store" "git could not commit the merge"
+        abort_merge "$store" "$store_dir"
+        return 1
+    fi
+    MERGED_FROM_ORIGIN=1
+    INTEGRATION_OUTCOME=$OUTCOME_KEPT_BOTH
+}
+
+# push_to_origin STORE_DIR — push HEAD to its branch on origin, once, unless origin already holds HEAD
+# or there is nothing to push. Sets PUSHED. Returns 1 with NETWORK_OUTCOME and NETWORK_DETAIL set when
+# the push failed: auth-failed, push-rejected when origin refused the ref, unreachable otherwise.
+push_to_origin() {
+    local store_dir=$1 tracking_ref head_id tracking_id push_errors push_status otherwise
+    PUSHED=0
+    if head_is_unborn "$store_dir"; then return 0; fi
+    tracking_ref="refs/remotes/$ORIGIN_REMOTE_NAME/$CURRENT_BRANCH"
+    head_id=$(git_in_store "$store_dir" rev-parse -q --verify HEAD)
+    tracking_id=$(git_in_store "$store_dir" rev-parse -q --verify "$tracking_ref^{commit}")
+    if [[ -n "$head_id" && "$head_id" == "$tracking_id" ]]; then return 0; fi
+    push_errors=$(network_git_in_store "$store_dir" push --quiet --no-verify --recurse-submodules=no \
+        "$ORIGIN_REMOTE_NAME" "HEAD:refs/heads/$CURRENT_BRANCH" 2>&1 >/dev/null)
+    push_status=$?
+    if (( push_status == 0 )); then
+        PUSHED=1
+        return 0
+    fi
+    otherwise=$OUTCOME_UNREACHABLE
+    if [[ "$push_errors" =~ $PUSH_REJECTED_ERE ]]; then otherwise=$OUTCOME_PUSH_REJECTED; fi
+    record_network_failure "$push_status" "$push_errors" "$otherwise"
+    return 1
+}
+
+# write_last_ok STORE — record now as the last push or up-to-date check that succeeded, by a rename.
+write_last_ok() {
+    local store=$1 epoch last_ok_path="$STATE_DIR/$1$LAST_OK_FILE_SUFFIX"
+    printf -v epoch '%(%s)T' -1
+    if ! printf '%s\n' "$epoch" > "$last_ok_path$STATUS_TEMP_SUFFIX" \
+        || ! mv -f -- "$last_ok_path$STATUS_TEMP_SUFFIX" "$last_ok_path"; then
+        printf '%s: %s: could not write %s\n' "$SCRIPT_NAME" "$store" "$last_ok_path" >&2
+        return 1
+    fi
+}
+
+# take_link_lock_reporting STORE — take_link_lock, reporting the store when it could not.
+take_link_lock_reporting() {
+    local lock_status
+    take_link_lock
+    lock_status=$?
+    (( lock_status != 0 )) || return 0
+    if (( lock_status == LOCK_WAIT_RAN_OUT )); then
+        report_store_failure "$1" "the lock $LINK_LOCK_PATH was still held after $LOCK_WAIT_SECONDS s"
+    else
+        report_store_failure "$1" "could not take the lock $LINK_LOCK_PATH"
+    fi
+    return 1
+}
+
+# print_outcome_line STORE OUTCOME DETAIL — `<store>: <outcome>: <detail>`, on one line.
+print_outcome_line() {
+    printf '%s: %s: %s\n' "$1" "$2" "$(escaped_for_one_line "$3")"
+}
+
+# record_store_outcome STORE — write the store's status from what the run found, and print the line of
+# a network outcome that is not ok. A withheld file is a bad level of its own, so it outranks a sync that
+# worked and a failure the next run may not repeat (push-rejected, unreachable, skipped-no-token), which
+# goes into its detail; it is added to the detail of one that is bad as well (blocked, auth-failed).
+record_store_outcome() {
+    local store=$1 outcome detail joined_paths='' withheld_path
+    for withheld_path in "${WITHHELD_REDACTED_PATHS[@]}"; do
+        joined_paths+="${joined_paths:+, }$withheld_path"
+    done
+    if (( ! STORE_HAS_ORIGIN )); then
+        outcome=$OUTCOME_OK_LOCAL_ONLY detail=$NOTHING_TO_COMMIT_DETAIL
+        if (( COMMITTED_COUNT )); then detail="committed $COMMITTED_COUNT files"; fi
+    elif [[ -n "$NETWORK_OUTCOME" ]]; then
+        outcome=$NETWORK_OUTCOME detail=$NETWORK_DETAIL
+    elif [[ "$INTEGRATION_OUTCOME" == "$OUTCOME_BLOCKED" ]]; then
+        outcome=$OUTCOME_BLOCKED detail=$INTEGRATION_DETAIL
+    elif [[ "$INTEGRATION_OUTCOME" == "$OUTCOME_KEPT_BOTH" ]]; then
+        outcome=$OUTCOME_KEPT_BOTH detail="kept both for $KEPT_BOTH_COUNT files"
+    else
+        outcome=$OUTCOME_OK detail='up to date'
+        if (( PUSHED )); then detail='pushed'; fi
+    fi
+    if is_one_of "$outcome" "$OUTCOME_BLOCKED" "$OUTCOME_PUSH_REJECTED" "$OUTCOME_SKIPPED_NO_TOKEN" \
+        "$OUTCOME_UNREACHABLE" "$OUTCOME_AUTH_FAILED"; then
+        print_outcome_line "$store" "$outcome" "$detail"
+    fi
+    if [[ -n "$joined_paths" ]]; then
+        if is_one_of "$outcome" "$OUTCOME_OK" "$OUTCOME_KEPT_BOTH" "$OUTCOME_OK_LOCAL_ONLY"; then
+            outcome=$OUTCOME_WITHHELD detail=$joined_paths
+        elif is_one_of "$outcome" "$OUTCOME_PUSH_REJECTED" "$OUTCOME_UNREACHABLE" "$OUTCOME_SKIPPED_NO_TOKEN"; then
+            detail="$joined_paths; $outcome: $detail" outcome=$OUTCOME_WITHHELD
+        else
+            detail+="; withheld: $joined_paths"
+        fi
+    fi
+    write_status "$store" "$outcome" "$detail"
+}
+
+# commit_and_integrate STORE STORE_DIR HAS_FETCHED — the part of a run that holds the lock: stage, gate
+# and commit, then the merge of a fetched origin.
+commit_and_integrate() {
+    stage_gate_and_commit "$1" "$2" || return 1
+    (( $3 )) || return 0
+    integrate_origin "$1" "$2"
+}
+
+# apply_store STORE STORE_DIR — the route, the origin check and the refusal of an unfinished
+# operation; the fetch; stage, gate, commit and merge under the lock; the push; then the status.
+# Returns 1 when the store could not run.
+apply_store() {
+    local store=$1 store_dir=$2 has_fetched=0 locked_status
+    NETWORK_OUTCOME='' NETWORK_DETAIL='' INTEGRATION_OUTCOME='' INTEGRATION_DETAIL='' MERGED_FROM_ORIGIN=0
+    KEPT_BOTH_COUNT=0 PUSHED=0 COMMITTED_COUNT=0 WITHHELD_REDACTED_PATHS=()
+    resolve_route "$store" "$store_dir" || return 1
+    check_origin "$store" "$store_dir" || return 1
+    refuse_unfinished_operation "$store" "$store_dir" || return 1
+    if (( STORE_HAS_ORIGIN )); then
+        if [[ "$ROUTE_MODE" == no-token ]]; then
+            NETWORK_OUTCOME=$OUTCOME_SKIPPED_NO_TOKEN NETWORK_DETAIL=$NO_TOKEN_DETAIL
+        elif fetch_origin "$store_dir"; then
+            has_fetched=1
+        fi
+    fi
+    take_link_lock_reporting "$store" || return 1
+    commit_and_integrate "$store" "$store_dir" "$has_fetched"
     locked_status=$?
     release_link_lock
     (( locked_status == 0 )) || return 1
 
     if (( COMMITTED_COUNT )); then printf '%s: committed %d files\n' "$store" "$COMMITTED_COUNT"; fi
-    if (( ${#WITHHELD_REDACTED_PATHS[@]} )); then
-        joined_paths=''
-        for withheld_path in "${WITHHELD_REDACTED_PATHS[@]}"; do
-            joined_paths+="${joined_paths:+, }$withheld_path"
+    if (( MERGED_FROM_ORIGIN )); then
+        if [[ "$INTEGRATION_OUTCOME" == "$OUTCOME_KEPT_BOTH" ]]; then
+            printf '%s: merged %s/%s, kept both for %d files\n' "$store" "$ORIGIN_REMOTE_NAME" "$CURRENT_BRANCH" "$KEPT_BOTH_COUNT"
+        else
+            printf '%s: merged %s/%s\n' "$store" "$ORIGIN_REMOTE_NAME" "$CURRENT_BRANCH"
+        fi
+    fi
+    if (( has_fetched )) && [[ "$INTEGRATION_OUTCOME" != "$OUTCOME_BLOCKED" ]] && push_to_origin "$store_dir"; then
+        if (( PUSHED )); then printf '%s: pushed\n' "$store"; fi
+        write_last_ok "$store" || { FAILED_STORES+=("$store"); return 1; }
+    fi
+    ROUTED_TOKEN=''
+    record_store_outcome "$store" || { FAILED_STORES+=("$store"); return 1; }
+}
+
+# ---------------------------------------------------------------------------------------------
+# --status: read-only.
+# ---------------------------------------------------------------------------------------------
+
+# print_status_line STORE LEVEL MESSAGE — one line of --status.
+print_status_line() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3"
+}
+
+# find_in_store STORE_DIR FIND_EXPRESSION… — find, from inside the store, over everything but .git: each
+# path is ./<path in the store>, ended by a NUL. From inside, so a pattern never meets the store's own
+# path.
+find_in_store() {
+    local store_dir=$1
+    shift
+    (cd -- "$store_dir" && find . -path ./.git -prune -o "$@" -print0)
+}
+
+# count_conflict_copies STORE_DIR — how many conflict copies the tree holds, outside .git.
+count_conflict_copies() {
+    local conflict_copies=()
+    read_nul_items conflict_copies find_in_store "$1" ! -type d -name "$CONFLICT_COPY_NAME_GLOB" || return 1
+    printf '%s' "${#conflict_copies[@]}"
+}
+
+# index_problem_counts INDEX_FILE — `<lines> <files>` for one index: how many of its lines name a file
+# that is not there, and how many files more than one of its lines names. A target is a markdown link's;
+# a URL, an anchor or an absolute path names no file in the store.
+index_problem_counts() {
+    local index_file=$1 index_dir=${1%/*} line rest target line_targets line_names_missing
+    local missing_lines=0 repeated_files=0 target_key
+    local -A lines_naming=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        rest=$line line_targets=$'\n' line_names_missing=0
+        while [[ "$rest" =~ $INDEX_LINK_RE ]]; do
+            target=${BASH_REMATCH[1]}
+            rest=${rest#*"${BASH_REMATCH[0]}"}
+            target=${target%%#*}
+            target=${target#./}
+            if [[ -z "$target" || "$target" =~ $NOT_A_STORE_FILE_RE ]]; then continue; fi
+            # One line naming a file twice is still one line.
+            [[ "$line_targets" != *$'\n'"$target"$'\n'* ]] || continue
+            line_targets+="$target"$'\n'
+            target_key="target:$target"
+            lines_naming["$target_key"]=$(( ${lines_naming["$target_key"]:-0} + 1 ))
+            if [[ ! -e "$index_dir/$target" && ! -L "$index_dir/$target" ]]; then line_names_missing=1; fi
         done
-        write_status "$store" "$OUTCOME_WITHHELD" "$joined_paths" || { FAILED_STORES+=("$store"); return 1; }
-    elif (( ! STORE_HAS_ORIGIN )); then
-        local_only_detail=$NOTHING_TO_COMMIT_DETAIL
-        if (( COMMITTED_COUNT )); then local_only_detail="committed $COMMITTED_COUNT files"; fi
-        write_status "$store" "$OUTCOME_OK_LOCAL_ONLY" "$local_only_detail" || { FAILED_STORES+=("$store"); return 1; }
+        missing_lines=$(( missing_lines + line_names_missing ))
+    done < "$index_file" || return 1
+    for target_key in "${!lines_naming[@]}"; do
+        if (( ${lines_naming["$target_key"]} > 1 )); then repeated_files=$(( repeated_files + 1 )); fi
+    done
+    printf '%s %s' "$missing_lines" "$repeated_files"
+}
+
+# print_index_warnings STORE STORE_DIR — a warn line for each directory whose index names a file that
+# is not there, or names one file on two lines, in the order of the directories' names.
+print_index_warnings() {
+    local store=$1 store_dir=$2 index_files=() index_file counts missing_lines repeated_files index_dir
+    if ! read_nul_items index_files find_in_store "$store_dir" -type f \
+        \( -name "$INDEX_FILE_NAME" -o -name "$TOPIC_INDEX_FILE_GLOB" \); then
+        return 1
+    fi
+    if (( ${#index_files[@]} == 0 )); then return 0; fi
+    read_nul_items index_files sort_nul_items "${index_files[@]}" || return 1
+    # Each is ./<path in the store>; its directory is shown as find gives it, less the ./ (the store's
+    # own top is .).
+    for index_file in "${index_files[@]}"; do
+        counts=$(index_problem_counts "$store_dir/${index_file#./}") || return 1
+        read -r missing_lines repeated_files <<< "$counts"
+        (( missing_lines || repeated_files )) || continue
+        index_dir=${index_file%/*}
+        index_dir=${index_dir#./}
+        print_status_line "$store" "$STATUS_LEVEL_WARN" \
+            "$(printable_path "$index_dir"): $missing_lines index lines name a missing file, $repeated_files files are named by more than one index line"
+    done
+}
+
+# sort_nul_items ITEM… — the items, sorted bytewise, each ended by a NUL.
+sort_nul_items() {
+    printf '%s\0' "$@" | LC_ALL=C sort -z
+}
+
+# read_status_file STORE — set STATUS_OUTCOME and STATUS_DETAIL from the store's status line, both
+# empty when there is none. Returns 1 when the line is not one this script writes.
+read_status_file() {
+    local status_path="$STATE_DIR/$1$STATUS_FILE_SUFFIX" status_line rest
+    STATUS_OUTCOME='' STATUS_DETAIL=''
+    [[ -e "$status_path" ]] || return 0
+    status_line=$(< "$status_path") || return 1
+    [[ "$status_line" == *$'\t'*$'\t'* ]] || return 1
+    rest=${status_line#*$'\t'}
+    [[ "${status_line%%$'\t'*}" =~ $EPOCH_RE ]] || return 1
+    STATUS_OUTCOME=${rest%%$'\t'*}
+    STATUS_DETAIL=${rest#*$'\t'}
+    is_one_of "$STATUS_OUTCOME" "${KNOWN_OUTCOMES[@]}"
+}
+
+# status_store STORE STORE_DIR — print the store's --status lines. Returns 1, having reported the
+# store, when it could not be read.
+status_store() {
+    local store=$1 store_dir=$2 last_ok_path="$STATE_DIR/$1$LAST_OK_FILE_SUFFIX" last_ok='' now
+    local age_minutes=0 is_fresh=0 last_outcome_text printed_lines=0 conflict_copy_count
+    check_origin "$store" "$store_dir" || return 1
+    if ! read_status_file "$store"; then
+        report_store_failure "$store" "the status file is not one this script writes"
+        return 1
+    fi
+    if [[ -e "$last_ok_path" ]]; then
+        last_ok=$(< "$last_ok_path")
+        if [[ ! "$last_ok" =~ $EPOCH_RE ]]; then
+            report_store_failure "$store" "the last-ok file does not hold an epoch"
+            return 1
+        fi
+        printf -v now '%(%s)T' -1
+        if (( now > last_ok )); then age_minutes=$(( (now - last_ok) / SECONDS_PER_MINUTE )); fi
+        if (( now - last_ok <= STALE_AFTER_MINUTES * SECONDS_PER_MINUTE )); then is_fresh=1; fi
+    fi
+    last_outcome_text='no run recorded'
+    if [[ -n "$STATUS_OUTCOME" ]]; then
+        last_outcome_text="last outcome $STATUS_OUTCOME${STATUS_DETAIL:+: $STATUS_DETAIL}"
+    fi
+
+    case "$STATUS_OUTCOME" in
+        "$OUTCOME_WITHHELD"|"$OUTCOME_BLOCKED"|"$OUTCOME_AUTH_FAILED"|"$OUTCOME_COULD_NOT_RUN")
+            print_status_line "$store" "$STATUS_LEVEL_BAD" "$STATUS_OUTCOME: $STATUS_DETAIL"
+            printed_lines=$(( printed_lines + 1 )) ;;
+        "$OUTCOME_OK_LOCAL_ONLY")
+            print_status_line "$store" "$STATUS_LEVEL_WARN" 'no remote yet'
+            printed_lines=$(( printed_lines + 1 )) ;;
+        "$OUTCOME_PUSH_REJECTED"|"$OUTCOME_UNREACHABLE"|"$OUTCOME_SKIPPED_NO_TOKEN")
+            # Past the threshold, the staleness line below names this outcome.
+            if (( STORE_HAS_ORIGIN && is_fresh )); then
+                print_status_line "$store" "$STATUS_LEVEL_WARN" "$STATUS_OUTCOME: $STATUS_DETAIL"
+                printed_lines=$(( printed_lines + 1 ))
+            fi ;;
+    esac
+    if (( STORE_HAS_ORIGIN )) && [[ -z "$last_ok" ]]; then
+        print_status_line "$store" "$STATUS_LEVEL_BAD" "never synced; $last_outcome_text"
+        printed_lines=$(( printed_lines + 1 ))
+    elif (( STORE_HAS_ORIGIN && ! is_fresh )); then
+        print_status_line "$store" "$STATUS_LEVEL_BAD" \
+            "last synced $age_minutes min ago, past the $STALE_AFTER_MINUTES min threshold; $last_outcome_text"
+        printed_lines=$(( printed_lines + 1 ))
+    elif (( ! STORE_HAS_ORIGIN )) && [[ -z "$STATUS_OUTCOME" ]]; then
+        print_status_line "$store" "$STATUS_LEVEL_WARN" 'no run recorded yet'
+        printed_lines=$(( printed_lines + 1 ))
+    fi
+    if (( printed_lines == 0 )); then
+        if (( STORE_HAS_ORIGIN )); then
+            print_status_line "$store" "$STATUS_LEVEL_OK" "last synced $age_minutes min ago"
+        else
+            print_status_line "$store" "$STATUS_LEVEL_OK" "$last_outcome_text"
+        fi
+    fi
+
+    if ! conflict_copy_count=$(count_conflict_copies "$store_dir"); then
+        report_store_failure "$store" "could not look for conflict copies in the tree"
+        return 1
+    fi
+    if (( conflict_copy_count )); then
+        print_status_line "$store" "$STATUS_LEVEL_WARN" "$conflict_copy_count conflict copies in the tree"
+    fi
+    if ! print_index_warnings "$store" "$store_dir"; then
+        report_store_failure "$store" "could not read the indexes in the tree"
+        return 1
     fi
 }
 
@@ -676,8 +1509,9 @@ check_store() {
     # and every untracked one, ignored ones included, one entry each ("XY <path>"). `git status` and not
     # `git diff <tree>`: under GIT_OPTIONAL_LOCKS=0 status leaves the index alone, and diff still writes
     # back the entries it refreshes (probed, git 2.53).
-    if ! read_nul_items status_entries git_in_store "$store_dir" status --porcelain=v1 -z --no-renames \
-        --untracked-files=all --ignored=traditional -- "${STAGE_PATHSPEC[@]}"; then
+    # A warning git prints names a path, so it passes through the redactor.
+    if ! read_nul_items status_entries stderr_redacted git_in_store "$store_dir" status --porcelain=v1 -z \
+        --no-renames --untracked-files=all --ignored=traditional -- "${STAGE_PATHSPEC[@]}"; then
         report_store_failure "$store" "git could not list the changed files"
         return 1
     fi
@@ -686,7 +1520,7 @@ check_store() {
         full_path="$store_dir/$path"
         name_and_content_command=(print_name_then_content "$path")
         if [[ -L "$full_path" ]]; then name_and_content_command+=(print_link_target "$full_path")
-        elif [[ -f "$full_path" ]]; then name_and_content_command+=(cat -- "$full_path")
+        elif [[ -f "$full_path" ]]; then name_and_content_command+=(print_file_content "$full_path")
         elif [[ ! -e "$full_path" ]]; then continue   # a deletion: its name leaves the tree
         fi   # else a nested repository: its name is all a commit would carry
         content_has_credential_shape "${name_and_content_command[@]}"
@@ -754,12 +1588,31 @@ scan_store() {
     done
 }
 
-# prepare_apply — settle the host name the commit message carries and the lock wait.
-prepare_apply() {
+# settle_host_name — the host a commit message, a conflict copy's name and the threshold name.
+settle_host_name() {
     HOST_NAME=${CLAUDE_MEMORY_HOST:-$(hostname -s)}
-    [[ "$HOST_NAME" =~ $HOST_NAME_RE ]] || die "host name '$HOST_NAME' cannot go in a commit message"
+    [[ "$HOST_NAME" =~ $HOST_NAME_RE ]] || die "host name '$HOST_NAME' cannot go in a commit message or a file name"
+}
+
+# prepare_apply — settle the host name, the lock wait and the tools only --apply runs.
+prepare_apply() {
+    settle_host_name
     [[ "$LOCK_WAIT_SECONDS" =~ $LOCK_WAIT_SECONDS_RE ]] \
         || die "CLAUDE_MEMORY_LOCK_WAIT_SECONDS '$LOCK_WAIT_SECONDS' is not a whole number of seconds above 0"
+    command -v flock >/dev/null || die "flock is required"
+    command -v timeout >/dev/null || die "timeout is required"
+    [[ -x "$GH_ROUTE" ]] || die "$GH_ROUTE is not executable"
+}
+
+# settle_stale_after_minutes — this host's threshold: the table's stale_after_minutes[<host>], else its
+# .default, else STALE_AFTER_MINUTES_DEFAULT. load_store_table has checked the shape.
+settle_stale_after_minutes() {
+    settle_host_name
+    STALE_AFTER_MINUTES=$(jq -r --arg host "$HOST_NAME" --argjson fallback "$STALE_AFTER_MINUTES_DEFAULT" \
+        '(.stale_after_minutes // {}) | (.[$host] // .default // $fallback)' "$CONFIG_PATH") \
+        || die "could not read stale_after_minutes from $CONFIG_PATH"
+    [[ "$STALE_AFTER_MINUTES" =~ $STALE_AFTER_MINUTES_RE ]] \
+        || die "$CONFIG_PATH: stale_after_minutes for $HOST_NAME is not a whole number of minutes above 0"
 }
 
 main() {
@@ -783,7 +1636,6 @@ main() {
     command -v git >/dev/null || die "git is required"
     command -v sha256sum >/dev/null || die "sha256sum is required"
     [[ -x "$REDACTOR" ]] || die "$REDACTOR is not executable"
-    if [[ "$MODE" == apply ]]; then command -v flock >/dev/null || die "flock is required"; fi
     load_store_table
     if [[ -n "$ONLY_STORE" && -z "${REMOTE_OF_STORE[$ONLY_STORE]+set}" ]]; then
         die "no store named $ONLY_STORE in $CONFIG_PATH"
@@ -791,17 +1643,20 @@ main() {
     if [[ "$MODE" == apply ]]; then
         prepare_apply
     else
-        # --check and --scan never write, and an index refresh is a write git otherwise makes on its own.
+        # --check, --scan and --status never write, and an index refresh is a write git otherwise makes
+        # on its own.
         export GIT_OPTIONAL_LOCKS=0
     fi
+    if [[ "$MODE" == status ]]; then settle_stale_after_minutes; fi
     for store in "${STORE_NAMES[@]}"; do
         if [[ -n "$ONLY_STORE" && "$store" != "$ONLY_STORE" ]]; then continue; fi
         store_dir="$STORES_ROOT/$store"
         [[ -e "$store_dir/.git" ]] || continue
         case "$MODE" in
-            apply) apply_store "$store" "$store_dir" ;;
-            check) check_store "$store" "$store_dir" ;;
-            scan)  scan_store "$store" "$store_dir" ;;
+            apply)  apply_store "$store" "$store_dir" ;;
+            check)  check_store "$store" "$store_dir" ;;
+            scan)   scan_store "$store" "$store_dir" ;;
+            status) status_store "$store" "$store_dir" ;;
         esac
     done
     if (( ${#FAILED_STORES[@]} )); then

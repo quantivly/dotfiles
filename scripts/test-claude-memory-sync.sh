@@ -3,9 +3,10 @@
 # scripts/test-claude-memory-sync.sh
 # ==================================
 #
-# State table for scripts/claude-memory-sync.sh, its local half: the origin check, staging every file
+# State table for scripts/claude-memory-sync.sh. The local half: the origin check, staging every file
 # but the link script's partial copies, the credential-shape gate, the commit with no hook, the lock,
-# the status file, --check and --scan.
+# the status file, --check and --scan. The network half: the route and the token, fetch, the merge
+# that keeps both copies on a conflict, the push, and --status.
 #
 # HERMETIC. Every row runs against fixtures under mktemp -d, under a fixture HOME, with the projects
 # dir, the stores root, the store table, the state dir, the host name, the lock wait and both route
@@ -13,8 +14,10 @@
 # `git init -b main` checkout and a remote is a local bare repository, so nothing touches the network.
 # The credential in the gate rows is fake, gho_ and 36 letters, built at run time so that no scanner
 # reads this file as holding one. A row that must see what git or cat is asked to do puts a fixture
-# wrapper first on PATH for that one run; the wrapper runs the real tool.
-# Requires: bash, git, jq, flock, sha256sum, find, sort, timeout, touch, sleep, cat.
+# wrapper first on PATH for that one run; the wrapper runs the real tool. The other host is a second
+# checkout of the same bare remote, and gh-route is a stub whose answer each row picks.
+# Requires: bash, git, jq, flock, sha256sum, find, sort, timeout, touch, sleep, cat, stat, sh, a
+# user other than root (the unreadable-file rows would assert nothing as root).
 
 set -uo pipefail
 
@@ -32,6 +35,9 @@ mkdir -p "$HOME"
 export HOME
 # A row run from a git hook would otherwise point every fixture git at the hook's repository.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+# The account a shell routed to would otherwise reach every git call the rows log, and an unpinned run
+# would show it as its own.
+unset GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN CLAUDE_MEMORY_GIT_TOKEN
 GIT_CONFIG_GLOBAL="$TMPROOT/gitconfig-global"
 GIT_CONFIG_SYSTEM="$TMPROOT/gitconfig-system"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
@@ -70,7 +76,8 @@ bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for tool in bash git jq flock sha256sum find sort timeout touch sleep cat; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
+for tool in bash git jq flock sha256sum find sort timeout touch sleep cat stat sh; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
+(( $(id -u) != 0 )) || fatal "the table cannot run as root: its unreadable-file rows would assert nothing"
 [[ -x "$SUT" ]] || fatal "$SUT is not executable — every row below would assert nothing"
 [[ -x "$REDACTOR" ]] || fatal "$REDACTOR is not executable — the gate rows could not show their fixtures are right"
 
@@ -95,8 +102,15 @@ BETA_DIR="$STORES_ROOT/$BETA_STORE"
 ALPHA_REMOTE="https://github.com/$FIXTURE_OWNER/alpha-memory.git"
 BETA_REMOTE="https://github.com/$FIXTURE_OWNER/beta-memory.git"
 OTHER_REMOTE="https://github.com/$FIXTURE_OWNER/other-memory.git"
-# The route scripts are the network half's and the link script's; the local half asks neither.
+# The link script's tenant route: the sync never asks it.
 ROUTE_STUB="$TMPROOT/stub-bin/refusing-route"
+# The sync's gh-route: FIXTURE_GH_ROUTE_MODE picks its answer (none, the default: no route; matched: the
+# fixture's config dir and token file; fail: exit 2), and every directory it is asked about is logged.
+GH_ROUTE_STUB="$TMPROOT/stub-bin/gh-route"
+FIXTURE_GH_ROUTE_CALLS="$TMPROOT/gh-route-calls"
+FIXTURE_GH_CONFIG_DIR="$TMPROOT/gh-config/fixture-account"
+FIXTURE_TOKEN_FILE="$TMPROOT/gh-token-cache/fixture-account"
+FIXTURE_GH_ROUTE_MODE=none
 FAKE_TOKEN="gho_$(printf 'A%.0s' {1..36})"
 # What the redactor's shape rules make of FAKE_TOKEN.
 REDACTED_FAKE_TOKEN='<REDACTED:github-token>'
@@ -116,11 +130,37 @@ LOCK_TAKEN_POLL_INTERVAL_SECONDS=0.05
 LEFTOVER_CHILD_SECONDS=5
 # touch -t: a moment after any fixture's own writes, so the file's stat data no longer matches its index entry.
 FUTURE_MTIME_STAMP='203001010000'
+# touch -t: a moment long before the run, so a file the run rewrites shows it in its mtime.
+PAST_MTIME_STAMP='200001010000'
+# What a host that is not this one calls itself, in a conflict copy it made.
+OTHER_HOST='other-host'
+# The index lines the integrate rows write: the seed's, then one per side.
+SEED_INDEX_LINE='- [Seed](seed.md) — the seed note'
+REMOTE_INDEX_LINE='- [Topic](topic.md) — the remote host wrote this'
+LOCAL_INDEX_LINE='- [Topic](topic.md) — this host wrote this'
+# How old a last-ok the staleness rows write, and the thresholds they set around it.
+STALE_ROW_AGE_MINUTES=45
+SHORT_THRESHOLD_MINUTES=30
+LONG_THRESHOLD_MINUTES=180
+SECONDS_PER_MINUTE=60
+TAB=$'\t'
 
 mkdir -p "$(dirname "$ROUTE_STUB")"
-printf '#!/usr/bin/env bash\nprintf "stub route: not for the local half\\n" >&2\nexit 3\n' > "$ROUTE_STUB"
+printf '#!/usr/bin/env bash\nprintf "stub route: not for the sync\\n" >&2\nexit 3\n' > "$ROUTE_STUB"
 printf '#!/usr/bin/env bash\nprintf called > %q\nexit 1\n' "$SIGNING_CALLS" > "$SIGNING_STUB"
-chmod +x "$ROUTE_STUB" "$SIGNING_STUB"
+cat > "$GH_ROUTE_STUB" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-}" >> "$FIXTURE_GH_ROUTE_CALLS"
+case "$FIXTURE_GH_ROUTE_MODE" in
+    none)    jq -cn '{state: "none", dir: "", token_file: "", why: "fixture: no route"}' ;;
+    matched) jq -cn --arg dir "$FIXTURE_GH_CONFIG_DIR" --arg token_file "$FIXTURE_TOKEN_FILE" \
+                 '{state: "matched", dir: $dir, token_file: $token_file, why: "fixture: matched"}' ;;
+    fail)    printf 'gh-route: fixture: the tables are malformed\n' >&2; exit 2 ;;
+esac
+STUB
+chmod +x "$ROUTE_STUB" "$SIGNING_STUB" "$GH_ROUTE_STUB"
+mkdir -p "$FIXTURE_GH_CONFIG_DIR" "$(dirname "$FIXTURE_TOKEN_FILE")"
+export FIXTURE_GH_ROUTE_CALLS FIXTURE_GH_CONFIG_DIR FIXTURE_TOKEN_FILE FIXTURE_GH_ROUTE_MODE
 
 # A third global config whose core.hooksPath holds hooks that stage the withheld file and leave a mark:
 # pre-commit and post-index-change can each put a file into the commit the gate just kept it out of.
@@ -141,21 +181,72 @@ printf '%s\n' '#!/usr/bin/env bash' ': > "$FIXTURE_HOOK_MARKER"' \
     'git add -f -- "$FIXTURE_HOOK_STAGED_PATH"' 'exit 0' > "$FIXTURE_HOOKS_DIR/pre-commit"
 cp "$FIXTURE_HOOKS_DIR/pre-commit" "$FIXTURE_HOOKS_DIR/post-index-change"
 cp "$FIXTURE_HOOKS_DIR/pre-commit" "$FIXTURE_HOOKS_DIR/post-commit"
+# The hooks a merge and a push run. None of these names is a hook the receiving side runs, so the bare
+# remote, which reads the same global config, runs none of them.
+cp "$FIXTURE_HOOKS_DIR/pre-commit" "$FIXTURE_HOOKS_DIR/post-merge"
+cp "$FIXTURE_HOOKS_DIR/pre-commit" "$FIXTURE_HOOKS_DIR/pre-merge-commit"
+cp "$FIXTURE_HOOKS_DIR/pre-commit" "$FIXTURE_HOOKS_DIR/pre-push"
 chmod +x "$FIXTURE_HOOKS_DIR"/*
 
-# The fixture's git, for a row that puts it first on PATH: it logs each call's arguments and, on a
-# commit, does what FIXTURE_GIT_ON_COMMIT asks (probe-lock: record whether link.lock is free;
-# leave-child: start a background child keeping every descriptor the commit was given but its output),
-# then runs the real git.
+# A fourth global config naming a file-system monitor that leaves a mark and stages the withheld file:
+# git runs it on any call that reads the index, between the gate and the commit as much as anywhere.
+FSMONITOR_CONFIG="$TMPROOT/gitconfig-fsmonitor"
+FIXTURE_FSMONITOR="$TMPROOT/fixture-fsmonitor"
+FIXTURE_FSMONITOR_MARKER="$TMPROOT/a-monitor-ran"
+cat > "$FSMONITOR_CONFIG" <<GITCONFIG
+[include]
+    path = $GIT_CONFIG_GLOBAL
+[core]
+    fsmonitor = $FIXTURE_FSMONITOR
+GITCONFIG
+# shellcheck disable=SC2016  # expanded when the monitor runs
+printf '%s\n' '#!/usr/bin/env bash' ': > "$FIXTURE_FSMONITOR_MARKER"' \
+    '[[ -z "${FIXTURE_HOOK_IS_STAGING:-}" ]] || exit 1' 'export FIXTURE_HOOK_IS_STAGING=1' \
+    'git add -f -- "$FIXTURE_HOOK_STAGED_PATH"' 'exit 1' > "$FIXTURE_FSMONITOR"
+chmod +x "$FIXTURE_FSMONITOR"
+
+# The fixture's git, for a row that puts it first on PATH: it logs each call's arguments; logs its
+# subcommand with what its environment holds (the token: expected, other or unset; GH_CONFIG_DIR);
+# keeps the inline credential helper it was given; on a fetch, fails as GitHub does for a repository it
+# cannot see when FIXTURE_GIT_ON_FETCH=not-found; on a commit, does what FIXTURE_GIT_ON_COMMIT asks
+# (probe-lock: record whether link.lock is free; leave-child: start a background child keeping every
+# descriptor the commit was given but its output); then runs the real git.
 FIXTURE_REAL_GIT=$(command -v git)
 GIT_WRAPPER_DIR="$TMPROOT/git-wrapper-bin"
 FIXTURE_GIT_CALL_LOG="$TMPROOT/git-calls"
+FIXTURE_GIT_ENV_LOG="$TMPROOT/git-call-environments"
+FIXTURE_CREDENTIAL_HELPER_FILE="$TMPROOT/credential-helper"
 FIXTURE_LOCK_PROBE_RESULT="$TMPROOT/lock-probe-result"
 FIXTURE_LEFTOVER_CHILD_PID="$TMPROOT/leftover-child-pid"
 mkdir -p "$GIT_WRAPPER_DIR"
 cat > "$GIT_WRAPPER_DIR/git" <<'WRAPPER'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FIXTURE_GIT_CALL_LOG"
+subcommand='' takes_value=0
+for argument in "$@"; do
+    if (( takes_value )); then takes_value=0; continue; fi
+    case "$argument" in
+        -C|-c) takes_value=1 ;;
+        -*)    ;;
+        *)     subcommand=$argument; break ;;
+    esac
+done
+token_state=unset
+if [[ -n "${CLAUDE_MEMORY_GIT_TOKEN:-}" ]]; then
+    token_state=other
+    if [[ "$CLAUDE_MEMORY_GIT_TOKEN" == "${FIXTURE_EXPECTED_TOKEN:-}" ]]; then token_state=expected; fi
+fi
+printf '%s token:%s gh-config:%s\n' "$subcommand" "$token_state" "${GH_CONFIG_DIR:-unset}" >> "$FIXTURE_GIT_ENV_LOG"
+for argument in "$@"; do
+    if [[ "$argument" == 'credential.helper=!'* ]]; then
+        printf '%s' "${argument#credential.helper=!}" > "$FIXTURE_CREDENTIAL_HELPER_FILE"
+    fi
+done
+if [[ "$subcommand" == fetch && "${FIXTURE_GIT_ON_FETCH:-}" == not-found ]]; then
+    printf "remote: Repository not found.\nfatal: repository 'https://github.com/%s/alpha-memory.git/' not found\n" \
+        "$FIXTURE_OWNER" >&2
+    exit 128
+fi
 if [[ " $* " == *" commit "* ]]; then
     case "${FIXTURE_GIT_ON_COMMIT:-}" in
         probe-lock)
@@ -192,7 +283,8 @@ FIXTURE_LINK_LOCK=$LINK_LOCK
 FIXTURE_LEFTOVER_CHILD_SECONDS=$LEFTOVER_CHILD_SECONDS
 export FIXTURE_HOOK_MARKER FIXTURE_HOOK_STAGED_PATH FIXTURE_REAL_GIT FIXTURE_GIT_CALL_LOG \
     FIXTURE_LOCK_PROBE_RESULT FIXTURE_LEFTOVER_CHILD_PID FIXTURE_LINK_LOCK FIXTURE_LEFTOVER_CHILD_SECONDS \
-    FIXTURE_REAL_CAT FIXTURE_CAT_READ_COUNT
+    FIXTURE_REAL_CAT FIXTURE_CAT_READ_COUNT FIXTURE_GIT_ENV_LOG FIXTURE_CREDENTIAL_HELPER_FILE \
+    FIXTURE_FSMONITOR_MARKER FIXTURE_OWNER
 
 # write_default_config — alpha and beta each in a store with its own remote.
 write_default_config() {
@@ -214,7 +306,11 @@ set_store_remote() {
 # reset_scene — nothing under the fixture home, the stores root, the state dir or the remotes; the
 # alpha store checked out with no origin and no commit, the beta store not checked out.
 reset_scene() {
-    rm -rf "$HOME" "$STORES_ROOT" "$STATE_DIR" "$REMOTES_DIR" "$SEED_DIR" "$SIGNING_CALLS"
+    rm -rf "$HOME" "$STORES_ROOT" "$STATE_DIR" "$REMOTES_DIR" "$SEED_DIR" "$SIGNING_CALLS" \
+        "$FIXTURE_GH_ROUTE_CALLS" "$FIXTURE_CREDENTIAL_HELPER_FILE"
+    : > "$FIXTURE_GIT_CALL_LOG"
+    : > "$FIXTURE_GIT_ENV_LOG"
+    rm -f "$FIXTURE_TOKEN_FILE"
     mkdir -p "$HOME" "$STORES_ROOT"
     git init -q -b main "$ALPHA_DIR" || fatal "could not create the alpha store"
     write_default_config
@@ -232,13 +328,15 @@ fixture_commit() {
     git -C "$1" commit -q --no-gpg-sign -m "$2" || fatal "could not commit in $1"
 }
 
-# make_tracked_store STORE — STORE becomes a clone of a fresh bare remote holding one commit, and the
-# table's remote for STORE is that remote's path. The seed checkout stays at SEED_DIR, for pushes.
+# make_tracked_store STORE — STORE becomes a clone of a fresh bare remote holding one commit (seed.md
+# and an index naming it), and the table's remote for STORE is that remote's path. The seed checkout
+# stays at SEED_DIR: it is the other host, for pushes.
 make_tracked_store() {
     local remote="$REMOTES_DIR/$1.git"
     git init -q --bare -b main "$remote" || fatal "could not create the remote of $1"
     git init -q -b main "$SEED_DIR" || fatal "could not create the seed checkout"
     write_file "$SEED_DIR/seed.md" 'seed body'
+    write_file "$SEED_DIR/MEMORY.md" "$SEED_INDEX_LINE"
     fixture_commit "$SEED_DIR" 'seed'
     git -C "$SEED_DIR" push -q "$remote" main || fatal "could not seed the remote of $1"
     rm -rf "${STORES_ROOT:?}/$1"
@@ -251,6 +349,81 @@ seed_push() {
     write_file "$SEED_DIR/$1" "$1 body"
     fixture_commit "$SEED_DIR" "$1"
     git -C "$SEED_DIR" push -q "$REMOTES_DIR/$ALPHA_STORE.git" main || fatal "could not push $1"
+}
+
+# seed_write_push PATH BODY — the other host writes PATH, commits and pushes it.
+seed_write_push() {
+    write_file "$SEED_DIR/$1" "$2"
+    fixture_commit "$SEED_DIR" "write $1"
+    git -C "$SEED_DIR" push -q "$REMOTES_DIR/$ALPHA_STORE.git" main || fatal "could not push $1"
+}
+
+# seed_remove_push PATH — the other host deletes PATH, commits and pushes the deletion.
+seed_remove_push() {
+    git -C "$SEED_DIR" rm -q -- "$1" || fatal "could not remove $1 in the seed checkout"
+    git -C "$SEED_DIR" commit -q --no-gpg-sign -m "remove $1" || fatal "could not commit the removal of $1"
+    git -C "$SEED_DIR" push -q "$REMOTES_DIR/$ALPHA_STORE.git" main || fatal "could not push the removal of $1"
+}
+
+# pull_into_alpha — the alpha store takes what the remote has, as an earlier sync would have.
+pull_into_alpha() {
+    git -C "$ALPHA_DIR" fetch -q origin || fatal "could not fetch into the alpha store"
+    git -C "$ALPHA_DIR" merge -q --ff-only origin/main || fatal "could not fast-forward the alpha store"
+}
+
+remote_head() { git -C "$REMOTES_DIR/$ALPHA_STORE.git" rev-parse main 2>/dev/null; }   # → the remote's main
+local_head() { git -C "$ALPHA_DIR" rev-parse HEAD 2>/dev/null; }                      # → the alpha store's HEAD
+parent_count() { git -C "$1" rev-list --parents -n 1 HEAD 2>/dev/null | wc -w | tr -d ' '; }  # DIR → 1 + parents
+body_of() { cat "$1" 2>/dev/null || printf '(absent)'; }                                # FILE → its body
+mtime_of() { stat -c %Y -- "$1" 2>/dev/null; }                                          # FILE → its mtime
+last_ok_of() { cat "$STATE_DIR/$1.last-ok" 2>/dev/null || printf '(absent)'; }          # STORE → its last-ok
+# committed_body_of PATH — PATH's body in the alpha store's HEAD, so a row pins the commit as well as the tree.
+committed_body_of() { git -C "$ALPHA_DIR" show "HEAD:$1" 2>/dev/null || printf '(absent)'; }
+# tree_state — "tree is HEAD" when the alpha store's tree holds exactly what HEAD does, untracked files included.
+tree_state() { [[ -z "$(git -C "$ALPHA_DIR" status --porcelain --untracked-files=all 2>&1)" ]] && printf 'tree is HEAD'; }
+merge_head_state() { [[ -e "$ALPHA_DIR/.git/MERGE_HEAD" ]] && printf 'a merge in progress'; }
+
+# conflict_copies DIR — every conflict copy under DIR outside .git, sorted, each followed by a space.
+conflict_copies() {
+    (cd "$1" && find . -path ./.git -prune -o -name '*.conflict-*' -print) | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' '
+}
+
+# calls_of SUBCOMMAND — how many logged git calls ran SUBCOMMAND.
+calls_of() {
+    local logged_call calls=0
+    while IFS= read -r logged_call; do
+        if [[ "$logged_call" == "$1 "* ]]; then calls=$(( calls + 1 )); fi
+    done < "$FIXTURE_GIT_ENV_LOG"
+    printf '%s' "$calls"
+}
+
+# stamp_now_minus MINUTES — the epoch MINUTES ago.
+stamp_now_minus() {
+    local now
+    printf -v now '%(%s)T' -1
+    printf '%s' $(( now - $1 * SECONDS_PER_MINUTE ))
+}
+
+# write_status_fixture STORE OUTCOME DETAIL [LAST_OK_EPOCH] — a status the sync could have written, and
+# a last-ok when one is given.
+write_status_fixture() {
+    local now
+    mkdir -p "$STATE_DIR" || fatal "could not create the state dir"
+    printf -v now '%(%s)T' -1
+    printf '%s\t%s\t%s\n' "$now" "$2" "$3" > "$STATE_DIR/$1.status" || fatal "could not write a status"
+    rm -f "$STATE_DIR/$1.last-ok"
+    if [[ -n "${4:-}" ]]; then printf '%s\n' "$4" > "$STATE_DIR/$1.last-ok" || fatal "could not write a last-ok"; fi
+}
+
+# set_stale_after HOST_MINUTES DEFAULT_MINUTES — the table's stale_after_minutes, either one left out
+# when empty, and the key left out when both are.
+set_stale_after() {
+    jq --arg host "$FIXTURE_HOST" --arg host_minutes "$1" --arg default_minutes "$2" '
+        del(.stale_after_minutes)
+        | if $host_minutes != "" then .stale_after_minutes[$host] = ($host_minutes | tonumber) else . end
+        | if $default_minutes != "" then .stale_after_minutes.default = ($default_minutes | tonumber) else . end' \
+        "$CONFIG" > "$CONFIG.new" || fatal "could not set stale_after_minutes"
+    mv "$CONFIG.new" "$CONFIG" || fatal "could not replace the table"
 }
 
 commit_count() { git -C "$1" rev-list --count HEAD 2>/dev/null || printf '0'; }   # DIR → commits on HEAD
@@ -292,7 +465,7 @@ run_sut() {
     OUT=$(CLAUDE_MEMORY_PROJECTS_DIR="$PROJECTS_DIR" CLAUDE_MEMORY_STORES_ROOT="$STORES_ROOT" \
         CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_STATE_DIR="$STATE_DIR" \
         CLAUDE_MEMORY_HOST="$FIXTURE_HOST" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" \
-        CLAUDE_MEMORY_GH_ROUTE="$ROUTE_STUB" CLAUDE_MEMORY_LOCK_WAIT_SECONDS="$SUT_LOCK_WAIT_SECONDS" \
+        CLAUDE_MEMORY_GH_ROUTE="$GH_ROUTE_STUB" CLAUDE_MEMORY_LOCK_WAIT_SECONDS="$SUT_LOCK_WAIT_SECONDS" \
         "${SUT_RUNNER_PREFIX[@]}" "$SUT" "$@" 2>&1); RC=$?
 }
 
@@ -354,8 +527,8 @@ check "usage: --store or --rev with no value is exit 64" \
     "$store_with_nothing|$RC|$(contains "$OUT" '--rev needs a revision')" "64|yes|64|yes"
 run_sut --help
 check "usage: --help is exit 0 and names every verb and flag" \
-    "$RC|$(contains "$OUT" '--check')$(contains "$OUT" '--scan')$(contains "$OUT" '--apply')$(contains "$OUT" '--store')$(contains "$OUT" '--rev')" \
-    "0|yesyesyesyesyes"
+    "$RC|$(contains "$OUT" '--check')$(contains "$OUT" '--scan')$(contains "$OUT" '--apply')$(contains "$OUT" '--status')$(contains "$OUT" '--store')$(contains "$OUT" '--rev')" \
+    "0|yesyesyesyesyesyes"
 
 # ---------------------------------------------------------------------------------------------
 # config
@@ -475,6 +648,21 @@ write_file "$ALPHA_DIR/notes/leaky.md" "a line carrying $FAKE_TOKEN in prose"
 PATH="$GIT_WRAPPER_DIR:$PATH" run_sut --apply
 check "hooks: every git call that writes turns hooks and the file-system monitor off, and the commit passes --no-verify" \
     "$RC|$(git_write_calls_summary)" "0|add 1 1 1 reset 1 1 1 commit 1 1 1 no-verify 1"
+
+# A monitor runs on reads as well as writes: the gate's own diff-index under the lock ran it, and the
+# file it staged then went into the commit.
+reset_scene
+write_file "$ALPHA_DIR/clean.md" 'clean body'
+write_file "$ALPHA_DIR/$FIXTURE_HOOK_STAGED_PATH" "a line carrying $FAKE_TOKEN in prose"
+rm -f "$FIXTURE_FSMONITOR_MARKER"
+GIT_CONFIG_GLOBAL="$FSMONITOR_CONFIG" run_sut --apply
+fixture_log=$(git -C "$ALPHA_DIR" log -p --all)
+monitor_mark_after_sync=$([[ -e "$FIXTURE_FSMONITOR_MARKER" ]] && printf 'the monitor ran')
+# The fixture is only meaningful if git runs the monitor for a read that does not turn it off.
+GIT_CONFIG_GLOBAL="$FSMONITOR_CONFIG" git -C "$ALPHA_DIR" diff-index --cached --quiet HEAD -- >/dev/null 2>&1
+check "hooks: a file-system monitor the host configures never runs, and the token is in no commit" \
+    "$RC|$(contains "$fixture_log" "$FAKE_TOKEN")|$(contains "$fixture_log" 'clean body')|$monitor_mark_after_sync|$([[ -e "$FIXTURE_FSMONITOR_MARKER" ]] && printf 'the monitor runs for plain git')" \
+    "0|no|yes||the monitor runs for plain git"
 
 # ---------------------------------------------------------------------------------------------
 # lock: the link script's lock is held from stage to commit, and only so long
@@ -603,15 +791,6 @@ check "status: ok-local-only when there is no origin" \
     "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(status_field_of "$ALPHA_STORE" 3)|$([[ "$status_epoch" =~ ^[0-9]+$ ]] && (( status_epoch >= epoch_before && status_epoch <= epoch_after )) && printf 'stamped now')" \
     "0|ok-local-only|committed 1 files|stamped now"
 
-reset_scene
-make_tracked_store "$ALPHA_STORE"
-write_file "$ALPHA_DIR/a.md" 'a body'
-remote_head_before=$(git -C "$REMOTES_DIR/$ALPHA_STORE.git" rev-parse main)
-run_sut --apply
-check "status: a store whose origin is the table's is committed and given no status" \
-    "$RC|$OUT|$(commit_count "$ALPHA_DIR")|$([[ -e "$STATE_DIR/$ALPHA_STORE.status" ]] && printf 'has a status')|$(git -C "$REMOTES_DIR/$ALPHA_STORE.git" rev-parse main)" \
-    "0|$ALPHA_STORE: committed 1 files|2||$remote_head_before"
-
 # ---------------------------------------------------------------------------------------------
 # scan: the gate, for commits the sync did not make
 # ---------------------------------------------------------------------------------------------
@@ -738,6 +917,29 @@ check "check: a file is read once for its verdict, so a write between two reads 
     "$RC|$OUT|$(cat "$FIXTURE_CAT_READ_COUNT" 2>/dev/null)" \
     "1|$ALPHA_STORE: 1 pending, 0 withheld, no fetched origin|1"
 
+# What cat says about a file it cannot read names the file: here a name that carries a token shape.
+reset_scene
+write_file "$ALPHA_DIR/$TOKEN_NAMED_FILE" 'a clean body under a leaky name'
+chmod 000 "$ALPHA_DIR/$TOKEN_NAMED_FILE"
+token_named_file_state=$([[ -r "$ALPHA_DIR/$TOKEN_NAMED_FILE" ]] || printf unreadable)
+run_sut --check
+chmod 644 "$ALPHA_DIR/$TOKEN_NAMED_FILE"
+check "check: an unreadable file whose name carries a token shape is named redacted, and the shape is in no line" \
+    "$RC|$(contains "$OUT" "$FAKE_TOKEN")|$(contains "$OUT" "$ALPHA_STORE: could not read $REDACTED_TOKEN_NAMED_FILE")|$token_named_file_state" \
+    "2|no|yes|unreadable"
+
+# git status warns about a directory it cannot open, by name. The mode goes back before the row, or
+# the fixture root cannot be removed.
+TOKEN_NAMED_DIR="dir-$FAKE_TOKEN"
+reset_scene
+write_file "$ALPHA_DIR/$TOKEN_NAMED_DIR/inner.md" 'inner body'
+chmod 000 "$ALPHA_DIR/$TOKEN_NAMED_DIR"
+run_sut --check
+chmod 755 "$ALPHA_DIR/$TOKEN_NAMED_DIR"
+check "check: git's warning about an unreadable directory whose name carries a token shape is redacted" \
+    "$(contains "$OUT" "$FAKE_TOKEN")|$(contains "$OUT" "could not open directory 'dir-$REDACTED_FAKE_TOKEN/'")" \
+    "no|yes"
+
 reset_scene
 make_tracked_store "$ALPHA_STORE"
 seed_push second.md
@@ -778,8 +980,382 @@ run_sut --check --store no-such-store
 check "store: --store naming no store in the table is exit 2" \
     "$RC|$(contains "$OUT" 'no store named no-such-store in')" "2|yes"
 
+# ---------------------------------------------------------------------------------------------
+# network: fetch, merge, push, and what each outcome leaves
+# ---------------------------------------------------------------------------------------------
+
+printf 'network: push and pull\n'
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+printf -v epoch_before '%(%s)T' -1
+run_sut --apply
+printf -v epoch_after '%(%s)T' -1
+last_ok_epoch=$(last_ok_of "$ALPHA_STORE")
+check "push: a local commit reaches origin and last-ok is written" \
+    "$RC|$OUT|$(remote_head)|$(status_field_of "$ALPHA_STORE" 2)|$([[ "$last_ok_epoch" =~ ^[0-9]+$ ]] && (( last_ok_epoch >= epoch_before && last_ok_epoch <= epoch_after )) && printf 'stamped now')" \
+    "0|$ALPHA_STORE: committed 1 files${NL}$ALPHA_STORE: pushed|$(local_head)|ok|stamped now"
+
+# The local commit is the fixture's, so the run has a commit to integrate past: a rebase would write
+# local.md again, and the merge leaves it alone.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push remote-only.md 'remote-only body'
+write_file "$ALPHA_DIR/local.md" 'local body'
+fixture_commit "$ALPHA_DIR" 'local'
+touch -m -t "$PAST_MTIME_STAMP" "$ALPHA_DIR/local.md" "$ALPHA_DIR/seed.md" || fatal "could not move the mtimes back"
+mtimes_before="$(mtime_of "$ALPHA_DIR/local.md") $(mtime_of "$ALPHA_DIR/seed.md")"
+run_sut --apply
+check "pull: a remote-only file arrives and local files keep their mtime" \
+    "$RC|$(body_of "$ALPHA_DIR/remote-only.md")|$(mtime_of "$ALPHA_DIR/local.md") $(mtime_of "$ALPHA_DIR/seed.md")|$(status_field_of "$ALPHA_STORE" 2)|$(remote_head)" \
+    "0|remote-only body|$mtimes_before|ok|$(local_head)"
+
+printf 'integrate: both sides changed\n'
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push theirs.md 'their body'
+write_file "$ALPHA_DIR/ours.md" 'our body'
+run_sut --apply
+check "integrate: different files on both sides merge with no conflict copy" \
+    "$RC|$(head_files "$ALPHA_DIR")|$(conflict_copies "$ALPHA_DIR")|$(parent_count "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(remote_head)" \
+    "0|MEMORY.md ours.md seed.md theirs.md ||3|ok|$(local_head)"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push seed.md 'remote body'
+write_file "$ALPHA_DIR/seed.md" 'local body'
+run_sut --apply
+check "integrate: both edited one file keeps both bodies, and the conflict copy is the local one" \
+    "$RC|$(committed_body_of "seed.md")|$(committed_body_of "seed.conflict-$FIXTURE_HOST.md")|$(conflict_copies "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(head_subject "$ALPHA_DIR")|$(merge_head_state)|$(remote_head)|$(tree_state)" \
+    "0|remote body|local body|seed.conflict-$FIXTURE_HOST.md |kept-both|$FIXTURE_HOST: merge, kept both for 1 files||$(local_head)|tree is HEAD"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$SEED_DIR/topic.md" 'remote topic'
+printf '%s\n' "$REMOTE_INDEX_LINE" >> "$SEED_DIR/MEMORY.md"
+fixture_commit "$SEED_DIR" 'remote topic'
+git -C "$SEED_DIR" push -q "$REMOTES_DIR/$ALPHA_STORE.git" main || fatal "could not push the remote topic"
+write_file "$ALPHA_DIR/topic.md" 'local topic'
+printf '%s\n' "$LOCAL_INDEX_LINE" >> "$ALPHA_DIR/MEMORY.md"
+run_sut --apply
+check "integrate: both added one name keeps both bodies, the conflict copy is the local one, and the index holds both lines" \
+    "$RC|$(committed_body_of "topic.md")|$(committed_body_of "topic.conflict-$FIXTURE_HOST.md")|$(committed_body_of "MEMORY.md")|$(status_field_of "$ALPHA_STORE" 2)|$(merge_head_state)|$(remote_head)|$(tree_state)" \
+    "0|remote topic|local topic|$SEED_INDEX_LINE${NL}$REMOTE_INDEX_LINE${NL}$LOCAL_INDEX_LINE|kept-both||$(local_head)|tree is HEAD"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+printf '%s\n' "$REMOTE_INDEX_LINE" >> "$SEED_DIR/MEMORY.md"
+fixture_commit "$SEED_DIR" 'remote index line'
+git -C "$SEED_DIR" push -q "$REMOTES_DIR/$ALPHA_STORE.git" main || fatal "could not push the remote index line"
+printf '%s\n' "$LOCAL_INDEX_LINE" >> "$ALPHA_DIR/MEMORY.md"
+run_sut --apply
+check "integrate: index lines added on both sides are unioned with no conflict copy" \
+    "$RC|$(committed_body_of "MEMORY.md")|$(conflict_copies "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(remote_head)|$(tree_state)" \
+    "0|$SEED_INDEX_LINE${NL}$REMOTE_INDEX_LINE${NL}$LOCAL_INDEX_LINE||kept-both|$(local_head)|tree is HEAD"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push seed.md 'remote edit'
+rm "$ALPHA_DIR/seed.md"
+run_sut --apply
+check "integrate: deleted here, edited there is present with their body" \
+    "$RC|$(committed_body_of "seed.md")|$(conflict_copies "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(merge_head_state)|$(remote_head)|$(tree_state)" \
+    "0|remote edit||kept-both||$(local_head)|tree is HEAD"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_remove_push seed.md
+write_file "$ALPHA_DIR/seed.md" 'local edit'
+run_sut --apply
+check "integrate: edited here, deleted there is present with our body" \
+    "$RC|$(committed_body_of "seed.md")|$(conflict_copies "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(merge_head_state)|$(remote_head)|$(tree_state)" \
+    "0|local edit||kept-both||$(local_head)|tree is HEAD"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push "seed.conflict-$FIXTURE_HOST.md" 'an older copy'
+pull_into_alpha
+seed_write_push seed.md 'remote body'
+write_file "$ALPHA_DIR/seed.md" 'local body'
+run_sut --apply
+check "integrate: an existing conflict copy is never overwritten, and the next is numbered .2" \
+    "$RC|$(committed_body_of "seed.md")|$(committed_body_of "seed.conflict-$FIXTURE_HOST.md")|$(committed_body_of "seed.conflict-$FIXTURE_HOST.2.md")|$(status_field_of "$ALPHA_STORE" 2)|$(tree_state)" \
+    "0|remote body|an older copy|local body|kept-both|tree is HEAD"
+
+# With renames off a rename is a deletion and an addition, so the edit meets a deletion.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push seed.md 'remote edit'
+mv "$ALPHA_DIR/seed.md" "$ALPHA_DIR/renamed.md" || fatal "could not rename seed.md"
+run_sut --apply
+check "integrate: a rename on one side and an edit on the other loses neither body" \
+    "$RC|$(committed_body_of "seed.md")|$(committed_body_of "renamed.md")|$(status_field_of "$ALPHA_STORE" 2)|$(merge_head_state)|$(remote_head)|$(tree_state)" \
+    "0|remote edit|seed body|kept-both||$(local_head)|tree is HEAD"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push "$FIXTURE_HOOK_STAGED_PATH" 'a clean body from the other host'
+write_file "$ALPHA_DIR/$FIXTURE_HOOK_STAGED_PATH" "a line carrying $FAKE_TOKEN in prose"
+head_before=$(local_head)
+remote_before=$(remote_head)
+run_sut --apply
+fixture_log=$(git -C "$ALPHA_DIR" log -p --all)
+check "integrate: a withheld local file in the merge's way is outcome blocked, exit 0, nothing committed" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$(status_field_of "$ALPHA_STORE" 3)" "$FIXTURE_HOOK_STAGED_PATH")|$(local_head)|$(remote_head)|$(contains "$(body_of "$ALPHA_DIR/$FIXTURE_HOOK_STAGED_PATH")" "$FAKE_TOKEN")|$(merge_head_state)|$(contains "$fixture_log" "$FAKE_TOKEN")|$(contains "$OUT" "$FAKE_TOKEN")" \
+    "0|blocked|yes|$head_before|$remote_before|yes||no|no"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push theirs.md 'their body'
+write_file "$ALPHA_DIR/ours.md" 'our body'
+rm -f "$FIXTURE_HOOK_MARKER"
+GIT_CONFIG_GLOBAL="$HOOKS_CONFIG" run_sut --apply
+check "hooks: no hook runs during the merge or the push" \
+    "$RC|$([[ -e "$FIXTURE_HOOK_MARKER" ]] && printf 'a hook ran')|$(parent_count "$ALPHA_DIR")|$(remote_head)" \
+    "0||3|$(local_head)"
+
+# The store's first commit is its own, made before it ever fetched: its history and origin's share no
+# commit, and a merge that refuses unrelated histories would refuse on every run.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+rm -rf "$ALPHA_DIR"
+git init -q -b main "$ALPHA_DIR" || fatal "could not create the alpha store"
+git -C "$ALPHA_DIR" remote add origin "$REMOTES_DIR/$ALPHA_STORE.git" || fatal "could not add the origin"
+write_file "$ALPHA_DIR/seed.md" 'local seed body'
+write_file "$ALPHA_DIR/own.md" 'own body'
+run_sut --apply
+check "integrate: an origin that shares no history with the store is merged, keeping both" \
+    "$RC|$(committed_body_of "seed.md")|$(committed_body_of "seed.conflict-$FIXTURE_HOST.md")|$(head_files "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)|$(remote_head)|$(tree_state)" \
+    "0|seed body|local seed body|MEMORY.md own.md seed.conflict-$FIXTURE_HOST.md seed.md |kept-both|$(local_head)|tree is HEAD"
+
+printf 'apply: an operation left unfinished\n'
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push seed.md 'remote body'
+write_file "$ALPHA_DIR/seed.md" 'local body'
+fixture_commit "$ALPHA_DIR" 'local'
+git -C "$ALPHA_DIR" fetch -q origin || fatal "could not fetch into the alpha store"
+git -C "$ALPHA_DIR" merge -q --no-edit origin/main >/dev/null 2>&1
+[[ -e "$ALPHA_DIR/.git/MERGE_HEAD" ]] || fatal "the fixture merge did not stop on its conflict"
+store_before=$(tree_fingerprint "$ALPHA_DIR")
+run_sut --apply
+check "apply: a merge in progress is could-not-run, naming it, and nothing is reset" \
+    "$RC|$(contains "$OUT" "$ALPHA_STORE: a merge is in progress")|$(merge_head_state)|$(tree_fingerprint "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)" \
+    "2|yes|a merge in progress|$store_before|could-not-run"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+git -C "$ALPHA_DIR" checkout -q --detach || fatal "could not detach HEAD"
+write_file "$ALPHA_DIR/pending.md" 'pending body'
+store_before=$(tree_fingerprint "$ALPHA_DIR")
+run_sut --apply
+check "apply: a detached HEAD is could-not-run, and nothing is staged" \
+    "$RC|$(contains "$OUT" "$ALPHA_STORE: HEAD is detached")|$(tree_fingerprint "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)" \
+    "2|yes|$store_before|could-not-run"
+
+# A file here where the remote has a directory: git moves the file aside to d~HEAD, an entry added by
+# us alone, which is none of the statuses the sync resolves.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push d/x.md 'remote body under d'
+write_file "$ALPHA_DIR/d" 'local file d'
+run_sut --apply
+check "apply: no run leaves MERGE_HEAD behind, even on a conflict it cannot resolve" \
+    "$RC|$(merge_head_state)|$([[ -e "$ALPHA_DIR/d~HEAD" ]] && printf 'd~HEAD left')|$(body_of "$ALPHA_DIR/d")|$(git -C "$ALPHA_DIR" status --porcelain)|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$OUT" "$ALPHA_STORE: a conflict the sync does not resolve")" \
+    "2|||local file d||could-not-run|yes"
+
+printf 'auth: the route and the token\n'
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GH_ROUTE_MODE=fail run_sut --apply
+check "auth: gh-route exit 2 is could-not-run and git is never called" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(cat "$FIXTURE_GIT_CALL_LOG")|$(contains "$OUT" "$ALPHA_STORE: gh-route could not answer")|$(commit_count "$ALPHA_DIR")" \
+    "2|could-not-run||yes|1"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+: > "$FIXTURE_TOKEN_FILE"
+remote_before=$(remote_head)
+PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GH_ROUTE_MODE=matched run_sut --apply
+check "auth: an empty token file is skipped-no-token, exit 0, no fetch, and the local commit is still made" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|fetch $(calls_of fetch) push $(calls_of push)|$(remote_head)|$(commit_count "$ALPHA_DIR")|$(last_ok_of "$ALPHA_STORE")" \
+    "0|skipped-no-token|fetch 0 push 0|$remote_before|2|(absent)"
+
+# A remote commit as well, so the run fetches, merges and pushes: every git call it makes is logged.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push theirs.md 'their body'
+write_file "$ALPHA_DIR/a.md" 'a body'
+printf '%s\n' "$FAKE_TOKEN" > "$FIXTURE_TOKEN_FILE"
+PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GH_ROUTE_MODE=matched FIXTURE_EXPECTED_TOKEN="$FAKE_TOKEN" run_sut --apply
+calls_with_token=''
+while IFS= read -r logged_call; do
+    if [[ "$logged_call" != *" token:unset "* ]]; then calls_with_token+="${logged_call%% *}:${logged_call#* token:} "; fi
+done < "$FIXTURE_GIT_ENV_LOG"
+fetch_call=$(grep -F ' fetch ' "$FIXTURE_GIT_CALL_LOG")
+check "auth: the token is in no argv, no output and no status, and only the fetch and the push are given it" \
+    "$RC|$(contains "$(cat "$FIXTURE_GIT_CALL_LOG")" "$FAKE_TOKEN")|$(contains "$OUT" "$FAKE_TOKEN")|$(contains "$(status_line_of "$ALPHA_STORE")" "$FAKE_TOKEN")|$calls_with_token|$(contains "$fetch_call" ' -c credential.helper= -c credential.helper=!')|$(remote_head)" \
+    "0|no|no|no|fetch:expected gh-config:$FIXTURE_GH_CONFIG_DIR push:expected gh-config:$FIXTURE_GH_CONFIG_DIR |yes|$(local_head)"
+
+# The helper the run gave git, run as git runs one: `sh -c '<helper> <operation>'`, its request on stdin.
+helper_snippet=$(cat "$FIXTURE_CREDENTIAL_HELPER_FILE" 2>/dev/null)
+credential_request="protocol=https${NL}host=github.com${NL}"
+helper_get_output=$(printf '%s\n' "$credential_request" | CLAUDE_MEMORY_GIT_TOKEN="$FAKE_TOKEN" sh -c "$helper_snippet get" 2>&1)
+helper_get_status=$?
+helper_store_output=$(printf '%s\n' "$credential_request" | CLAUDE_MEMORY_GIT_TOKEN="$FAKE_TOKEN" sh -c "$helper_snippet store" 2>&1)
+helper_store_status=$?
+helper_erase_output=$(printf '%s\n' "$credential_request" | CLAUDE_MEMORY_GIT_TOKEN="$FAKE_TOKEN" sh -c "$helper_snippet erase" 2>&1)
+helper_erase_status=$?
+helper_empty_output=$(printf '%s\n' "$credential_request" | CLAUDE_MEMORY_GIT_TOKEN='' sh -c "$helper_snippet get" 2>&1)
+helper_empty_status=$?
+# And as git itself asks it, behind a cleared helper list.
+git_fill_output=$(printf '%s\n' "$credential_request" | CLAUDE_MEMORY_GIT_TOKEN="$FAKE_TOKEN" GIT_TERMINAL_PROMPT=0 \
+    git -c credential.helper= -c "credential.helper=!$helper_snippet" credential fill 2>&1)
+check "auth: the helper answers only get, and fails on an empty variable" \
+    "$([[ -n "$helper_snippet" ]] && printf 'a helper was given')|$helper_get_status|$([[ "$helper_get_output" == "username=x-access-token${NL}password=$FAKE_TOKEN" ]] && printf 'answers the token')|$helper_store_status|$helper_store_output|$helper_erase_status|$helper_erase_output|$helper_empty_status|$helper_empty_output|$(contains "$git_fill_output" "password=$FAKE_TOKEN")" \
+    "a helper was given|0|answers the token|0||0||1||yes"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GH_ROUTE_MODE=none run_sut --apply
+calls_with_route_environment=''
+while IFS= read -r logged_call; do
+    if [[ "$logged_call" != *" token:unset gh-config:unset" ]]; then calls_with_route_environment+="$logged_call "; fi
+done < "$FIXTURE_GIT_ENV_LOG"
+check "auth: state none runs unpinned, with the host's own credential helper" \
+    "$RC|$(cat "$FIXTURE_GH_ROUTE_CALLS" 2>/dev/null)|$(contains "$(cat "$FIXTURE_GIT_CALL_LOG")" 'credential.helper')|$calls_with_route_environment|fetch $(calls_of fetch)|$(status_field_of "$ALPHA_STORE" 2)|$(remote_head)" \
+    "0|$ALPHA_DIR|no||fetch 1|ok|$(local_head)"
+
+printf 'fetch: a remote that does not answer\n'
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+mv "$REMOTES_DIR/$ALPHA_STORE.git" "$REMOTES_DIR/$ALPHA_STORE.git.gone" || fatal "could not move the remote away"
+run_sut --apply
+check "fetch: an unreachable origin is outcome unreachable, exit 0, and the local commit is still made" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$OUT" "$ALPHA_STORE: unreachable")|$(commit_count "$ALPHA_DIR")|$(last_ok_of "$ALPHA_STORE")" \
+    "0|unreachable|yes|2|(absent)"
+
+# A withheld file is bad on every run until it is renamed or edited; an unreachable remote may answer
+# the next run. So withheld is the outcome, and the network failure goes into its detail.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/clean.md" 'clean body'
+write_file "$ALPHA_DIR/$FIXTURE_HOOK_STAGED_PATH" "a line carrying $FAKE_TOKEN in prose"
+mv "$REMOTES_DIR/$ALPHA_STORE.git" "$REMOTES_DIR/$ALPHA_STORE.git.gone" || fatal "could not move the remote away"
+run_sut --apply
+check "fetch: a withheld file outranks an unreachable origin, which goes into its detail" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$(status_field_of "$ALPHA_STORE" 3)" "$FIXTURE_HOOK_STAGED_PATH; unreachable: ")|$(contains "$OUT" "$ALPHA_STORE: unreachable")|$(contains "$(status_line_of "$ALPHA_STORE")" "$FAKE_TOKEN")" \
+    "0|withheld|yes|yes|no"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+remote_before=$(remote_head)
+PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GIT_ON_FETCH=not-found run_sut --apply
+check "fetch: a not-found error is outcome auth-failed, exit 0, and nothing is pushed" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$(status_field_of "$ALPHA_STORE" 3)" 'Repository not found')|push $(calls_of push)|$(remote_head)|$(last_ok_of "$ALPHA_STORE")" \
+    "0|auth-failed|yes|push 0|$remote_before|(absent)"
+
+PUSH_ATTEMPTS_LOG="$TMPROOT/push-attempts"
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+rm -f "$PUSH_ATTEMPTS_LOG"
+printf '#!/usr/bin/env bash\nprintf "attempt\\n" >> %q\nprintf "fixture: this remote takes no pushes\\n" >&2\nexit 1\n' \
+    "$PUSH_ATTEMPTS_LOG" > "$REMOTES_DIR/$ALPHA_STORE.git/hooks/pre-receive"
+chmod +x "$REMOTES_DIR/$ALPHA_STORE.git/hooks/pre-receive"
+remote_before=$(remote_head)
+run_sut --apply
+check "push: a rejected push is outcome push-rejected, exit 0, one attempt" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(wc -l < "$PUSH_ATTEMPTS_LOG" 2>/dev/null | tr -d ' ')|$(remote_head)|$(last_ok_of "$ALPHA_STORE")" \
+    "0|push-rejected|1|$remote_before|(absent)"
+
+# ---------------------------------------------------------------------------------------------
+# --status: one or more lines per checked-out store, store<TAB>level<TAB>message
+# ---------------------------------------------------------------------------------------------
+
+printf 'status: --status, read-only\n'
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus 0)"
+run_sut --status
+status_after_ok="$RC|$OUT"
+write_status_fixture "$ALPHA_STORE" kept-both 'kept both for 1 files' "$(stamp_now_minus 0)"
+run_sut --status
+check "status: ok or kept-both with last-ok within the threshold is level ok" \
+    "$status_after_ok|$RC|$OUT" \
+    "0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago|0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_status_fixture "$ALPHA_STORE" skipped-no-token 'no token' ''
+run_sut --status
+status_never_synced="$RC|$OUT"
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus "$STALE_ROW_AGE_MINUTES")"
+set_stale_after '' "$SHORT_THRESHOLD_MINUTES"
+run_sut --status
+check "status: a store with an origin whose last-ok is missing or past the threshold is bad, with the last outcome and detail" \
+    "$status_never_synced|$RC|$OUT" \
+    "0|$ALPHA_STORE${TAB}bad${TAB}never synced; last outcome skipped-no-token: no token|0|$ALPHA_STORE${TAB}bad${TAB}last synced $STALE_ROW_AGE_MINUTES min ago, past the $SHORT_THRESHOLD_MINUTES min threshold; last outcome ok"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus "$STALE_ROW_AGE_MINUTES")"
+threshold_levels=''
+for stale_after in "$LONG_THRESHOLD_MINUTES $SHORT_THRESHOLD_MINUTES" " $SHORT_THRESHOLD_MINUTES" " "; do
+    set_stale_after "${stale_after% *}" "${stale_after#* }"
+    run_sut --status
+    threshold_levels+="$(cut -f2 <<< "$OUT") "
+done
+check "status: the threshold is stale_after_minutes[<host>], else .default, else 60" \
+    "$threshold_levels" "ok bad ok "
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+bad_outcome_lines=''
+for bad_outcome in withheld blocked auth-failed could-not-run; do
+    write_status_fixture "$ALPHA_STORE" "$bad_outcome" "notes/$bad_outcome.md" "$(stamp_now_minus 0)"
+    run_sut --status
+    bad_outcome_lines+="$RC $OUT${NL}"
+done
+check "status: withheld, blocked, auth-failed and could-not-run are bad, naming the file or reason" \
+    "$bad_outcome_lines" \
+    "0 $ALPHA_STORE${TAB}bad${TAB}withheld: notes/withheld.md${NL}0 $ALPHA_STORE${TAB}bad${TAB}blocked: notes/blocked.md${NL}0 $ALPHA_STORE${TAB}bad${TAB}auth-failed: notes/auth-failed.md${NL}0 $ALPHA_STORE${TAB}bad${TAB}could-not-run: notes/could-not-run.md${NL}"
+
+reset_scene
+write_status_fixture "$ALPHA_STORE" ok-local-only 'committed 1 files'
+run_sut --status
+check "status: ok-local-only is warn, no remote yet" \
+    "$RC|$OUT" "0|$ALPHA_STORE${TAB}warn${TAB}no remote yet"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/x.conflict-$FIXTURE_HOST.md" 'one copy'
+write_file "$ALPHA_DIR/sub/y.conflict-$OTHER_HOST.2.md" 'another copy'
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus 0)"
+run_sut --status
+check "status: a conflict copy in the tree is warn, with the count" \
+    "$RC|$OUT" \
+    "0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago${NL}$ALPHA_STORE${TAB}warn${TAB}2 conflict copies in the tree"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+printf '%s\n' '- [Gone](gone.md) — names a file that is not there' >> "$ALPHA_DIR/MEMORY.md"
+write_file "$ALPHA_DIR/repos/$FIXTURE_OWNER/demo/a.md" 'a body'
+printf '%s\n' '- [A](a.md) — first' '- [A again](a.md) — second' '- [B](b.md) — missing' \
+    > "$ALPHA_DIR/repos/$FIXTURE_OWNER/demo/MEMORY.md"
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus 0)"
+run_sut --status
+check "status: an index line naming a missing file, or one file named by two index lines, is warn with the directory and counts" \
+    "$RC|$OUT" \
+    "0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago${NL}$ALPHA_STORE${TAB}warn${TAB}.: 1 index lines name a missing file, 0 files are named by more than one index line${NL}$ALPHA_STORE${TAB}warn${TAB}repos/$FIXTURE_OWNER/demo: 1 index lines name a missing file, 1 files are named by more than one index line"
+
 printf '\n'
-EXPECTED_ROWS=48
+EXPECTED_ROWS=82
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

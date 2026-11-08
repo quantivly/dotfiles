@@ -330,7 +330,7 @@ the doctor row reports the age of the last successful sync with a laptop thresho
 
 **Amended 2026-11-06 (DO-891):** eight amendments, from the plan
 `docs/superpowers/plans/2026-11-06-claude-memory-stores.md`. Where they differ from the text above,
-they win. M7 reverses a recorded answer and **awaits Zvi's confirmation**; the other seven stand.
+they win. M7 reverses a recorded answer; Zvi confirmed it on 2026-11-08.
 
 - **(M1) Stores are a table, not one per tenant.** `memory-stores.json` names each store, its
   `remote` and the `tenants` it holds. A store is checked out at
@@ -356,12 +356,12 @@ they win. M7 reverses a recorded answer and **awaits Zvi's confirmation**; the o
   created for a checkout with neither.
 - **(M6) The secret gate withholds files, it does not refuse the commit.** A file whose content
   changes under the redactor's shape rules is left uncommitted and named; the other files sync.
-- **(M7, awaiting Zvi's confirmation) Auth on a host with more than one GitHub account reads the
-  routed token file.** This section and the answer recorded as Q4 say "keyring via gh, no token on
+- **(M7, confirmed by Zvi on 2026-11-08) Auth on a host with more than one GitHub account reads
+  the routed token file.** This section and the answer recorded as Q4 say "keyring via gh, no token on
   disk". The keyring is keyed by host and cannot choose an account (`docs/GH_ACCOUNT_ROUTING.md`), so
   the sync asks `scripts/gh-route` and reads the shell's existing token cache file, as the
-  `rabota schedule` tick does. No new token file is created. This reverses a recorded answer and
-  needs Zvi's confirmation before the sync's network half is built.
+  `rabota schedule` tick does. No new token file is created. This reverses a recorded answer; Zvi
+  confirmed it on 2026-11-08 ("Yes, as recommended").
 - **(M8) Merge, never rebase.** This section says `pull --rebase`. A rebase removes every unpushed
   file from the working tree while it replays, and a session writing in that window stops it in a
   state `--abort` cannot leave (probed). The sync integrates with one `git merge`.
