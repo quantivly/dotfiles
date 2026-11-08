@@ -15,6 +15,12 @@ export const APP_SCAN_INTERVAL_SECONDS = 10;
 /** Sample ticks between per-app scans. */
 export const APP_SCAN_EVERY_N_TICKS = 5;
 /**
+ * Sample ticks an app scan may stay in flight: one whole scan interval, by when the next scan is overdue. On the
+ * timer tick after that the scan counts as stalled (once per stall): the ranking is dropped, so "heaviest" shows
+ * no data, and the scan's late result is discarded.
+ */
+export const APP_SCAN_STALL_TICKS = APP_SCAN_EVERY_N_TICKS;
+/**
  * The tick that scans once more than the cadence would, after every baseline reset (enable, resume, the scan turned
  * back on), which restarts the tick count at 0. Tick 0's scan is only a baseline, so without this the CPU half of
  * "heaviest" would wait for tick APP_SCAN_EVERY_N_TICKS (about 12 s); with it, tick 2's snapshot has it (about 4 s).

@@ -7,6 +7,8 @@
 //   APP_SCAN_READ_BATCH_LEAVES leaves' reads are in flight at once;
 // - a sample or scan already in flight makes the next one a no-op: skipped, never queued;
 // - a sample stuck in flight for more than SAMPLE_STALL_TICKS intervals turns both surfaces to no data, once;
+// - an app scan stuck in flight for more than APP_SCAN_STALL_TICKS intervals drops the ranking, once, so "heaviest"
+//   shows no data instead of the last ranking as if it were live;
 // - after every await, a destroyed (or restarted-baseline) check comes before any state is touched;
 // - the IO helpers are module functions with no access to sampler state, so only methods can change it;
 // - nothing a tick does can throw out of the timer callback;
@@ -16,8 +18,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {
-    APP_SCAN_EVERY_N_TICKS, APP_SCAN_READ_BATCH_LEAVES, APP_SCAN_SKIPPED_UNIT_SUFFIXES, APP_SCAN_WARM_UP_TICK,
-    CARD_HISTORY_SAMPLES,
+    APP_SCAN_EVERY_N_TICKS, APP_SCAN_READ_BATCH_LEAVES, APP_SCAN_SKIPPED_UNIT_SUFFIXES, APP_SCAN_STALL_TICKS,
+    APP_SCAN_WARM_UP_TICK, CARD_HISTORY_SAMPLES,
     DIRECTORY_LISTING_BATCH_ENTRIES, APP_MEMORY_STAT_MIN_BYTES, FILE_READ_CHUNK_BYTES, SAMPLE_INTERVAL_SECONDS,
     SAMPLE_STALL_TICKS,
 } from './lib/constants.js';
@@ -428,6 +430,8 @@ export class Sampler {
         // Timer ticks that found the sample still in flight; reset when a sample settles.
         this._timerTicksWithSampleInFlight = 0;
         this._isAppScanInFlight = false;
+        // Timer ticks that found the app scan still in flight; reset when a scan settles.
+        this._timerTicksWithAppScanInFlight = 0;
         // Bumped whenever a baseline is thrown away, so a read begun before that cannot reinstate it.
         this._cpuBaselineEpoch = 0;
         this._appBaselineEpoch = 0;
@@ -650,6 +654,7 @@ export class Sampler {
             return null;
         } finally {
             this._isAppScanInFlight = false;
+            this._timerTicksWithAppScanInFlight = 0;
         }
     }
 
@@ -702,6 +707,22 @@ export class Sampler {
     }
 
     /**
+     * Counts a timer tick that found the app scan still in flight. On the tick after APP_SCAN_STALL_TICKS of them
+     * the scan counts as stalled, once: the ranking and baseline are dropped (the epoch bump makes the scan's late
+     * result count as overtaken, so it is discarded), so "heaviest" shows no data rather than a ranking that is
+     * by now a whole scan interval old. The stuck read is left to finish; nothing is queued behind it.
+     *
+     * @returns {void}
+     */
+    _noteAppScanStillInFlight() {
+        this._timerTicksWithAppScanInFlight++;
+        if (this._timerTicksWithAppScanInFlight !== APP_SCAN_STALL_TICKS + 1)
+            return;
+        this._forgetAppScans();
+        this._logRateLimited(`app scan stalled: still in flight after ${APP_SCAN_STALL_TICKS} intervals`);
+    }
+
+    /**
      * Drops the last ranking (and its baseline) after a scan threw, so the next snapshot carries no apps rather
      * than a ranking from before the failure, then logs the failure.
      *
@@ -736,13 +757,16 @@ export class Sampler {
     }
 
     /**
-     * The timer callback: notes a sample still in flight (see _noteSampleStillInFlight), then runs the next tick.
+     * The timer callback: notes a sample still in flight (see _noteSampleStillInFlight) and an app scan still in
+     * flight (see _noteAppScanStillInFlight), then runs the next tick.
      *
      * @returns {boolean} GLib.SOURCE_CONTINUE: only source_remove ends the source, so its id is never stale.
      */
     _onTimeout() {
         if (this._isSampleInFlight)
             this._noteSampleStillInFlight();
+        if (this._isAppScanInFlight)
+            this._noteAppScanStillInFlight();
         this._runNextTick();
         return GLib.SOURCE_CONTINUE;
     }

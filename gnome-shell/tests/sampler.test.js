@@ -7,8 +7,8 @@ import {Sampler, groupOfCgroup, readTextFile} from '../extensions/resource-pulse
 import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
 import {cardText} from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {
-    APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, APP_SCAN_READ_BATCH_LEAVES, ERROR_LOG_REPEAT_INTERVAL_USEC,
-    FILE_READ_CHUNK_BYTES, KERNEL_AND_OTHER_LABEL, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS, SAMPLE_STALL_TICKS,
+    APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, APP_SCAN_READ_BATCH_LEAVES, APP_SCAN_STALL_TICKS,
+    ERROR_LOG_REPEAT_INTERVAL_USEC, FILE_READ_CHUNK_BYTES, KERNEL_AND_OTHER_LABEL, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS, SAMPLE_STALL_TICKS,
 } from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const [TEST_FILE_PATH] = GLib.filename_from_uri(import.meta.url);
@@ -33,6 +33,8 @@ const USER_APP_SLICE = 'user.slice/user-1000.slice/user@1000.service/app.slice';
 const LATER_CLOCK_LABEL = '14:04';
 /** The end of the /proc/stat path the sampler reads under its fsRoot. */
 const PROC_STAT_FIXTURE_SUFFIX = '/proc/stat';
+/** The end of the root cgroup's cpu.stat path: the first file an app scan reads after listing the tree. */
+const ROOT_CGROUP_CPU_STAT_FIXTURE_SUFFIX = '/sys/fs/cgroup/cpu.stat';
 /** Linux's errno for "No such device": what reading a removed kernfs (cgroup) file returns. */
 const ENODEV_ERRNO = 19;
 const HERDR_LEAF_NAME = 'herdr-server.service';
@@ -945,15 +947,17 @@ test('sampler: after enable, a resume and the scan turned back on, "heaviest" ha
  * A sampler on root-a whose /proc/stat read can be made to hang, driven through its own timer callback.
  *
  * @param {{added: Array<{callback: Function}>}} spy - withTimerSpy's spy.
+ * @param {object} [samplerOverrides] - Constructor options replacing the defaults (for example a failing log).
  * @returns {object} The sampler, its clock, log and published snapshots, its tick runs, fireTimer() (one interval
  *     passing), setStatReadStuck(isStuck) for the reads that start next, releaseStuckRead() and statReadCount().
  */
-function makeStuckStatSampler(spy) {
+function makeStuckStatSampler(spy, samplerOverrides = {}) {
     let isStatReadStuck = false;
     let releaseStuckRead = null;
     let statReadCount = 0;
     const {sampler, clock, logged} = makeSampler('root-a', {
         sampleIntervalSeconds: QUIET_INTERVAL_SECONDS,
+        ...samplerOverrides,
         readTextFile: (path, ...readArguments) => {
             if (!path.endsWith(PROC_STAT_FIXTURE_SUFFIX))
                 return readTextFile(path, ...readArguments);
@@ -972,7 +976,7 @@ function makeStuckStatSampler(spy) {
         tickRuns: recordTickRuns(sampler),
         fireTimer: () => {
             clock.nowUsec += SAMPLE_SPACING_USEC;
-            spy.added.at(-1).callback();
+            return spy.added.at(-1).callback();
         },
         setStatReadStuck: isStuck => {
             isStatReadStuck = isStuck;
@@ -1059,6 +1063,145 @@ test('sampler: once a stuck sample settles the stall count starts over, so a lat
         assertEqual([noDataAfterFirstStall, noDataAfterRecovery, noDataAfterSecondStall], [1, 1, 2]);
     });
 });
+
+/**
+ * A sampler on root-a whose app scan can be made to hang on its first read, driven through its own timer callback.
+ * The scan is stuck by setScanStuck(true) and the reads of the next scan then never settle until
+ * releaseStuckReads().
+ *
+ * @param {{added: Array<{callback: Function}>}} spy - withTimerSpy's spy.
+ * @param {object} [samplerOverrides] - Constructor options replacing the defaults (for example a failing log).
+ * @returns {object} The sampler, its log and published snapshots, its tick runs, fireTimer() (one interval passing),
+ *     fireTimerAndSettleTick() (the same, then waits for the tick it ran), setScanStuck(isStuck),
+ *     waitForScanToStick() (settles once a stuck read has begun) and releaseStuckReads().
+ */
+function makeStuckScanSampler(spy, samplerOverrides = {}) {
+    let isScanStuck = false;
+    const stuckReadReleasers = [];
+    let notifyStuckReadBegan = null;
+    const stuckReadBegan = new Promise(resolve => {
+        notifyStuckReadBegan = resolve;
+    });
+    const {sampler, clock, logged} = makeSampler('root-a', {
+        sampleIntervalSeconds: QUIET_INTERVAL_SECONDS,
+        ...samplerOverrides,
+        readTextFile: (path, ...readArguments) => {
+            if (!isScanStuck || !path.endsWith(ROOT_CGROUP_CPU_STAT_FIXTURE_SUFFIX))
+                return readTextFile(path, ...readArguments);
+            notifyStuckReadBegan();
+            return new Promise(resolve => {
+                stuckReadReleasers.push(() => resolve(readTextFile(path, ...readArguments)));
+            });
+        },
+    });
+    const published = [];
+    sampler.addListener(snapshot => published.push(snapshot));
+    const tickRuns = recordTickRuns(sampler);
+    const fireTimer = () => {
+        clock.nowUsec += SAMPLE_SPACING_USEC;
+        return spy.added.at(-1).callback();
+    };
+    return {
+        sampler, logged, published, tickRuns, fireTimer,
+        fireTimerAndSettleTick: async () => {
+            fireTimer();
+            await tickRuns.at(-1).tickRun;
+        },
+        setScanStuck: isStuck => {
+            isScanStuck = isStuck;
+        },
+        waitForScanToStick: () => stuckReadBegan,
+        releaseStuckReads: () => {
+            isScanStuck = false;
+            stuckReadReleasers.splice(0).forEach(release => release());
+        },
+    };
+}
+
+/**
+ * Starts a sampler whose first scan has completed (so a ranking is showing), then fires the timer once with the
+ * next scan stuck, and waits until that scan's read has begun.
+ *
+ * @param {object} stuck - makeStuckScanSampler's return value.
+ * @returns {Promise<number>} The index in stuck.tickRuns of the tick whose scan is stuck.
+ */
+async function startWithNextScanStuck(stuck) {
+    stuck.sampler.start();
+    await stuck.tickRuns[0].tickRun;
+    stuck.setScanStuck(true);
+    stuck.fireTimer();
+    await stuck.waitForScanToStick();
+    return stuck.tickRuns.length - 1;
+}
+
+/**
+ * Fires the timer, each time waiting for its tick, so only app-scan ticks (never the sample) are counted.
+ *
+ * @param {object} stuck - makeStuckScanSampler's return value.
+ * @param {number} intervalCount - How many timer callbacks to fire.
+ * @returns {Promise<void>} Settles after the last tick has.
+ */
+async function fireTimerIntervals(stuck, intervalCount) {
+    for (let interval = 0; interval < intervalCount; interval++)
+        await stuck.fireTimerAndSettleTick();
+}
+
+test('sampler: an app scan stuck in flight for more than APP_SCAN_STALL_TICKS intervals drops the ranking once, ' +
+    'logs it once, and its late result is never published', async () => {
+    await withTimerSpy(async spy => {
+        const stuck = makeStuckScanSampler(spy);
+        const {sampler, logged, published} = stuck;
+        const stuckTickIndex = await startWithNextScanStuck(stuck);
+
+        await fireTimerIntervals(stuck, APP_SCAN_STALL_TICKS);
+        const appsWithinStallTicks = published.at(-1).apps !== null;
+        await fireTimerIntervals(stuck, 1);
+        const appsAfterStall = published.at(-1).apps;
+        await fireTimerIntervals(stuck, 2);
+        const stallLinesWhileStuck = logged.filter(line => line.includes('app scan stalled'));
+
+        stuck.releaseStuckReads();
+        await stuck.tickRuns[stuckTickIndex].tickRun;
+        await fireTimerIntervals(stuck, 1);
+        const appsAfterLateResult = published.at(-1).apps;
+        sampler.destroy();
+
+        assertEqual([appsWithinStallTicks, appsAfterStall, stallLinesWhileStuck.length,
+            stallLinesWhileStuck[0]?.startsWith(LOG_PREFIX), stallLinesWhileStuck[0]?.endsWith(
+                `still in flight after ${APP_SCAN_STALL_TICKS} intervals`), appsAfterLateResult],
+        [true, null, 1, true, true, null]);
+    });
+});
+
+test('sampler: once a stuck app scan settles the stall count starts over, so a later stall drops the ranking too',
+    async () => {
+        await withTimerSpy(async spy => {
+            const stuck = makeStuckScanSampler(spy);
+            const {sampler, published} = stuck;
+            const stuckTickIndex = await startWithNextScanStuck(stuck);
+            await fireTimerIntervals(stuck, APP_SCAN_STALL_TICKS + 1);
+            stuck.releaseStuckReads();
+            await stuck.tickRuns[stuckTickIndex].tickRun;
+
+            // A fresh ranking, then a second stuck scan: its count must run from zero, not on from the first.
+            await sampler.scanAppsOnce();
+            await fireTimerIntervals(stuck, 1);
+            const appsBeforeSecondStall = published.at(-1).apps !== null;
+            stuck.setScanStuck(true);
+            const secondStuckScan = sampler.scanAppsOnce();
+            await stuck.waitForScanToStick();
+            await fireTimerIntervals(stuck, APP_SCAN_STALL_TICKS);
+            const appsWithinSecondStallTicks = published.at(-1).apps !== null;
+            await fireTimerIntervals(stuck, 1);
+            const appsAfterSecondStall = published.at(-1).apps;
+            stuck.releaseStuckReads();
+            await secondStuckScan;
+            sampler.destroy();
+
+            assertEqual([appsBeforeSecondStall, appsWithinSecondStallTicks, appsAfterSecondStall],
+                [true, true, null]);
+        });
+    });
 
 test('sampler: a leaf whose file is gone with ENODEV (a scope that exited mid-read) is skipped silently, like ENOENT; ' +
     'any other read error is logged', async () => {
