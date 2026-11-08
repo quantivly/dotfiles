@@ -93,11 +93,11 @@ kept across a blank or a lock.
 | Waiting on | PSI `some avg10` for cpu, memory and **io**. It is a 10 s average by definition, so it lags on purpose. Meter bands: ▯▯▯ < 10%, ▮▯▯ 10–25%, ▮▮▯ 25–50%, ▮▮▮ ≥ 50%. The top band matches oomd's 50% kill limit. | `/proc/pressure/*` |
 | App CPU | Each leaf cgroup's Δ`cpu.stat usage_usec` / (interval × ncpu), as a % of the whole machine, so it is comparable with the total. | cgroup v2 |
 | App memory | Each leaf cgroup's memory **minus reclaimable page cache**: `memory.current − (active_file + inactive_file)`. This matches the MemAvailable semantics, so cache never counts as used. | cgroup v2 `memory.current`, `memory.stat` |
-| "kernel & other" | A computed pseudo-app that ranks like any app. **CPU:** the root `/sys/fs/cgroup/cpu.stat` Δ minus the Σ of the scanned leaves. That covers kswapd, zram compression, writeback, `init.scope` and ssh `session-N.scope`. **Memory:** Memory used − the Σ of the scanned leaves' app memory. That covers kernel memory and zram's RAM, which no cgroup is charged for. It is clamped at 0. This keeps reclaim nameable, and the heaviest entries never silently add up to far less than the total. | root cgroup, `/proc/meminfo` |
-| Heaviest | **One line**, as in the mockup: the top app by CPU, then the top app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. When the same app tops both, it collapses to `herdr agents 31% · 15.7 GiB`. | the two rankings above |
+| "kernel & other" | A computed pseudo-app that ranks **for CPU only**: the root `/sys/fs/cgroup/cpu.stat` Δ minus the Σ of the scanned leaves, clamped at 0. That covers kswapd, zram compression, writeback, `init.scope` and ssh `session-N.scope`, so reclaim stays nameable: kernel CPU is a real "why slow" answer. It is **not a memory candidate** (the user's decision): memory no cgroup is charged for (kernel memory, zram's RAM, GPU buffers, unscanned scopes) is mostly not attributable to anything nameable, so the memory half of "heaviest" names real apps only. That memory still counts in the MEM total. | root cgroup |
+| Heaviest | **One line**, as in the mockup: the top app by CPU (which may be "kernel & other"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. When the same app tops both, it collapses to `herdr agents 31% · 15.7 GiB`. | the two rankings above |
 
-"kernel & other" also absorbs the unit types the app scan skips and any cgroup that started or ended
-between two scans.
+In CPU, "kernel & other" also absorbs the unit types the app scan skips and any cgroup that started
+or ended between two scans.
 
 ### Enabling it
 

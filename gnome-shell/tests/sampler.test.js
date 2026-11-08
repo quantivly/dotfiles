@@ -309,12 +309,13 @@ test('sampler: two Chrome scopes are one app (one group key, one name)', () => {
 });
 
 test('sampler: a cgroup that vanished mid-scan is skipped in both rankings and the scan succeeds', async () => {
-    // Σ apps without herdr = 4.0 + 2×0.5 + 0.3 + 0.3 GB = 5.6 GB of 20.48 GB used; leaf CPU Δ 4.5 s of root Δ 12 s.
-    // Had herdr been kept, it would top both rankings (see the row above).
+    // Leaf CPU Δ 4.5 s of root Δ 12 s, so "kernel & other" tops CPU. Memory names real apps only: Chromium's
+    // 4.0 GB tops Chrome 2×0.5, GNOME Shell 0.3 and docker 0.3, although 14.88 of the 20.48 GB used is
+    // unattributed. Had herdr been kept, it would top both rankings (see the row above).
     const {ranking, logged} = await scanTwice('root-vanished');
     assertEqual([ranking, logged], [{
         topCpu: {name: KERNEL_AND_OTHER_LABEL, cpuPercent: 62.5},
-        topMemory: {name: KERNEL_AND_OTHER_LABEL, memoryBytes: 14_880_000_000},
+        topMemory: {name: 'Chromium', memoryBytes: 4_000_000_000},
     }, []]);
 });
 

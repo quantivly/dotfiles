@@ -39,7 +39,7 @@ test('a non-app kind ignores the resolver', () =>
  * Builds a rankApps input from per-cgroup usage deltas and memory, naming each cgroup after itself.
  *
  * @param {object} spec - cgroups as {path: [previousUsec|null, currentUsec, memoryBytes|null]}, plus overrides.
- * @param {object} [overrides] - fields replacing the defaults (rootCpuDeltaUsec, memoryUsedBytes, nameOfCgroup).
+ * @param {object} [overrides] - fields replacing or adding to the defaults (rootCpuDeltaUsec, nameOfCgroup).
  * @returns {object} The argument for rankApps.
  */
 const input = (spec, overrides = {}) => {
@@ -55,7 +55,7 @@ const input = (spec, overrides = {}) => {
     }
     return {
         previousUsageUsec, currentUsageUsec, memoryBytesByCgroup,
-        elapsedUsec: ELAPSED_USEC, cpuCount: CPU_COUNT, rootCpuDeltaUsec: null, memoryUsedBytes: null,
+        elapsedUsec: ELAPSED_USEC, cpuCount: CPU_COUNT, rootCpuDeltaUsec: null,
         nameOfCgroup: path => ({groupKey: path.split('#')[0], name: path.split('#')[0]}),
         ...overrides,
     };
@@ -88,20 +88,26 @@ test('"kernel & other" tops CPU when the scanned leaves are small', () => {
     const ranking = rankApps(input({'app': [0, 1_000_000, 1]}, {rootCpuDeltaUsec: 12_000_000}));
     assertEqual(ranking.topCpu, {name: KERNEL_AND_OTHER, cpuPercent: 68.75});
 });
-test('"kernel & other" tops memory as used minus the apps', () => {
+test('the memory half names real apps only: "kernel & other" never wins memory, however much is unattributed', () => {
+    // memoryUsedBytes is what the pseudo-app's memory was once derived from (used − Σapps = 8 GiB here); passing it
+    // proves rankApps no longer makes the pseudo-app a memory candidate. Unattributed memory still counts in MEM.
     const ranking = rankApps(input({'app': [0, 0, 2 * GIB]}, {memoryUsedBytes: 10 * GIB}));
-    assertEqual(ranking.topMemory, {name: KERNEL_AND_OTHER, memoryBytes: 8 * GIB});
+    assertEqual(ranking.topMemory, {name: 'app', memoryBytes: 2 * GIB});
 });
-test('"kernel & other" memory is clamped at 0', () => {
-    // Used < Σapps: the pseudo-app is 0 and a tie at 0 must never beat a real app.
-    const ranking = rankApps(input({'app': [0, 0, 3 * GIB]}, {memoryUsedBytes: 1 * GIB}));
-    assertEqual(ranking.topMemory, {name: 'app', memoryBytes: 3 * GIB});
+test('"kernel & other" stays a CPU candidate while the memory half names a real app', () => {
+    // root Δ 12M, leaves Δ 1M → 11M of 16M capacity for the pseudo-app; memory goes to the app.
+    const ranking = rankApps(input({'app': [0, 1_000_000, 3 * GIB]},
+        {rootCpuDeltaUsec: 12_000_000, memoryUsedBytes: 10 * GIB}));
+    assertEqual(ranking, {
+        topCpu: {name: KERNEL_AND_OTHER, cpuPercent: 68.75},
+        topMemory: {name: 'app', memoryBytes: 3 * GIB},
+    });
 });
 test('"kernel & other" CPU is clamped at 0 when the leaves used more than the root did', () => {
     const ranking = rankApps(input({'app': [0, 4_000_000, 1]}, {rootCpuDeltaUsec: 1_000_000}));
     assertEqual(ranking.topCpu, {name: 'app', cpuPercent: 25});
 });
-test('without root or used figures there is no "kernel & other"', () => {
+test('without a root CPU delta there is no "kernel & other"', () => {
     const ranking = rankApps(input({'app': [0, 0, 0]}));
     assertEqual([ranking.topCpu.name, ranking.topMemory.name], ['app', 'app']);
 });

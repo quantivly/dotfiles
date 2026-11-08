@@ -103,7 +103,10 @@ function pickLargest(entries) {
 }
 
 /**
- * Ranks apps by CPU (share of the whole machine) and by memory, with "kernel & other" as a pseudo-app.
+ * Ranks apps by CPU (share of the whole machine) and by memory. "kernel & other" (the root cgroup's CPU no scanned
+ * leaf accounts for: reclaim, compression, writeback) is a candidate for CPU only; the memory half names real apps
+ * only, by the user's decision, because the memory no cgroup is charged for is mostly not attributable to anything
+ * nameable. That memory still counts in the machine's MEM total, which is read elsewhere.
  * A cgroup missing from the previous reading has no delta: it is left out of CPU, kept for memory.
  *
  * @param {object} scan - the inputs.
@@ -113,10 +116,9 @@ function pickLargest(entries) {
  * @param {number} scan.elapsedUsec - time between the two readings.
  * @param {number} scan.cpuCount - CPUs counted as 100%.
  * @param {number|null} scan.rootCpuDeltaUsec - the root cgroup's usage_usec delta, if known.
- * @param {number|null} scan.memoryUsedBytes - machine memory used, if known.
  * @param {(cgroupPath: string) => {groupKey: string, name: string}} scan.nameOfCgroup - grouping and naming.
  * @returns {{topCpu: {name: string, cpuPercent: number}|null, topMemory: {name: string, memoryBytes: number}|null}}
- *     The two winners; topCpu is null when nothing has a delta.
+ *     The two winners; topCpu is null when nothing has a delta, and topMemory is never "kernel & other".
  */
 export function rankApps(scan) {
     const cpuDeltaByGroup = new Map();
@@ -130,18 +132,11 @@ export function rankApps(scan) {
         addToGroup(cpuDeltaByGroup, scan.nameOfCgroup(cgroupPath), deltaUsec);
     }
     const memoryByGroup = new Map();
-    let appMemoryTotalBytes = 0;
-    for (const [cgroupPath, memoryBytes] of scan.memoryBytesByCgroup) {
-        appMemoryTotalBytes += memoryBytes;
+    for (const [cgroupPath, memoryBytes] of scan.memoryBytesByCgroup)
         addToGroup(memoryByGroup, scan.nameOfCgroup(cgroupPath), memoryBytes);
-    }
     if (scan.rootCpuDeltaUsec !== null)
         cpuDeltaByGroup.set(KERNEL_AND_OTHER_LABEL, {
             name: KERNEL_AND_OTHER_LABEL, value: Math.max(0, scan.rootCpuDeltaUsec - leafDeltaTotalUsec),
-        });
-    if (scan.memoryUsedBytes !== null)
-        memoryByGroup.set(KERNEL_AND_OTHER_LABEL, {
-            name: KERNEL_AND_OTHER_LABEL, value: Math.max(0, scan.memoryUsedBytes - appMemoryTotalBytes),
         });
 
     const topCpuEntry = scan.elapsedUsec > 0 && scan.cpuCount > 0 ? pickLargest(cpuDeltaByGroup.values()) : null;

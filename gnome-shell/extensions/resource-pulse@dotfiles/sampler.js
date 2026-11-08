@@ -65,8 +65,8 @@ const UTF8_DECODER = new TextDecoder();
  * @typedef {object} AppRanking
  * @property {{name: string, cpuPercent: number}|null} topCpu - The app using the most CPU, as a share of the
  *     whole machine; null until two scans give a delta.
- * @property {{name: string, memoryBytes: number}|null} topMemory - The app holding the most memory that is not
- *     page cache.
+ * @property {{name: string, memoryBytes: number}|null} topMemory - The real app holding the most memory that is
+ *     not page cache; never "kernel & other", which ranks for CPU only.
  */
 
 /**
@@ -832,10 +832,8 @@ export class Sampler {
         if (this._isDestroyed || appBaselineEpoch !== this._appBaselineEpoch)
             return null;
         const rootCpuStatPath = joinPath(cgroupRootPath, CGROUP_CPU_STAT_FILE);
-        const meminfoPath = joinPath(fsRoot, PROC_MEMINFO_PATH);
-        const [rootCpuStatRead, meminfoRead, ...leafReads] = await Promise.allSettled([
+        const [rootCpuStatRead, ...leafReads] = await Promise.allSettled([
             readTextFile(rootCpuStatPath, this._cancellable),
-            readTextFile(meminfoPath, this._cancellable),
             ...leafRelativePaths.map(leafRelativePath =>
                 readCgroupLeaf(joinPath(cgroupRootPath, leafRelativePath), this._cancellable)),
         ]);
@@ -843,9 +841,6 @@ export class Sampler {
             return null;
 
         const rootUsageUsec = this._parseSettledRead(rootCpuStatRead, rootCpuStatPath, parseCpuStatUsageUsec);
-        const meminfo = this._parseSettledRead(meminfoRead, meminfoPath, parseMeminfo);
-        const memory = meminfo === null ? null
-            : this._requirePart(memoryUsage(meminfo), `cannot find MemTotal and MemAvailable in ${meminfoPath}`);
         const {usageUsecByCgroup, memoryBytesByCgroup} = this._collectLeafReadings(leafRelativePaths, leafReads);
         const previousScan = this._previousAppScan;
         const hasRootDelta = previousScan !== null && previousScan.rootUsageUsec !== null && rootUsageUsec !== null;
@@ -858,7 +853,6 @@ export class Sampler {
             elapsedUsec: previousScan === null ? 0 : takenAtUsec - previousScan.takenAtUsec,
             cpuCount: this._cpuCount ?? 0,
             rootCpuDeltaUsec: hasRootDelta ? rootUsageUsec - previousScan.rootUsageUsec : null,
-            memoryUsedBytes: memory === null ? null : memory.usedBytes,
             nameOfCgroup: cgroupPath => groupOfCgroup(cgroupPath, this._resolveAppName),
         });
 

@@ -131,9 +131,10 @@ test('heaviestLine: two different apps', () =>
 test('heaviestLine collapses when one app tops both', () =>
     assertEqual(heaviestLine({topCpu: {name: 'herdr agents', cpuPercent: 31},
         topMemory: {name: 'herdr agents', memoryBytes: 15.7 * GIB}}), 'herdr agents 31% · 15.7 GiB'));
-test('heaviestLine ellipsizes a long name, including "kernel & other"', () =>
-    assertEqual(heaviestLine({topCpu: {name: 'a-very-long-application-name', cpuPercent: 5},
-        topMemory: {name: 'kernel & other', memoryBytes: 2 * GIB}}), 'a-very-long-appli… 5% · kernel & other 2.0 GiB'));
+test('heaviestLine ellipsizes a long name, and names "kernel & other" in the CPU half as it is', () =>
+    assertEqual(heaviestLine({topCpu: {name: 'kernel & other', cpuPercent: 5},
+        topMemory: {name: 'a-very-long-application-name', memoryBytes: 2 * GIB}}),
+    'kernel & other 5% · a-very-long-appli… 2.0 GiB'));
 test('heaviestLine with only one ranking shows just that half', () =>
     assertEqual([heaviestLine({topCpu: {name: 'Chromium', cpuPercent: 31}, topMemory: null}),
         heaviestLine({topCpu: null, topMemory: {name: 'Chromium', memoryBytes: GIB}})],

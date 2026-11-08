@@ -6,6 +6,8 @@
 
 **Amended 2026-11-08 (nested run):** test in a nested shell only with scripts/resource-pulse-nested.sh — the plain --devkit recipe in Verification §2 reaches the live session (crash-guard file, logind, GDM, GeoClue, extensions.gnome.org). Every idle blank in GNOME 50 pushes the unlock-dialog session mode, so the extension is disabled on every blank as well as every lock (not only paused, as "Display off" below says), and its histories restart after either; by the user's decision they are not persisted.
 
+**Amended 2026-11-08 (user decisions):** the memory half of "heaviest" names real apps only — "kernel & other" stays a candidate for the CPU half (kernel CPU such as reclaim and compression is a real "why slow" answer) but never for memory, and unattributed memory still counts in the MEM total.
+
 ## Context
 
 The user wants live CPU and memory state on this laptop: a **minimal** indicator in the top bar and a
