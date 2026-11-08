@@ -190,6 +190,17 @@
     # needs, so on any other machine the unit is SKIPPED, which is not a failure.
     ~/.config/systemd/user/dev-sync.service: systemd/dev-sync.service
     ~/.config/systemd/user/dev-sync.timer: systemd/dev-sync.timer
+    # claude-memory-sync (DO-892): every 10 min, link Claude Code memory into its
+    # stores and sync each store with its remote. Linked, NOT enabled: it pushes
+    # to a remote unattended, so it is armed by hand on each host after reading
+    # what its first tick would do --
+    #   scripts/claude-memory-link.sh --apply --dry-run
+    #   scripts/claude-memory-sync.sh --check
+    #   systemctl --user enable --now claude-memory-sync.timer
+    # Its ConditionPathExists=%h/.local/share/claude-memory makes systemd SKIP it
+    # on a host with no store checked out.
+    ~/.config/systemd/user/claude-memory-sync.service: systemd/claude-memory-sync.service
+    ~/.config/systemd/user/claude-memory-sync.timer: systemd/claude-memory-sync.timer
     ~/.config/yazi/theme.toml: yazi/theme.toml
     ~/.config/yazi/yazi.toml: yazi/yazi.toml
     ~/.config/yazi/Catppuccin-mocha.tmTheme: yazi/Catppuccin-mocha.tmTheme

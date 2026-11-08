@@ -268,6 +268,9 @@ run_doctor() {
     # is no clauth anywhere on this PATH — see the SYSBIN note above.
     p="$base"
     [[ "${WITH_CLAUTH:-0}" == 1 ]] && p="$STUBBIN:$base"
+    # A row that needs a tool the base PATH leaves out (a systemctl stub, git)
+    # names a directory holding it with EXTRA_BIN.
+    [[ -n "${EXTRA_BIN:-}" ]] && p="$EXTRA_BIN:$p"
     local -a pre=()
     # Never the real key: env inherits this shell's, and a session that runs the
     # suite has one. A row that wants it set says so with LKEY. The `-u` options go
@@ -277,9 +280,10 @@ run_doctor() {
     # Never the caller's host-profile marker: exported, it would make the
     # no-profile row fail and route every other row through the real renderer.
     pre=(-u CLAUDE_SETTINGS_RENDER_MARKER "${pre[@]}")
-    # Never the caller's memory-store table either: every row but one reaches the
-    # table by the default path, which HOME puts inside the fixture.
-    pre=(-u CLAUDE_MEMORY_CONFIG "${pre[@]}")
+    # Never the caller's memory-store table or stores root either: every row but one
+    # reaches the table, and every row the stores, by the default path, which HOME
+    # puts inside the fixture.
+    pre=(-u CLAUDE_MEMORY_CONFIG -u CLAUDE_MEMORY_STORES_ROOT "${pre[@]}")
     # DOTFILES_ROOT is THIS tree, so the doctor reads this tree's
     # scripts/claude-account-dirs.data-entries (DO-835) -- system.sh would
     # otherwise default it to the fixture's own, empty, ~/.dotfiles. A row that
@@ -3773,6 +3777,25 @@ mk_link_stub() {
     chmod +x "$MEMORY_STUB"
     : > "$MEMORY_CALLS"
 }
+# The sync half (DO-892): after the link rows the doctor asks
+# scripts/claude-memory-sync.sh --status, which prints one
+# <store><TAB><level><TAB><message> line or more per checked-out store. That
+# script is a stub here too, and its levels and outcomes are its own table's
+# business (scripts/test-claude-memory-sync.sh). Until ms18 every row sees the
+# stub made just below, which prints nothing and exits 0 (a host with no store
+# checked out), so none of them grows a sync row.
+SYNC_CALLS="$TMPROOT/sync-calls.log"
+SYNC_STUB="$MEMORY_ROOT/scripts/claude-memory-sync.sh"
+# mk_sync_stub EXIT_STATUS STDOUT_TEXT STDERR_TEXT — mk_link_stub's shape, for the sync script.
+mk_sync_stub() {
+    printf '%s' "$2" > "$MEMORY_ROOT/sync-stub-stdout"
+    printf '%s' "$3" > "$MEMORY_ROOT/sync-stub-stderr"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncat "%s"\ncat "%s" >&2\nexit %s\n' \
+        "$SYNC_CALLS" "$MEMORY_ROOT/sync-stub-stdout" "$MEMORY_ROOT/sync-stub-stderr" "$1" > "$SYNC_STUB"
+    chmod +x "$SYNC_STUB"
+    : > "$SYNC_CALLS"
+}
+mk_sync_stub 0 '' ''
 mk_memory_table() { mkdir -p "$FHOME/.dotfiles-local/claude"; printf '{"stores":{}}\n' > "$FHOME/.dotfiles-local/claude/memory-stores.json"; }
 # Rows as --check prints them: TSV, key first. The source directory of the second
 # holds a tab as the script escapes it, the two characters \t, which a zsh `echo`
@@ -3804,7 +3827,7 @@ want_rc  "...and the doctor exits non-zero on it"            1
 new_home ms4; write_cred; mk_memory_table
 mk_link_stub 0 "$UNMAPPED_ROW"$'\nclaude-memory-link: 7 linked, 0 to fix, 1 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
-want_out "exit 0 with an UNMAPPED row is a ⚠ giving both remedies: the table's, and by hand when the directory is gone" "⚠ memory directories no table entry claims (7 linked, 0 to fix, 1 unmapped, 0 without a store) — a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory aside, or the row is permanent"
+want_out "exit 0 with an UNMAPPED row is a ⚠ giving both remedies: the table's, and by hand when the directory is gone" "⚠ memory directories no table entry claims (7 linked, 0 to fix, 1 unmapped, 0 without a store) — a key whose directory still exists is claimed by adding it to checkout_globs or plain_dirs; a key whose directory no longer exists cannot be claimed: read its memory, move what is worth keeping into the store by hand, then move the key directory out of the projects directory, or the row is permanent"
 want_out "...with the row shown whole, empty fields and all"  "    $UNMAPPED_ROW"
 no_out   "...and never the ✓ of the summary-only exit 0"      "every memory directory is linked"
 want_rc  "...and an UNMAPPED key alone does not fail the doctor" 0
@@ -3862,7 +3885,7 @@ want_out "a link script that is not there is a ⚠, not a silence" "⚠ memory s
 new_home ms11; write_cred; mk_memory_table
 mk_link_stub 0 $'claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 3 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
-want_out "no store checked out, with keys waiting for one, is a ⚠ naming how many" "⚠ no memory store is checked out on this host (3 keys wait for one)"
+want_out "no store checked out, with keys waiting for one, is a ⚠ naming how many" "⚠ no store that these keys map to is checked out here (3 keys wait for one)"
 no_out   "...and never the ✓"                  "every memory directory is linked"
 want_rc  "...and it does not fail the doctor"  0
 
@@ -3871,21 +3894,21 @@ new_home ms12; write_cred; mk_memory_table
 mk_link_stub 0 $'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 2 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "keys waiting beside linked ones is the ✓, carrying the count" "✓ every memory directory is linked (7 linked, 0 to fix, 0 unmapped, 2 without a store)"
-no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+no_out   "...and not the no-store ⚠"           "no store that these keys map to is checked out"
 
 # Nothing waits for anything: a host with the table and no memory yet is no finding.
 new_home ms13; write_cred; mk_memory_table
 mk_link_stub 0 $'claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 0 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "nothing linked and nothing waiting is the ✓" "✓ every memory directory is linked (0 linked, 0 to fix, 0 unmapped, 0 without a store)"
-no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+no_out   "...and not the no-store ⚠"           "no store that these keys map to is checked out"
 
 # Each has its own remedy, so one must not hide the other.
 new_home ms14; write_cred; mk_memory_table
 mk_link_stub 0 "$UNMAPPED_ROW"$'\nclaude-memory-link: 0 linked, 0 to fix, 1 unmapped, 3 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "an UNMAPPED row and no store here are two ⚠: the first" "⚠ memory directories no table entry claims (0 linked, 0 to fix, 1 unmapped, 3 without a store)"
-want_out "...and the second"                   "⚠ no memory store is checked out on this host (3 keys wait for one)"
+want_out "...and the second"                   "⚠ no store that these keys map to is checked out here (3 keys wait for one)"
 no_out   "...and never the ✓"                  "every memory directory is linked"
 
 # Exit 1 keeps its ✗ whatever else is waiting: what is to fix comes first.
@@ -3893,7 +3916,7 @@ new_home ms15; write_cred; mk_memory_table
 mk_link_stub 1 "$REAL_DIR_ROW"$'\nclaude-memory-link: 0 linked, 1 to fix, 0 unmapped, 3 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "exit 1 with keys waiting is the ✗"   "✗ memory directories are not linked into their stores (0 linked, 1 to fix, 0 unmapped, 3 without a store)"
-no_out   "...and not the no-store ⚠"           "no memory store is checked out"
+no_out   "...and not the no-store ⚠"           "no store that these keys map to is checked out"
 
 # The counts go through arithmetic, so a summary is only one whose counts are numbers.
 # The stale three-count shape and a word for a count both read as no summary at all.
@@ -3907,7 +3930,132 @@ new_home ms17; write_cred; mk_memory_table
 mk_link_stub 0 $'claude-memory-link: x linked, 0 to fix, 0 unmapped, 3 without a store\n' ''
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "a word for a count is no summary"    "(no summary)"
-no_out   "...and is not read as zero"          "no memory store is checked out"
+no_out   "...and is not read as zero"          "no store that these keys map to is checked out"
+
+LINKED_SUMMARY=$'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 0 without a store\n'
+# A detail as the sync script escapes it: a tab in it is the two characters \t,
+# which a zsh `echo` would turn back into a tab.
+SYNC_OK_LINE=$'alpha\tok\tlast synced 3 min ago'
+SYNC_WARN_LINE=$'beta\twarn\tpush-rejected: ! [rejected] main -> main (fetch first)'
+SYNC_BAD_LINE=$'gamma\tbad\twithheld: notes/a\\tb.md (slack-token)'
+# An exit 2 as --status gives one when it can read nothing: a tool's own error,
+# then the script's. jq's is not silenced where the threshold is read.
+SYNC_EARLIER_LINE='jq: error: Could not open /x/memory-stores.json: Permission denied'
+SYNC_LAST_REASON='claude-memory-sync: could not read stale_after_minutes from /x/memory-stores.json'
+# memory_section_of_output — the doctor's "Memory stores" section, less its
+# header, the next section's header and blank lines.
+memory_section_of_output() {
+    printf '%s\n' "$OUT" | sed -n '/^--- Memory stores ---$/,/^--- Pools ---$/p' \
+        | grep -v -e '^--- ' -e '^$'
+}
+
+new_home ms18; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 0 "$SYNC_OK_LINE"$'\n'"$SYNC_WARN_LINE"$'\n'"$SYNC_BAD_LINE"$'\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: an ok line is a ✓ naming the store, the message whole" "✓ memory store alpha: last synced 3 min ago"
+want_out "...a warn line a ⚠"                    "⚠ memory store beta: push-rejected: ! [rejected] main -> main (fetch first)"
+want_out "...and a bad line a ✗, its escaped tab kept as written" '✗ memory store gamma: withheld: notes/a\tb.md (slack-token)'
+want_rc  "...and the ✗ fails the doctor"          1
+if [[ "$(cat "$SYNC_CALLS")" == "--status" ]]; then ok "...and the sync script is asked by --status alone: the doctor never applies"; else bad "...and the sync script is asked by --status alone — the stub saw: $(cat "$SYNC_CALLS")"; fi
+
+# Exit 2 is the script's could-not-run, kept for a run that could read nothing
+# (a store it cannot read is a bad line of its own). The ⚠ carries the last
+# stderr line and every line before it is printed under it, so a reason given
+# on an earlier line is never lost. A store line printed before the exit is
+# still shown: --status prints none today, but the doctor drops no line it gets.
+new_home ms19; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 2 $'beta\tok\tlast synced 1 min ago\n' "$SYNC_EARLIER_LINE"$'\n'"$SYNC_LAST_REASON"$'\n'
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: exit 2 is a ⚠ carrying the last stderr line" "⚠ memory sync status could not be read: $SYNC_LAST_REASON"
+want_out "...with each line before it printed under the ⚠, indented" "⚠ memory sync status could not be read: $SYNC_LAST_REASON"$'\n'"    $SYNC_EARLIER_LINE"
+want_out "...and the stores it did report are still shown"  "✓ memory store beta: last synced 1 min ago"
+
+# Section Z's trap again: one stderr line with no final newline.
+new_home ms19b; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 2 '' "$SYNC_LAST_REASON"
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: a one-line stderr is carried whole" "⚠ memory sync status could not be read: $SYNC_LAST_REASON"
+
+new_home ms19c; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 2 '' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: an exit 2 with nothing on stderr still says it could not be read" "⚠ memory sync status could not be read: exit 2"
+
+# No store checked out: --status is asked all the same, since a store the keys do
+# not map to can still be checked out here and only --status knows which are, and
+# its empty answer adds no row. The link rows' ⚠ is the section's whole report.
+new_home ms20; write_cred; mk_memory_table
+mk_link_stub 0 $'claude-memory-link: 0 linked, 0 to fix, 0 unmapped, 3 without a store\n' ''
+mk_sync_stub 0 '' ''
+DROOT="$MEMORY_ROOT" run_doctor
+memory_section="$(memory_section_of_output)"
+if [[ "$memory_section" == "  ⚠ no store that these keys map to is checked out here (3 keys wait for one)" ]]; then
+    ok "sync: no store checked out leaves the link rows' ⚠ as the section's only line"
+else
+    bad "sync: no store checked out leaves the link rows' ⚠ as the section's only line — the section was: $memory_section"
+fi
+if [[ "$(cat "$SYNC_CALLS")" == "--status" ]]; then ok "...and --status was still asked, its empty answer tolerated"; else bad "...and --status was still asked, its empty answer tolerated — the stub saw: $(cat "$SYNC_CALLS")"; fi
+
+# A line that is not <store><TAB><level><TAB><message> with a level the doctor
+# knows is shown whole, never dropped. The script's own no-table note is one.
+new_home ms21; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
+mk_sync_stub 0 $'alpha\tinfo\ta level the doctor does not know\nclaude-memory-sync: no store table at /x; nothing to do\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+want_out "sync: a line with an unknown level is a ⚠ carrying it whole" $'⚠ memory sync status printed a line the doctor cannot read: alpha\tinfo\ta level the doctor does not know'
+want_out "...and so is a line with no tabs"      "⚠ memory sync status printed a line the doctor cannot read: claude-memory-sync: no store table at /x; nothing to do"
+
+new_home ms22; write_cred; mk_link_stub 0 '' ''; mk_sync_stub 0 "$SYNC_OK_LINE"$'\n' ''
+DROOT="$MEMORY_ROOT" run_doctor
+if [[ ! -s "$SYNC_CALLS" ]]; then ok "sync: no store table and the sync script is not run"; else bad "sync: no store table and the sync script is not run — it was: $(cat "$SYNC_CALLS")"; fi
+
+# The timer is linked by ./install and armed by hand, so a host can carry a store
+# with an origin and a timer nothing started: its sync rows then age into "never
+# synced" with no word of why. The ⚠ needs all three: the unit linked, systemd
+# not saying active, a checked-out store with an origin. ms23 has all three; each
+# row after it takes one away. The systemctl stub answers active only for
+# exactly `--user is-active claude-memory-sync.timer`, and only when its state
+# file says so; git is the real one, which the base PATH leaves out.
+MEMORY_TIMER_BIN="$TMPROOT/memory-timer-bin"
+SYSTEMCTL_STUB_STATE_FILE="$MEMORY_TIMER_BIN/timer-state"
+MEMORY_TIMER_WARNING='⚠ claude-memory-sync.timer is linked but not active; nothing syncs until it is armed'
+mkdir -p "$MEMORY_TIMER_BIN"
+# shellcheck disable=SC2016  # $* and $(cat …) are the stub's own, expanded when it runs
+printf '#!/bin/sh\nif [ "$*" = "--user is-active claude-memory-sync.timer" ] && [ "$(cat %s)" = active ]; then echo active; exit 0; fi\necho inactive\nexit 3\n' \
+    "$SYSTEMCTL_STUB_STATE_FILE" > "$MEMORY_TIMER_BIN/systemctl"
+chmod +x "$MEMORY_TIMER_BIN/systemctl"
+ln -sf "$(command -v git)" "$MEMORY_TIMER_BIN/git"
+# mk_memory_timer_scene UNIT_LINKED TIMER_STATE STORE_HAS_ORIGIN — the table, the
+# link and sync stubs, the timer unit linked or not (yes|no), the stub's answer,
+# and one store checked out with an origin or without one (yes|no).
+mk_memory_timer_scene() {
+    local timer_unit_dir="$FHOME/.config/systemd/user" store_dir="$FHOME/.local/share/claude-memory/alpha"
+    mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''; mk_sync_stub 0 "$SYNC_OK_LINE"$'\n' ''
+    if [[ "$1" == yes ]]; then mkdir -p "$timer_unit_dir"; : > "$timer_unit_dir/claude-memory-sync.timer"; fi
+    printf '%s\n' "$2" > "$SYSTEMCTL_STUB_STATE_FILE"
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git init -q "$store_dir" \
+        || fatal "could not create the fixture store"
+    if [[ "$3" == yes ]]; then
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+            git -C "$store_dir" remote add origin https://example.invalid/alpha-memory.git \
+            || fatal "could not give the fixture store an origin"
+    fi
+}
+
+new_home ms23; write_cred; mk_memory_timer_scene yes inactive yes
+EXTRA_BIN="$MEMORY_TIMER_BIN" DROOT="$MEMORY_ROOT" run_doctor
+want_out "timer: linked, not active, and a store with an origin is a ⚠ saying nothing syncs" "$MEMORY_TIMER_WARNING"
+
+new_home ms24; write_cred; mk_memory_timer_scene yes active yes
+EXTRA_BIN="$MEMORY_TIMER_BIN" DROOT="$MEMORY_ROOT" run_doctor
+no_out "timer: an active timer is no ⚠" "$MEMORY_TIMER_WARNING"
+
+new_home ms25; write_cred; mk_memory_timer_scene no inactive yes
+EXTRA_BIN="$MEMORY_TIMER_BIN" DROOT="$MEMORY_ROOT" run_doctor
+no_out "timer: a timer that is not linked is no ⚠: the host has not taken the sync" "$MEMORY_TIMER_WARNING"
+
+new_home ms26; write_cred; mk_memory_timer_scene yes inactive no
+EXTRA_BIN="$MEMORY_TIMER_BIN" DROOT="$MEMORY_ROOT" run_doctor
+no_out "timer: stores with no origin are no ⚠: nothing has anywhere to sync to yet" "$MEMORY_TIMER_WARNING"
 
 # --- the row total -----------------------------------------------------------
 # Catches a row that VANISHED -- an early exit, a deleted block, an emptied
@@ -3927,7 +4075,7 @@ no_out   "...and is not read as zero"          "no memory store is checked out"
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=584
+EXPECTED_ROWS=603
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
