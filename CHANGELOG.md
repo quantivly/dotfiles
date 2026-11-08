@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/resource-pulse-cost.sh` measures gnome-shell CPU and memory; every number is defined in
   `docs/GNOME_CONFIGURATION_GUIDE.md`. `scripts/resource-pulse-nested.sh` (`start`, `eval`,
   `screenshot`, `stop`) runs it in a headless nested shell that cannot reach the live session: private
-  runtime dir and buses, a fake system bus and GDM, an `env -i` allowlist, and unsafe mode only from a
-  helper that exists in the run directory. The plain `gnome-shell --devkit` recipe is not safe: it
+  runtime dir and buses (path sockets in a 0700 run directory, never abstract ones), a fake system bus
+  and GDM, an `env -i` allowlist, unsafe mode only from a helper that exists in the run directory, and
+  `eval`/`screenshot` only to a run whose recorded gnome-shell still runs in its own session. The plain `gnome-shell --devkit` recipe is not safe: it
   writes the live crash-guard file and reaches logind, GDM, GeoClue and extensions.gnome.org. State
   table: `scripts/test-resource-pulse.sh`.
 

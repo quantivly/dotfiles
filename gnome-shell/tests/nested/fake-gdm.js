@@ -1,11 +1,15 @@
 // Test double for scripts/resource-pulse-nested.sh: owns org.gnome.DisplayManager on the nested run's FAKE system
 // bus only, so the nested shell's LoginManager.canLock() is true and it builds a ScreenShield as the live one does.
-// It connects to the address given as ARGV[0] and refuses any other bus, so it can never answer on the real one.
-// Usage: gjs -m fake-gdm.js unix:abstract=rp-nested-system-<run suffix>
+// It connects to the address given as ARGV[0] only when that is exactly the fake system bus of the run named by
+// RESOURCE_PULSE_NESTED_DIR, and refuses any other bus, so it can never answer on the real one.
+// Usage (inside a run's environment): gjs -m fake-gdm.js unix:path=<run dir>/bus/system.sock
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-const FAKE_SYSTEM_BUS_ADDRESS_PREFIX = 'unix:abstract=rp-nested-system-';
+/** Set by scripts/resource-pulse-nested.sh to the run directory, in the nested processes' environment only. */
+const NESTED_RUN_DIR_VARIABLE = 'RESOURCE_PULSE_NESTED_DIR';
+/** Where the fake system bus listens, relative to the run directory. */
+const FAKE_SYSTEM_BUS_SOCKET_RELATIVE_PATH = 'bus/system.sock';
 const FAKE_GDM_VERSION = '50.0';
 const MANAGER_OBJECT_PATH = '/org/gnome/DisplayManager/Manager';
 const MANAGER_BUS_NAME = 'org.gnome.DisplayManager';
@@ -19,8 +23,10 @@ const MANAGER_INTERFACE_XML = `
 </node>`;
 
 const [fakeSystemBusAddress] = ARGV;
-if (!fakeSystemBusAddress?.startsWith(FAKE_SYSTEM_BUS_ADDRESS_PREFIX))
-    throw new Error(`refusing to connect to anything but the fake system bus, got: ${fakeSystemBusAddress}`);
+const nestedRunDir = GLib.getenv(NESTED_RUN_DIR_VARIABLE);
+const runFakeSystemBusAddress = nestedRunDir ? `unix:path=${nestedRunDir}/${FAKE_SYSTEM_BUS_SOCKET_RELATIVE_PATH}` : null;
+if (runFakeSystemBusAddress === null || fakeSystemBusAddress !== runFakeSystemBusAddress)
+    throw new Error(`refusing to connect to anything but the fake system bus of this run, got: ${fakeSystemBusAddress}`);
 
 const connection = Gio.DBusConnection.new_for_address_sync(fakeSystemBusAddress,
     Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, null, null);

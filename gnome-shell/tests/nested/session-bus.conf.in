@@ -1,18 +1,21 @@
 <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
 <!-- The nested shell's private session bus (scripts/resource-pulse-nested.sh renders the @…@ fields).
-     Its ONLY activatable service is dconf, from a service directory inside the run: no portals, no gvfs, no
-     keyring, no accessibility bus, no systemd, nothing that would mount or write under a live runtime dir.
-     No standard service directories and no included config files: the script refuses a config with either. -->
+     It listens on a path socket inside the run directory, which is 0700: only this user can reach it, and no
+     other user can take the path over once the run ends. Its ONLY activatable service is dconf, from a service
+     directory inside the run: no portals, no gvfs, no keyring, no accessibility bus, no systemd. No standard
+     service directories and no included config files: the script refuses a config with either. Sending and
+     receiving are allowed explicitly (receive_sender), with no monitoring rule: the harness never watches
+     other connections' messages, and without an allow-receive rule dbus-daemon rejects every reply. -->
 <busconfig>
   <type>session</type>
   <keep_umask/>
-  <listen>unix:abstract=rp-nested-session-@RUN_SUFFIX@</listen>
+  <listen>unix:path=@RUN_DIR@/bus/session.sock</listen>
   <auth>EXTERNAL</auth>
   <servicedir>@SESSION_SERVICE_DIR@</servicedir>
   <policy context="default">
-    <allow send_destination="*" eavesdrop="true"/>
-    <allow eavesdrop="true"/>
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
     <allow own="*"/>
   </policy>
   <limit name="service_start_timeout">120000</limit>

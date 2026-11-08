@@ -14,9 +14,13 @@
 # to extensions.gnome.org. Here each of those has nowhere to go:
 #
 #   display      --headless --virtual-monitor: no client of the live compositor
-#   runtime dir  a private 0700 XDG_RUNTIME_DIR, short (a socket path is at most 108 bytes)
-#   session bus  a private dbus-daemon whose only activatable service is dconf
-#   system bus   a fake, empty dbus-daemon; fake-gdm.js owns org.gnome.DisplayManager on it
+#   run dir      one 0700 directory per run, under a private base ($XDG_RUNTIME_DIR by
+#                default), so no other user can list, reach or later claim anything in it
+#   runtime dir  a private 0700 XDG_RUNTIME_DIR inside it, short (a socket path is at most 108 bytes)
+#   session bus  a private dbus-daemon on a path socket in the run dir; its only activatable
+#                service is dconf
+#   system bus   a fake, empty dbus-daemon on a path socket in the run dir; fake-gdm.js owns
+#                org.gnome.DisplayManager on it
 #   environment  env -i with an explicit allowlist: no token, no WAYLAND_DISPLAY or DISPLAY,
 #                no live bus; HOME, TMPDIR and every XDG dir inside the run directory
 #   settings     the nested dconf only: no lock, no idle blank, a dead proxy, no location,
@@ -24,11 +28,13 @@
 #   apps         the extension-update apps masked, so the shell sees no updater
 #   unsafe mode  only through a throwaway helper extension copied into the run's data dir,
 #                which refuses to act in any shell but this one
+#   requests     eval and screenshot go only to a live run: its supervisor running, and its
+#                recorded gnome-shell running, as gnome-shell, in the run's own session
 #   lifetime     setsid + timeout --kill-after; stop tears down by the recorded PIDs, and
 #                only ever signals processes in the run's own session
 #
-# Everything it creates is under one temp directory, the run directory. Any
-# isolation step that fails stops the run: exit 2, and nothing left running.
+# Everything it creates is under the run directory. Any isolation step that
+# fails stops the run: exit 2, and nothing left running.
 #
 # Not run in CI: it needs gnome-shell and a GPU render node. Its hermetic rows
 # (usage, the bus configs, the environment, the refusals) are in
@@ -50,7 +56,8 @@
 # Environment:
 #   RESOURCE_PULSE_NESTED_DIR     the run directory eval, screenshot and stop act on
 #                                 (needed only while more than one run is live)
-#   RESOURCE_PULSE_NESTED_BASE    where run directories are made (default $TMPDIR, else /tmp)
+#   RESOURCE_PULSE_NESTED_BASE    where run directories are made: yours, with no group or
+#                                 other access (default $XDG_RUNTIME_DIR, else $TMPDIR)
 #   RESOURCE_PULSE_NESTED_LIFETIME_SECONDS  a run's hard lifetime (default 1200)
 #
 # Exit: 0 ok; 1 the nested shell ran the request and it failed (an Eval that
@@ -67,6 +74,7 @@ readonly EXTENSION_UUID='resource-pulse@dotfiles'
 readonly EXTENSION_SOURCE_DIR="$REPO_ROOT/gnome-shell/extensions/$EXTENSION_UUID"
 readonly UNSAFE_MODE_HELPER_UUID='resource-pulse-nested-unsafe-mode@local'
 readonly NESTED_SESSION_MODE='resource-pulse-nested'
+readonly NESTED_SHELL_COMM='gnome-shell'
 readonly DCONF_SERVICE_FILE='ca.desrt.dconf.service'
 readonly DCONF_SERVICE_NAME='ca.desrt.dconf'
 readonly DCONF_SERVICE_EXECUTABLE='/usr/libexec/dconf-service'
@@ -79,13 +87,16 @@ readonly RUN_DIR_PREFIX='rpn.'
 readonly RUN_DIR_MARKER_FILE='.resource-pulse-nested'
 readonly RUN_DIR_MODE='700'
 readonly PRIVATE_UMASK='077'
+# A mode (as `stat -c %a` prints it) with no group or other bits.
+readonly PRIVATE_MODE_PATTERN='^[0-7]*00$'
 readonly RUN_SUFFIX_PATTERN='^[A-Za-z0-9]+$'
 # Only characters that are safe in a sed replacement, a D-Bus address and an unquoted XML text node.
 readonly RUN_DIR_SAFE_PATH_PATTERN='^/[A-Za-z0-9/._-]+$'
-# The nested shell makes sockets under <run>/run; a Unix socket path is at most 108 bytes.
+# The nested shell makes sockets under <run>/run, and the buses listen under <run>/bus; a Unix socket path is at
+# most 108 bytes.
 readonly MAX_RUN_DIR_PATH_CHARS=48
-readonly SESSION_BUS_NAME_PREFIX='rp-nested-session-'
-readonly SYSTEM_BUS_NAME_PREFIX='rp-nested-system-'
+readonly SESSION_BUS_SOCKET_RELATIVE_PATH='bus/session.sock'
+readonly SYSTEM_BUS_SOCKET_RELATIVE_PATH='bus/system.sock'
 readonly NESTED_WAYLAND_DISPLAY='rp-nested-0'
 readonly NESTED_MONITOR_SIZE='3072x1920'
 readonly NESTED_PATH='/usr/local/bin:/usr/bin:/bin'
@@ -109,6 +120,7 @@ readonly EVAL_TIMEOUT_SECONDS=60
 readonly SCREENSHOT_NAME_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 readonly WHOLE_NUMBER_PATTERN='^[0-9]+$'
 readonly POSITIVE_WHOLE_NUMBER_PATTERN='^[1-9][0-9]*$'
+readonly DBUS_GUID_SUFFIX_PATTERN=',guid=[0-9a-f]+'
 readonly PNG_SUFFIX='.png'
 # /proc/<pid>/stat after the last ") ": state (field 3), ppid, pgrp, session (field 6).
 readonly STAT_STATE_INDEX_AFTER_COMM=0
@@ -178,7 +190,16 @@ require_tools() {
 # Print the directory run directories are made in.
 #######################################
 nested_base_dir() {
-    printf '%s' "${RESOURCE_PULSE_NESTED_BASE:-${TMPDIR:-/tmp}}"
+    printf '%s' "${RESOURCE_PULSE_NESTED_BASE:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
+}
+
+#######################################
+# Succeed when a directory is this user's and nobody else can enter or list it.
+# Arguments:
+#   $1 - directory
+#######################################
+is_private_directory() {
+    [[ -d "$1" && -O "$1" && "$(stat -c %a "$1")" =~ $PRIVATE_MODE_PATTERN ]]
 }
 
 #######################################
@@ -294,15 +315,23 @@ verified_run_suffix() {
 }
 
 #######################################
+# Print the address of a run's fake system bus (its path socket).
+# Arguments:
+#   $1 - run directory
+#######################################
+fake_system_bus_address() {
+    printf 'unix:path=%s/%s' "$1" "$SYSTEM_BUS_SOCKET_RELATIVE_PATH"
+}
+
+#######################################
 # Fill ISOLATED_ENV_COMMAND with `env -i` and the allowlist: a command run
 # through it inherits nothing from the caller.
 # Arguments:
 #   $1 - run directory
-#   $2 - run suffix
 #######################################
 build_isolated_env_command() {
     local -a assignments
-    mapfile -t assignments < <(nested_environment_assignments "$1" "$2")
+    mapfile -t assignments < <(nested_environment_assignments "$1")
     (( ${#assignments[@]} > 0 )) || return 1
     ISOLATED_ENV_COMMAND=(env -i "${assignments[@]}")
 }
@@ -313,10 +342,9 @@ build_isolated_env_command() {
 # display, no live bus.
 # Arguments:
 #   $1 - run directory
-#   $2 - run suffix
 #######################################
 nested_environment_assignments() {
-    local run_dir="$1" run_suffix="$2" user_name
+    local run_dir="$1" user_name
     user_name="$(id -un)" || return 1
     printf '%s\n' \
         "HOME=$run_dir/home" \
@@ -335,7 +363,7 @@ nested_environment_assignments() {
         "XDG_CONFIG_DIRS=$SYSTEM_XDG_CONFIG_DIRS" \
         "XDG_CURRENT_DESKTOP=$NESTED_CURRENT_DESKTOP" \
         "XDG_SESSION_TYPE=wayland" \
-        "DBUS_SYSTEM_BUS_ADDRESS=unix:abstract=$SYSTEM_BUS_NAME_PREFIX$run_suffix" \
+        "DBUS_SYSTEM_BUS_ADDRESS=$(fake_system_bus_address "$run_dir")" \
         "GIO_USE_VFS=local" \
         "GIO_USE_VOLUME_MONITOR=unix" \
         "NO_AT_BRIDGE=1" \
@@ -348,27 +376,25 @@ nested_environment_assignments() {
 # the launch itself uses ISOLATED_ENV_COMMAND directly, so env execs in place).
 # Arguments:
 #   $1 - run directory
-#   $2 - run suffix
 #   $@ - command
 #######################################
 run_isolated() {
-    build_isolated_env_command "$1" "$2" || return "$EXIT_REFUSED"
-    shift 2
+    build_isolated_env_command "$1" || return "$EXIT_REFUSED"
+    shift
     "${ISOLATED_ENV_COMMAND[@]}" "$@"
 }
 
 #######################################
-# Print a bus config template with the run's suffix and service dir filled in.
+# Print a bus config template with the run directory and its session service
+# dir filled in.
 # Arguments:
 #   $1 - template path
 #   $2 - run directory
-#   $3 - run suffix
 #######################################
 render_bus_config() {
-    local template_path="$1" run_dir="$2" run_suffix="$3"
-    [[ "$run_dir" =~ $RUN_DIR_SAFE_PATH_PATTERN && "$run_suffix" =~ $RUN_SUFFIX_PATTERN ]] || return 1
-    sed -e "s|@RUN_SUFFIX@|$run_suffix|g" -e "s|@SESSION_SERVICE_DIR@|$run_dir/bus/session-services|g" \
-        "$template_path"
+    local template_path="$1" run_dir="$2"
+    [[ "$run_dir" =~ $RUN_DIR_SAFE_PATH_PATTERN ]] || return 1
+    sed -e "s|@RUN_DIR@|$run_dir|g" -e "s|@SESSION_SERVICE_DIR@|$run_dir/bus/session-services|g" "$template_path"
 }
 
 #######################################
@@ -386,10 +412,8 @@ prepare_run_directory() {
     # Every directory private to the user, intermediate ones included (the runtime dir must be 0700).
     (umask "$PRIVATE_UMASK" && mkdir -p "${subdirectories[@]/#/$run_dir/}") || return 1
     printf '%s\n' "$run_suffix" >"$run_dir/$RUN_DIR_MARKER_FILE" || return 1
-    render_bus_config "$NESTED_FILES_DIR/session-bus.conf.in" "$run_dir" "$run_suffix" \
-        >"$run_dir/bus/session-bus.conf" || return 1
-    render_bus_config "$NESTED_FILES_DIR/system-bus.conf.in" "$run_dir" "$run_suffix" \
-        >"$run_dir/bus/system-bus.conf" || return 1
+    render_bus_config "$NESTED_FILES_DIR/session-bus.conf.in" "$run_dir" >"$run_dir/bus/session-bus.conf" || return 1
+    render_bus_config "$NESTED_FILES_DIR/system-bus.conf.in" "$run_dir" >"$run_dir/bus/system-bus.conf" || return 1
     cp -- "$NESTED_FILES_DIR/session-services/$DCONF_SERVICE_FILE" "$run_dir/bus/session-services/" || return 1
     cp -- "$NESTED_FILES_DIR/$NESTED_SESSION_MODE.json" "$run_dir/sysdata/gnome-shell/modes/" || return 1
     cp -- "$NESTED_FILES_DIR"/applications/*.desktop "$run_dir/data/applications/" || return 1
@@ -453,10 +477,9 @@ system_bus_config_activates_nothing() {
 # every home and the runtime dir inside it, the fake system bus, no display.
 # Arguments:
 #   $1 - run directory
-#   $2 - run suffix
 #######################################
 is_isolated_environment() {
-    local run_dir="$1" run_suffix="$2" variable_name
+    local run_dir="$1" variable_name
     [[ "${RESOURCE_PULSE_NESTED_DIR:-}" == "$run_dir" ]] || { note "RESOURCE_PULSE_NESTED_DIR is not $run_dir"; return 1; }
     for variable_name in HOME TMPDIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR; do
         if [[ "${!variable_name:-}" != "$run_dir/"* ]]; then
@@ -464,7 +487,7 @@ is_isolated_environment() {
             return 1
         fi
     done
-    if [[ "${DBUS_SYSTEM_BUS_ADDRESS:-}" != "unix:abstract=$SYSTEM_BUS_NAME_PREFIX$run_suffix" ]]; then
+    if [[ "${DBUS_SYSTEM_BUS_ADDRESS:-}" != "$(fake_system_bus_address "$run_dir")" ]]; then
         note "the system bus is not the fake one: '${DBUS_SYSTEM_BUS_ADDRESS:-}'"
         return 1
     fi
@@ -472,15 +495,26 @@ is_isolated_environment() {
 }
 
 #######################################
-# Succeed when an address is exactly this run's private session bus (as
-# dbus-daemon prints it, with or without its guid).
+# Succeed when an address is exactly a bus socket of this run (as dbus-daemon
+# prints it, with or without its guid).
 # Arguments:
 #   $1 - address
-#   $2 - run suffix
+#   $2 - run directory
+#   $3 - the socket's path relative to the run directory
+#######################################
+is_run_bus_address() {
+    local run_bus_address="unix:path=$2/$3"
+    [[ "$1" == "$run_bus_address" || "$1" =~ ^"$run_bus_address"$DBUS_GUID_SUFFIX_PATTERN$ ]]
+}
+
+#######################################
+# Succeed when an address is exactly this run's private session bus.
+# Arguments:
+#   $1 - address
+#   $2 - run directory
 #######################################
 is_private_session_bus_address() {
-    local private_address="unix:abstract=$SESSION_BUS_NAME_PREFIX$2"
-    [[ "$1" == "$private_address" || "$1" =~ ^"$private_address",guid=[0-9a-f]+$ ]]
+    is_run_bus_address "$1" "$2" "$SESSION_BUS_SOCKET_RELATIVE_PATH"
 }
 
 #######################################
@@ -488,14 +522,57 @@ is_private_session_bus_address() {
 # this run's private bus, so nothing below can ever reach the live one.
 # Arguments:
 #   $1 - run directory
-#   $2 - run suffix
 #######################################
 verified_session_address() {
     local recorded_address=""
     [[ -r "$1/state/session.addr" ]] && read -r recorded_address <"$1/state/session.addr"
-    is_private_session_bus_address "$recorded_address" "$2" \
+    is_private_session_bus_address "$recorded_address" "$1" \
         || die "refusing: '$recorded_address' is not this run's private session bus"
     printf '%s' "$recorded_address"
+}
+
+#######################################
+# Succeed while a process is running (not gone, not a zombie).
+# Arguments:
+#   $1 - pid
+#######################################
+is_process_running() {
+    [[ -n "$1" ]] && session_id_of_process /proc "$1" >/dev/null
+}
+
+#######################################
+# Succeed while the run's supervisor, or before it has recorded itself the
+# launcher, is still running: either is alive for the whole run.
+# Arguments:
+#   $1 - run directory
+#######################################
+is_run_alive() {
+    is_process_running "$(recorded_run_value "$1" supervisor)" ||
+        is_process_running "$(recorded_run_value "$1" launcher)"
+}
+
+#######################################
+# Succeed only when the run is alive and its recorded gnome-shell is running,
+# under that name, in the run's own session: the bus it recorded is then still
+# the one that shell owns, not a socket left from an ended run.
+# Arguments:
+#   $1 - run directory
+#######################################
+is_nested_shell_live() {
+    local run_dir="$1" session_id shell_pid shell_comm=""
+    is_run_alive "$run_dir" || { note "the run's supervisor is not running"; return 1; }
+    session_id="$(recorded_run_value "$run_dir" session)"
+    shell_pid="$(recorded_run_value "$run_dir" gnome-shell)"
+    if ! [[ "$session_id" =~ $POSITIVE_WHOLE_NUMBER_PATTERN && "$shell_pid" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]]; then
+        note "the run has no recorded session or gnome-shell"
+        return 1
+    fi
+    if [[ "$(session_id_of_process /proc "$shell_pid")" != "$session_id" ]]; then
+        note "the recorded gnome-shell ($shell_pid) is not running in the run's session ($session_id)"
+        return 1
+    fi
+    read -r shell_comm 2>/dev/null <"/proc/$shell_pid/comm"
+    [[ "$shell_comm" == "$NESTED_SHELL_COMM" ]] || { note "process $shell_pid is '$shell_comm', not $NESTED_SHELL_COMM"; return 1; }
 }
 
 #######################################
@@ -526,6 +603,19 @@ resolve_run_directory() {
 }
 
 #######################################
+# Print the private bus address of the run eval and screenshot act on; exit 2
+# unless the address is the run's own and the run is live.
+#######################################
+live_run_session_address() {
+    local run_dir address
+    run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
+    verified_run_suffix "$run_dir" >/dev/null || die "not a run directory of this script: $run_dir"
+    address="$(verified_session_address "$run_dir")" || exit "$EXIT_REFUSED"
+    is_nested_shell_live "$run_dir" || die "refusing: the run in $run_dir is not live"
+    printf '%s' "$address"
+}
+
+#######################################
 # Run JavaScript in the nested shell over its private bus and print the JSON
 # result. Returns 0 on success, 1 when the code threw, 2 when the call failed.
 # Arguments:
@@ -544,15 +634,6 @@ eval_in_nested_shell() {
         return "$EXIT_REQUEST_FAILED"
     fi
     printf '%s\n' "$result"
-}
-
-#######################################
-# Succeed while a process is running (not gone, not a zombie).
-# Arguments:
-#   $1 - pid
-#######################################
-is_process_running() {
-    [[ -n "$1" ]] && session_id_of_process /proc "$1" >/dev/null
 }
 
 #######################################
@@ -650,12 +731,11 @@ wait_until() {
 # Succeed once the fake system bus has printed this run's address.
 # Arguments:
 #   $1 - run directory
-#   $2 - run suffix
 #######################################
 has_fake_system_bus_address() {
     local printed_address=""
     [[ -s "$1/state/system.addr" ]] && read -r printed_address <"$1/state/system.addr"
-    [[ "$printed_address" =~ ^"unix:abstract=$SYSTEM_BUS_NAME_PREFIX$2",guid=[0-9a-f]+$ ]]
+    is_run_bus_address "$printed_address" "$1" "$SYSTEM_BUS_SOCKET_RELATIVE_PATH"
 }
 
 #######################################
@@ -674,9 +754,9 @@ does_fake_display_manager_own_its_name() {
 #   $1 - run directory
 #######################################
 supervise_run() {
-    local run_dir="$1" run_suffix own_session_id shell_session_pid shell_session_status
-    run_suffix="$(verified_run_suffix "$run_dir")" || die "not a run directory of this script: $run_dir"
-    is_isolated_environment "$run_dir" "$run_suffix" || refuse_run "$run_dir" "the supervisor is not isolated"
+    local run_dir="$1" own_session_id shell_session_pid shell_session_status
+    verified_run_suffix "$run_dir" >/dev/null || die "not a run directory of this script: $run_dir"
+    is_isolated_environment "$run_dir" || refuse_run "$run_dir" "the supervisor is not isolated"
     [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || refuse_run "$run_dir" "the supervisor inherited a session bus"
     own_session_id="$(session_id_of_process /proc "$$")" || refuse_run "$run_dir" "cannot read the supervisor's session"
     [[ "$own_session_id" == "$PPID" ]] || refuse_run "$run_dir" "the supervisor is not in the session setsid made"
@@ -691,7 +771,7 @@ supervise_run() {
     dbus-daemon --config-file="$run_dir/bus/system-bus.conf" --nofork --print-address=1 \
         >"$run_dir/state/system.addr" 2>"$run_dir/log/system-bus.log" &
     record_run_value "$run_dir" fake-system-bus "$!"
-    wait_until "$FAKE_SYSTEM_BUS_TIMEOUT_SECONDS" has_fake_system_bus_address "$run_dir" "$run_suffix" \
+    wait_until "$FAKE_SYSTEM_BUS_TIMEOUT_SECONDS" has_fake_system_bus_address "$run_dir" \
         || refuse_run "$run_dir" "the fake system bus did not start (log/system-bus.log)"
 
     gjs -m "$NESTED_FILES_DIR/fake-gdm.js" "$DBUS_SYSTEM_BUS_ADDRESS" >"$run_dir/log/fake-gdm.log" 2>&1 &
@@ -756,10 +836,10 @@ write_nested_settings() {
 #   $1 - run directory
 #######################################
 run_inside_private_session_bus() {
-    local run_dir="$1" run_suffix
-    run_suffix="$(verified_run_suffix "$run_dir")" || die "not a run directory of this script: $run_dir"
-    is_isolated_environment "$run_dir" "$run_suffix" || refuse_run "$run_dir" "the in-bus stage is not isolated"
-    is_private_session_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "$run_suffix" \
+    local run_dir="$1"
+    verified_run_suffix "$run_dir" >/dev/null || die "not a run directory of this script: $run_dir"
+    is_isolated_environment "$run_dir" || refuse_run "$run_dir" "the in-bus stage is not isolated"
+    is_private_session_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "$run_dir" \
         || refuse_run "$run_dir" "the session bus is not this run's private one: '${DBUS_SESSION_BUS_ADDRESS:-}'"
     write_nested_settings || refuse_run "$run_dir" "a nested setting could not be written"
     [[ -s "$XDG_CONFIG_HOME/dconf/user" ]] || refuse_run "$run_dir" "the settings did not land in the nested dconf"
@@ -770,26 +850,15 @@ run_inside_private_session_bus() {
 }
 
 #######################################
-# Succeed while the run's supervisor, or before it has recorded itself the
-# launcher, is still running: either is alive for the whole run.
+# Succeed once the nested shell is live and answers Eval with unsafe mode on.
 # Arguments:
 #   $1 - run directory
-#######################################
-is_run_alive() {
-    is_process_running "$(recorded_run_value "$1" supervisor)" ||
-        is_process_running "$(recorded_run_value "$1" launcher)"
-}
-
-#######################################
-# Succeed once the nested shell answers Eval with unsafe mode on.
-# Arguments:
-#   $1 - run directory
-#   $2 - run suffix
 #######################################
 does_nested_shell_answer() {
     local recorded_address=""
     [[ -r "$1/state/session.addr" ]] && read -r recorded_address <"$1/state/session.addr"
-    is_private_session_bus_address "$recorded_address" "$2" || return 1
+    is_private_session_bus_address "$recorded_address" "$1" || return 1
+    is_nested_shell_live "$1" 2>/dev/null || return 1
     [[ "$(eval_in_nested_shell "$recorded_address" 'global.context.unsafe_mode' 2>/dev/null)" == true ]]
 }
 
@@ -798,12 +867,11 @@ does_nested_shell_answer() {
 # died, or after STARTUP_TIMEOUT_SECONDS.
 # Arguments:
 #   $1 - run directory
-#   $2 - run suffix
 #######################################
 wait_for_nested_shell() {
-    local run_dir="$1" run_suffix="$2" deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
+    local run_dir="$1" deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
     while (( SECONDS < deadline )); do
-        does_nested_shell_answer "$run_dir" "$run_suffix" && return 0
+        does_nested_shell_answer "$run_dir" && return 0
         if [[ -s "$run_dir/state/refused" ]]; then
             note "the run refused: $(<"$run_dir/state/refused")"
             return 1
@@ -845,16 +913,20 @@ confirm_nested_shell_isolation() {
 }
 
 #######################################
-# `start`: make and lay out a run directory, check the bus configs, launch the
-# supervisor under setsid + timeout with the isolated environment, wait for the
-# shell, confirm its isolation, and print its private bus address.
+# `start`: make and lay out a run directory under a private base, check the
+# bus configs, launch the supervisor under setsid + timeout with the isolated
+# environment, wait for the shell, confirm its isolation, and print its private
+# bus address.
 #######################################
 start_subcommand() {
-    require_tools gnome-shell dbus-daemon dbus-run-session gjs gsettings busctl jq setsid timeout mktemp stat sed
-    [[ -x "$DCONF_SERVICE_EXECUTABLE" ]] || die "$DCONF_SERVICE_EXECUTABLE is required"
     local base_dir run_dir run_suffix lifetime_seconds address
     base_dir="$(nested_base_dir)"
-    [[ -d "$base_dir" ]] || die "no such directory for runs: $base_dir"
+    # Checked first: nothing is made, and no tool is looked for, under a base others can read.
+    is_private_directory "$base_dir" \
+        || die "the base directory $base_dir is not private (it must be yours, with no group or other access):" \
+            "set RESOURCE_PULSE_NESTED_BASE to one that is"
+    require_tools gnome-shell dbus-daemon dbus-run-session gjs gsettings busctl jq setsid timeout mktemp stat sed
+    [[ -x "$DCONF_SERVICE_EXECUTABLE" ]] || die "$DCONF_SERVICE_EXECUTABLE is required"
     lifetime_seconds="${RESOURCE_PULSE_NESTED_LIFETIME_SECONDS:-$DEFAULT_LIFETIME_SECONDS}"
     [[ "$lifetime_seconds" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] \
         || die "RESOURCE_PULSE_NESTED_LIFETIME_SECONDS is not a whole number of seconds: $lifetime_seconds"
@@ -874,16 +946,16 @@ start_subcommand() {
         rm -rf -- "$run_dir"
         die "refusing: a rendered bus config could activate more than dconf"
     fi
-    build_isolated_env_command "$run_dir" "$run_suffix" || die "cannot build the isolated environment"
+    build_isolated_env_command "$run_dir" || die "cannot build the isolated environment"
 
     "${ISOLATED_ENV_COMMAND[@]}" setsid timeout --kill-after="$KILL_AFTER_SECONDS" "$lifetime_seconds" \
         bash "$SCRIPT_PATH" __supervise "$run_dir" </dev/null >"$run_dir/log/supervisor.log" 2>&1 &
     record_run_value "$run_dir" launcher "$!"
-    if ! wait_for_nested_shell "$run_dir" "$run_suffix"; then
+    if ! wait_for_nested_shell "$run_dir"; then
         stop_run "$run_dir"
         exit "$EXIT_REFUSED"
     fi
-    address="$(verified_session_address "$run_dir" "$run_suffix")" || { stop_run "$run_dir"; exit "$EXIT_REFUSED"; }
+    address="$(verified_session_address "$run_dir")" || { stop_run "$run_dir"; exit "$EXIT_REFUSED"; }
     if ! confirm_nested_shell_isolation "$run_dir" "$address"; then
         stop_run "$run_dir"
         exit "$EXIT_REFUSED"
@@ -897,7 +969,8 @@ start_subcommand() {
 # Stop a run: SIGTERM the nested gnome-shell by its recorded pid, wait for the
 # session to empty (the supervisor's exit sweeps it), then signal whatever is
 # left in that session. Never signals outside the run's own session, and never
-# the caller's session. Removes the runtime dir; keeps logs and shots.
+# the caller's session. Removes the runtime dir and the bus sockets; keeps logs
+# and shots.
 # Arguments:
 #   $1 - run directory
 #######################################
@@ -923,7 +996,8 @@ stop_run() {
             return 1
         fi
     fi
-    rm -rf -- "${run_dir:?}/run"
+    rm -rf -- "${run_dir:?}/run" "${run_dir:?}/$SESSION_BUS_SOCKET_RELATIVE_PATH" \
+        "${run_dir:?}/$SYSTEM_BUS_SOCKET_RELATIVE_PATH"
     : >"$run_dir/state/stopped"
     note "stopped; logs and screenshots stay in $run_dir"
 }
@@ -934,13 +1008,11 @@ stop_run() {
 #   $1 - JavaScript, or '-' to read it from stdin
 #######################################
 eval_subcommand() {
-    local code="$1" run_dir run_suffix address
+    local code="$1" address
     [[ "$code" == - ]] && code="$(cat)"
     [[ -n "$code" ]] || usage_error "eval needs JavaScript"
     require_tools busctl jq stat
-    run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
-    run_suffix="$(verified_run_suffix "$run_dir")" || die "not a run directory of this script: $run_dir"
-    address="$(verified_session_address "$run_dir" "$run_suffix")" || exit "$EXIT_REFUSED"
+    address="$(live_run_session_address)" || exit "$EXIT_REFUSED"
     eval_in_nested_shell "$address" "$code"
 }
 
@@ -952,7 +1024,7 @@ eval_subcommand() {
 #   $2..$5 - optional area, in logical pixels
 #######################################
 screenshot_subcommand() {
-    local shot_name="${1:-}" run_dir run_suffix address shot_path reply has_succeeded
+    local shot_name="${1:-}" run_dir address shot_path reply has_succeeded
     [[ "$shot_name" =~ $SCREENSHOT_NAME_PATTERN ]] \
         || usage_error "a screenshot name is a plain file name (letters, digits, . _ -), got: '$shot_name'"
     [[ "$shot_name" == *"$PNG_SUFFIX" ]] || shot_name+="$PNG_SUFFIX"
@@ -970,9 +1042,8 @@ screenshot_subcommand() {
         *) usage_error "screenshot takes a name, then either no area or x y width height" ;;
     esac
     require_tools busctl jq stat
+    address="$(live_run_session_address)" || exit "$EXIT_REFUSED"
     run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
-    run_suffix="$(verified_run_suffix "$run_dir")" || die "not a run directory of this script: $run_dir"
-    address="$(verified_session_address "$run_dir" "$run_suffix")" || exit "$EXIT_REFUSED"
     shot_path="$run_dir/shots/$shot_name"
     if (( ${#area[@]} == 0 )); then
         reply="$(busctl --address="$address" --json=short call org.gnome.Shell.Screenshot \

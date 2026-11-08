@@ -136,15 +136,19 @@ scripts/resource-pulse-nested.sh screenshot card.png 2600 40 470 200   # x y wid
 scripts/resource-pulse-nested.sh stop         # logs and screenshots stay in the run directory
 ```
 
-Everything it creates is in one run directory under `$TMPDIR` (the path is printed): a private
-0700 runtime dir, HOME and XDG dirs, a private session bus that can activate only dconf, a fake
-empty system bus with a fake GDM, an `env -i` allowlist (no tokens, no live display or bus), nested
-settings that never lock, blank, use the network or check for extension updates, and the
-extension-update apps masked. Unsafe mode (which `eval` and `screenshot` need) comes from a
-throwaway helper extension that exists only in that directory and refuses to act anywhere else. A
-run lives at most 20 minutes (`setsid timeout`), and `stop` signals only processes in the run's own
-session. Any isolation step that fails stops the run with exit 2. It needs gnome-shell and a GPU,
-so CI does not run it; its hermetic rows are in the suite below.
+Everything it creates is in one 0700 run directory under `$XDG_RUNTIME_DIR` (the path is
+printed; `RESOURCE_PULSE_NESTED_BASE` picks another base, which must be yours with no group or
+other access): a private runtime dir, HOME and XDG dirs, a private session bus that can activate
+only dconf and a fake empty system bus with a fake GDM, both on path sockets inside the run
+directory (never abstract sockets, which any local process could reach), an `env -i` allowlist (no
+tokens, no live display or bus), nested settings that never lock, blank, use the network or check
+for extension updates, and the extension-update apps masked. Unsafe mode (which `eval` and
+`screenshot` need) comes from a throwaway helper extension that exists only in that directory and
+refuses to act anywhere else, and `eval` and `screenshot` refuse a run whose supervisor and
+recorded gnome-shell are not both running in its own session. A run lives at most 20 minutes
+(`setsid timeout`), and `stop` signals only processes in the run's own session. Any isolation step
+that fails stops the run with exit 2. It needs gnome-shell and a GPU, so CI does not run it; its
+hermetic rows are in the suite below.
 
 ### What it costs
 
@@ -163,7 +167,7 @@ skipped unit types.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (189 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (192 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.
