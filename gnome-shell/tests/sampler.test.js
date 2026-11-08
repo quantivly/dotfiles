@@ -33,6 +33,10 @@ const USER_APP_SLICE = 'user.slice/user-1000.slice/user@1000.service/app.slice';
 const LATER_CLOCK_LABEL = '14:04';
 /** The end of the /proc/stat path the sampler reads under its fsRoot. */
 const PROC_STAT_FIXTURE_SUFFIX = '/proc/stat';
+/** Linux's errno for "No such device": what reading a removed kernfs (cgroup) file returns. */
+const ENODEV_ERRNO = 19;
+const HERDR_LEAF_NAME = 'herdr-server.service';
+const DOCKER_LEAF_NAME = 'docker-abc.scope';
 /** Mode of every directory a row creates: the user's own. */
 const PRIVATE_DIRECTORY_MODE = 0o700;
 /** Digits in a generated leaf's index, so the generated names sort as their indices do. */
@@ -1054,4 +1058,29 @@ test('sampler: once a stuck sample settles the stall count starts over, so a lat
         sampler.destroy();
         assertEqual([noDataAfterFirstStall, noDataAfterRecovery, noDataAfterSecondStall], [1, 1, 2]);
     });
+});
+
+test('sampler: a leaf whose file is gone with ENODEV (a scope that exited mid-read) is skipped silently, like ENOENT; ' +
+    'any other read error is logged', async () => {
+    // A removed cgroup's open file reads as ENODEV, which GLib maps to its own code; build the error the way GLib
+    // does, from the errno, so the row follows GLib's real mapping.
+    const vanishedError = new GLib.Error(Gio.IOErrorEnum, Gio.io_error_from_errno(ENODEV_ERRNO),
+        `Error reading from file: ${GLib.strerror(ENODEV_ERRNO)}`);
+    const deniedError = new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.PERMISSION_DENIED,
+        'Error opening file: Permission denied');
+    const {sampler, logged} = makeSampler('root-a', {
+        readTextFile: (path, ...readArguments) => {
+            if (path.endsWith(`${HERDR_LEAF_NAME}/memory.current`))
+                return Promise.reject(vanishedError);
+            if (path.endsWith(`${DOCKER_LEAF_NAME}/cpu.stat`))
+                return Promise.reject(deniedError);
+            return readTextFile(path, ...readArguments);
+        },
+    });
+    await sampler.initialize();
+    const ranking = await sampler.scanAppsOnce();
+    sampler.destroy();
+    // Without herdr's 15 GB, Chromium's 4 GB tops memory.
+    assertEqual([ranking?.topMemory?.name, logged.length, logged[0]?.includes(DOCKER_LEAF_NAME),
+        logged.some(line => line.includes(HERDR_LEAF_NAME))], ['Chromium', 1, true, false]);
 });

@@ -130,6 +130,19 @@ function isNotFoundError(error) {
 }
 
 /**
+ * Says whether a cgroup read failed because the cgroup is gone: no such file (it vanished before the open), or no
+ * such device (ENODEV: kernfs answers a file already open in a removed cgroup that way, so a scope that exits
+ * between open and read lands here).
+ *
+ * @param {*} error - A rejection reason.
+ * @returns {boolean} True for G_IO_ERROR_NOT_FOUND and G_IO_ERROR_NO_SUCH_DEVICE.
+ */
+function isVanishedCgroupError(error) {
+    return isNotFoundError(error) ||
+        (error instanceof GLib.Error && error.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NO_SUCH_DEVICE));
+}
+
+/**
  * Calls an injected callback for a best-effort value. Used only while publishing "no data" after a failure that
  * is being logged anyway, where this callback may well be what failed; a second throw from it is not news.
  *
@@ -1048,7 +1061,7 @@ export class Sampler {
 
     /**
      * Turns a settled directory listing into child paths. A missing directory is normal (systemd removes an empty
-     * slice, and a scope can exit mid-scan); any other failure is logged.
+     * slice, and a scope can exit mid-scan: isVanishedCgroupError); any other failure is logged.
      *
      * @param {PromiseSettledResult<string[]>} listing - The settled listChildDirectoryNames call.
      * @param {string} parentRelativePath - The listed directory, relative to the cgroup root.
@@ -1056,7 +1069,7 @@ export class Sampler {
      */
     _childPaths(listing, parentRelativePath) {
         if (listing.status === 'rejected') {
-            if (!isNotFoundError(listing.reason))
+            if (!isVanishedCgroupError(listing.reason))
                 this._logRateLimited(`cannot list cgroup ${parentRelativePath}: ${describeError(listing.reason)}`);
             return [];
         }
@@ -1065,7 +1078,7 @@ export class Sampler {
 
     /**
      * Gathers the leaves whose reads all succeeded. A leaf with any failed read is skipped from both rankings:
-     * silently when a file is missing (the cgroup vanished between listing and reading), logged otherwise.
+     * silently when the cgroup vanished between listing and reading (isVanishedCgroupError), logged otherwise.
      *
      * @param {string[]} leafRelativePaths - Leaf paths relative to the cgroup root.
      * @param {Array<PromiseSettledResult<{usageUsec: number, memoryBytes: number}>>} leafReads - Same order.
@@ -1079,7 +1092,7 @@ export class Sampler {
             if (leafRead.status === 'fulfilled') {
                 usageUsecByCgroup.set(leafRelativePath, leafRead.value.usageUsec);
                 memoryBytesByCgroup.set(leafRelativePath, leafRead.value.memoryBytes);
-            } else if (!isNotFoundError(leafRead.reason)) {
+            } else if (!isVanishedCgroupError(leafRead.reason)) {
                 this._logRateLimited(`cannot read cgroup ${leafRelativePath}: ${describeError(leafRead.reason)}`);
             }
         });
