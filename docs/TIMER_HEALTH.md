@@ -212,7 +212,7 @@ unit and a "now" of zero passes every one of them. Both are exit 2. Mutant **M14
 
 ## The state table
 
-`scripts/test-timer-health.sh` (133 checks, hermetic, run in CI, job
+`scripts/test-timer-health.sh` (134 checks, hermetic, run in CI, job
 "Repo-Owned Timer Health State Table").
 
 **Hermetic means a recording `systemctl` stub at the front of `PATH`**, never "systemctl happens to
@@ -523,6 +523,36 @@ was the only standalone unit — neither is gated on a condition and it does not
 branch with one instance is a branch with one shape**, which is the same lesson as the fixture
 that described a state the machine could not produce: the rows existed, and the machine had
 never been in the state they were written for.
+
+## A monotonic timer with `Persistent=true` wedges on a late boot (2026-11-07)
+
+`claude-cred-reconcile.timer` stopped for a whole boot. Its last run was at 11:40:54, the machine
+booted at 11:41:32, and the service did not run again for 22 hours. Restarting the timer changed
+nothing.
+
+The user manager came up 296 s after the kernel, past `OnBootSec=2min`, and `Persistent=true` had
+loaded the last trigger from its stamp file. With a last trigger set, an `OnBootSec=` already in
+the past is dropped rather than fired. `OnUnitActiveSec=` counts from the service's last run, and
+the service had not run on this boot, so nothing was left to schedule: `SubState=elapsed`,
+`NextElapseUSecMonotonic=infinity`.
+
+Reproduced with three transient timers, identical but for the ingredient under test, on a boot
+long past their `OnBootSec=2min`:
+
+| probe | state after 40 s | next run |
+|---|---|---|
+| `Persistent=true`, stamp file present | `elapsed` | `infinity` |
+| `Persistent=true`, no stamp file | `waiting` | scheduled |
+| no `Persistent=` | `waiting` | scheduled |
+
+Restarting the first left it `elapsed`. Only a run of the service clears the state:
+`systemctl --user start <unit>.service`. `claude-usage-poll.timer` and `dev-link-probe.timer` also
+had their `OnBootSec=3min` in the past on that boot and kept running; neither sets `Persistent=`.
+
+`Persistent=` "only has an effect on timers configured with `OnCalendar=`" (`man systemd.timer`),
+so on a monotonic timer it catches nothing up and leaves only this hazard. A timer here may set it
+only alongside `OnCalendar=`, and `scripts/test-timer-health.sh` enforces that for every unit under
+`systemd/`.
 
 ## What this does not do
 
