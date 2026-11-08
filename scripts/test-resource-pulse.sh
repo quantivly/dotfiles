@@ -54,7 +54,7 @@ if (( JS_EXIT != 0 && JS_FAIL == 0 )); then
   FAIL=$((FAIL + 1))
 fi
 
-EXPECTED_ROWS=118
+EXPECTED_ROWS=121
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

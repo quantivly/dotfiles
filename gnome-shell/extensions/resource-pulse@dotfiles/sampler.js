@@ -6,7 +6,9 @@
 // - a sample or scan already in flight makes the next one a no-op: skipped, never queued;
 // - after every await, a destroyed (or restarted-baseline) check comes before any state is touched;
 // - the IO helpers are module functions with no access to sampler state, so only methods can change it;
-// - nothing a tick does can throw out of the timer callback.
+// - nothing a tick does can throw out of the timer callback;
+// - a failure becomes the "no data" state on both surfaces: a sample that throws publishes an all-null snapshot
+//   and a gap in the histories, and a scan that throws drops its ranking rather than leaving it shown as current.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
@@ -69,8 +71,10 @@ const UTF8_DECODER = new TextDecoder();
 
 /**
  * @typedef {object} Snapshot
- * @property {number} takenAtUsec - nowUsec() when the sample began.
- * @property {string} takenAtClockLabel - Wall-clock 'HH:MM' of the sample.
+ * @property {number|null} takenAtUsec - nowUsec() when the sample began; null only in a no-data snapshot whose
+ *     clock could not be read.
+ * @property {string|null} takenAtClockLabel - Wall-clock 'HH:MM' of the sample; null only in a no-data snapshot
+ *     whose clock label could not be read (the sampler's lastGoodClockLabel still names the last good one).
  * @property {number|null} cpuBusyPercent - Whole-machine CPU busy, 0–100. Null on the first sample (no delta
  *     yet) and when /proc/stat could not be read.
  * @property {{performancePercent: number|null, efficiencyPercent: number|null}|null} cpuClusters - Busy percent
@@ -79,9 +83,11 @@ const UTF8_DECODER = new TextDecoder();
  * @property {{swappedBytes: number, zramStoredBytes: number, zramRamBytes: number, diskBytes: number}|null} swap
  *     - Swap split between zram and disk.
  * @property {{cpu: number|null, memory: number|null, io: number|null}} pressureAvg10 - PSI `some avg10` percents.
- * @property {AppRanking|null} apps - The latest app scan; null before the first one and while scanning is off.
+ * @property {AppRanking|null} apps - The latest app scan; null before the first one, while scanning is off, and
+ *     after a scan that threw.
  * @property {boolean} isComplete - True when every read and parse of this sample succeeded. A first sample's
- *     missing CPU delta is not a failure.
+ *     missing CPU delta is not a failure. A sample that threw publishes a no-data snapshot: every number null,
+ *     apps null, and isComplete false.
  */
 
 /**
@@ -102,6 +108,32 @@ function joinPath(...segments) {
  */
 function isNotFoundError(error) {
     return error instanceof GLib.Error && error.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND);
+}
+
+/**
+ * Gives an error's message and, when it has one, its stack: for failures that point at a bug, not at IO.
+ *
+ * @param {*} error - A caught value.
+ * @returns {string} The message, then the stack on the following lines.
+ */
+function describeErrorWithStack(error) {
+    const stackText = error?.stack ? `\n${error.stack}` : '';
+    return `${describeError(error)}${stackText}`;
+}
+
+/**
+ * Calls an injected callback for a best-effort value. Used only while publishing "no data" after a failure that
+ * is being logged anyway, where this callback may well be what failed; a second throw from it is not news.
+ *
+ * @param {() => *} callback - nowUsec or clockLabel.
+ * @returns {*} Its value, or null when it throws.
+ */
+function callOrNull(callback) {
+    try {
+        return callback();
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -478,8 +510,10 @@ export class Sampler {
     }
 
     /**
-     * Does one tick's work: an app scan when it is due and enabled, then a sample. Read errors are handled inside;
-     * anything else rejects, and the timer callback logs it.
+     * Does one tick's work: a sample, then an app scan when one is due and enabled. The sample comes first, so a
+     * slow or failing scan can never delay or skip it; a ranking from this tick's scan appears in the next tick's
+     * snapshot. Neither step rejects: a sample that throws publishes no data, and a scan that throws drops the
+     * ranking.
      *
      * @param {number} tickNumber - The timer's tick count; it restarts at 0 on resume and when the scan is
      *     re-enabled, so the first tick after either scans at once.
@@ -488,20 +522,18 @@ export class Sampler {
     async runTick(tickNumber) {
         if (this._isDestroyed)
             return;
-        const isAppScanDue = this._isAppScanEnabled && tickNumber % APP_SCAN_EVERY_N_TICKS === 0;
-        if (isAppScanDue) {
-            await this.scanAppsOnce();
-            if (this._isDestroyed)
-                return;
-        }
         await this.sampleOnce();
+        const isAppScanDue = this._isAppScanEnabled && tickNumber % APP_SCAN_EVERY_N_TICKS === 0;
+        if (isAppScanDue && !this._isDestroyed)
+            await this.scanAppsOnce();
     }
 
     /**
-     * Samples CPU, memory, swap and pressure once, records the history and tells listeners.
+     * Samples CPU, memory, swap and pressure once, records the history and tells listeners. When the sample
+     * throws, it publishes the no-data state instead (see _publishNoDataSnapshot), so it never rejects.
      *
-     * @returns {Promise<Snapshot|null>} The snapshot, or null when skipped (one already in flight), destroyed,
-     *     or overtaken by a pause.
+     * @returns {Promise<Snapshot|null>} The snapshot (a no-data one after a throw), or null when skipped (one
+     *     already in flight), destroyed, or overtaken by a pause.
      */
     async sampleOnce() {
         if (this._isDestroyed || this._isSampleInFlight)
@@ -510,16 +542,19 @@ export class Sampler {
         this._isSampleInFlight = true;
         try {
             return await this._takeSample();
+        } catch (error) {
+            return this._publishNoDataSnapshot(error);
         } finally {
             this._isSampleInFlight = false;
         }
     }
 
     /**
-     * Scans the app cgroups once and ranks them. The ranking appears in the following snapshots.
+     * Scans the app cgroups once and ranks them. The ranking appears in the following snapshots. When the scan
+     * throws, the last ranking is dropped and the failure logged, so it never rejects.
      *
      * @returns {Promise<AppRanking|null>} The ranking, or null when skipped (one already in flight), destroyed,
-     *     or overtaken by the scan being turned off.
+     *     overtaken by the scan being turned off, or failed.
      */
     async scanAppsOnce() {
         if (this._isDestroyed || this._isAppScanInFlight)
@@ -528,9 +563,58 @@ export class Sampler {
         this._isAppScanInFlight = true;
         try {
             return await this._scanApps();
+        } catch (error) {
+            this._dropRankingAfterFailure(error);
+            return null;
         } finally {
             this._isAppScanInFlight = false;
         }
+    }
+
+    /**
+     * Publishes the no-data state after a sample threw: an all-null, incomplete snapshot and a gap in both
+     * histories, so neither surface goes on showing the last good numbers as live. The failure is logged last, so
+     * the surfaces hear about it even if logging fails. lastGoodClockLabel is left alone (the snapshot has no
+     * data), so "no data since" still names the last good sample.
+     *
+     * Everything in _takeSample that can throw runs before it changes any state, so this never follows a
+     * half-recorded sample.
+     *
+     * @param {*} error - What the sample threw.
+     * @returns {Snapshot|null} The no-data snapshot, or null when destroyed.
+     */
+    _publishNoDataSnapshot(error) {
+        if (this._isDestroyed)
+            return null;
+        const snapshot = {
+            takenAtUsec: callOrNull(this._nowUsec),
+            takenAtClockLabel: callOrNull(this._clockLabel),
+            cpuBusyPercent: null,
+            cpuClusters: null,
+            memory: null,
+            swap: null,
+            pressureAvg10: {cpu: null, memory: null, io: null},
+            apps: null,
+            isComplete: false,
+        };
+        this._recordHistory(snapshot);
+        this._notifyListeners(snapshot);
+        this._logRateLimited(`sample failed: ${describeErrorWithStack(error)}`);
+        return snapshot;
+    }
+
+    /**
+     * Drops the last ranking (and its baseline) after a scan threw, so the next snapshot carries no apps rather
+     * than a ranking from before the failure, then logs the failure.
+     *
+     * @param {*} error - What the scan threw.
+     * @returns {void}
+     */
+    _dropRankingAfterFailure(error) {
+        if (this._isDestroyed)
+            return;
+        this._forgetAppScans();
+        this._logRateLimited(`app scan failed: ${describeErrorWithStack(error)}`);
     }
 
     /**
@@ -550,17 +634,15 @@ export class Sampler {
     }
 
     /**
-     * The timer callback. runTick is async, so it cannot throw here; whatever it rejects with is logged rather
-     * than left unhandled.
+     * The timer callback. runTick is async, so it cannot throw here, and it does not reject today; should a future
+     * change make it reject, the rejection is logged rather than left unhandled.
      *
      * @returns {boolean} GLib.SOURCE_CONTINUE: only source_remove ends the source, so its id is never stale.
      */
     _onTimeout() {
         const tickNumber = this._nextTickNumber++;
-        this.runTick(tickNumber).catch(error => {
-            const stackText = error?.stack ? `\n${error.stack}` : '';
-            this._logRateLimited(`tick failed: ${describeError(error)}${stackText}`);
-        });
+        this.runTick(tickNumber).catch(error =>
+            this._logRateLimited(`tick failed: ${describeErrorWithStack(error)}`));
         return GLib.SOURCE_CONTINUE;
     }
 

@@ -26,6 +26,17 @@ const TICK_FAILURE_SETTLE_MS = 200;
 /** An interval long enough that a real firing never lands inside a row that drives the callback itself. */
 const QUIET_INTERVAL_SECONDS = 60;
 const USER_APP_SLICE = 'user.slice/user-1000.slice/user@1000.service/app.slice';
+const LATER_CLOCK_LABEL = '14:04';
+/** What a failed sample publishes, apart from its two timestamps (in the order a snapshot lists its fields). */
+const NO_DATA_SNAPSHOT_FIELDS = {
+    cpuBusyPercent: null,
+    cpuClusters: null,
+    memory: null,
+    swap: null,
+    pressureAvg10: {cpu: null, memory: null, io: null},
+    apps: null,
+    isComplete: false,
+};
 
 /**
  * Builds the absolute path of a fixture root.
@@ -316,19 +327,87 @@ test('sampler: a leaf inside a sub-slice is found, and at or under 64 MiB it is 
     assertEqual(ranking.topMemory, {name: 'example-tool', memoryBytes: 1_000_000});
 });
 
-test('sampler: runTick(0) scans apps only while enabled, and disabling drops the old ranking', async () => {
+test('sampler: runTick samples first, scans only while enabled, and disabling drops the ranking', async () => {
+    // The sample comes first, so tick 0's own snapshot cannot carry tick 0's scan yet; tick 1's does.
     const {sampler} = makeSampler('root-a');
     await sampler.initialize();
     sampler.setAppScanEnabled(false);
     await sampler.runTick(0);
+    await sampler.runTick(1);
     const appsWhileDisabled = sampler.latestSnapshot.apps;
     sampler.setAppScanEnabled(true);
     await sampler.runTick(0);
-    const appsWhileEnabled = sampler.latestSnapshot.apps;
-    sampler.setAppScanEnabled(false);
+    const appsInTheScanningTick = sampler.latestSnapshot.apps;
     await sampler.runTick(1);
-    assertEqual([appsWhileDisabled, appsWhileEnabled !== null, sampler.latestSnapshot.apps], [null, true, null]);
+    const appsInTheNextTick = sampler.latestSnapshot.apps;
+    sampler.setAppScanEnabled(false);
+    await sampler.runTick(2);
+    assertEqual([appsWhileDisabled, appsInTheScanningTick, appsInTheNextTick !== null, sampler.latestSnapshot.apps],
+        [null, null, true, null]);
 });
+
+test('sampler: a scan that throws is logged, drops the ranking, and never costs the tick its sample', async () => {
+    let isNameLookupBroken = false;
+    const {sampler, logged} = makeSampler('root-a', {
+        resolveAppName: () => {
+            if (isNameLookupBroken)
+                throw new Error('name lookup exploded');
+            return null;
+        },
+    });
+    await sampler.initialize();
+    await sampler.runTick(0);
+    await sampler.runTick(1);
+    const appsBeforeTheFailure = sampler.latestSnapshot.apps;
+    isNameLookupBroken = true;
+    const historyLengthBefore = sampler.cpuHistory.values().length;
+    await sampler.runTick(APP_SCAN_EVERY_N_TICKS);
+    const historyLengthAfterFailingTick = sampler.cpuHistory.values().length;
+    await sampler.runTick(APP_SCAN_EVERY_N_TICKS + 1);
+    assertEqual([appsBeforeTheFailure !== null, historyLengthAfterFailingTick - historyLengthBefore,
+        sampler.latestSnapshot.apps, logged.length, logged[0]?.startsWith(LOG_PREFIX),
+        logged[0]?.includes('name lookup exploded')], [true, 1, null, 1, true, true]);
+});
+
+test('sampler: a throwing sample publishes an all-null, incomplete snapshot and a gap in both histories', async () => {
+    const clockLabels = [FIXTURE_CLOCK_LABEL, LATER_CLOCK_LABEL];
+    const {sampler, clock, logged} = makeSampler('root-a', {clockLabel: () => clockLabels.shift()});
+    await sampler.sampleOnce();
+    // A ranking is on hand, so the no-data snapshot's apps: null is a choice, not an accident.
+    const ranking = await sampler.scanAppsOnce();
+    const published = [];
+    sampler.addListener(snapshot => published.push(snapshot));
+    clock.nowUsec += SAMPLE_SPACING_USEC;
+    Object.defineProperty(sampler, 'fsRoot', {
+        get() {
+            throw new Error('fsRoot exploded');
+        },
+    });
+    const snapshot = await sampler.sampleOnce();
+    const {takenAtUsec, takenAtClockLabel, ...dataFields} = snapshot;
+    assertEqual([ranking !== null, dataFields, takenAtUsec, takenAtClockLabel, published.length,
+        published[0] === snapshot, sampler.cpuHistory.values(), sampler.memoryHistory.values(),
+        sampler.lastGoodClockLabel, logged.length, logged[0]?.includes('fsRoot exploded')],
+    [true, NO_DATA_SNAPSHOT_FIELDS, SAMPLE_SPACING_USEC, LATER_CLOCK_LABEL, 1, true, [null, null], [0.625, null],
+        FIXTURE_CLOCK_LABEL, 1, true]);
+});
+
+test('sampler: a sample whose clock label throws publishes no label, and "no data since" keeps the last good one',
+    async () => {
+        let isClockBroken = false;
+        const {sampler} = makeSampler('root-a', {
+            clockLabel: () => {
+                if (isClockBroken)
+                    throw new Error('clock exploded');
+                return FIXTURE_CLOCK_LABEL;
+            },
+        });
+        await sampler.sampleOnce();
+        isClockBroken = true;
+        const snapshot = await sampler.sampleOnce();
+        assertEqual([snapshot.takenAtClockLabel, snapshot.isComplete, snapshot.memory, sampler.lastGoodClockLabel],
+            [null, false, null, FIXTURE_CLOCK_LABEL]);
+    });
 
 test('sampler: after a pause the CPU and app baselines restart (no average across the gap)', async () => {
     const {sampler, clock} = makeSampler('root-a');
@@ -386,23 +465,27 @@ test('sampler: start() twice adds one source; stop, pause and destroy remove it;
     });
 });
 
-test('sampler: the timer callback never throws; a failing tick is logged and the timer continues', async () => {
-    await withTimerSpy(async spy => {
-        const {sampler, logged} = makeSampler('root-a', {
-            sampleIntervalSeconds: QUIET_INTERVAL_SECONDS,
-            clockLabel: () => {
-                throw new Error('clock exploded');
-            },
+test('sampler: the timer callback never throws; a tick whose sample throws publishes no data, timer continues',
+    async () => {
+        await withTimerSpy(async spy => {
+            const {sampler, logged} = makeSampler('root-a', {
+                sampleIntervalSeconds: QUIET_INTERVAL_SECONDS,
+                clockLabel: () => {
+                    throw new Error('clock exploded');
+                },
+            });
+            const published = [];
+            sampler.addListener(snapshot => published.push(snapshot));
+            sampler.start();
+            const callbackResult = spy.added[0].callback();
+            await waitMs(TICK_FAILURE_SETTLE_MS);
+            const isStillAttached = isSourceAttached(spy.added[0].sourceId);
+            sampler.destroy();
+            assertEqual([callbackResult, isStillAttached, published.length, published[0]?.isComplete,
+                published[0]?.memory, logged.length, logged[0]?.startsWith(LOG_PREFIX),
+                logged[0]?.includes('clock exploded')], [GLib.SOURCE_CONTINUE, true, 1, false, null, 1, true, true]);
         });
-        sampler.start();
-        const callbackResult = spy.added[0].callback();
-        await waitMs(TICK_FAILURE_SETTLE_MS);
-        const isStillAttached = isSourceAttached(spy.added[0].sourceId);
-        sampler.destroy();
-        assertEqual([callbackResult, isStillAttached, logged.length, logged[0]?.startsWith(LOG_PREFIX),
-            logged[0]?.includes('clock exploded')], [GLib.SOURCE_CONTINUE, true, 1, true, true]);
     });
-});
 
 test('sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()', async () => {
     const {sampler} = makeSampler('root-a', {sampleIntervalSeconds: TIMER_INTERVAL_SECONDS});
