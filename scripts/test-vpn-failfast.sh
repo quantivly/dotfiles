@@ -515,6 +515,18 @@ tunnel_up_state() {
         > "$IPSTATE/route-dev-$IFACE"
 }
 
+# The split-tunnel shape (endpoint switched 2026-11-08): one host route per
+# allowlisted server plus the VPC range, every one with a gateway, and the same
+# link-scope subnet route without one. Measured on the first reconnect: 20
+# gateway routes, no 0.0.0.0/1 or 128.0.0.0/1, and `ip -j` prints a host route's
+# dst without the /32.
+tunnel_up_split_state() {
+    printf '[{"ifindex":186,"ifname":"tun0","flags":["POINTOPOINT","MULTICAST","NOARP","UP","LOWER_UP"],"operstate":"UNKNOWN"}]\n' \
+        > "$IPSTATE/link-$IFACE"
+    printf '%s\n' '[{"dst":"54.166.22.221","gateway":"172.31.81.33","flags":[]},{"dst":"52.0.26.215","gateway":"172.31.81.33","flags":[]},{"dst":"172.31.0.0/16","gateway":"172.31.81.33","flags":[]},{"dst":"172.31.81.32/27","protocol":"kernel","scope":"link","prefsrc":"172.31.81.34","flags":[]}]' \
+        > "$IPSTATE/route-dev-$IFACE"
+}
+
 # The interface LINGERS, still flagged UP, with only its link-scope route left.
 # This is what a drop actually looks like — the client deletes the two gateway
 # routes — and it is why "does the interface exist" is not the test.
@@ -627,6 +639,10 @@ printf '\nthe tunnel state machine\n'
 reset; tunnel_up_state; write_conf "${GOOD_CONF[@]}"
 OUT="$(ff --status)"
 grep_ok "$OUT" 'tunnel:  UP' "two gateway routes and UP: reported up"
+
+reset; tunnel_up_split_state; write_conf "${GOOD_CONF[@]}"
+OUT="$(ff --status)"
+grep_ok "$OUT" 'tunnel:  UP' "split tunnel: host routes and the VPC range with a gateway, no default halves: reported up"
 
 # The case the naive test gets wrong. The interface is still there and still
 # flagged UP; only the forwarding routes are gone. Counting routes on the
@@ -2205,7 +2221,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=339
+EXPECTED_ROWS=340
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2

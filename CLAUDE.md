@@ -626,8 +626,9 @@ Commands are `audit-setup` / `audit-status` / `audit-sweeps`, listed below. Why 
 ## VPN Resilience
 
 `vpn-failfast.service` (system, root) makes VPN-only destinations FAIL instead of hanging while
-the tunnel is DOWN, and (armed by `vpn-setup --block-ipv6`) blocks IPv6 egress while it is UP —
-opposite polarities, because the tunnel carries no v6. `vpn-notify.service` (user; arm it by hand)
+the tunnel is DOWN. Its IPv6 egress block (`vpn-setup --block-ipv6`, UP polarity) fits a full
+tunnel only; the endpoint is split tunnel since 2026-11-08, so it is disarmed. `vpn-notify.service`
+(user; arm it by hand)
 notifies. Root pieces come from `vpn-setup`, **copied never symlinked**; `./install` links only
 the user unit. [docs/VPN_RESILIENCE.md](docs/VPN_RESILIENCE.md) ·
 [docs/VPN_INTERNALS.md](docs/VPN_INTERNALS.md) · `scripts/test-vpn-failfast.sh`,
