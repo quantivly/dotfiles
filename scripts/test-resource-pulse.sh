@@ -189,6 +189,8 @@ mkdir -p "$STUB_BIN" "$STUB_STATE" || fatal "cannot create the gsettings stub di
 cat >"$STUB_BIN/gsettings" <<'STUB'
 #!/usr/bin/env bash
 # Stateful gsettings stand-in: get/set/list-schemas over files under $STUB_STATE.
+# Every call is logged to $STUB_CALLS, so a row can prove the stub was the one used.
+printf '%s\n' "$*" >>"$STUB_CALLS"
 case "$1" in
   list-schemas) cat "$STUB_STATE/schemas" 2>/dev/null ;;
   get)
@@ -207,7 +209,7 @@ STUB
 chmod +x "$STUB_BIN/gsettings"
 printf 'genable_extension %s\n' "$EXTENSION_UUID" >"$WIRING_TMP/local-overrides"
 
-REAL_ENABLED_BEFORE="$(gsettings get "$SHELL_SCHEMA" enabled-extensions 2>&1)"
+STUB_CALLS_LOG="$WIRING_TMP/stub-calls"
 
 # Reset the stub to a state, run the apply script, leave its stderr+stdout in
 # APPLY_OUTPUT and its exit status in APPLY_EXIT.
@@ -220,7 +222,8 @@ run_apply_against_stub() {
   printf '%s\n' "$2" >"$STUB_STATE/$SHELL_SCHEMA/disabled-extensions"
   printf '%s\n' "$3" >"$STUB_STATE/$SHELL_SCHEMA/disable-user-extensions"
   printf '%s' "$4" >"$STUB_STATE/schemas"
-  APPLY_OUTPUT="$(PATH="$STUB_BIN:$PATH" STUB_STATE="$STUB_STATE" XDG_CURRENT_DESKTOP=GNOME \
+  : >"$STUB_CALLS_LOG"
+  APPLY_OUTPUT="$(PATH="$STUB_BIN:$PATH" STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" XDG_CURRENT_DESKTOP=GNOME \
     GNOME_LOCAL_OVERRIDES="$WIRING_TMP/local-overrides" bash "$APPLY_SCRIPT" 2>&1)"
   APPLY_EXIT=$?
 }
@@ -288,9 +291,10 @@ FORBIDDEN_READS_PATTERN="cmd""line|env""iron\\b|pgre""p|\\bps -"
 check "cost: the script never reads an argument list or environment, or runs ps" \
   "$(grep -c -E "$FORBIDDEN_READS_PATTERN" "$COST_SCRIPT" 2>/dev/null)" 0
 
-printf '\nthe real session was not touched\n'
-check "the real enabled-extensions is unchanged by this run" \
-  "$(gsettings get "$SHELL_SCHEMA" enabled-extensions 2>&1)" "$REAL_ENABLED_BEFORE"
+printf '\nthe stub, never the real session, answered gsettings\n'
+run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
+check "the apply script called the stub gsettings to set enabled-extensions" \
+  "$(grep -c -x -F "set $SHELL_SCHEMA enabled-extensions ['$EXTENSION_UUID']" "$STUB_CALLS_LOG")" 1
 
 # The guide must state this suite's own row count, as test-dock-wifi.sh does.
 docs_claim() {
