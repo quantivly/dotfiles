@@ -1,0 +1,21 @@
+/* Resource Pulse. Sizes that the code computes with (the graphs) live in lib/constants.js; this file holds the
+   look. */
+
+/* Top-bar indicator: the CPU and memory graphs, side by side inside the panel button. */
+.resource-pulse-graphs {
+  spacing: 4px;
+}
+
+/* The hover label under the indicator, styled after the dock's labels: Yaru's .dash-label (gnome-shell.css,
+   the same in the light and dark themes), copied rather than reused, so a theme change cannot leave the label
+   unstyled. Tabular numerals keep the digits from jittering as they update. */
+.resource-pulse-hover-label {
+  background-color: rgba(0, 0, 0, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  border-radius: 999px;
+  padding: 6px 12px;
+  text-align: center;
+  font-feature-settings: "tnum";
+  -y-offset: 8px;
+}
