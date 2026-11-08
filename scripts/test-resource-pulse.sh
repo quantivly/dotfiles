@@ -161,7 +161,9 @@ check "indicator.js re-places a shown hover label when its width or the display 
 # notify::width is emitted during allocation, and moving an actor then makes
 # Clutter warn "Can't update stage views actor ... needs an allocation" (seen in
 # the nested shell for the card and the hover label). Both placements on a
-# width change go through a BEFORE_REDRAW later instead, which teardown removes.
+# width change go through a BEFORE_REDRAW later instead, which teardown removes:
+# the extension in a guarded step of _tearDown (the step itself is counted,
+# not just the remove() it calls), the indicator inside _onDestroy.
 deferred_placement_summary=""
 for glue_file in extension.js indicator.js; do
   glue_path="$EXT_DIR/$glue_file"
@@ -169,8 +171,11 @@ for glue_file in extension.js indicator.js; do
   deferred_placement_summary+="/$(grep -c -F 'get_laters().remove(' "$glue_path" 2>/dev/null)"
   deferred_placement_summary+="/$(grep -c -E "connect(Object)?\('notify::width', \(\) => this\._queue" "$glue_path" 2>/dev/null) "
 done
+teardown_cancels_placement="$(grep -c -F "{name: 'cancel the pending card placement', run: () => this._cancelCardPlacement()}" "$EXTENSION_JS" 2>/dev/null)"
+on_destroy_removes_later="$(sed -n '/^    _onDestroy() {/,/^    }/p' "$EXT_DIR/indicator.js" 2>/dev/null | grep -c -F 'get_laters().remove(')"
 check "a width change moves the card and the hover label in a BEFORE_REDRAW later, never during allocation" \
-  "$deferred_placement_summary" "extension.js:1/1/1 indicator.js:1/1/1 "
+  "$deferred_placement_summary| teardown-step=$teardown_cancels_placement on-destroy=$on_destroy_removes_later" \
+  "extension.js:1/1/1 indicator.js:1/1/1 | teardown-step=1 on-destroy=1"
 check "extension.js says a failed start removed Resource Pulse, not just the indicator" \
   "$(grep -c -E "^const START_FAILURE_MESSAGE = '.*Resource Pulse.*removed" "$EXTENSION_JS" 2>/dev/null)" 1
 
