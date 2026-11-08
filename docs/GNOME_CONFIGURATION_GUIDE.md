@@ -167,7 +167,7 @@ skipped unit types.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (202 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (207 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.

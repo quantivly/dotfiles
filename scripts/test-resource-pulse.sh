@@ -144,6 +144,19 @@ else
   fi
 fi
 
+# extension.js imports the Shell, so its teardown cannot run here. lib/teardown.js
+# (runEveryStep, whose rows are in lifecycle.test.js) guards each step; these
+# rows read extension.js for the order of its destroy steps, the card first
+# because a card left behind would show frozen numbers as live, and for what
+# a failed start says it removed.
+EXTENSION_JS="$EXT_DIR/extension.js"
+teardown_destroy_order="$(grep -E "run: \(\) => (card|indicator|sampler)\?\.destroy\(\)" "$EXTENSION_JS" 2>/dev/null \
+  | sed -E 's/.*=> ([a-z]+)\?\.destroy.*/\1/' | tr '\n' ' ')"
+check "extension.js tears down in guarded steps (runEveryStep), destroying the card, then the indicator, then the sampler" \
+  "$teardown_destroy_order|$(grep -c -F 'runEveryStep([' "$EXTENSION_JS" 2>/dev/null)" "card indicator sampler |1"
+check "extension.js says a failed start removed Resource Pulse, not just the indicator" \
+  "$(grep -c -E "^const START_FAILURE_MESSAGE = '.*Resource Pulse.*removed" "$EXTENSION_JS" 2>/dev/null)" 1
+
 # metadata.json, parsed as JSON by gjs (never grepped). Each field is printed
 # on its own prefixed line, so an unreadable or malformed file prints none and
 # every row below fails rather than passes.
@@ -574,7 +587,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=202
+EXPECTED_ROWS=207
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

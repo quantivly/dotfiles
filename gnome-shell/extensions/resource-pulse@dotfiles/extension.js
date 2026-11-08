@@ -20,6 +20,10 @@
 //   journal prefix and tears down the same way.
 // - disable() works at any point, whether or not the asynchronous start has finished, and twice in a row. It
 //   disconnects every signal before destroying anything, so no handler runs against a half-destroyed card.
+// - each teardown step runs under its own guard (lib/teardown.js), card first: a step that throws is logged and
+//   the rest still run, so one failure can neither leave a frozen card drawn as live nor mask the error enable()
+//   is already rethrowing, and the fields are cleared first, so a later enable() starts clean.
+import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -27,14 +31,15 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {PulseCard} from './card.js';
 import {PulseIndicator} from './indicator.js';
-import {LOG_PREFIX} from './lib/constants.js';
+import {RateLimitedLogger, describeErrorWithStack} from './lib/errorLog.js';
+import {runEveryStep} from './lib/teardown.js';
 import {Sampler} from './sampler.js';
 
 /** The panel box the indicator goes in. */
 const PANEL_BOX = 'right';
 /** Where the indicator goes when the system menu cannot be found. */
 const FALLBACK_PANEL_INDEX = 0;
-const START_FAILURE_MESSAGE = `${LOG_PREFIX} sampling could not start, so the indicator was removed:`;
+const START_FAILURE_MESSAGE = 'sampling could not start, so Resource Pulse (its indicator and card) was removed:';
 
 /**
  * Looks up the real name of an installed app, for naming app cgroups.
@@ -71,6 +76,12 @@ export default class ResourcePulseExtension extends Extension {
         this._sampler = null;
         this._indicator = null;
         this._card = null;
+        // Kept across enable() and disable(), so a failure that repeats on every enable (every unlock and blank)
+        // is still logged at most once per 10 minutes.
+        this._errorLog = new RateLimitedLogger({
+            nowUsec: () => GLib.get_monotonic_time(),
+            write: line => console.error(line),
+        });
     }
 
     /**
@@ -103,8 +114,8 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Disconnects every signal, then destroys the sampler, the indicator and the card. Safe at any point: before
-     * the asynchronous start has finished, after a failed start, or twice.
+     * Disconnects every signal, then destroys the card, the indicator and the sampler, each step guarded. Safe at
+     * any point: before the asynchronous start has finished, after a failed start, or twice.
      *
      * @returns {void}
      */
@@ -170,14 +181,16 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Logs a failed asynchronous start once and, if that enable() is still current, removes everything it built.
+     * Logs a failed asynchronous start (rate-limited) and, if that enable() is still current, removes everything
+     * it built.
      *
      * @param {object} enableToken - The token of the enable() whose start failed.
      * @param {*} error - What the start threw.
      * @returns {void}
      */
     _onStartFailed(enableToken, error) {
-        console.error(START_FAILURE_MESSAGE, error);
+        const errorText = describeErrorWithStack(error);
+        this._errorLog.log(`${START_FAILURE_MESSAGE} ${errorText}`);
         if (this._enableToken === enableToken)
             this._tearDown();
     }
@@ -199,24 +212,45 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Undoes enable(), whatever it got to: marks no enable() as current; disconnects from the screen shield, the
-     * overview, the layout manager, the display and the card; destroys the sampler, the indicator and the card
-     * (which also takes the card out of the background group); and clears every field.
+     * Undoes enable(), whatever it got to, and never throws: marks no enable() as current and clears every field;
+     * then disconnects from the screen shield, the overview, the layout manager, the display and the card; then
+     * destroys the card (which also takes it out of the background group), the indicator and the sampler. Each
+     * step runs under its own guard (lib/teardown.js runEveryStep): one that throws is logged, rate-limited, and
+     * the rest still run.
      *
      * @returns {void}
      */
     _tearDown() {
         this._enableToken = null;
-        Main.screenShield?.disconnectObject(this);
-        Main.overview.disconnectObject(this);
-        Main.layoutManager.disconnectObject(this);
-        global.display.disconnectObject(this);
-        this._card?.disconnectObject(this);
-        this._sampler?.destroy();
-        this._indicator?.destroy();
-        this._card?.destroy();
-        this._sampler = null;
-        this._indicator = null;
+        const card = this._card;
+        const indicator = this._indicator;
+        const sampler = this._sampler;
+        // Cleared first: whatever a step below throws, no later enable() or disable() finds a half-destroyed part.
         this._card = null;
+        this._indicator = null;
+        this._sampler = null;
+        runEveryStep([
+            {name: 'disconnect from the screen shield', run: () => Main.screenShield?.disconnectObject(this)},
+            {name: 'disconnect from the overview', run: () => Main.overview.disconnectObject(this)},
+            {name: 'disconnect from the layout manager', run: () => Main.layoutManager.disconnectObject(this)},
+            {name: 'disconnect from the display', run: () => global.display.disconnectObject(this)},
+            {name: 'disconnect from the card', run: () => card?.disconnectObject(this)},
+            // The card first: it is the most visible part, and one left behind would show frozen numbers as live.
+            {name: 'destroy the card', run: () => card?.destroy()},
+            {name: 'destroy the indicator', run: () => indicator?.destroy()},
+            {name: 'destroy the sampler', run: () => sampler?.destroy()},
+        ], (stepName, error) => this._logTearDownFailure(stepName, error));
+    }
+
+    /**
+     * Logs a teardown step that threw, rate-limited.
+     *
+     * @param {string} stepName - What the step does, for example 'destroy the card'.
+     * @param {*} error - What it threw.
+     * @returns {void}
+     */
+    _logTearDownFailure(stepName, error) {
+        const errorText = describeErrorWithStack(error);
+        this._errorLog.log(`teardown could not ${stepName}: ${errorText}`);
     }
 }

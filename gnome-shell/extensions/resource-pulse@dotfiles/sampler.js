@@ -14,8 +14,9 @@ import GLib from 'gi://GLib';
 
 import {
     APP_SCAN_EVERY_N_TICKS, APP_SCAN_SKIPPED_UNIT_SUFFIXES, CARD_HISTORY_SAMPLES, DIRECTORY_LISTING_BATCH_ENTRIES,
-    APP_MEMORY_STAT_MIN_BYTES, ERROR_LOG_REPEAT_INTERVAL_USEC, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
+    APP_MEMORY_STAT_MIN_BYTES, SAMPLE_INTERVAL_SECONDS,
 } from './lib/constants.js';
+import {RateLimitedLogger, describeError, describeErrorWithStack} from './lib/errorLog.js';
 import {parseMeminfo, parsePressureSomeAvg10, parseProcStat, parseUid, parseZramMmStat} from './lib/procParsers.js';
 import {parseCpuStatUsageUsec, parseMemoryStatReclaimableBytes, parseSingleNumber} from './lib/cgroupParsers.js';
 import {buildClusterMap, clusterBusyFraction, cpuBusyFraction, parseCpuList} from './lib/cpu.js';
@@ -111,17 +112,6 @@ function isNotFoundError(error) {
 }
 
 /**
- * Gives an error's message and, when it has one, its stack: for failures that point at a bug, not at IO.
- *
- * @param {*} error - A caught value.
- * @returns {string} The message, then the stack on the following lines.
- */
-function describeErrorWithStack(error) {
-    const stackText = error?.stack ? `\n${error.stack}` : '';
-    return `${describeError(error)}${stackText}`;
-}
-
-/**
  * Calls an injected callback for a best-effort value. Used only while publishing "no data" after a failure that
  * is being logged anyway, where this callback may well be what failed; a second throw from it is not news.
  *
@@ -134,16 +124,6 @@ function callOrNull(callback) {
     } catch {
         return null;
     }
-}
-
-/**
- * Gives an error's message, whatever was thrown.
- *
- * @param {*} error - A rejection reason or caught value.
- * @returns {string} Its message, or its string form.
- */
-function describeError(error) {
-    return error?.message ?? String(error);
 }
 
 /**
@@ -340,7 +320,6 @@ export class Sampler {
         this._resolveAppName = resolveAppName;
         this._nowUsec = nowUsec;
         this._clockLabel = clockLabel;
-        this._log = log;
         this._sampleIntervalSeconds = sampleIntervalSeconds;
 
         this._cancellable = new Gio.Cancellable();
@@ -368,7 +347,7 @@ export class Sampler {
         this._memoryHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
         this._listeners = new Map();
         this._nextListenerId = 1;
-        this._lastLoggedUsecByMessage = new Map();
+        this._errorLog = new RateLimitedLogger({nowUsec, write: log});
     }
 
     /** @returns {Snapshot|null} The most recent snapshot, or null before the first. */
@@ -1073,7 +1052,7 @@ export class Sampler {
 
     /**
      * Logs a message with the journal prefix, at most once per ERROR_LOG_REPEAT_INTERVAL_USEC for each distinct
-     * message. Silent once destroyed. Entries old enough to log again are forgotten, so the table stays small.
+     * message (lib/errorLog.js). Silent once destroyed.
      *
      * @param {string} message - The message, without the prefix.
      * @returns {void}
@@ -1081,15 +1060,6 @@ export class Sampler {
     _logRateLimited(message) {
         if (this._isDestroyed)
             return;
-        const nowUsec = this._nowUsec();
-        const lastLoggedUsec = this._lastLoggedUsecByMessage.get(message);
-        if (lastLoggedUsec !== undefined && nowUsec - lastLoggedUsec < ERROR_LOG_REPEAT_INTERVAL_USEC)
-            return;
-        for (const [loggedMessage, loggedAtUsec] of this._lastLoggedUsecByMessage) {
-            if (nowUsec - loggedAtUsec >= ERROR_LOG_REPEAT_INTERVAL_USEC)
-                this._lastLoggedUsecByMessage.delete(loggedMessage);
-        }
-        this._lastLoggedUsecByMessage.set(message, nowUsec);
-        this._log(`${LOG_PREFIX} ${message}`);
+        this._errorLog.log(message);
     }
 }
