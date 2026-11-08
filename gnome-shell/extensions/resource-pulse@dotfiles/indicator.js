@@ -8,6 +8,7 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
@@ -59,6 +60,7 @@ class PulseIndicator extends PanelMenu.Button {
         this._hoverLabel = null;
         this._isHoverLabelShown = false;
         this._showHoverLabelTimeoutId = null;
+        this._placeHoverLabelLaterId = null;
         this._snapshotListenerId = null;
 
         const graphBox = new St.BoxLayout({style_class: GRAPH_BOX_STYLE_CLASS});
@@ -80,11 +82,11 @@ class PulseIndicator extends PanelMenu.Button {
         // measures at the old scale until it is allocated again. Placing it again once its width settles (and
         // when the scale changes while it is up) keeps it centred. The label is destroyed with the indicator,
         // and its handlers with it.
-        this._hoverLabel.connect('notify::width', () => this._placeShownHoverLabel());
+        this._hoverLabel.connect('notify::width', () => this._queuePlaceShownHoverLabel());
         Main.layoutManager.addTopChrome(this._hoverLabel);
         this._snapshotListenerId = sampler.addListener(snapshot => this._onSnapshot(snapshot));
         St.ThemeContext.get_for_stage(global.stage).connectObject(
-            'notify::scale-factor', () => this._placeShownHoverLabel(), this);
+            'notify::scale-factor', () => this._queuePlaceShownHoverLabel(), this);
     }
 
     /**
@@ -233,6 +235,23 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
+     * Places the hover label again before the next frame, if it is up. notify::width comes during allocation, and
+     * moving an actor then leaves it needing an allocation, which Clutter warns about; a BEFORE_REDRAW later moves
+     * it before the next frame instead, as the shell's own layout.js does. Several calls before then queue one.
+     *
+     * @returns {void}
+     */
+    _queuePlaceShownHoverLabel() {
+        if (this._placeHoverLabelLaterId !== null || !this._isHoverLabelShown)
+            return;
+        this._placeHoverLabelLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+            this._placeHoverLabelLaterId = null;
+            this._placeShownHoverLabel();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    /**
      * Places the hover label again if it is up; a no-op while it is hidden or once the indicator is destroyed.
      *
      * @returns {void}
@@ -287,7 +306,7 @@ class PulseIndicator extends PanelMenu.Button {
 
     /**
      * Removes everything the indicator added outside itself: the display-scale handler, the hover label's pending
-     * show, its sampler listener and the label itself (destroying it also takes it out of the chrome, with its own
+     * placement and pending show, its sampler listener and the label itself (destroying it also takes it out of the chrome, with its own
      * handlers). Runs on the 'destroy' signal, which PanelMenu.Button connects, so it runs however the indicator
      * is destroyed.
      *
@@ -295,6 +314,10 @@ class PulseIndicator extends PanelMenu.Button {
      */
     _onDestroy() {
         St.ThemeContext.get_for_stage(global.stage).disconnectObject(this);
+        if (this._placeHoverLabelLaterId !== null) {
+            global.compositor.get_laters().remove(this._placeHoverLabelLaterId);
+            this._placeHoverLabelLaterId = null;
+        }
         this._cancelHoverLabelTimeout();
         if (this._snapshotListenerId !== null) {
             this._sampler.removeListener(this._snapshotListenerId);

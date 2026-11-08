@@ -158,6 +158,19 @@ check "extension.js hands its rate-limited logger to every sampler, so the limit
   "$(grep -c -F 'errorLog: this._errorLog' "$EXTENSION_JS" 2>/dev/null)" 1
 check "indicator.js re-places a shown hover label when its width or the display scale changes" \
   "$(grep -c -E "'notify::(width|scale-factor)'" "$EXT_DIR/indicator.js" 2>/dev/null)" 2
+# notify::width is emitted during allocation, and moving an actor then makes
+# Clutter warn "Can't update stage views actor ... needs an allocation" (seen in
+# the nested shell for the card and the hover label). Both placements on a
+# width change go through a BEFORE_REDRAW later instead, which teardown removes.
+deferred_placement_summary=""
+for glue_file in extension.js indicator.js; do
+  glue_path="$EXT_DIR/$glue_file"
+  deferred_placement_summary+="$glue_file:$(grep -c -F 'Meta.LaterType.BEFORE_REDRAW' "$glue_path" 2>/dev/null)"
+  deferred_placement_summary+="/$(grep -c -F 'get_laters().remove(' "$glue_path" 2>/dev/null)"
+  deferred_placement_summary+="/$(grep -c -E "connect(Object)?\('notify::width', \(\) => this\._queue" "$glue_path" 2>/dev/null) "
+done
+check "a width change moves the card and the hover label in a BEFORE_REDRAW later, never during allocation" \
+  "$deferred_placement_summary" "extension.js:1/1/1 indicator.js:1/1/1 "
 check "extension.js says a failed start removed Resource Pulse, not just the indicator" \
   "$(grep -c -E "^const START_FAILURE_MESSAGE = '.*Resource Pulse.*removed" "$EXTENSION_JS" 2>/dev/null)" 1
 
@@ -793,7 +806,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=220
+EXPECTED_ROWS=221
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

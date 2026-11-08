@@ -24,6 +24,7 @@
 //   the rest still run, so one failure can neither leave a frozen card drawn as live nor mask the error enable()
 //   is already rethrowing, and the fields are cleared first, so a later enable() starts clean.
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -76,6 +77,7 @@ export default class ResourcePulseExtension extends Extension {
         this._sampler = null;
         this._indicator = null;
         this._card = null;
+        this._cardPlacementLaterId = null;
         // Kept across enable() and disable(), and handed to every sampler, so a failure that repeats on every
         // enable (every unlock and blank) is still logged at most once per 10 minutes.
         this._errorLog = new RateLimitedLogger({
@@ -143,7 +145,7 @@ export default class ResourcePulseExtension extends Extension {
      * Creates the card, adds it to the background group (above the wallpaper, below every window; a new wallpaper
      * actor goes to the bottom of that group, so the card stays above it), and keeps it at the top right of the
      * primary monitor's work area: again whenever the monitors change, a work area changes (a panel or dock
-     * strut), or the card's own width changes.
+     * strut), or the card's own width changes (that one just before the next frame: see _queueCardPlacement).
      *
      * @returns {void}
      */
@@ -152,7 +154,7 @@ export default class ResourcePulseExtension extends Extension {
         Main.layoutManager._backgroundGroup.add_child(this._card);
         Main.layoutManager.connectObject('monitors-changed', () => this._placeCard(), this);
         global.display.connectObject('workareas-changed', () => this._placeCard(), this);
-        this._card.connectObject('notify::width', () => this._placeCard(), this);
+        this._card.connectObject('notify::width', () => this._queueCardPlacement(), this);
         this._placeCard();
     }
 
@@ -163,6 +165,36 @@ export default class ResourcePulseExtension extends Extension {
      */
     _placeCard() {
         this._card?.placeOnPrimaryMonitor();
+    }
+
+    /**
+     * Moves the card before the next frame. Its notify::width comes during allocation, and moving an actor then
+     * leaves it needing an allocation, which Clutter warns about; a BEFORE_REDRAW later moves it before the next
+     * frame instead, as the shell's own layout.js does. Several calls before then queue one.
+     *
+     * @returns {void}
+     */
+    _queueCardPlacement() {
+        if (this._cardPlacementLaterId !== null)
+            return;
+        this._cardPlacementLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+            this._cardPlacementLaterId = null;
+            this._placeCard();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    /**
+     * Removes a pending card placement, if any.
+     *
+     * @returns {void}
+     */
+    _cancelCardPlacement() {
+        if (this._cardPlacementLaterId === null)
+            return;
+        const laterId = this._cardPlacementLaterId;
+        this._cardPlacementLaterId = null;
+        global.compositor.get_laters().remove(laterId);
     }
 
     /**
@@ -213,7 +245,8 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Undoes enable(), whatever it got to, and never throws: marks no enable() as current and clears every field;
-     * then disconnects from the screen shield, the overview, the layout manager, the display and the card; then
+     * then disconnects from the screen shield, the overview, the layout manager, the display and the card, and
+     * removes a pending card placement; then
      * destroys the card (which also takes it out of the background group), the indicator and the sampler. Each
      * step runs under its own guard (lib/teardown.js runEveryStep): one that throws is logged, rate-limited, and
      * the rest still run.
@@ -235,6 +268,7 @@ export default class ResourcePulseExtension extends Extension {
             {name: 'disconnect from the layout manager', run: () => Main.layoutManager.disconnectObject(this)},
             {name: 'disconnect from the display', run: () => global.display.disconnectObject(this)},
             {name: 'disconnect from the card', run: () => card?.disconnectObject(this)},
+            {name: 'cancel the pending card placement', run: () => this._cancelCardPlacement()},
             // The card first: it is the most visible part, and one left behind would show frozen numbers as live.
             {name: 'destroy the card', run: () => card?.destroy()},
             {name: 'destroy the indicator', run: () => indicator?.destroy()},
