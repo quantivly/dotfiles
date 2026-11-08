@@ -3,6 +3,11 @@
 /** Seconds between CPU, memory and pressure samples. */
 export const SAMPLE_INTERVAL_SECONDS = 2;
 /**
+ * Sample intervals a sample may stay in flight. On the timer tick after that it counts as stalled: both surfaces
+ * go to no data (once per stall) and its late result is dropped, while no second sample is queued behind it.
+ */
+export const SAMPLE_STALL_TICKS = 3;
+/**
  * Seconds between per-app scans: SAMPLE_INTERVAL_SECONDS × APP_SCAN_EVERY_N_TICKS, which a test row enforces.
  * 10 rather than the spec's first 6, to keep the scan inside the < 0.5%-of-one-core idle budget.
  */

@@ -8,7 +8,7 @@ import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/error
 import {cardText} from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {
     APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, APP_SCAN_READ_BATCH_LEAVES, ERROR_LOG_REPEAT_INTERVAL_USEC,
-    FILE_READ_CHUNK_BYTES, KERNEL_AND_OTHER_LABEL, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
+    FILE_READ_CHUNK_BYTES, KERNEL_AND_OTHER_LABEL, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS, SAMPLE_STALL_TICKS,
 } from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const [TEST_FILE_PATH] = GLib.filename_from_uri(import.meta.url);
@@ -31,6 +31,8 @@ const TICK_FAILURE_SETTLE_MS = 200;
 const QUIET_INTERVAL_SECONDS = 60;
 const USER_APP_SLICE = 'user.slice/user-1000.slice/user@1000.service/app.slice';
 const LATER_CLOCK_LABEL = '14:04';
+/** The end of the /proc/stat path the sampler reads under its fsRoot. */
+const PROC_STAT_FIXTURE_SUFFIX = '/proc/stat';
 /** Mode of every directory a row creates: the user's own. */
 const PRIVATE_DIRECTORY_MODE = 0o700;
 /** Digits in a generated leaf's index, so the generated names sort as their indices do. */
@@ -155,6 +157,24 @@ async function withTimerSpy(body) {
         GLib.timeout_add_seconds = originalTimeoutAddSeconds;
         GLib.source_remove = originalSourceRemove;
     }
+}
+
+/**
+ * Records every tick a sampler runs, through whichever path runs it (start(), a resume, the timer callback), so a
+ * row can read the tick numbers and await each tick.
+ *
+ * @param {Sampler} sampler - The sampler.
+ * @returns {Array<{tickNumber: number, tickRun: Promise<void>}>} Filled as ticks run, oldest first.
+ */
+function recordTickRuns(sampler) {
+    const tickRuns = [];
+    const runTickForReal = sampler.runTick.bind(sampler);
+    sampler.runTick = tickNumber => {
+        const tickRun = runTickForReal(tickNumber);
+        tickRuns.push({tickNumber, tickRun});
+        return tickRun;
+    };
+    return tickRuns;
 }
 
 /**
@@ -869,13 +889,7 @@ test('sampler: after enable, a resume and the scan turned back on, "heaviest" ha
         await withTimerSpy(async spy => {
             const {sampler, clock} = makeSampler('root-a', {sampleIntervalSeconds: QUIET_INTERVAL_SECONDS});
             await sampler.initialize();
-            const tickRuns = [];
-            const runTickForReal = sampler.runTick.bind(sampler);
-            sampler.runTick = tickNumber => {
-                const tickRun = runTickForReal(tickNumber);
-                tickRuns.push({tickNumber, tickRun});
-                return tickRun;
-            };
+            const tickRuns = recordTickRuns(sampler);
             /** @returns {Promise<void>} Fires the timer's callback once and waits for the tick it runs. */
             const fireTimer = async () => {
                 clock.nowUsec += SAMPLE_SPACING_USEC;
@@ -922,3 +936,122 @@ test('sampler: after enable, a resume and the scan turned back on, "heaviest" ha
                 [expectedRestart, expectedRestart, expectedRestart]);
         });
     });
+
+/**
+ * A sampler on root-a whose /proc/stat read can be made to hang, driven through its own timer callback.
+ *
+ * @param {{added: Array<{callback: Function}>}} spy - withTimerSpy's spy.
+ * @returns {object} The sampler, its clock, log and published snapshots, its tick runs, fireTimer() (one interval
+ *     passing), setStatReadStuck(isStuck) for the reads that start next, releaseStuckRead() and statReadCount().
+ */
+function makeStuckStatSampler(spy) {
+    let isStatReadStuck = false;
+    let releaseStuckRead = null;
+    let statReadCount = 0;
+    const {sampler, clock, logged} = makeSampler('root-a', {
+        sampleIntervalSeconds: QUIET_INTERVAL_SECONDS,
+        readTextFile: (path, ...readArguments) => {
+            if (!path.endsWith(PROC_STAT_FIXTURE_SUFFIX))
+                return readTextFile(path, ...readArguments);
+            statReadCount++;
+            if (!isStatReadStuck)
+                return readTextFile(path, ...readArguments);
+            return new Promise(resolve => {
+                releaseStuckRead = () => resolve(readTextFile(path, ...readArguments));
+            });
+        },
+    });
+    const published = [];
+    sampler.addListener(snapshot => published.push(snapshot));
+    return {
+        sampler, clock, logged, published,
+        tickRuns: recordTickRuns(sampler),
+        fireTimer: () => {
+            clock.nowUsec += SAMPLE_SPACING_USEC;
+            spy.added.at(-1).callback();
+        },
+        setStatReadStuck: isStuck => {
+            isStatReadStuck = isStuck;
+        },
+        releaseStuckRead: () => releaseStuckRead(),
+        statReadCount: () => statReadCount,
+    };
+}
+
+test('sampler: a sample stuck in flight for more than SAMPLE_STALL_TICKS intervals publishes no data once, queues no ' +
+    'read, and its late result is dropped', async () => {
+    await withTimerSpy(async spy => {
+        const stuck = makeStuckStatSampler(spy);
+        const {sampler, logged, published, tickRuns} = stuck;
+
+        stuck.setStatReadStuck(true);
+        sampler.start();
+        for (let interval = 0; interval < SAMPLE_STALL_TICKS; interval++)
+            stuck.fireTimer();
+        const publishedWithinStallTicks = published.length;
+        stuck.fireTimer();
+        stuck.fireTimer();
+        stuck.fireTimer();
+        const publishedWhileStuck = published.map(snapshot => ({...snapshot, takenAtUsec: null}));
+        const statReadsWhileStuck = stuck.statReadCount();
+        const historiesWhileStuck = [sampler.cpuHistory.values(), sampler.memoryHistory.values()];
+
+        stuck.setStatReadStuck(false);
+        stuck.releaseStuckRead();
+        await tickRuns[0].tickRun;
+        const publishedAfterLateResult = published.length;
+        // Against root-a's /proc/stat as a baseline, root-b's is 60% busy: a kept late result would show it.
+        sampler.fsRoot = fixtureRoot('root-b');
+        stuck.fireTimer();
+        await tickRuns.at(-1).tickRun;
+        const nextSnapshot = published.at(-1);
+        sampler.destroy();
+
+        const stallLines = logged.filter(line => line.includes('stalled'));
+        assertEqual([publishedWithinStallTicks, publishedWhileStuck, statReadsWhileStuck, historiesWhileStuck,
+            publishedAfterLateResult, nextSnapshot.memory !== null, nextSnapshot.cpuBusyPercent, stallLines.length,
+            stallLines[0]?.startsWith(LOG_PREFIX)],
+        [0, [{takenAtUsec: null, takenAtClockLabel: FIXTURE_CLOCK_LABEL, ...NO_DATA_SNAPSHOT_FIELDS}], 1,
+            [[null], [null]], 1, true, null, 1, true]);
+    });
+});
+
+test('sampler: once a stuck sample settles the stall count starts over, so a later stall is declared too', async () => {
+    await withTimerSpy(async spy => {
+        const stuck = makeStuckStatSampler(spy);
+        const {sampler, published, tickRuns} = stuck;
+        /** @returns {number} How many no-data snapshots have been published so far. */
+        const noDataCount = () => published.filter(snapshot => !snapshot.isComplete).length;
+        /**
+         * Lets the stuck sample finish, and waits for its tick.
+         *
+         * @param {number} stuckTickIndex - Index in tickRuns of the tick whose sample is stuck.
+         * @returns {Promise<void>} Settles when that tick has.
+         */
+        const releaseStuckTick = async stuckTickIndex => {
+            stuck.setStatReadStuck(false);
+            stuck.releaseStuckRead();
+            await tickRuns[stuckTickIndex].tickRun;
+        };
+
+        stuck.setStatReadStuck(true);
+        sampler.start();
+        for (let interval = 0; interval <= SAMPLE_STALL_TICKS; interval++)
+            stuck.fireTimer();
+        const noDataAfterFirstStall = noDataCount();
+        await releaseStuckTick(0);
+        stuck.fireTimer();
+        await tickRuns.at(-1).tickRun;
+        const noDataAfterRecovery = noDataCount();
+
+        stuck.setStatReadStuck(true);
+        stuck.fireTimer();
+        const secondStuckTickIndex = tickRuns.length - 1;
+        for (let interval = 0; interval <= SAMPLE_STALL_TICKS; interval++)
+            stuck.fireTimer();
+        const noDataAfterSecondStall = noDataCount();
+        await releaseStuckTick(secondStuckTickIndex);
+        sampler.destroy();
+        assertEqual([noDataAfterFirstStall, noDataAfterRecovery, noDataAfterSecondStall], [1, 1, 2]);
+    });
+});

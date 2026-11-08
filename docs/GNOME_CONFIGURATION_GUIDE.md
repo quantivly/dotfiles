@@ -76,7 +76,9 @@ It samples every 2 s (`SAMPLE_INTERVAL_SECONDS`) and scans per-app cgroups every
 shell's redraws, 16 leaves at a time. After it starts, resumes or comes back from the overview, it scans
 once more on the second tick, so "heaviest" has its CPU half within about 4 s rather than 12. The top
 bar keeps 30 samples, the card 150.
-The first sample is *no data*, never 0%, and stale numbers are never drawn as live.
+The first sample is *no data*, never 0%, and stale numbers are never drawn as live: a sample whose
+reads hang turns both surfaces to *no data* about 8 s in (`SAMPLE_STALL_TICKS`), and its late result is
+dropped.
 
 GNOME 50 turns the extension off on every lock **and on every idle screen blank**: a blank enters the
 lock screen's session mode even when locking is disabled, and an extension without that mode is
@@ -172,7 +174,7 @@ skipped unit types.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (237 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (239 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.

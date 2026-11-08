@@ -6,6 +6,7 @@
 // - the app scan's reads complete at GLib.PRIORITY_LOW, below the compositor's redraws, and at most
 //   APP_SCAN_READ_BATCH_LEAVES leaves' reads are in flight at once;
 // - a sample or scan already in flight makes the next one a no-op: skipped, never queued;
+// - a sample stuck in flight for more than SAMPLE_STALL_TICKS intervals turns both surfaces to no data, once;
 // - after every await, a destroyed (or restarted-baseline) check comes before any state is touched;
 // - the IO helpers are module functions with no access to sampler state, so only methods can change it;
 // - nothing a tick does can throw out of the timer callback;
@@ -18,6 +19,7 @@ import {
     APP_SCAN_EVERY_N_TICKS, APP_SCAN_READ_BATCH_LEAVES, APP_SCAN_SKIPPED_UNIT_SUFFIXES, APP_SCAN_WARM_UP_TICK,
     CARD_HISTORY_SAMPLES,
     DIRECTORY_LISTING_BATCH_ENTRIES, APP_MEMORY_STAT_MIN_BYTES, FILE_READ_CHUNK_BYTES, SAMPLE_INTERVAL_SECONDS,
+    SAMPLE_STALL_TICKS,
 } from './lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from './lib/errorLog.js';
 import {
@@ -410,6 +412,8 @@ export class Sampler {
         this._timeoutSourceId = null;
         this._nextTickNumber = 0;
         this._isSampleInFlight = false;
+        // Timer ticks that found the sample still in flight; reset when a sample settles.
+        this._timerTicksWithSampleInFlight = 0;
         this._isAppScanInFlight = false;
         // Bumped whenever a baseline is thrown away, so a read begun before that cannot reinstate it.
         this._cpuBaselineEpoch = 0;
@@ -607,9 +611,10 @@ export class Sampler {
         try {
             return await this._takeSample();
         } catch (error) {
-            return this._publishNoDataSnapshot(error);
+            return this._publishNoDataSnapshot(`sample failed: ${describeErrorWithStack(error)}`);
         } finally {
             this._isSampleInFlight = false;
+            this._timerTicksWithSampleInFlight = 0;
         }
     }
 
@@ -636,18 +641,18 @@ export class Sampler {
     }
 
     /**
-     * Publishes the no-data state after a sample threw: an all-null, incomplete snapshot and a gap in both
-     * histories, so neither surface goes on showing the last good numbers as live. The failure is logged last, so
-     * the surfaces hear about it even if logging fails. lastGoodClockLabel is left alone (the snapshot has no
+     * Publishes the no-data state after a sample threw or stalled: an all-null, incomplete snapshot and a gap in
+     * both histories, so neither surface goes on showing the last good numbers as live. The failure is logged last,
+     * so the surfaces hear about it even if logging fails. lastGoodClockLabel is left alone (the snapshot has no
      * data), so "no data since" still names the last good sample.
      *
      * Everything in _takeSample that can throw runs before it changes any state, so this never follows a
      * half-recorded sample.
      *
-     * @param {*} error - What the sample threw.
+     * @param {string} failureMessage - What went wrong, for the journal.
      * @returns {Snapshot|null} The no-data snapshot, or null when destroyed.
      */
-    _publishNoDataSnapshot(error) {
+    _publishNoDataSnapshot(failureMessage) {
         if (this._isDestroyed)
             return null;
         const snapshot = {
@@ -663,8 +668,24 @@ export class Sampler {
         };
         this._recordHistory(snapshot);
         this._notifyListeners(snapshot);
-        this._logRateLimited(`sample failed: ${describeErrorWithStack(error)}`);
+        this._logRateLimited(failureMessage);
         return snapshot;
+    }
+
+    /**
+     * Counts a timer tick that found the sample still in flight. On the tick after SAMPLE_STALL_TICKS of them the
+     * sample counts as stalled, once: its CPU baseline is thrown away, so its late result is dropped rather than
+     * drawn (its reads may by then be many seconds old), and no data is published. The stuck read is left to
+     * finish; nothing is queued behind it, so later ticks stay no-ops until it does.
+     *
+     * @returns {void}
+     */
+    _noteSampleStillInFlight() {
+        this._timerTicksWithSampleInFlight++;
+        if (this._timerTicksWithSampleInFlight !== SAMPLE_STALL_TICKS + 1)
+            return;
+        this._restartCpuBaseline();
+        this._publishNoDataSnapshot(`sample stalled: still in flight after ${SAMPLE_STALL_TICKS} intervals`);
     }
 
     /**
@@ -702,11 +723,13 @@ export class Sampler {
     }
 
     /**
-     * The timer callback: runs the next tick.
+     * The timer callback: notes a sample still in flight (see _noteSampleStillInFlight), then runs the next tick.
      *
      * @returns {boolean} GLib.SOURCE_CONTINUE: only source_remove ends the source, so its id is never stale.
      */
     _onTimeout() {
+        if (this._isSampleInFlight)
+            this._noteSampleStillInFlight();
         this._runNextTick();
         return GLib.SOURCE_CONTINUE;
     }
@@ -729,10 +752,20 @@ export class Sampler {
      * @returns {void}
      */
     _restartBaselines() {
-        this._cpuBaselineEpoch++;
-        this._previousProcStat = null;
+        this._restartCpuBaseline();
         this._forgetAppScans();
         this._nextTickNumber = 0;
+    }
+
+    /**
+     * Throws away the CPU baseline, so the next CPU number needs two fresh samples and a sample in flight now is
+     * dropped when it completes.
+     *
+     * @returns {void}
+     */
+    _restartCpuBaseline() {
+        this._cpuBaselineEpoch++;
+        this._previousProcStat = null;
     }
 
     /**
