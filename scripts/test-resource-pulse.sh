@@ -124,10 +124,28 @@ else
 fi
 
 # The extension runs on the compositor's main loop: no subprocess and no
-# synchronous file read, anywhere in it.
-BLOCKING_CALL_PATTERN='Gio.Subprocess|GLib.spawn|Util.spawn|load_contents\(|file_get_contents'
+# synchronous file IO, anywhere in it. Each Gio call is matched with its "(" so
+# its _async form (enumerate_children_async( and so on) does not match.
+BLOCKING_CALL_PATTERN='Gio.Subprocess|GLib.spawn|Util.spawn|load_contents\(|file_get_contents|enumerate_children\(|query_info\(|read_bytes\(|load_bytes\(|replace_contents\('
+# The pattern itself: every forbidden call (a subprocess, synchronous IO) must match, and no _async IO call.
+FORBIDDEN_CALLS=('Gio.Subprocess.new(' 'GLib.spawn_command_line_async(' 'Util.spawn([' 'file.load_contents(null)'
+  'GLib.file_get_contents(path)' 'file.enumerate_children(attributes, flags, null)' 'file.query_info(attributes, flags, null)'
+  'stream.read_bytes(4096, null)' 'file.load_bytes(null)' 'file.replace_contents(bytes, null, false, 0, null)')
+AFORBIDDEN_CALLS=('file.load_contents_async(null)' 'file.enumerate_children_async(attributes, flags, priority, null)'
+  'file.query_info_async(attributes, flags, priority, null)' 'stream.read_bytes_async(4096, priority, null)'
+  'file.load_bytes_async(null)' 'file.replace_contents_async(bytes, null, false, 0, null)')
+unmatched_forbidden_calls=()
+for io_call in "${FORBIDDEN_CALLS[@]}"; do
+  [[ "$io_call" =~ $BLOCKING_CALL_PATTERN ]] || unmatched_forbidden_calls+=("$io_call")
+done
+matched_asynchronous_calls=()
+for io_call in "${AFORBIDDEN_CALLS[@]}"; do
+  [[ "$io_call" =~ $BLOCKING_CALL_PATTERN ]] && matched_asynchronous_calls+=("$io_call")
+done
+check "the blocking-call pattern matches every forbidden call (subprocess, synchronous IO) and no _async IO call" \
+  "missed=[${unmatched_forbidden_calls[*]}] async-matched=[${matched_asynchronous_calls[*]}]" "missed=[] async-matched=[]"
 mapfile -d '' EXTENSION_FILE_PATHS < <(find "$EXT_DIR" -type f -print0 2>/dev/null)
-row_name="no file in the extension spawns a process or reads a file synchronously"
+row_name="no file in the extension spawns a process or does synchronous file IO"
 if (( ${#EXTENSION_FILE_PATHS[@]} == 0 )); then
   bad "$row_name — found no files under $EXT_DIR"
 else
@@ -1015,7 +1033,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=246
+EXPECTED_ROWS=247
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
