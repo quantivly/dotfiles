@@ -3,6 +3,8 @@
 //
 // It runs inside gnome-shell, the compositor, so a mistake here freezes or destabilises the desktop:
 // - every read is asynchronous and nothing here blocks the main loop;
+// - the app scan's reads complete at GLib.PRIORITY_LOW, below the compositor's redraws, and at most
+//   APP_SCAN_READ_BATCH_LEAVES leaves' reads are in flight at once;
 // - a sample or scan already in flight makes the next one a no-op: skipped, never queued;
 // - after every await, a destroyed (or restarted-baseline) check comes before any state is touched;
 // - the IO helpers are module functions with no access to sampler state, so only methods can change it;
@@ -13,8 +15,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {
-    APP_SCAN_EVERY_N_TICKS, APP_SCAN_SKIPPED_UNIT_SUFFIXES, CARD_HISTORY_SAMPLES, DIRECTORY_LISTING_BATCH_ENTRIES,
-    APP_MEMORY_STAT_MIN_BYTES, SAMPLE_INTERVAL_SECONDS,
+    APP_SCAN_EVERY_N_TICKS, APP_SCAN_READ_BATCH_LEAVES, APP_SCAN_SKIPPED_UNIT_SUFFIXES, CARD_HISTORY_SAMPLES,
+    DIRECTORY_LISTING_BATCH_ENTRIES, APP_MEMORY_STAT_MIN_BYTES, FILE_READ_CHUNK_BYTES, SAMPLE_INTERVAL_SECONDS,
 } from './lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from './lib/errorLog.js';
 import {
@@ -26,7 +28,9 @@ import {memoryUsage, swapSummary} from './lib/memory.js';
 import {describeCgroup, displayNameFor, rankApps} from './lib/apps.js';
 import {RingBuffer} from './lib/history.js';
 
-Gio._promisify(Gio.File.prototype, 'load_contents_async', 'load_contents_finish');
+Gio._promisify(Gio.File.prototype, 'read_async', 'read_finish');
+Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async', 'read_bytes_finish');
+Gio._promisify(Gio.InputStream.prototype, 'close_async', 'close_finish');
 Gio._promisify(Gio.File.prototype, 'enumerate_children_async', 'enumerate_children_finish');
 Gio._promisify(Gio.FileEnumerator.prototype, 'next_files_async', 'next_files_finish');
 Gio._promisify(Gio.FileEnumerator.prototype, 'close_async', 'close_finish');
@@ -61,6 +65,13 @@ const SLICE_SUFFIX = '.slice';
 const NAME_ONLY_ATTRIBUTES = 'standard::name';
 const NAME_AND_TYPE_ATTRIBUTES = 'standard::name,standard::type';
 const CLOCK_LABEL_FORMAT = '%H:%M';
+/** The fast tick's handful of reads (and the reads at enable) complete at the main loop's default priority. */
+const SAMPLE_READ_PRIORITY = GLib.PRIORITY_DEFAULT;
+/**
+ * The app scan's hundreds of reads complete below the compositor's redraws (CLUTTER_PRIORITY_REDRAW is
+ * G_PRIORITY_HIGH_IDLE + 50), so a scan never delays a frame.
+ */
+const APP_SCAN_READ_PRIORITY = GLib.PRIORITY_LOW;
 const PERCENT_SCALE = 100;
 const DECIMAL_RADIX = 10;
 const UTF8_DECODER = new TextDecoder();
@@ -155,15 +166,52 @@ function parseUsableProcStat(text) {
 }
 
 /**
- * Reads a whole file asynchronously as UTF-8. /proc and cgroup files report size 0 but read to EOF.
+ * Reads a whole file asynchronously as UTF-8, with every step at one main-loop priority: open, read in chunks
+ * until EOF (/proc, /sys and cgroup files report size 0, so the size is never trusted), and close, which runs even
+ * when a read fails.
  *
  * @param {string} path - Absolute path.
- * @param {Gio.Cancellable} cancellable - Cancels the read.
+ * @param {number} priority - GLib priority of each step's completion, for example GLib.PRIORITY_LOW.
+ * @param {Gio.Cancellable|null} cancellable - Cancels the open and the reads (the close always runs).
  * @returns {Promise<string>} The contents; rejects with a GLib.Error when unreadable.
  */
-async function readTextFile(path, cancellable) {
-    const [contentBytes] = await Gio.File.new_for_path(path).load_contents_async(cancellable);
-    return UTF8_DECODER.decode(contentBytes);
+export async function readTextFile(path, priority, cancellable) {
+    const inputStream = await Gio.File.new_for_path(path).read_async(priority, cancellable);
+    try {
+        return UTF8_DECODER.decode(await readStreamToEnd(inputStream, priority, cancellable));
+    } finally {
+        // Release the descriptor now, not whenever the garbage collector finalizes the stream.
+        await inputStream.close_async(priority, null);
+    }
+}
+
+/**
+ * Reads an open stream to EOF in chunks of FILE_READ_CHUNK_BYTES. The bytes are joined before decoding, so a
+ * character split across two chunks decodes whole.
+ *
+ * @param {Gio.InputStream} inputStream - An open stream.
+ * @param {number} priority - GLib priority of each read's completion.
+ * @param {Gio.Cancellable|null} cancellable - Cancels the reads.
+ * @returns {Promise<Uint8Array>} Every byte up to EOF.
+ */
+async function readStreamToEnd(inputStream, priority, cancellable) {
+    const chunks = [];
+    let totalByteCount = 0;
+    for (;;) {
+        const chunk = await inputStream.read_bytes_async(FILE_READ_CHUNK_BYTES, priority, cancellable);
+        if (chunk.get_size() === 0)
+            break;
+        const chunkBytes = chunk.toArray();
+        chunks.push(chunkBytes);
+        totalByteCount += chunkBytes.length;
+    }
+    const contentBytes = new Uint8Array(totalByteCount);
+    let writeOffset = 0;
+    for (const chunkBytes of chunks) {
+        contentBytes.set(chunkBytes, writeOffset);
+        writeOffset += chunkBytes.length;
+    }
+    return contentBytes;
 }
 
 /**
@@ -232,17 +280,18 @@ async function listChildDirectoryNames(directoryPath, cancellable) {
  * Reads mm_stat of every zram device, keeping each device's name so swap can tell which ones are swap areas.
  *
  * @param {string} fsRoot - The filesystem root.
+ * @param {typeof readTextFile} readFile - Reads one file (readTextFile, or a test's stand-in).
  * @param {Gio.Cancellable} cancellable - Cancels the reads.
  * @returns {Promise<Array<{deviceName: string, storedBytes: number, ramBytes: number}>>} One entry per device;
  *     empty without zram.
  */
-async function readZramDevices(fsRoot, cancellable) {
+async function readZramDevices(fsRoot, readFile, cancellable) {
     const blockDevicesPath = joinPath(fsRoot, BLOCK_DEVICES_PATH);
     const deviceNames = await listChildNames(blockDevicesPath, cancellable);
     const zramDeviceNames = deviceNames.filter(deviceName => ZRAM_DEVICE_NAME_PATTERN.test(deviceName));
     return Promise.all(zramDeviceNames.map(async deviceName => {
         const mmStatPath = joinPath(blockDevicesPath, deviceName, ZRAM_MM_STAT_FILE);
-        const zramDevice = parseZramMmStat(await readTextFile(mmStatPath, cancellable));
+        const zramDevice = parseZramMmStat(await readFile(mmStatPath, SAMPLE_READ_PRIORITY, cancellable));
         if (zramDevice === null)
             throw new Error(`cannot parse ${mmStatPath}`);
         return {deviceName, ...zramDevice};
@@ -250,19 +299,21 @@ async function readZramDevices(fsRoot, cancellable) {
 }
 
 /**
- * Reads one cgroup leaf's CPU usage and its memory net of page cache. memory.stat is read only when
- * memory.current exceeds APP_MEMORY_STAT_MIN_BYTES; a smaller leaf is ranked uncorrected.
+ * Reads one cgroup leaf's CPU usage and its memory net of page cache, at APP_SCAN_READ_PRIORITY. memory.stat is
+ * read only when memory.current exceeds APP_MEMORY_STAT_MIN_BYTES; a smaller leaf is ranked uncorrected.
  *
  * @param {string} leafPath - Absolute path of the cgroup directory.
+ * @param {typeof readTextFile} readFile - Reads one file (readTextFile, or a test's stand-in).
  * @param {Gio.Cancellable} cancellable - Cancels the reads.
  * @returns {Promise<{usageUsec: number, memoryBytes: number}>} The leaf's readings; rejects when a required file
  *     is missing (the cgroup vanished) or unparseable.
  */
-async function readCgroupLeaf(leafPath, cancellable) {
+async function readCgroupLeaf(leafPath, readFile, cancellable) {
     const cpuStatPath = joinPath(leafPath, CGROUP_CPU_STAT_FILE);
     const memoryCurrentPath = joinPath(leafPath, CGROUP_MEMORY_CURRENT_FILE);
     const [cpuStatText, memoryCurrentText] = await Promise.all([
-        readTextFile(cpuStatPath, cancellable), readTextFile(memoryCurrentPath, cancellable),
+        readFile(cpuStatPath, APP_SCAN_READ_PRIORITY, cancellable),
+        readFile(memoryCurrentPath, APP_SCAN_READ_PRIORITY, cancellable),
     ]);
     const usageUsec = parseCpuStatUsageUsec(cpuStatText);
     if (usageUsec === null)
@@ -273,7 +324,8 @@ async function readCgroupLeaf(leafPath, cancellable) {
     if (memoryCurrentBytes <= APP_MEMORY_STAT_MIN_BYTES)
         return {usageUsec, memoryBytes: memoryCurrentBytes};
     const memoryStatPath = joinPath(leafPath, CGROUP_MEMORY_STAT_FILE);
-    const reclaimableBytes = parseMemoryStatReclaimableBytes(await readTextFile(memoryStatPath, cancellable));
+    const memoryStatText = await readFile(memoryStatPath, APP_SCAN_READ_PRIORITY, cancellable);
+    const reclaimableBytes = parseMemoryStatReclaimableBytes(memoryStatText);
     if (reclaimableBytes === null)
         throw new Error(`cannot parse ${memoryStatPath}`);
     return {usageUsec, memoryBytes: Math.max(0, memoryCurrentBytes - reclaimableBytes)};
@@ -317,6 +369,8 @@ export class Sampler {
      *     every lock), and a limiter per sampler would let a lasting failure be logged once per enable, not once
      *     per 10 minutes.
      * @param {number} [options.sampleIntervalSeconds] - Seconds between ticks.
+     * @param {typeof readTextFile} [options.readTextFile] - Reads one file at a priority; tests wrap it to watch
+     *     the reads.
      */
     constructor({
         fsRoot = '/',
@@ -326,12 +380,14 @@ export class Sampler {
         log = message => console.warn(message),
         errorLog = new RateLimitedLogger({nowUsec, write: log}),
         sampleIntervalSeconds = SAMPLE_INTERVAL_SECONDS,
+        readTextFile: readFile = readTextFile,
     } = {}) {
         this.fsRoot = fsRoot;
         this._resolveAppName = resolveAppName;
         this._nowUsec = nowUsec;
         this._clockLabel = clockLabel;
         this._sampleIntervalSeconds = sampleIntervalSeconds;
+        this._readTextFile = readFile;
 
         this._cancellable = new Gio.Cancellable();
         this._isDestroyed = false;
@@ -397,7 +453,8 @@ export class Sampler {
         const statusPath = joinPath(fsRoot, PROC_SELF_STATUS_PATH);
         const statPath = joinPath(fsRoot, PROC_STAT_PATH);
         const [statusRead, statRead] = await Promise.allSettled([
-            readTextFile(statusPath, this._cancellable), readTextFile(statPath, this._cancellable),
+            this._readTextFile(statusPath, SAMPLE_READ_PRIORITY, this._cancellable),
+            this._readTextFile(statPath, SAMPLE_READ_PRIORITY, this._cancellable),
         ]);
         if (this._isDestroyed)
             return;
@@ -693,13 +750,13 @@ export class Sampler {
         const blockDevicesPath = joinPath(fsRoot, BLOCK_DEVICES_PATH);
         const [statRead, meminfoRead, swapsRead, cpuPressureRead, memoryPressureRead, ioPressureRead, zramRead] =
             await Promise.allSettled([
-                readTextFile(statPath, this._cancellable),
-                readTextFile(meminfoPath, this._cancellable),
-                readTextFile(swapsPath, this._cancellable),
-                readTextFile(cpuPressurePath, this._cancellable),
-                readTextFile(memoryPressurePath, this._cancellable),
-                readTextFile(ioPressurePath, this._cancellable),
-                readZramDevices(fsRoot, this._cancellable),
+                this._readTextFile(statPath, SAMPLE_READ_PRIORITY, this._cancellable),
+                this._readTextFile(meminfoPath, SAMPLE_READ_PRIORITY, this._cancellable),
+                this._readTextFile(swapsPath, SAMPLE_READ_PRIORITY, this._cancellable),
+                this._readTextFile(cpuPressurePath, SAMPLE_READ_PRIORITY, this._cancellable),
+                this._readTextFile(memoryPressurePath, SAMPLE_READ_PRIORITY, this._cancellable),
+                this._readTextFile(ioPressurePath, SAMPLE_READ_PRIORITY, this._cancellable),
+                readZramDevices(fsRoot, this._readTextFile, this._cancellable),
             ]);
         if (this._isDestroyed || cpuBaselineEpoch !== this._cpuBaselineEpoch)
             return null;
@@ -820,15 +877,16 @@ export class Sampler {
         const takenAtUsec = this._nowUsec();
         const cgroupRootPath = joinPath(fsRoot, CGROUP_ROOT_PATH);
         const leafRelativePaths = await this._listCgroupLeaves(cgroupRootPath);
-        if (this._isDestroyed || appBaselineEpoch !== this._appBaselineEpoch)
+        if (this._isAppScanOvertaken(appBaselineEpoch))
             return null;
         const rootCpuStatPath = joinPath(cgroupRootPath, CGROUP_CPU_STAT_FILE);
-        const [rootCpuStatRead, ...leafReads] = await Promise.allSettled([
-            readTextFile(rootCpuStatPath, this._cancellable),
-            ...leafRelativePaths.map(leafRelativePath =>
-                readCgroupLeaf(joinPath(cgroupRootPath, leafRelativePath), this._cancellable)),
+        const [rootCpuStatRead] = await Promise.allSettled([
+            this._readTextFile(rootCpuStatPath, APP_SCAN_READ_PRIORITY, this._cancellable),
         ]);
-        if (this._isDestroyed || appBaselineEpoch !== this._appBaselineEpoch)
+        if (this._isAppScanOvertaken(appBaselineEpoch))
+            return null;
+        const leafReads = await this._readCgroupLeavesInBatches(cgroupRootPath, leafRelativePaths, appBaselineEpoch);
+        if (leafReads === null)
             return null;
 
         const rootUsageUsec = this._parseSettledRead(rootCpuStatRead, rootCpuStatPath, parseCpuStatUsageUsec);
@@ -850,6 +908,41 @@ export class Sampler {
         this._previousAppScan = {usageUsecByCgroup, rootUsageUsec, takenAtUsec};
         this._latestAppRanking = ranking;
         return ranking;
+    }
+
+    /**
+     * Says whether the scan that began at an app-baseline epoch must be dropped: the sampler was destroyed, or the
+     * scan was turned off or a pause restarted the baselines since.
+     *
+     * @param {number} appBaselineEpoch - _appBaselineEpoch when the scan began.
+     * @returns {boolean} True when the scan's results must not be kept.
+     */
+    _isAppScanOvertaken(appBaselineEpoch) {
+        return this._isDestroyed || appBaselineEpoch !== this._appBaselineEpoch;
+    }
+
+    /**
+     * Reads the leaves APP_SCAN_READ_BATCH_LEAVES at a time, each batch starting once the one before has settled,
+     * so a scan never has more than one batch of leaves' reads waiting on the main loop. Each leaf settles on its
+     * own: one that fails does not fail its batch.
+     *
+     * @param {string} cgroupRootPath - Absolute path of the cgroup v2 root.
+     * @param {string[]} leafRelativePaths - Leaf paths relative to the cgroup root.
+     * @param {number} appBaselineEpoch - _appBaselineEpoch when the scan began.
+     * @returns {Promise<Array<PromiseSettledResult<{usageUsec: number, memoryBytes: number}>>|null>} One settled
+     *     read per leaf, in leafRelativePaths' order; null when the scan was overtaken (see _isAppScanOvertaken).
+     */
+    async _readCgroupLeavesInBatches(cgroupRootPath, leafRelativePaths, appBaselineEpoch) {
+        const leafReads = [];
+        for (let batchStart = 0; batchStart < leafRelativePaths.length; batchStart += APP_SCAN_READ_BATCH_LEAVES) {
+            const batchRelativePaths = leafRelativePaths.slice(batchStart, batchStart + APP_SCAN_READ_BATCH_LEAVES);
+            const batchReads = await Promise.allSettled(batchRelativePaths.map(leafRelativePath =>
+                readCgroupLeaf(joinPath(cgroupRootPath, leafRelativePath), this._readTextFile, this._cancellable)));
+            if (this._isAppScanOvertaken(appBaselineEpoch))
+                return null;
+            leafReads.push(...batchReads);
+        }
+        return leafReads;
     }
 
     /**
@@ -957,7 +1050,8 @@ export class Sampler {
         const corePmuPath = joinPath(fsRoot, CORE_PMU_CPUS_PATH);
         const atomPmuPath = joinPath(fsRoot, ATOM_PMU_CPUS_PATH);
         const [corePmuRead, atomPmuRead] = await Promise.allSettled([
-            readTextFile(corePmuPath, this._cancellable), readTextFile(atomPmuPath, this._cancellable),
+            this._readTextFile(corePmuPath, SAMPLE_READ_PRIORITY, this._cancellable),
+            this._readTextFile(atomPmuPath, SAMPLE_READ_PRIORITY, this._cancellable),
         ]);
         if (this._isDestroyed)
             return null;
@@ -1016,7 +1110,7 @@ export class Sampler {
         const capacityPaths = cpuNumbers.map(cpuNumber =>
             joinPath(cpuDevicesPath, `cpu${cpuNumber}`, CPU_CAPACITY_FILE));
         const capacityReads = await Promise.allSettled(capacityPaths.map(capacityPath =>
-            readTextFile(capacityPath, this._cancellable)));
+            this._readTextFile(capacityPath, SAMPLE_READ_PRIORITY, this._cancellable)));
         if (this._isDestroyed)
             return new Map();
         const capacities = new Map();

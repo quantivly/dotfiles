@@ -3,12 +3,12 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
-import {Sampler, groupOfCgroup} from '../extensions/resource-pulse@dotfiles/sampler.js';
+import {Sampler, groupOfCgroup, readTextFile} from '../extensions/resource-pulse@dotfiles/sampler.js';
 import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
 import {cardText} from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {
-    APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, ERROR_LOG_REPEAT_INTERVAL_USEC, KERNEL_AND_OTHER_LABEL,
-    LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
+    APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, APP_SCAN_READ_BATCH_LEAVES, ERROR_LOG_REPEAT_INTERVAL_USEC,
+    FILE_READ_CHUNK_BYTES, KERNEL_AND_OTHER_LABEL, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
 } from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const [TEST_FILE_PATH] = GLib.filename_from_uri(import.meta.url);
@@ -31,6 +31,16 @@ const TICK_FAILURE_SETTLE_MS = 200;
 const QUIET_INTERVAL_SECONDS = 60;
 const USER_APP_SLICE = 'user.slice/user-1000.slice/user@1000.service/app.slice';
 const LATER_CLOCK_LABEL = '14:04';
+/** Mode of every directory a row creates: the user's own. */
+const PRIVATE_DIRECTORY_MODE = 0o700;
+/** Digits in a generated leaf's index, so the generated names sort as their indices do. */
+const GENERATED_LEAF_INDEX_DIGITS = 3;
+/** Full batches of leaves in a generated scan root (plus one leaf, so a last, partial batch exists too). */
+const GENERATED_SCAN_BATCHES = 3;
+const GENERATED_LEAF_MEMORY_BYTES = 1_000_000;
+const HEAVIEST_GENERATED_LEAF_MEMORY_BYTES = 9_000_000;
+/** Chunks in the file the multi-chunk read row reads (it is a little over this many). */
+const MULTI_CHUNK_FILE_CHUNKS = 3;
 /** What a failed sample publishes, apart from its two timestamps (in the order a snapshot lists its fields). */
 const NO_DATA_SNAPSHOT_FIELDS = {
     cpuBusyPercent: null,
@@ -310,23 +320,27 @@ test('sampler: a sample in flight across a pause, or a scan in flight when scann
         nextSnapshot.apps], [null, null, 1, null, null]);
 });
 
-test('sampler: a scan turned off between its cgroup listing and its reads is dropped too', async () => {
-    // The scan awaits twice; the first file read starts only after the listing has settled.
-    const {sampler} = makeSampler('root-a');
+test('sampler: a scan turned off during its first file read is dropped and reads nothing after it', async () => {
+    // The scan awaits more than once; its first file read (the root cgroup's cpu.stat) starts only after the
+    // listing has settled. Once the scan is turned off, no leaf's files are read: that work would be thrown away.
+    let isTurningScanOff = false;
+    const readPathsAfterTurningOff = [];
+    const {sampler} = makeSampler('root-a', {
+        readTextFile: (path, ...readArguments) => {
+            if (isTurningScanOff) {
+                readPathsAfterTurningOff.push(path);
+                sampler.setAppScanEnabled(false);
+            }
+            return readTextFile(path, ...readArguments);
+        },
+    });
     await sampler.initialize();
-    const originalLoadContentsAsync = Gio.File.prototype.load_contents_async;
-    Gio.File.prototype.load_contents_async = function (...readArguments) {
-        sampler.setAppScanEnabled(false);
-        return originalLoadContentsAsync.apply(this, readArguments);
-    };
-    let scanResult;
-    try {
-        scanResult = await sampler.scanAppsOnce();
-    } finally {
-        Gio.File.prototype.load_contents_async = originalLoadContentsAsync;
-    }
+    isTurningScanOff = true;
+    const scanResult = await sampler.scanAppsOnce();
+    isTurningScanOff = false;
     const nextSnapshot = await sampler.sampleOnce();
-    assertEqual([scanResult, nextSnapshot.apps], [null, null]);
+    assertEqual([scanResult, nextSnapshot.apps, readPathsAfterTurningOff.map(path => GLib.path_get_basename(path))],
+        [null, null, ['cpu.stat']]);
 });
 
 test('sampler: two Chrome scopes are one app (one group key, one name)', () => {
@@ -614,3 +628,215 @@ test('sampler: an injected logger keeps its rate limit across samplers, one per 
         assertEqual([written.length, written[0]?.startsWith(LOG_PREFIX), written[0]?.includes('proc/stat')],
             [1, true, true]);
     });
+
+/**
+ * Writes a file, making its directory first (tests may block).
+ *
+ * @param {string} directoryPath - Absolute directory path.
+ * @param {string} fileName - File name inside it.
+ * @param {string} contents - UTF-8 text.
+ * @returns {string} The file's path.
+ */
+function writeFixtureFile(directoryPath, fileName, contents) {
+    GLib.mkdir_with_parents(directoryPath, PRIVATE_DIRECTORY_MODE);
+    const filePath = GLib.build_filenamev([directoryPath, fileName]);
+    GLib.file_set_contents(filePath, contents);
+    return filePath;
+}
+
+/**
+ * Deletes a directory tree made by a row (tests may block).
+ *
+ * @param {string} path - The tree's root.
+ * @returns {void}
+ */
+function removeTree(path) {
+    const file = Gio.File.new_for_path(path);
+    if (file.query_file_type(Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null) === Gio.FileType.DIRECTORY) {
+        const enumerator = file.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+        for (let info = enumerator.next_file(null); info !== null; info = enumerator.next_file(null))
+            removeTree(GLib.build_filenamev([path, info.get_name()]));
+        enumerator.close(null);
+    }
+    file.delete(null);
+}
+
+/**
+ * Name of the generated cgroup leaf at an index, zero-padded so the names sort as the indices do.
+ *
+ * @param {number} leafIndex - The leaf's index.
+ * @returns {string} For example 'generated-007.service'.
+ */
+const generatedLeafName = leafIndex =>
+    `generated-${String(leafIndex).padStart(GENERATED_LEAF_INDEX_DIGITS, '0')}.service`;
+
+/**
+ * Builds a fixture root in a new temporary directory whose system.slice holds leafCount service leaves (a cpu.stat
+ * and a memory.current each); the last leaf holds the most memory, so a ranking that names it read every batch.
+ *
+ * @param {number} leafCount - How many leaves.
+ * @returns {{rootPath: string, cgroupRootPath: string, heaviestLeafName: string}} The tree, and the name the
+ *     ranking gives its heaviest leaf.
+ */
+function makeGeneratedCgroupRoot(leafCount) {
+    const rootPath = GLib.dir_make_tmp('resource-pulse-scan-XXXXXX');
+    const cgroupRootPath = GLib.build_filenamev([rootPath, 'sys', 'fs', 'cgroup']);
+    writeFixtureFile(cgroupRootPath, 'cpu.stat', 'usage_usec 1000000\n');
+    for (let leafIndex = 0; leafIndex < leafCount; leafIndex++) {
+        const leafPath = GLib.build_filenamev([cgroupRootPath, 'system.slice', generatedLeafName(leafIndex)]);
+        const isHeaviest = leafIndex === leafCount - 1;
+        const memoryBytes = isHeaviest ? HEAVIEST_GENERATED_LEAF_MEMORY_BYTES : GENERATED_LEAF_MEMORY_BYTES;
+        writeFixtureFile(leafPath, 'cpu.stat', `usage_usec ${leafIndex}\n`);
+        writeFixtureFile(leafPath, 'memory.current', `${memoryBytes}\n`);
+    }
+    const heaviestLeafName = generatedLeafName(leafCount - 1).replace(/\.service$/, '');
+    return {rootPath, cgroupRootPath, heaviestLeafName};
+}
+
+/**
+ * Wraps the real reader to record the priorities it is asked for and the most cgroup leaves with a read in flight
+ * at once (a read of the cgroup root's own cpu.stat is not a leaf's).
+ *
+ * @param {string} cgroupRootPath - The cgroup root, whose own files are not a leaf's.
+ * @param {(leafDirectoryPath: string, distinctLeafCount: number) => void} [onLeafReadStart] - Called as each read
+ *     of a leaf starts, with how many distinct leaves have started so far.
+ * @returns {{readTextFile: Function, record: {priorities: Set<number>, maxLeavesInFlight: number}}} The reader
+ *     and what it saw.
+ */
+function makeLeafTrackingReader(cgroupRootPath, onLeafReadStart = () => {}) {
+    const record = {priorities: new Set(), maxLeavesInFlight: 0};
+    const inFlightReadsByLeaf = new Map();
+    const startedLeaves = new Set();
+    const trackingReadTextFile = async (path, priority, cancellable) => {
+        record.priorities.add(priority);
+        const leafDirectoryPath = GLib.path_get_dirname(path);
+        if (leafDirectoryPath === cgroupRootPath)
+            return readTextFile(path, priority, cancellable);
+        inFlightReadsByLeaf.set(leafDirectoryPath, (inFlightReadsByLeaf.get(leafDirectoryPath) ?? 0) + 1);
+        record.maxLeavesInFlight = Math.max(record.maxLeavesInFlight, inFlightReadsByLeaf.size);
+        startedLeaves.add(leafDirectoryPath);
+        onLeafReadStart(leafDirectoryPath, startedLeaves.size);
+        try {
+            return await readTextFile(path, priority, cancellable);
+        } finally {
+            const remainingReads = inFlightReadsByLeaf.get(leafDirectoryPath) - 1;
+            if (remainingReads === 0)
+                inFlightReadsByLeaf.delete(leafDirectoryPath);
+            else
+                inFlightReadsByLeaf.set(leafDirectoryPath, remainingReads);
+        }
+    };
+    return {readTextFile: trackingReadTextFile, record};
+}
+
+/**
+ * Runs a body while Gio's file-open, stream-read and stream-close calls are spied on (each still runs for real).
+ *
+ * @param {(spy: {openPriorities: number[], readPriorities: number[], closePriorities: number[],
+ *     streams: Gio.InputStream[]}) => Promise<void>} body - The test body.
+ * @param {(inputStream: Gio.InputStream, readArguments: Array) => (Promise|null)} [replaceRead] - Returns a promise
+ *     to use instead of a real read_bytes_async, or null to read for real.
+ * @returns {Promise<void>} Settles when the body has, with the originals restored.
+ */
+async function withStreamSpy(body, replaceRead = () => null) {
+    const originalReadAsync = Gio.File.prototype.read_async;
+    const originalReadBytesAsync = Gio.InputStream.prototype.read_bytes_async;
+    const originalCloseAsync = Gio.InputStream.prototype.close_async;
+    const spy = {openPriorities: [], readPriorities: [], closePriorities: [], streams: []};
+    Gio.File.prototype.read_async = function (priority, ...rest) {
+        spy.openPriorities.push(priority);
+        const pendingStream = originalReadAsync.call(this, priority, ...rest);
+        pendingStream.then(inputStream => spy.streams.push(inputStream), () => {});
+        return pendingStream;
+    };
+    Gio.InputStream.prototype.read_bytes_async = function (...readArguments) {
+        spy.readPriorities.push(readArguments[1]);
+        return replaceRead(this, readArguments) ?? originalReadBytesAsync.apply(this, readArguments);
+    };
+    Gio.InputStream.prototype.close_async = function (priority, ...rest) {
+        spy.closePriorities.push(priority);
+        return originalCloseAsync.call(this, priority, ...rest);
+    };
+    try {
+        await body(spy);
+    } finally {
+        Gio.File.prototype.read_async = originalReadAsync;
+        Gio.InputStream.prototype.read_bytes_async = originalReadBytesAsync;
+        Gio.InputStream.prototype.close_async = originalCloseAsync;
+    }
+}
+
+test('readTextFile reads a file of several chunks to EOF at the priority given (open, reads, close) and closes it',
+    async () => {
+        // One ASCII byte first, so two-byte characters straddle every chunk boundary: decoding chunk by chunk
+        // would mangle them.
+        const contents = `a${'é'.repeat(MULTI_CHUNK_FILE_CHUNKS * FILE_READ_CHUNK_BYTES / 2)}`;
+        const directoryPath = GLib.dir_make_tmp('resource-pulse-read-XXXXXX');
+        const filePath = writeFixtureFile(directoryPath, 'multi-chunk.txt', contents);
+        try {
+            await withStreamSpy(async spy => {
+                const text = await readTextFile(filePath, GLib.PRIORITY_LOW, null);
+                const priorities = [...spy.openPriorities, ...spy.readPriorities, ...spy.closePriorities];
+                assertEqual([text === contents, spy.readPriorities.length > MULTI_CHUNK_FILE_CHUNKS,
+                    [...new Set(priorities)], spy.closePriorities.length,
+                    spy.streams.map(inputStream => inputStream.is_closed())],
+                [true, true, [GLib.PRIORITY_LOW], 1, [true]]);
+            });
+        } finally {
+            removeTree(directoryPath);
+        }
+    });
+
+test('readTextFile closes the stream when a read after the open fails, and rejects with that failure', async () => {
+    const directoryPath = GLib.dir_make_tmp('resource-pulse-read-XXXXXX');
+    const filePath = writeFixtureFile(directoryPath, 'small.txt', 'usage_usec 1\n');
+    const readFailure = new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.FAILED, 'read exploded');
+    try {
+        await withStreamSpy(async spy => {
+            const failureMessage = await readTextFile(filePath, GLib.PRIORITY_LOW, null)
+                .then(() => 'resolved', error => error.message);
+            assertEqual([failureMessage, spy.streams.map(inputStream => inputStream.is_closed())],
+                ['read exploded', [true]]);
+        }, () => Promise.reject(readFailure));
+    } finally {
+        removeTree(directoryPath);
+    }
+});
+
+test('sampler: the app scan reads at PRIORITY_LOW, at most APP_SCAN_READ_BATCH_LEAVES leaves at once, and every leaf',
+    async () => {
+        const leafCount = GENERATED_SCAN_BATCHES * APP_SCAN_READ_BATCH_LEAVES + 1;
+        const {rootPath, cgroupRootPath, heaviestLeafName} = makeGeneratedCgroupRoot(leafCount);
+        try {
+            const {readTextFile: trackingReadTextFile, record} = makeLeafTrackingReader(cgroupRootPath);
+            const {sampler} = makeSampler('root-a', {fsRoot: rootPath, readTextFile: trackingReadTextFile});
+            const ranking = await sampler.scanAppsOnce();
+            sampler.destroy();
+            assertEqual([[...record.priorities], record.maxLeavesInFlight, ranking?.topMemory],
+                [[GLib.PRIORITY_LOW], APP_SCAN_READ_BATCH_LEAVES,
+                    {name: heaviestLeafName, memoryBytes: HEAVIEST_GENERATED_LEAF_MEMORY_BYTES}]);
+        } finally {
+            removeTree(rootPath);
+        }
+    });
+
+test('sampler: a scan turned off between two batches of leaf reads is dropped', async () => {
+    const leafCount = GENERATED_SCAN_BATCHES * APP_SCAN_READ_BATCH_LEAVES + 1;
+    const {rootPath, cgroupRootPath} = makeGeneratedCgroupRoot(leafCount);
+    try {
+        let sampler = null;
+        const {readTextFile: trackingReadTextFile} = makeLeafTrackingReader(cgroupRootPath,
+            (_leafDirectoryPath, distinctLeafCount) => {
+                // The first read of the second batch: the first batch has settled by now.
+                if (distinctLeafCount === APP_SCAN_READ_BATCH_LEAVES + 1)
+                    sampler.setAppScanEnabled(false);
+            });
+        ({sampler} = makeSampler('root-a', {fsRoot: rootPath, readTextFile: trackingReadTextFile}));
+        const scanResult = await sampler.scanAppsOnce();
+        const nextSnapshot = await sampler.sampleOnce();
+        sampler.destroy();
+        assertEqual([scanResult, nextSnapshot.apps], [null, null]);
+    } finally {
+        removeTree(rootPath);
+    }
+});

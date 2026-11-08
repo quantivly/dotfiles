@@ -24,6 +24,14 @@ export const APP_SCAN_SKIPPED_UNIT_SUFFIXES = [
 export const APP_MEMORY_STAT_MIN_BYTES = 64 * 1024 ** 2;
 /** Directory entries fetched per step of an asynchronous directory listing. */
 export const DIRECTORY_LISTING_BATCH_ENTRIES = 64;
+/**
+ * Cgroup leaves whose files an app scan reads at once. The next batch starts only when this one has settled, so a
+ * scan never has more than this many leaves' reads waiting to complete on the shell's main loop (about 200 leaves,
+ * 500 files and 2,000 completions in all on the reference laptop), where they would compete with redraws.
+ */
+export const APP_SCAN_READ_BATCH_LEAVES = 16;
+/** Bytes asked for per read of a /proc, /sys or cgroup file: they report size 0, so each is read until EOF. */
+export const FILE_READ_CHUNK_BYTES = 8192;
 /** Samples kept for the top-bar sparkline. */
 export const TOPBAR_HISTORY_SAMPLES = 30;
 /** Samples kept for the desktop card graphs. */
