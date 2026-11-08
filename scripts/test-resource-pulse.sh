@@ -291,6 +291,196 @@ FORBIDDEN_READS_PATTERN="cmd""line|env""iron\\b|pgre""p|\\bps -"
 check "cost: the script never reads an argument list or environment, or runs ps" \
   "$(grep -c -E "$FORBIDDEN_READS_PATTERN" "$COST_SCRIPT" 2>/dev/null)" 0
 
+printf '\nresource-pulse-nested.sh (hermetic: no gnome-shell, nothing is started)\n'
+# The nested-shell harness itself needs gnome-shell and a GPU, so it never runs
+# here. These rows cover what it decides before anything starts: its usage,
+# the bus configs it renders, the environment allowlist, and its refusals. Every
+# run of it here has busctl, gsettings and gnome-shell replaced by stubs that
+# only record the call, and RESOURCE_PULSE_NESTED_BASE pointed at an empty
+# directory, so a row that must refuse proves it reached none of them.
+#
+# That directory's name is deliberately longer than the script allows a run
+# directory to be (48 characters, for its sockets). `start` launches through
+# `env -i` with its own PATH, where these stubs do not reach, so a mutant that
+# fell through to `start` could otherwise launch a real nested shell from this
+# suite; with this base it refuses at the length check before launching.
+NESTED_SCRIPT="$DOTFILES/scripts/resource-pulse-nested.sh"
+NESTED_FILES="$DOTFILES/gnome-shell/tests/nested"
+NESTED_BASE="$WIRING_TMP/nested-base-named-longer-than-any-run-directory-may-be"
+NESTED_STUB_BIN="$WIRING_TMP/nested-bin"
+NESTED_STUB_CALLS="$WIRING_TMP/nested-stub-calls"
+UNSAFE_MODE_HELPER_UUID="resource-pulse-nested-unsafe-mode@local"
+mkdir -p "$NESTED_BASE" "$NESTED_STUB_BIN" || fatal "cannot create the nested-harness fixture directories"
+for stubbed_tool in busctl gsettings gnome-shell; do
+  # shellcheck disable=SC2016  # The stub's own source: its $* and $NESTED_STUB_CALLS expand when it runs.
+  printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" %s "$*" >>"$NESTED_STUB_CALLS"\nexit 1\n' "$stubbed_tool" \
+    >"$NESTED_STUB_BIN/$stubbed_tool"
+  chmod +x "$NESTED_STUB_BIN/$stubbed_tool"
+done
+nested_stub_call_count() { printf '%d' "$(wc -l <"$NESTED_STUB_CALLS")"; }
+# nested_run <args...> runs the script against the stubs and the empty base;
+# leaves NESTED_OUTPUT and NESTED_EXIT.
+nested_run() {
+  : >"$NESTED_STUB_CALLS"
+  NESTED_OUTPUT="$(env -u RESOURCE_PULSE_NESTED_DIR PATH="$NESTED_STUB_BIN:$PATH" \
+    NESTED_STUB_CALLS="$NESTED_STUB_CALLS" RESOURCE_PULSE_NESTED_BASE="$NESTED_BASE" \
+    bash "$NESTED_SCRIPT" "$@" 2>&1)"
+  NESTED_EXIT=$?
+}
+# nested_call <function> <args...> sources the script (which then runs nothing)
+# and calls one of its functions. A missing script exits 99, never 0.
+nested_call() {
+  bash -c 'source "$1" || exit 99; shift; "$@"' nested-call "$NESTED_SCRIPT" "$@"
+}
+
+check "nested: the script parses (bash -n)" "$(bash -n "$NESTED_SCRIPT" 2>&1; printf 'rc=%d' $?)" "rc=0"
+
+nested_run
+no_subcommand_exit=$NESTED_EXIT
+nested_run launch
+check "nested: no subcommand and an unknown one both exit 2, say why, and create nothing" \
+  "$no_subcommand_exit:$NESTED_EXIT:$(grep -c -F "unknown subcommand: 'launch'" <<<"$NESTED_OUTPUT"):$(find "$NESTED_BASE" -mindepth 1 | wc -l)" \
+  "2:2:1:0"
+
+nested_run eval '1 + 1'
+check "nested: eval with no run refuses (exit 2) and never calls busctl" \
+  "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'no live run' <<<"$NESTED_OUTPUT")" "2:0:1"
+
+# A run directory whose recorded address is the LIVE session bus: the address
+# check, not the run lookup, must be what refuses it.
+TAMPERED_SUFFIX="Tamper01"
+TAMPERED_RUN="$NESTED_BASE/rpn.$TAMPERED_SUFFIX"
+mkdir -p "$TAMPERED_RUN/state" && chmod 700 "$TAMPERED_RUN"
+printf '%s\n' "$TAMPERED_SUFFIX" >"$TAMPERED_RUN/.resource-pulse-nested"
+printf '%s\n' "unix:path=/run/user/$(id -u)/bus" >"$TAMPERED_RUN/state/session.addr"
+nested_run eval '1 + 1'
+check "nested: a run whose recorded address is not its private bus is refused before busctl" \
+  "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F "not this run's private session bus" <<<"$NESTED_OUTPUT")" "2:0:1"
+rm -rf "$TAMPERED_RUN"
+
+nested_run screenshot ../escape.png
+check "nested: a screenshot name with a / in it is refused before anything runs" \
+  "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'a screenshot name is a plain file name' <<<"$NESTED_OUTPUT")" "2:0:1"
+
+# One run directory, prepared exactly as `start` prepares it but never started.
+PREPARED_SUFFIX="Prep0001"
+PREPARED_RUN="$WIRING_TMP/prepared/rpn.$PREPARED_SUFFIX"
+mkdir -p "$PREPARED_RUN" && chmod 700 "$PREPARED_RUN"
+nested_call prepare_run_directory "$PREPARED_RUN" "$PREPARED_SUFFIX"
+prepare_exit=$?
+SESSION_BUS_CONF="$PREPARED_RUN/bus/session-bus.conf"
+SESSION_SERVICES_DIR="$PREPARED_RUN/bus/session-services"
+session_bus_summary="prepare=$prepare_exit"
+session_bus_summary+=" servicedirs=$(grep -c -F '<servicedir>' "$SESSION_BUS_CONF" 2>/dev/null)"
+session_bus_summary+=" ours=$(grep -c -F "<servicedir>$SESSION_SERVICES_DIR</servicedir>" "$SESSION_BUS_CONF" 2>/dev/null)"
+session_bus_summary+=" standard=$(grep -c -E 'standard_(session|system)_servicedirs|<include' "$SESSION_BUS_CONF" 2>/dev/null)"
+session_bus_summary+=" services=$(find "$SESSION_SERVICES_DIR" -mindepth 1 -printf '%f,' 2>/dev/null)"
+session_bus_summary+=" dconf=$(grep -c -x -F 'Name=ca.desrt.dconf' "$SESSION_SERVICES_DIR/ca.desrt.dconf.service" 2>/dev/null)"
+check "nested: the private session bus can activate dconf and nothing else" "$session_bus_summary" \
+  "prepare=0 servicedirs=1 ours=1 standard=0 services=ca.desrt.dconf.service, dconf=1"
+
+WIDENED_SESSION_BUS_CONF="$WIRING_TMP/widened-session-bus.conf"
+{ grep -v -F '</busconfig>' "$SESSION_BUS_CONF"; printf '  <standard_session_servicedirs/>\n</busconfig>\n'; } \
+  >"$WIDENED_SESSION_BUS_CONF" 2>/dev/null
+nested_call session_bus_config_permits_only_dconf "$SESSION_BUS_CONF" "$SESSION_SERVICES_DIR"
+accepts_rendered_session_bus=$?
+nested_call session_bus_config_permits_only_dconf "$WIDENED_SESSION_BUS_CONF" "$SESSION_SERVICES_DIR"
+accepts_widened_session_bus=$?
+check "nested: the start-time check accepts that session bus and refuses one with the standard service dirs" \
+  "$accepts_rendered_session_bus:$accepts_widened_session_bus" "0:1"
+
+SYSTEM_BUS_CONF="$PREPARED_RUN/bus/system-bus.conf"
+WIDENED_SYSTEM_BUS_CONF="$WIRING_TMP/widened-system-bus.conf"
+{ grep -v -F '</busconfig>' "$SYSTEM_BUS_CONF"; printf '  <standard_system_servicedirs/>\n</busconfig>\n'; } \
+  >"$WIDENED_SYSTEM_BUS_CONF" 2>/dev/null
+system_bus_summary="listen=$(grep -c -F "unix:abstract=rp-nested-system-$PREPARED_SUFFIX<" "$SYSTEM_BUS_CONF" 2>/dev/null)"
+system_bus_summary+=" activatable=$(grep -c -E '<servicedir|standard_(session|system)_servicedirs|<include|<servicehelper' "$SYSTEM_BUS_CONF" 2>/dev/null)"
+nested_call system_bus_config_activates_nothing "$SYSTEM_BUS_CONF"
+system_bus_summary+=" check-rendered=$?"
+nested_call system_bus_config_activates_nothing "$WIDENED_SYSTEM_BUS_CONF"
+system_bus_summary+=" check-widened=$?"
+check "nested: the fake system bus can activate nothing, and the start-time check says so" "$system_bus_summary" \
+  "listen=1 activatable=0 check-rendered=0 check-widened=1"
+
+NESTED_ENVIRONMENT="$(nested_call nested_environment_assignments "$PREPARED_RUN" "$PREPARED_SUFFIX")"
+NESTED_ENVIRONMENT_NAMES="$(cut -d= -f1 <<<"$NESTED_ENVIRONMENT")"
+FORBIDDEN_NESTED_NAMES_PATTERN='^(WAYLAND_DISPLAY|DISPLAY|DBUS_SESSION_BUS_ADDRESS|SSH_AUTH_SOCK)$|TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL'
+check "nested: the environment allowlist names no display, no live session bus and no credential" \
+  "$(grep -c -E "$FORBIDDEN_NESTED_NAMES_PATTERN" <<<"$NESTED_ENVIRONMENT_NAMES"):$(wc -l <<<"$NESTED_ENVIRONMENT_NAMES")" "0:22"
+
+poisoned_child_environment="$(WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 GH_TOKEN=poison-not-a-token \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+  nested_call run_isolated "$PREPARED_RUN" "$PREPARED_SUFFIX" env)"
+check "nested: a process started isolated inherits none of the live display, bus or token" \
+  "$(grep -c -E '^(WAYLAND_DISPLAY|DISPLAY|DBUS_SESSION_BUS_ADDRESS|GH_TOKEN)=' <<<"$poisoned_child_environment"):$(grep -c -x -F "XDG_RUNTIME_DIR=$PREPARED_RUN/run" <<<"$poisoned_child_environment")" "0:1"
+
+dirs_outside_the_run=""
+for isolated_variable in HOME TMPDIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR; do
+  isolated_value="$(grep -E "^$isolated_variable=" <<<"$NESTED_ENVIRONMENT" | cut -d= -f2-)"
+  [[ "$isolated_value" == "$PREPARED_RUN/"* ]] || dirs_outside_the_run+="$isolated_variable='$isolated_value' "
+done
+check "nested: HOME, TMPDIR and every XDG home and runtime dir are in the run; the system bus is the fake one" \
+  "${dirs_outside_the_run:-none}:$(grep -c -x -F "DBUS_SYSTEM_BUS_ADDRESS=unix:abstract=rp-nested-system-$PREPARED_SUFFIX" <<<"$NESTED_ENVIRONMENT")" "none:1"
+
+fake_gdm_output="$(timeout "$GLUE_PARSE_TIMEOUT_SECONDS" gjs -m "$NESTED_FILES/fake-gdm.js" \
+  'unix:path=/run/dbus/system_bus_socket' 2>&1)"
+fake_gdm_exit=$?
+check "nested: fake-gdm.js refuses any bus but the fake one, before connecting" \
+  "$(( fake_gdm_exit != 0 )):$(grep -c -F 'refusing to connect to anything but the fake system bus' <<<"$fake_gdm_output")" "1:1"
+
+# The two apps whose presence makes GNOME 50 check extensions.gnome.org for
+# updates (extensionSystem.js updatesSupported): masked, and copied into the run.
+masked_update_apps=0
+for update_app_id in org.gnome.Extensions com.mattjakeman.ExtensionManager; do
+  if [[ "$(grep -c -x -F 'Hidden=true' "$NESTED_FILES/applications/$update_app_id.desktop" 2>/dev/null)" == 1 &&
+        -f "$PREPARED_RUN/data/applications/$update_app_id.desktop" ]]; then
+    masked_update_apps=$((masked_update_apps + 1))
+  fi
+done
+check "nested: both apps that make the shell check extensions.gnome.org are masked in the run" "$masked_update_apps" 2
+
+UNSAFE_MODE_HELPER_JS="$NESTED_FILES/$UNSAFE_MODE_HELPER_UUID/extension.js"
+# The FIRST line that sets unsafe mode must come after the guard.
+helper_guard_line="$(grep -n -m 1 -F 'if (!isInsideNestedRun())' "$UNSAFE_MODE_HELPER_JS" 2>/dev/null | cut -d: -f1)"
+helper_unsafe_line="$(grep -n -m 1 -F 'global.context.unsafe_mode = true' "$UNSAFE_MODE_HELPER_JS" 2>/dev/null | cut -d: -f1)"
+helper_placement="$([[ -d "$PREPARED_RUN/data/gnome-shell/extensions/$UNSAFE_MODE_HELPER_UUID" ]] && printf run)"
+helper_placement+="$([[ -e "$DOTFILES/gnome-shell/extensions/$UNSAFE_MODE_HELPER_UUID" ]] && printf +linkable)"
+check "nested: the unsafe-mode helper checks for a nested run first, and lives only in the run's data dir" \
+  "$(( ${helper_guard_line:-0} > 0 && ${helper_unsafe_line:-0} > ${helper_guard_line:-0} )):$helper_placement" "1:run"
+
+# make_fake_stat <pid> <comm> <session> writes one /proc/<pid>/stat.
+NESTED_FAKE_PROC="$WIRING_TMP/nested-proc"
+make_fake_stat() {
+  mkdir -p "$NESTED_FAKE_PROC/$1"
+  printf '%s (%s) S 1 %s %s 0 -1 4194304\n' "$1" "$2" "$1" "$3" >"$NESTED_FAKE_PROC/$1/stat"
+}
+make_fake_stat 500 gnome-shell 500
+make_fake_stat 501 'odd) S 1 9 9 (name' 500
+make_fake_stat 502 bash 777
+check "nested: the teardown sweep finds exactly the run's session, even past a comm holding ') '" \
+  "$(nested_call pids_in_session "$NESTED_FAKE_PROC" 500 | sort -n | tr '\n' ' ')" "500 501 "
+
+# The stage that runs inside the private bus writes settings and starts
+# gnome-shell (both stubs here). It has two guards, so each call below defeats
+# one of them: (a) the live environment with the run's private bus address
+# claimed, and (b) the run's isolated environment with no private bus. Each
+# must refuse on its own guard, writing no setting and starting no shell.
+: >"$NESTED_STUB_CALLS"
+live_env_in_bus_output="$(env -u RESOURCE_PULSE_NESTED_DIR PATH="$NESTED_STUB_BIN:$PATH" \
+  NESTED_STUB_CALLS="$NESTED_STUB_CALLS" DBUS_SESSION_BUS_ADDRESS="unix:abstract=rp-nested-session-$PREPARED_SUFFIX" \
+  bash "$NESTED_SCRIPT" __inside-session-bus "$PREPARED_RUN" 2>&1)"
+live_env_in_bus_exit=$?
+no_bus_in_bus_output="$(nested_call run_isolated "$PREPARED_RUN" "$PREPARED_SUFFIX" \
+  env PATH="$NESTED_STUB_BIN:/usr/bin:/bin" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" \
+  bash "$NESTED_SCRIPT" __inside-session-bus "$PREPARED_RUN" 2>&1)"
+no_bus_in_bus_exit=$?
+in_bus_summary="live-env=$live_env_in_bus_exit/$(grep -c -F 'the in-bus stage is not isolated' <<<"$live_env_in_bus_output")"
+in_bus_summary+=" no-private-bus=$no_bus_in_bus_exit/$(grep -c -F "is not this run's private one" <<<"$no_bus_in_bus_output")"
+in_bus_summary+=" stub-calls=$(nested_stub_call_count)"
+in_bus_summary+=" address=$([[ -e "$PREPARED_RUN/state/session.addr" ]] && printf recorded || printf none)"
+check "nested: the in-bus stage refuses a live environment and a missing private bus, each on its own guard" \
+  "$in_bus_summary" "live-env=2/1 no-private-bus=2/1 stub-calls=0 address=none"
+
 printf '\nthe stub, never the real session, answered gsettings\n'
 run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
 check "the apply script called the stub gsettings to set enabled-extensions" \
@@ -304,7 +494,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=170
+EXPECTED_ROWS=186
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

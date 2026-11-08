@@ -17,7 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   samples every 2 s and scans per-app cgroups every 10 s, never blocks the shell and never draws stale
   numbers as live. `gnome-status` gains a `Resource Pulse:` line (linked, enabled, shell State);
   `scripts/resource-pulse-cost.sh` measures gnome-shell CPU and memory; every number is defined in
-  `docs/GNOME_CONFIGURATION_GUIDE.md`. State table: `scripts/test-resource-pulse.sh`.
+  `docs/GNOME_CONFIGURATION_GUIDE.md`. `scripts/resource-pulse-nested.sh` (`start`, `eval`,
+  `screenshot`, `stop`) runs it in a headless nested shell that cannot reach the live session: private
+  runtime dir and buses, a fake system bus and GDM, an `env -i` allowlist, and unsafe mode only from a
+  helper that exists in the run directory. The plain `gnome-shell --devkit` recipe is not safe: it
+  writes the live crash-guard file and reaches logind, GDM, GeoClue and extensions.gnome.org. State
+  table: `scripts/test-resource-pulse.sh`.
 
 - **`scripts/claude-memory-link.sh` links Claude Code's memory directories into git-backed stores,
   on a host with a store table (DO-891).** The link half of D7 in the shared-configuration design

@@ -1,0 +1,8 @@
+# Masked for scripts/resource-pulse-nested.sh: the Extensions app under its other desktop id. GNOME 50 looks up
+# only org.gnome.Extensions and com.mattjakeman.ExtensionManager (extensionSystem.js updatesSupported), but the
+# first nested run masked this one too, and an app that can install extensions has no place in the nested shell.
+[Desktop Entry]
+Type=Application
+Name=masked for the nested Resource Pulse test
+Exec=false
+Hidden=true

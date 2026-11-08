@@ -1,0 +1,10 @@
+{
+    "parentMode": "user",
+    "stylesheetName": "Yaru/gnome-shell.css",
+    "colorScheme": "prefer-light",
+    "themeResourceName": "theme/Yaru/gnome-shell-theme.gresource",
+    "iconsResourceName": "theme/Yaru/gnome-shell-icons.gresource",
+    "components": [],
+    "showWelcomeDialog": false,
+    "enabledExtensions": []
+}

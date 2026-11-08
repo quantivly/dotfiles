@@ -4,6 +4,8 @@
 
 **Amended 2026-11-08 (build):** the app scan runs every 10 s, not 6 s, and skips .mount/.socket/.swap/.automount/.path/.timer/.device leaves — measured cost 0.86% → ~0.42% of one core; see docs/GNOME_CONFIGURATION_GUIDE.md.
 
+**Amended 2026-11-08 (nested run):** test in a nested shell only with scripts/resource-pulse-nested.sh — the plain --devkit recipe in Verification §2 reaches the live session (crash-guard file, logind, GDM, GeoClue, extensions.gnome.org).
+
 ## Context
 
 The user wants live CPU and memory state on this laptop: a **minimal** indicator in the top bar and a

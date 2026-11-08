@@ -116,20 +116,29 @@ are logged to the journal under `resource-pulse:` (each distinct message at most
 
 ### Trying changes in a nested shell
 
-Never restart the live shell to test a change. Install `mutter-dev-bin`, then run a throwaway
-session with its own config and data, pointing at the worktree's copy of the extension:
+Never restart the live shell to test a change, and never use the plain
+`dbus-run-session gnome-shell --devkit --wayland` recipe: even with its own config, data and cache it
+writes the live session's crash-guard file, takes a logind inhibitor and sets the live session's
+locked hint, registers with GDM and GeoClue, and posts your extension list to extensions.gnome.org.
+Use `scripts/resource-pulse-nested.sh`, which starts a headless nested shell that can reach none of
+that, with a copy of the checkout's extension enabled:
 
 ```bash
-NESTED=$(mktemp -d)
-mkdir -p "$NESTED"/{config,cache,data/gnome-shell/extensions}
-ln -s "$PWD/gnome-shell/extensions/resource-pulse@dotfiles" "$NESTED/data/gnome-shell/extensions/"
-env XDG_CONFIG_HOME=$NESTED/config XDG_DATA_HOME=$NESTED/data XDG_CACHE_HOME=$NESTED/cache \
-  dbus-run-session -- bash -c "gsettings set org.gnome.shell enabled-extensions \"['resource-pulse@dotfiles']\" \
-  && gnome-shell --devkit --wayland"
+scripts/resource-pulse-nested.sh start        # prints the nested shell's private bus address
+scripts/resource-pulse-nested.sh eval 'Main.extensionManager.lookup("resource-pulse@dotfiles").state'
+scripts/resource-pulse-nested.sh screenshot card.png 2600 40 470 200   # x y width height, optional
+scripts/resource-pulse-nested.sh stop         # logs and screenshots stay in the run directory
 ```
 
-The private session bus keeps the `gsettings set` away from your real dconf database; compare
-`gsettings get org.gnome.shell enabled-extensions` before and after to be sure.
+Everything it creates is in one run directory under `$TMPDIR` (the path is printed): a private
+0700 runtime dir, HOME and XDG dirs, a private session bus that can activate only dconf, a fake
+empty system bus with a fake GDM, an `env -i` allowlist (no tokens, no live display or bus), nested
+settings that never lock, blank, use the network or check for extension updates, and the
+extension-update apps masked. Unsafe mode (which `eval` and `screenshot` need) comes from a
+throwaway helper extension that exists only in that directory and refuses to act anywhere else. A
+run lives at most 20 minutes (`setsid timeout`), and `stop` signals only processes in the run's own
+session. Any isolation step that fails stops the run with exit 2. It needs gnome-shell and a GPU,
+so CI does not run it; its hermetic rows are in the suite below.
 
 ### What it costs
 
@@ -148,7 +157,7 @@ skipped unit types.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (170 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (186 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.
