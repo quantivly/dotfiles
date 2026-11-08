@@ -1,7 +1,8 @@
 # systemd/claude-memory-sync.service
 # ==================================
 # One tick of the Claude Code memory sync (DO-892): link, then sync every store
-# checked out on this host. Guide: docs/CLAUDE_SETUP.md, "Memory stores".
+# checked out on this host. Guide: docs/CLAUDE_SETUP.md, "Syncing a store" and
+# "The tick".
 #
 # WHAT IT RUNS. Two steps, in this order:
 #   1. scripts/claude-memory-link.sh --apply   makes each project's `memory`
@@ -10,20 +11,27 @@
 #      file with a credential shape, merges its remote (never rebases) and
 #      pushes. Each header has the full rules.
 #
-# THE LINK STEP CANNOT STOP THE SYNC. It is ExecStartPre=-, so its exit 2 (could
-# not run) is ignored and the sync runs anyway: memory already linked keeps
-# travelling while one key is broken. That failure is then visible in ONE place
-# only, claude-doctor's "Memory stores" link row (the journal aside), and never
-# as a failed unit.
+# THE LINK STEP CANNOT STOP THE SYNC, by its exit status or by its time. It is
+# ExecStartPre=-, so its exit 2 (could not run) is ignored and the sync runs
+# anyway: memory already linked keeps travelling while one key is broken. And it
+# runs under `timeout 120`, whose exit 124 is ignored the same way, because the
+# `-` covers exit statuses only and TimeoutStartSec counts both steps: a link
+# step waiting on link.lock while a by-hand --apply holds it would otherwise
+# spend the sync's time. The link script bounds its own lock wait at 120 s too.
+# A link step that failed or ran out of time is then visible in ONE place only,
+# claude-doctor's "Memory stores" link row (the journal aside), and never as a
+# failed unit. 120 s is ample: a first --apply over about 3,000 files took 43 s,
+# and an interrupted merge resumes on the next tick.
 #
-# THE TIME LIMIT. The sync stops starting network work at its run deadline,
+# THE TIME LIMIT. The link step takes 125 s at most (timeout's 120 s, then its
+# kill 5 s later). The sync stops starting network work at its run deadline,
 # RUN_DEADLINE_SECONDS (240 s), but never cuts a step short, so a gh-route call
 # and a fetch that began just before it can add about 90 s: a worst case of about
-# 330 s, plus the local git work of the stores after it. 6 min leaves the rest for
-# the link step, which is local work. A limit under the worst case would kill a
-# slow but healthy run mid-step; no limit would let a hung one block every later
-# tick, since Type=oneshot has no start timeout by default and the timer does not
-# fire while the last run is still active.
+# 330 s, plus the local git work of the stores after it. Together about 455 s;
+# 8 min (480 s) leaves the rest for that local work. A limit under the worst
+# case would kill a slow but healthy run mid-step; no limit would let a hung one
+# block every later tick, since Type=oneshot has no start timeout by default and
+# the timer does not fire while the last run is still active.
 #
 # EXIT STATUS. The sync exits 0 or 2. A withheld file, a conflict copy, a blocked
 # merge, a rejected push, a missing token and an unreachable remote are all exit
@@ -63,6 +71,6 @@ Type=oneshot
 # tenant-route) is in /usr/bin; ~/.local/bin is first for a host that keeps one
 # there.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStartPre=-%h/.dotfiles/scripts/claude-memory-link.sh --apply
+ExecStartPre=-/usr/bin/timeout --kill-after=5 120 %h/.dotfiles/scripts/claude-memory-link.sh --apply
 ExecStart=%h/.dotfiles/scripts/claude-memory-sync.sh --apply
-TimeoutStartSec=6min
+TimeoutStartSec=8min

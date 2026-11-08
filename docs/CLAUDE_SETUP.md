@@ -370,7 +370,8 @@ store to be checked out here. No row of `--check` names them; `--list` does.
 
 `--apply` prints one line per key it acted on, and nothing on a second run:
 `linked <key> -> <store dir> (copied <n>, identical <n>, kept-both <n>)`. A real run holds an flock on
-`~/.local/state/claude-memory-sync/link.lock`, so another run waits for it.
+`~/.local/state/claude-memory-sync/link.lock`, so another run waits for it, 120 s at most
+(`CLAUDE_MEMORY_LOCK_WAIT_SECONDS`), and then is exit 2 naming the lock with nothing touched.
 
 | exit | meaning |
 |---|---|
@@ -500,7 +501,8 @@ merge produced, never from the working tree, so nothing the gate has not seen is
 **The run deadline.** All the stores together get 240 s (`RUN_DEADLINE_SECONDS`, measured on the
 kernel's monotonic uptime). A store that begins past it does no network work: it commits and records
 `unreachable`, `run deadline`. The deadline never cuts a step short, so a gh-route call and a fetch
-that began just before it can add 90 s: about 330 s at worst, which is why the unit allows 6 min.
+that began just before it can add 90 s: about 330 s at worst. With the link step's 125 s at most
+before it, that is why the unit allows 8 min.
 
 **The ten outcomes.** A store's last one is in `~/.local/state/claude-memory-sync/<store>.status`,
 and `<store>.last-ok` holds the time of the last push, or up-to-date check, that succeeded. `--apply`
@@ -523,19 +525,26 @@ exits 0 for every one but `could-not-run`: the rest are the doctor's to show.
 --status`, which only reads, and shows each line it prints as a row, `memory store <store>:
 <message>`:
 
-- ✗ when the last outcome is `withheld`, `blocked`, `auth-failed` or `could-not-run`; or when a store
+- ✗ when the last outcome is `withheld`, `blocked`, `auth-failed` or `could-not-run`; when a store
   with an origin has not synced within the threshold (`never synced; …`, or `last synced <n> min
-  ago, past the <t> min threshold; …`, naming the last outcome);
+  ago, past the <t> min threshold; …`, naming the last outcome); or when `--status` cannot read the
+  store at all, naming the reason (an origin that is not the table's `remote`, an origin git cannot
+  read, a status or last-ok file the sync did not write, a tree it cannot search), and nothing else
+  about that store;
 - ⚠ for `no remote yet` (`ok-local-only`); `push-rejected`, `unreachable` or `skipped-no-token`
   while the last success is still within the threshold; `no run recorded yet` for a store with no
   origin; `<n> conflict copies in the tree`; and, per directory, an index line naming a missing file
   or one file named by two index lines;
-- ✓ `last synced <n> min ago` otherwise.
+- ✓ `last synced <n> min ago` otherwise, or, for a store with no origin, `last outcome <outcome>`
+  with its detail.
 
-The threshold is the table's `stale_after_minutes`. When no store is checked out `--status` prints
-nothing and the doctor adds no row, the link rows' ⚠ having said so. When it could not run the row is
-⚠ `memory sync status could not be read: <last stderr line>`, and a line the doctor cannot read is
-shown whole as a ⚠.
+The threshold is the table's `stale_after_minutes`. A store the table names that is not checked out
+on this host is skipped, never a row: a host carries only the stores of the tenants it serves. When
+no store is checked out `--status` prints nothing and the doctor adds no row, the link rows' ⚠ having
+said so. `--status` exits 2 only when it could read nothing (no jq, a bad table or threshold, a state
+dir that exists and cannot be read); the row is then ⚠ `memory sync status could not be read: <last
+stderr line>`, with every stderr line before it printed indented under it. A line the doctor cannot
+read is shown whole as a ⚠.
 
 **Resolving a conflict copy.** `x.conflict-<host>.md` beside `x.md` holds this host's body, where
 origin's took the name. Merge the two bodies into `x.md` by hand, delete the copy, and let the next
@@ -558,8 +567,10 @@ the store reads `could-not-run: git commit failed`.
 `systemd/claude-memory-sync.service` and `.timer`, linked by `./install` and **not enabled**. Every
 10 minutes (`OnCalendar=*:0/10`, up to 60 s later at random, and a tick missed asleep runs once on
 resume) it runs `scripts/claude-memory-link.sh --apply`, then `scripts/claude-memory-sync.sh
---apply`, within 6 min. The link step is `ExecStartPre=-`: its failure never stops the sync and never
-fails the unit, so it shows only in the doctor's link row. The service runs only where
+--apply`, within 8 min. The link step is `ExecStartPre=-/usr/bin/timeout --kill-after=5 120 …`: its
+failure never stops the sync and never fails the unit, and neither does its running out of time,
+which the `-` alone would not cover (the unit's time limit counts both steps, and a link step can wait
+on a lock a by-hand run holds). Either shows only in the doctor's link row. The service runs only where
 `~/.local/share/claude-memory` exists. Both units' headers say why each value is what it is.
 
 **Arming**, by hand on each host, once the table and a store are there:
@@ -590,8 +601,8 @@ An armed timer on a host whose `~/.local/share/claude-memory` has gone is skippe
 `CLAUDE_MEMORY_GH_ROUTE`, `CLAUDE_MEMORY_LOCK_WAIT_SECONDS`, `CLAUDE_MEMORY_RUN_DEADLINE_SECONDS` and
 `CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS` override the sync's paths, host, route and limits.
 
-State tables: `scripts/test-claude-memory-link.sh` (205 rows) and `scripts/test-claude-memory-sync.sh`
-(99 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
+State tables: `scripts/test-claude-memory-link.sh` (206 rows) and `scripts/test-claude-memory-sync.sh`
+(103 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
 sync local bare repositories as remotes and a stub `gh-route` (CI `claude-memory-link-test` and
 `claude-memory-sync-test`). The doctor's rows are section AA of `scripts/test-claude-doctor.sh`, and
 `scripts/test-claude-config-audit.sh` pins that `claude-config-audit.sh` collects a linked `memory`

@@ -3934,8 +3934,10 @@ LINKED_SUMMARY=$'claude-memory-link: 7 linked, 0 to fix, 0 unmapped, 0 without a
 SYNC_OK_LINE=$'alpha\tok\tlast synced 3 min ago'
 SYNC_WARN_LINE=$'beta\twarn\tpush-rejected: ! [rejected] main -> main (fetch first)'
 SYNC_BAD_LINE=$'gamma\tbad\twithheld: notes/a\\tb.md (slack-token)'
-SYNC_STORE_REASON='claude-memory-sync: alpha: the status file is not one this script writes'
-SYNC_LAST_REASON='claude-memory-sync: could not finish 1 store(s): alpha'
+# An exit 2 as --status gives one when it can read nothing: a tool's own error,
+# then the script's. jq's is not silenced where the threshold is read.
+SYNC_EARLIER_LINE='jq: error: Could not open /x/memory-stores.json: Permission denied'
+SYNC_LAST_REASON='claude-memory-sync: could not read stale_after_minutes from /x/memory-stores.json'
 # memory_section_of_output — the doctor's "Memory stores" section, less its
 # header, the next section's header and blank lines.
 memory_section_of_output() {
@@ -3952,12 +3954,16 @@ want_out "...and a bad line a ✗, its escaped tab kept as written" '✗ memory 
 want_rc  "...and the ✗ fails the doctor"          1
 if [[ "$(cat "$SYNC_CALLS")" == "--status" ]]; then ok "...and the sync script is asked by --status alone: the doctor never applies"; else bad "...and the sync script is asked by --status alone — the stub saw: $(cat "$SYNC_CALLS")"; fi
 
-# Exit 2 is the script's could-not-run: a store it could not read is named on
-# stderr, and the stores it could read are still printed on stdout.
+# Exit 2 is the script's could-not-run, kept for a run that could read nothing
+# (a store it cannot read is a bad line of its own). The ⚠ carries the last
+# stderr line and every line before it is printed under it, so a reason given
+# on an earlier line is never lost. A store line printed before the exit is
+# still shown: --status prints none today, but the doctor drops no line it gets.
 new_home ms19; write_cred; mk_memory_table; mk_link_stub 0 "$LINKED_SUMMARY" ''
-mk_sync_stub 2 $'beta\tok\tlast synced 1 min ago\n' "$SYNC_STORE_REASON"$'\n'"$SYNC_LAST_REASON"$'\n'
+mk_sync_stub 2 $'beta\tok\tlast synced 1 min ago\n' "$SYNC_EARLIER_LINE"$'\n'"$SYNC_LAST_REASON"$'\n'
 DROOT="$MEMORY_ROOT" run_doctor
 want_out "sync: exit 2 is a ⚠ carrying the last stderr line" "⚠ memory sync status could not be read: $SYNC_LAST_REASON"
+want_out "...with each line before it printed under the ⚠, indented" "⚠ memory sync status could not be read: $SYNC_LAST_REASON"$'\n'"    $SYNC_EARLIER_LINE"
 want_out "...and the stores it did report are still shown"  "✓ memory store beta: last synced 1 min ago"
 
 # Section Z's trap again: one stderr line with no final newline.
@@ -4016,7 +4022,7 @@ if [[ ! -s "$SYNC_CALLS" ]]; then ok "sync: no store table and the sync script i
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=598
+EXPECTED_ROWS=599
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

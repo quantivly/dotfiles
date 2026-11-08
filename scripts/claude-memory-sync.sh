@@ -154,7 +154,11 @@
 # and bad:
 #   bad    the last outcome is withheld, blocked, auth-failed or could-not-run, naming the file or
 #          reason; or the store has an origin and its last-ok is missing or older than the threshold,
-#          with the last outcome and detail
+#          with the last outcome and detail; or the store cannot be read at all (an origin that is not
+#          the table's remote, an origin git cannot read, a status or last-ok file this script did not
+#          write, a tree it cannot search), naming the reason through the redactor, and nothing else is
+#          said about that store. A store the table names that is not checked out here is skipped,
+#          never a bad line: a host carries only the stores of the tenants it serves
 #   warn   the last outcome is ok-local-only (no remote yet); push-rejected, unreachable or
 #          skipped-no-token while last-ok is still within the threshold; no run recorded for a store
 #          with no origin; any conflict copy in the tree, counted; an index line (MEMORY.md, INDEX_*.md)
@@ -188,16 +192,17 @@
 #                    later stores still run
 #   claude-memory-sync --status [--store <name>]
 #                    `<store><TAB><level><TAB><message>` lines, one or more per checked-out store, levels
-#                    ok, warn and bad (this script's header says when each is printed). Never writes,
-#                    never fetches, takes no lock
+#                    ok, warn and bad (this script's header says when each is printed); a store it cannot
+#                    read is a bad line, and the stores after it are still read. Never writes, never
+#                    fetches, takes no lock
 #   claude-memory-sync --help    this text
 #   --store limits any verb to that store; a name the table does not hold is exit 2.
 #
 # Exit: 0 ok, or no store table here (nothing to do)
 #       1 attention on --check and --scan
 #       2 could not run (HOME unset, no jq, git or sha256sum, a bad store table, an unknown --store, a
-#         revision that does not resolve, an origin that is not the table's remote, an unusable host
-#         name; on --apply also no flock or timeout, a gh-route that is not executable or could not
+#         revision that does not resolve, an origin that is not the table's remote (but on --status a
+#         bad line), an unusable host name; on --apply also no flock or timeout, a gh-route that is not executable or could not
 #         answer in time, an unusable lock wait, run deadline or gh-route limit, a lock still held when
 #         the wait ran out, a merge, cherry-pick, revert or rebase in progress, unmerged index entries
 #         or a detached HEAD, a conflict the sync does not resolve, and a lock, stage, gate, commit,
@@ -205,7 +210,9 @@
 #       64 usage
 #   --apply exits only 0 or 2: a withheld file, a conflict copy, a blocked merge, a rejected push, a
 #   missing token or an unreachable remote is a status for the doctor, not a failed unit. --status
-#   exits 0 whatever levels it prints.
+#   exits 0 whatever levels it prints, a store it cannot read included (a bad line), and 2 only when it
+#   could read nothing: HOME unset, no jq, git or sha256sum, a bad store table or threshold, an unknown
+#   --store, an unusable host name, or a state dir that exists and cannot be read.
 #
 # Overrides: CLAUDE_MEMORY_STORES_ROOT (default ~/.local/share/claude-memory), CLAUDE_MEMORY_CONFIG
 # (~/.dotfiles-local/claude/memory-stores.json), CLAUDE_MEMORY_STATE_DIR
@@ -636,9 +643,15 @@ write_status() {
 }
 
 # report_store_failure STORE REASON — the store could not run: say why, count it, and on --apply
-# record could-not-run as its status. --check and --scan write nothing.
+# record could-not-run as its status. --check and --scan write nothing. --status instead prints a bad
+# line naming the reason and does not count the store: a store it cannot read is a finding about that
+# store, and its exit 2 is kept for a run that could read nothing.
 report_store_failure() {
     local store=$1 reason=$2
+    if [[ "$MODE" == status ]]; then
+        print_status_line "$store" "$STATUS_LEVEL_BAD" "$(redacted_text "$reason")"
+        return 0
+    fi
     printf '%s: %s: %s\n' "$SCRIPT_NAME" "$store" "$reason" >&2
     FAILED_STORES+=("$store")
     if [[ "$MODE" == apply ]]; then write_status "$store" "$OUTCOME_COULD_NOT_RUN" "$reason"; fi
@@ -1840,7 +1853,14 @@ main() {
         # on its own.
         export GIT_OPTIONAL_LOCKS=0
     fi
-    if [[ "$MODE" == status ]]; then settle_stale_after_minutes; fi
+    if [[ "$MODE" == status ]]; then
+        settle_stale_after_minutes
+        # A state dir that is not there yet means no run yet; one that is there and cannot be read would
+        # make every store read as never synced.
+        if [[ -e "$STATE_DIR" ]] && ! [[ -d "$STATE_DIR" && -r "$STATE_DIR" && -x "$STATE_DIR" ]]; then
+            die "the state dir $STATE_DIR cannot be read"
+        fi
+    fi
     for store in "${STORE_NAMES[@]}"; do
         if [[ -n "$ONLY_STORE" && "$store" != "$ONLY_STORE" ]]; then continue; fi
         store_dir="$STORES_ROOT/$store"

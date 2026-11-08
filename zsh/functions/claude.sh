@@ -1318,12 +1318,13 @@ _claude_doctor_memory_stores() {
 # can be checked out on a host whose keys wait for another. With no store here it
 # prints nothing at exit 0, which adds no row, and the link rows' ⚠ already says
 # no store is checked out. A line the doctor cannot read is shown whole as a ⚠,
-# never dropped; an exit other than 0 is a ⚠ with the last stderr line, after
-# the rows for the stores it could read.
+# never dropped. A store --status cannot read is its own bad line, so an exit
+# other than 0 means it could read nothing: a ⚠ with the last stderr line and
+# every line before it indented under it, after any rows it did print.
 _claude_doctor_memory_sync_status() {
   local sync_script="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/claude-memory-sync.sh"
   local captured_streams status_stdout status_rc last_stderr_line status_line
-  local store level message after_store
+  local store level message after_store status_stderr_line
   local -a stream_parts status_stderr_lines status_lines
   # The link rows' two-stream capture: see the comments there.
   captured_streams="$( ( status_stdout="$("$sync_script" --status)"; status_rc=$?; printf '\0%s\0%d' "$status_stdout" "$status_rc" ) 2>&1 )"
@@ -1348,6 +1349,12 @@ _claude_doctor_memory_sync_status() {
   done
   if [[ "$status_rc" != 0 ]]; then
     _doctor_warn "memory sync status could not be read: ${last_stderr_line:-exit $status_rc}"
+    # Every line before the last, which the ⚠ carries, indented under it as the
+    # link rows print theirs: a reason given on an earlier line is never lost.
+    # printf, never echo: zsh's echo would turn an escaped \t back into a tab.
+    for status_stderr_line in "${(@)status_stderr_lines[1,-2]}"; do
+      printf '    %s\n' "$status_stderr_line"
+    done
   fi
 }
 

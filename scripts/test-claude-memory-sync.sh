@@ -1646,6 +1646,38 @@ check "status: an index line naming a missing file, or one file named by two ind
     "$RC|$OUT" \
     "0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago${NL}$ALPHA_STORE${TAB}warn${TAB}.: 1 index lines name a missing file, 0 files are named by more than one index line${NL}$ALPHA_STORE${TAB}warn${TAB}repos/$FIXTURE_OWNER/demo: 1 index lines name a missing file, 1 files are named by more than one index line"
 
+# A store --status cannot read is one of its own lines, so the doctor names it with the reason; exit 2
+# is kept for a run that could read nothing at all.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+make_beta_tracked_store
+git -C "$BETA_DIR" remote set-url origin "$OTHER_REMOTE" || fatal "could not repoint the beta store's origin"
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus 0)"
+run_sut --status
+check "status: a store it cannot read is a bad line naming the reason, the other stores are still read, exit 0" \
+    "$RC|$OUT" \
+    "0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago${NL}$BETA_STORE${TAB}bad${TAB}origin is not the table's remote"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus 0)"
+# A PATH holding only what the script runs before it looks for jq.
+NO_JQ_BIN_DIR="$TMPROOT/no-jq-bin"
+mkdir -p "$NO_JQ_BIN_DIR" || fatal "could not create the no-jq bin directory"
+for tool in bash dirname; do ln -sf "$(command -v "$tool")" "$NO_JQ_BIN_DIR/$tool" || fatal "could not link $tool"; done
+PATH="$NO_JQ_BIN_DIR" run_sut --status
+check "status: no jq is still exit 2, naming it" "$RC|$(contains "$OUT" 'jq is required')" "2|yes"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus 0)"
+chmod 000 "$STATE_DIR" || fatal "could not make the state dir unreadable"
+run_sut --status
+unreadable_state_result="$RC|$(contains "$OUT" "the state dir $STATE_DIR cannot be read")|$(contains "$OUT" "${TAB}bad${TAB}")"
+chmod 755 "$STATE_DIR" || fatal "could not make the state dir readable again"
+check "status: a state dir it cannot read is exit 2 naming it, never a store reading as never synced" \
+    "$unreadable_state_result" "2|yes|no"
+
 # ---------------------------------------------------------------------------------------------
 # units: the tick, and the two links ./install makes for it
 # ---------------------------------------------------------------------------------------------
@@ -1654,21 +1686,22 @@ printf 'units: the service, the timer and their links\n'
 SYNC_SERVICE_UNIT="$DOTFILES/systemd/claude-memory-sync.service"
 SYNC_TIMER_UNIT="$DOTFILES/systemd/claude-memory-sync.timer"
 UNIT_COPIES_DIR="$TMPROOT/units"
-# The directives that carry a decision, as the service must hold them: the dash on ExecStartPre is what
-# lets a failed link step leave the sync to run, and 6 min outlasts the run's worst case of about 330 s.
+# The directives that carry a decision, as the service must hold them: the dash on ExecStartPre lets a
+# failed link step leave the sync to run, the timeout keeps a link step that hangs from spending the
+# sync's time, and 8 min outlasts both worst cases together, about 125 s and 330 s.
 EXPECTED_SERVICE_DIRECTIVES="ConditionPathExists=%h/.local/share/claude-memory
 Type=oneshot
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStartPre=-%h/.dotfiles/scripts/claude-memory-link.sh --apply
+ExecStartPre=-/usr/bin/timeout --kill-after=5 120 %h/.dotfiles/scripts/claude-memory-link.sh --apply
 ExecStart=%h/.dotfiles/scripts/claude-memory-sync.sh --apply
-TimeoutStartSec=6min"
+TimeoutStartSec=8min"
 SERVICE_DIRECTIVE_ERE='^(Condition[A-Za-z]*|Type|Environment|ExecStartPre|ExecStart|TimeoutStartSec)='
 EXPECTED_TIMER_DIRECTIVES="OnCalendar=*:0/10
 RandomizedDelaySec=60
 Persistent=true
 WantedBy=default.target"
 TIMER_DIRECTIVE_ERE='^(On[A-Za-z]*|RandomizedDelaySec|Persistent|WantedBy)='
-check "units: the service runs the link step, which cannot stop it, then the sync's --apply, within 6 min" \
+check "units: the service runs the bounded link step, which cannot stop it, then the sync's --apply, within 8 min" \
     "$(grep -E "$SERVICE_DIRECTIVE_ERE" "$SYNC_SERVICE_UNIT")" "$EXPECTED_SERVICE_DIRECTIVES"
 check "units: the timer fires every 10 min, catching up a missed tick, wanted by default.target" \
     "$(grep -E "$TIMER_DIRECTIVE_ERE" "$SYNC_TIMER_UNIT")" "$EXPECTED_TIMER_DIRECTIVES"
@@ -1678,16 +1711,27 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     # same unit text, commands that exist. The row above pins the real paths. The timer is verified
     # next to it, by name.
     mkdir -p "$UNIT_COPIES_DIR"
-    sed -e "s#^ExecStartPre=-%h/.dotfiles/scripts/#ExecStartPre=-$DOTFILES/scripts/#" \
-        -e "s#^ExecStart=%h/.dotfiles/scripts/#ExecStart=$DOTFILES/scripts/#" "$SYNC_SERVICE_UNIT" \
+    sed -e "/^ExecStart/s#%h/.dotfiles/scripts/#$DOTFILES/scripts/#" "$SYNC_SERVICE_UNIT" \
         > "$UNIT_COPIES_DIR/claude-memory-sync.service"
     cp "$SYNC_TIMER_UNIT" "$UNIT_COPIES_DIR/claude-memory-sync.timer"
     check "units: systemd-analyze verify accepts both (both commands pointed at this checkout)" \
         "$(systemd-analyze verify --man=no --recursive-errors=no "$UNIT_COPIES_DIR/claude-memory-sync.service" \
             "$UNIT_COPIES_DIR/claude-memory-sync.timer" >/dev/null 2>&1 && echo ok || echo bad)" ok
+elif [[ -n "${CI:-}" ]]; then
+    # CI is where this row is meant to run, so a runner without the tool is a failure, never a skip.
+    bad "units: systemd-analyze verify accepts both — systemd-analyze is missing on CI"
 else
     ok "units: systemd-analyze absent here; CI runs it"
 fi
+# Linked and nothing more: a host arms the timer by hand, so no line of ./install or of its config
+# (comments aside) may enable it.
+if [[ -r "$DOTFILES/install" && -r "$DOTFILES/install.conf.yaml" ]]; then
+    enabling_lines=$(cat "$DOTFILES/install" "$DOTFILES/install.conf.yaml" | grep -v '^[[:space:]]*#' \
+        | grep -c 'enable.*claude-memory-sync')
+else
+    enabling_lines='install or install.conf.yaml is unreadable'
+fi
+check "units: neither ./install nor install.conf.yaml enables claude-memory-sync" "$enabling_lines" 0
 # shellcheck disable=SC2088  # the tilde is the literal text of the yaml line, not a path
 check "install.conf.yaml links the service (linked, not enabled)" \
     "$(grep -c '^    ~/.config/systemd/user/claude-memory-sync.service: systemd/claude-memory-sync.service$' "$DOTFILES/install.conf.yaml")" 1
@@ -1696,7 +1740,7 @@ check "install.conf.yaml links the timer" \
     "$(grep -c '^    ~/.config/systemd/user/claude-memory-sync.timer: systemd/claude-memory-sync.timer$' "$DOTFILES/install.conf.yaml")" 1
 
 printf '\n'
-EXPECTED_ROWS=99
+EXPECTED_ROWS=103
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

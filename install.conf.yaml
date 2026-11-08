@@ -193,7 +193,9 @@
     # claude-memory-sync (DO-892): every 10 min, link Claude Code memory into its
     # stores and sync each store with its remote. Linked, NOT enabled: it pushes
     # to a remote unattended, so it is armed by hand on each host after reading
-    # one `scripts/claude-memory-sync.sh --check` --
+    # what its first tick would do --
+    #   scripts/claude-memory-link.sh --apply --dry-run
+    #   scripts/claude-memory-sync.sh --check
     #   systemctl --user enable --now claude-memory-sync.timer
     # Its ConditionPathExists=%h/.local/share/claude-memory makes systemd SKIP it
     # on a host with no store checked out.

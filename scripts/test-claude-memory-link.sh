@@ -30,6 +30,8 @@ mkdir -p "$HOME"
 export HOME
 # A row run from a git hook would otherwise point every fixture git at the hook's repository.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+# The caller's lock wait would otherwise reach every --apply; the row about it sets its own.
+unset CLAUDE_MEMORY_LOCK_WAIT_SECONDS
 GIT_CONFIG_GLOBAL="$TMPROOT/gitconfig-global"
 GIT_CONFIG_SYSTEM="$TMPROOT/gitconfig-system"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
@@ -1711,6 +1713,32 @@ PATH="$STUB_BIN:$PATH" run_sut --apply
 check "lock: a lock that cannot be taken is exit 2, with nothing touched" \
     "$RC|$(contains "$OUT" "could not take the lock $STATE_DIR/link.lock")|$(tree_fingerprint)" "2|yes|$tree_before"
 
+# The wait is bounded, so a link step on the sync's timer cannot spend the sync's time on a lock a
+# by-hand run holds. The holder keeps the lock past the row's wait of one second.
+LOCK_WAIT_ROW_SECONDS=1
+LOCK_HOLD_PAST_WAIT_SECONDS=3
+apply_scene lock-wait-runs-out
+write_file "$memory_dir/MEMORY.md" '- index'
+mkdir -p "$STATE_DIR" || fatal "could not create the state dir"
+lock_taken_file="$TMPROOT/lock-taken"
+rm -f "$lock_taken_file"
+# shellcheck disable=SC2016  # expanded by the bash -c, not this one
+flock "$STATE_DIR/link.lock" bash -c ': > "$1"; sleep "$2"' _ "$lock_taken_file" "$LOCK_HOLD_PAST_WAIT_SECONDS" &
+lock_holder_pid=$!
+for (( lock_wait_step = 0; lock_wait_step < 100; lock_wait_step++ )); do
+    [[ -e "$lock_taken_file" ]] && break
+    sleep 0.05
+done
+[[ -e "$lock_taken_file" ]] || fatal "the row's lock holder never took the lock"
+tree_before=$(tree_fingerprint)
+CLAUDE_MEMORY_LOCK_WAIT_SECONDS=$LOCK_WAIT_ROW_SECONDS run_sut_bounded --apply
+held_lock_result="$RC|$(contains "$OUT" "still held the lock $STATE_DIR/link.lock")|$(tree_fingerprint)"
+CLAUDE_MEMORY_LOCK_WAIT_SECONDS=soon run_sut_bounded --apply
+check "lock: a lock still held when the wait runs out is exit 2 naming it, with nothing renamed; a wait that is not whole seconds is exit 2" \
+    "$held_lock_result|$RC|$(contains "$OUT" 'CLAUDE_MEMORY_LOCK_WAIT_SECONDS')|$(tree_fingerprint)" \
+    "2|yes|$tree_before|2|yes|$tree_before"
+wait "$lock_holder_pid"
+
 printf 'apply: a failure stops only what failed\n'
 apply_scene bad-file-keeps-going
 write_file "$store_dir/aa" 'a file in the way'
@@ -2428,7 +2456,7 @@ done
 check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
 
 printf '\n'
-EXPECTED_ROWS=205
+EXPECTED_ROWS=206
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

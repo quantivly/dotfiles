@@ -150,7 +150,8 @@
 #                                or `merged` for that line when the key finished a merge and keeps a
 #                                link that points elsewhere. A key that fails prints its reasons on
 #                                stderr instead. A second run prints nothing. Holds an flock on
-#                                <state dir>/link.lock; another run waits for it.
+#                                <state dir>/link.lock; another run waits for it 120 s at most
+#                                (CLAUDE_MEMORY_LOCK_WAIT_SECONDS), then is exit 2 naming the lock.
 #                                --dry-run prints the same lines and changes nothing, so it takes no
 #                                lock: creating the lock file would be a change.
 #                                --only limits the run to one key; one no candidate claims is exit 2.
@@ -160,8 +161,9 @@
 #       1 attention on --check
 #       2 could not run (HOME unset, no jq or git, a bad store table, tenant-route or git could not
 #         answer, a key two stores share, an unreadable projects or key directory, a memory entry that
-#         is neither a directory nor a symlink; on --apply also no flock or cmp, an unusable host name,
-#         and any step of a swap or a merge that failed, reported once the other keys have run)
+#         is neither a directory nor a symlink; on --apply also no flock or cmp, an unusable host name
+#         or lock wait, a lock still held when the wait ran out, and any step of a swap or a merge that
+#         failed, reported once the other keys have run)
 #       64 usage
 #
 # Needs bash 4.4: associative arrays (4.0), a nameref (4.3), and `wait` on a process substitution
@@ -170,7 +172,8 @@
 # Overrides: CLAUDE_MEMORY_PROJECTS_DIR (default ~/.claude/projects), CLAUDE_MEMORY_STORES_ROOT
 # (~/.local/share/claude-memory), CLAUDE_MEMORY_CONFIG (~/.dotfiles-local/claude/memory-stores.json),
 # CLAUDE_MEMORY_STATE_DIR (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the
-# host in a conflict copy's name), CLAUDE_MEMORY_TENANT_ROUTE (the sibling scripts/tenant-route).
+# host in a conflict copy's name), CLAUDE_MEMORY_TENANT_ROUTE (the sibling scripts/tenant-route),
+# CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long --apply waits for link.lock; a whole number above 0).
 
 set -uo pipefail
 
@@ -189,6 +192,12 @@ REPLACED_DIR_INFIX='.replaced-'
 MERGED_MARKER_NAME='.merged-into-store'
 REPLACED_STAMP_FORMAT='+%Y%m%dT%H%M%SZ'
 LINK_LOCK_FILE_NAME='link.lock'
+# How long --apply waits for link.lock, so a run on the sync's timer cannot spend the sync's time on a
+# lock a by-hand run holds. The sync waits for the same lock as long, under the same override.
+LOCK_WAIT_SECONDS_DEFAULT=120
+LOCK_WAIT_SECONDS_RE='^[1-9][0-9]*$'
+# What flock -w is told to exit with (-E) when the wait runs out, apart from its own failures.
+FLOCK_WAIT_RAN_OUT_STATUS=75
 MAX_LINK_RETRIES=3
 INDEX_FILE_NAME='MEMORY.md'
 TOPIC_INDEX_FILE_GLOB='INDEX_*.md'
@@ -1147,14 +1156,22 @@ apply_all_keys() {
 # prepare_apply — settle the host name and, on a real run, wait for the lock. Everything that reads a
 # key's state happens after this, so a run that waited sees what the previous run left.
 prepare_apply() {
-    local lock_path="$STATE_DIR/$LINK_LOCK_FILE_NAME" link_lock_fd
+    local lock_path="$STATE_DIR/$LINK_LOCK_FILE_NAME" link_lock_fd flock_status
+    local lock_wait_seconds="${CLAUDE_MEMORY_LOCK_WAIT_SECONDS:-$LOCK_WAIT_SECONDS_DEFAULT}"
     HOST_NAME=${CLAUDE_MEMORY_HOST:-$(hostname -s)}
     [[ "$HOST_NAME" =~ $HOST_NAME_RE ]] || die "host name '$HOST_NAME' cannot go in a file name"
+    [[ "$lock_wait_seconds" =~ $LOCK_WAIT_SECONDS_RE ]] \
+        || die "CLAUDE_MEMORY_LOCK_WAIT_SECONDS '$lock_wait_seconds' is not a whole number of seconds above 0"
     (( ! IS_DRY_RUN )) || return 0
     mkdir -p -- "$STATE_DIR" || die "could not create $STATE_DIR"
     # The descriptor stays open after this function returns, and with it the lock, until the run ends.
     exec {link_lock_fd}>> "$lock_path" || die "could not open the lock $lock_path"
-    flock "$link_lock_fd" || die "could not take the lock $lock_path"
+    flock -E "$FLOCK_WAIT_RAN_OUT_STATUS" -w "$lock_wait_seconds" "$link_lock_fd"
+    flock_status=$?
+    if (( flock_status == FLOCK_WAIT_RAN_OUT_STATUS )); then
+        die "another run still held the lock $lock_path after $lock_wait_seconds s"
+    fi
+    (( flock_status == 0 )) || die "could not take the lock $lock_path"
 }
 
 # ---------------------------------------------------------------------------------------------

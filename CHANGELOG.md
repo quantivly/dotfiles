@@ -21,14 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.conflict-<host>` copy, an index takes the union of its lines, an edit beats a deletion); then one
   push. A run starts no network work past 240 s and never cuts a step short. Each store's outcome,
   one of ten, goes to `~/.local/state/claude-memory-sync/<store>.status`, and `--apply` exits 0 for
-  every one but `could-not-run`; `--check`, `--scan` and `--status` only read.
-  `systemd/claude-memory-sync.{service,timer}` run the link script's `--apply`, whose failure never
-  stops the sync, then the sync's, every 10 minutes within 6 min. `install.conf.yaml` gains two links
-  for them and enables neither: a host arms the timer by hand. `claude-doctor`'s "Memory stores"
-  section gains a row per `--status` line (✓ ok, ⚠ warn, ✗ bad, the message whole), and a ⚠ when
-  `--status` could not run. Guide: `docs/CLAUDE_SETUP.md` ("Syncing a store", "The tick"). State
-  table: `scripts/test-claude-memory-sync.sh` (99 rows, hermetic: local bare repositories as remotes,
-  a stub `gh-route`; CI `claude-memory-sync-test`), and 14 rows in `scripts/test-claude-doctor.sh`.
+  every one but `could-not-run`; `--check`, `--scan` and `--status` only read. `--status` reports a
+  store it cannot read (an origin that is not the table's remote, say) as a bad line naming the
+  reason and goes on, and exits 2 only when it could read nothing.
+  `systemd/claude-memory-sync.{service,timer}` run the link script's `--apply` under `timeout 120`,
+  so neither its failure nor its time stops the sync, then the sync's, every 10 minutes within
+  8 min. The link script's own wait for `link.lock` is bounded too, 120 s by default
+  (`CLAUDE_MEMORY_LOCK_WAIT_SECONDS`), then exit 2 naming the lock. `install.conf.yaml` gains two
+  links for them and enables neither: a host arms the timer by hand. `claude-doctor`'s "Memory
+  stores" section gains a row per `--status` line (✓ ok, ⚠ warn, ✗ bad, the message whole), and a ⚠
+  when `--status` could not run, with every stderr line under it. Guide: `docs/CLAUDE_SETUP.md`
+  ("Syncing a store", "The tick"). State table: `scripts/test-claude-memory-sync.sh` (103 rows,
+  hermetic: local bare repositories as remotes, a stub `gh-route`; CI `claude-memory-sync-test`), and
+  15 rows in `scripts/test-claude-doctor.sh`.
 
 - **`scripts/claude-memory-link.sh` links Claude Code's memory directories into git-backed stores,
   on a host with a store table (DO-891).** The link half of D7 in the shared-configuration design
@@ -49,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UNMAPPED` row, ⚠ when no store is checked out and keys wait for one, ⚠ could not run).
   `scripts/redact-secrets.sh` gains `--shapes-only` for at-rest gates, and refuses a second
   argument with exit 64. Guide: `docs/CLAUDE_SETUP.md` ("Memory stores"). State table:
-  `scripts/test-claude-memory-link.sh` (205 rows, hermetic; CI `claude-memory-link-test`), 41 rows
+  `scripts/test-claude-memory-link.sh` (206 rows, hermetic; CI `claude-memory-link-test`), 41 rows
   in `scripts/test-claude-doctor.sh`, and one in `scripts/test-claude-config-audit.sh` pinning that
   a linked `memory` is collected by content.
 
