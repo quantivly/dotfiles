@@ -3,12 +3,30 @@ import {
     formatGibibytes, formatWholePercent, memoryLine, swapLine, swapAmount, clusterSuffix, pressureMeter,
     waitingOnLine, ellipsize, heaviestLine, hoverLabel, cardText,
 } from '../extensions/resource-pulse@dotfiles/lib/format.js';
-import {cardPosition} from '../extensions/resource-pulse@dotfiles/lib/layout.js';
+import {cardPosition, hoverLabelPosition} from '../extensions/resource-pulse@dotfiles/lib/layout.js';
 
 const GIB = 1024 ** 3;
 const CARD_WIDTH_PX = 340;
 const CARD_MARGIN_PX = 24;
 const SECOND_MONITOR_X_PX = 1536;
+// The hover label's rows: a 1536 px wide monitor, a 32 px panel, the indicator's size, the label's width as the
+// nested run measured it, and the stylesheet's 8 px gap under the indicator.
+const MONITOR_WIDTH_PX = 1536;
+const INDICATOR_WIDTH_PX = 88;
+const INDICATOR_HEIGHT_PX = 32;
+const HOVER_LABEL_WIDTH_PX = 236;
+const HOVER_LABEL_GAP_PX = 8;
+const LEFT_MONITOR = {x: 0, width: MONITOR_WIDTH_PX};
+/** A monitor to the right of a 1920 px wide one, so it is not the leftmost. */
+const RIGHT_MONITOR = {x: 1920, width: MONITOR_WIDTH_PX};
+
+/**
+ * The indicator's stage rectangle at a given x, in the top bar.
+ *
+ * @param {number} x - Its left edge.
+ * @returns {{x: number, y: number, width: number, height: number}} The rectangle.
+ */
+const indicatorAt = x => ({x, y: 0, width: INDICATOR_WIDTH_PX, height: INDICATOR_HEIGHT_PX});
 
 /**
  * Builds a swap summary in the shape lib/memory.js produces.
@@ -179,3 +197,22 @@ test('cardPosition on a monitor that does not start at x 0 offsets by the work a
         {x: 2708, y: 56}));
 test('cardPosition clamps x to the work area when the card is wider than it', () =>
     assertEqual(cardPosition({x: 100, y: 0, width: 300, height: 600}, CARD_WIDTH_PX, CARD_MARGIN_PX), {x: 100, y: 24}));
+
+test('hoverLabelPosition: centred below the indicator, the gap under it', () =>
+    assertEqual(hoverLabelPosition(indicatorAt(1000), HOVER_LABEL_WIDTH_PX, HOVER_LABEL_GAP_PX, LEFT_MONITOR),
+        {x: 926, y: 40}));
+test('hoverLabelPosition: on a primary that is not the rightmost monitor, a label wider than the space to its ' +
+    'right edge stops at that edge, not at the stage\'s', () =>
+    // Centred it would start at 1366 and run onto the monitor to the right; the stage is 3456 px wide.
+    assertEqual(hoverLabelPosition(indicatorAt(1440), HOVER_LABEL_WIDTH_PX, HOVER_LABEL_GAP_PX, LEFT_MONITOR),
+        {x: 1300, y: 40}));
+test('hoverLabelPosition: on a monitor right of another, the label never crosses onto the left one', () =>
+    // Centred it would start at 1856, on the monitor to the left; the stage's left edge (0) is no limit here.
+    assertEqual(hoverLabelPosition(indicatorAt(1930), HOVER_LABEL_WIDTH_PX, HOVER_LABEL_GAP_PX, RIGHT_MONITOR),
+        {x: 1920, y: 40}));
+test('hoverLabelPosition: a label wider than its monitor starts at the monitor\'s left edge', () =>
+    assertEqual(hoverLabelPosition(indicatorAt(1930), HOVER_LABEL_WIDTH_PX, HOVER_LABEL_GAP_PX,
+        {x: RIGHT_MONITOR.x, width: 200}), {x: 1920, y: 40}));
+test('hoverLabelPosition: a fractional width or gap lands on whole pixels, still inside the monitor', () =>
+    // Flush right the label would start at 1300.5; whole pixels round that left, to 1300, never past the edge.
+    assertEqual(hoverLabelPosition(indicatorAt(1500), 235.5, 8.5, LEFT_MONITOR), {x: 1300, y: 40}));

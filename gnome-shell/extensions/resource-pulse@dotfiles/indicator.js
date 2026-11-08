@@ -20,6 +20,7 @@ import {
     MEMORY_GRAPH_RGBA, RESOURCES_APP_IDS, TOPBAR_GRAPH_HEIGHT_PX, TOPBAR_GRAPH_WIDTH_PX, TOPBAR_HISTORY_SAMPLES,
 } from './lib/constants.js';
 import {hoverLabel} from './lib/format.js';
+import {hoverLabelPosition} from './lib/layout.js';
 
 const ACCESSIBLE_NAME = 'Resource Pulse';
 /** PanelMenu.Button's menu alignment; unused, since the button has no menu. */
@@ -36,6 +37,10 @@ const GRAPH_HEIGHT_STYLE = `height: ${TOPBAR_GRAPH_HEIGHT_PX}px;`;
 const GRAPH_SIZE_STYLE = `${GRAPH_WIDTH_STYLE} ${GRAPH_HEIGHT_STYLE}`;
 const TRANSPARENT_OPACITY = 0;
 const OPAQUE_OPACITY = 255;
+/** Clutter's for_height of -1: the label's width for its own height, with no height constraint. */
+const UNCONSTRAINED_HEIGHT = -1;
+/** The stage's left edge, for the fallback when the indicator is on no monitor. */
+const STAGE_LEFT_EDGE_PX = 0;
 
 export const PulseIndicator = GObject.registerClass(
 class PulseIndicator extends PanelMenu.Button {
@@ -221,22 +226,29 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
-     * Centres the hover label below the indicator, kept on screen, as the dash places its labels.
+     * Centres the hover label below the indicator, kept inside the indicator's monitor (lib/layout.js
+     * hoverLabelPosition). Called only after the label's text is set, and it measures the label's natural width
+     * for that text: get_width() can still answer with the allocation of the previous text, which put the label
+     * off-centre by a pixel or two.
      *
      * @returns {void}
      */
     _placeHoverLabel() {
         const label = this._hoverLabel;
         const [indicatorX, indicatorY] = this.get_transformed_position();
-        const indicatorWidth = this.allocation.get_width();
-        const indicatorHeight = this.allocation.get_height();
-        const labelWidth = label.get_width();
-        const centredX = Math.floor(indicatorX + (indicatorWidth - labelWidth) / 2);
-        const rightmostX = global.stage.width - labelWidth;
-        const labelX = Math.min(Math.max(centredX, 0), rightmostX);
-        const yOffsetPx = label.get_theme_node().get_length(HOVER_LABEL_Y_OFFSET_PROPERTY);
-        const labelY = Math.floor(indicatorY + indicatorHeight + yOffsetPx);
-        label.set_position(labelX, labelY);
+        const indicatorRect = {
+            x: indicatorX,
+            y: indicatorY,
+            width: this.allocation.get_width(),
+            height: this.allocation.get_height(),
+        };
+        const [, labelNaturalWidthPx] = label.get_preferred_width(UNCONSTRAINED_HEIGHT);
+        // findMonitorForActor answers null only for an actor on no monitor; the whole stage is the fallback then.
+        const monitorRect = Main.layoutManager.findMonitorForActor(this) ??
+            {x: STAGE_LEFT_EDGE_PX, width: global.stage.width};
+        const gapPx = label.get_theme_node().get_length(HOVER_LABEL_Y_OFFSET_PROPERTY);
+        const {x, y} = hoverLabelPosition(indicatorRect, labelNaturalWidthPx, gapPx, monitorRect);
+        label.set_position(x, y);
     }
 
     /**
