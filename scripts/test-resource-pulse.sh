@@ -131,7 +131,7 @@ BLOCKING_CALL_PATTERN='Gio.Subprocess|GLib.spawn|Util.spawn|load_contents\(|file
 FORBIDDEN_CALLS=('Gio.Subprocess.new(' 'GLib.spawn_command_line_async(' 'Util.spawn([' 'file.load_contents(null)'
   'GLib.file_get_contents(path)' 'file.enumerate_children(attributes, flags, null)' 'file.query_info(attributes, flags, null)'
   'stream.read_bytes(4096, null)' 'file.load_bytes(null)' 'file.replace_contents(bytes, null, false, 0, null)')
-AFORBIDDEN_CALLS=('file.load_contents_async(null)' 'file.enumerate_children_async(attributes, flags, priority, null)'
+ASYNCHRONOUS_IO_CALLS=('file.load_contents_async(null)' 'file.enumerate_children_async(attributes, flags, priority, null)'
   'file.query_info_async(attributes, flags, priority, null)' 'stream.read_bytes_async(4096, priority, null)'
   'file.load_bytes_async(null)' 'file.replace_contents_async(bytes, null, false, 0, null)')
 unmatched_forbidden_calls=()
@@ -139,7 +139,7 @@ for io_call in "${FORBIDDEN_CALLS[@]}"; do
   [[ "$io_call" =~ $BLOCKING_CALL_PATTERN ]] || unmatched_forbidden_calls+=("$io_call")
 done
 matched_asynchronous_calls=()
-for io_call in "${AFORBIDDEN_CALLS[@]}"; do
+for io_call in "${ASYNCHRONOUS_IO_CALLS[@]}"; do
   [[ "$io_call" =~ $BLOCKING_CALL_PATTERN ]] && matched_asynchronous_calls+=("$io_call")
 done
 check "the blocking-call pattern matches every forbidden call (subprocess, synchronous IO) and no _async IO call" \

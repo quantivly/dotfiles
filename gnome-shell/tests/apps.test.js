@@ -109,7 +109,7 @@ test('"kernel & other" is the root CPU minus the leaves\', so leaves that used m
         // 4M instead would make it win. Whether its negative share is clamped cannot show here: any leaf with a
         // delta outranks it. The next row is where the clamp decides.
         const ranking = rankApps(input({'app': [0, 4_000_000, 1]}, {rootCpuDeltaUsec: 1_000_000}));
-            assertEqual(ranking.topCpu, {name: 'app', cpuPercent: 25});
+        assertEqual(ranking.topCpu, {name: 'app', cpuPercent: 25});
     });
 test('a root CPU counter that went backwards gives "kernel & other" 0%, never a negative share', () => {
     // No leaf has a delta (all new this scan), so the pseudo-app is the only CPU candidate and its clamp decides.
