@@ -563,7 +563,7 @@ session on the wrong account, use the [claude-accounts](.claude/skills/claude-ac
 
 ## GNOME Desktop Configuration
 
-Clean, modern GNOME (dark `Yaru-prussiangreen-dark`, floating autohiding **bottom** dock, empty desktop, tmux-friendly keys) applied reproducibly via **stock GNOME/Yaru** — no third-party extensions; one in-repo, opt-in extension (Resource Pulse).
+Clean, modern GNOME (dark `Yaru-prussiangreen-dark`, floating autohiding **bottom** dock, empty desktop, tmux-friendly keys) applied reproducibly via **stock GNOME/Yaru** — no third-party extensions or themes; one in-repo, opt-in extension (Resource Pulse).
 
 - **Mechanism:** a curated, schema-validated, idempotent `gsettings` script — **not** `dconf dump` (GNOME has no first-party export/import). `scripts/apply-gnome-settings.sh` is the portable core; `~/.gnome-settings.local` (`gnome-init`) is the machine-specific layer. `./install` runs them on GNOME only; `gnome-apply` re-runs them.
 - **The `.local` layer runs LAST and silently wins**, so a line there can undo one the portable layer just applied — that is how `grp:alt_shift_toggle` killed all four of herdr's `alt+shift+arrow` bindings while `gnome-apply` printed two ✓ lines. An overriding set prints `(overrides <previous>, set above)`.
