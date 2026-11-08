@@ -456,7 +456,7 @@ export class Sampler {
     }
 
     /**
-     * Pauses or resumes ticking (the display is off, not locked). On resume the CPU and app baselines restart,
+     * Pauses or resumes ticking (while the screen shield is up). On resume the CPU and app baselines restart,
      * so no delta averages across the pause and no ranking from before it is shown as current.
      *
      * @param {boolean} isPaused - True to pause.

@@ -75,6 +75,12 @@ It samples every 2 s (`SAMPLE_INTERVAL_SECONDS`) and scans per-app cgroups every
 (`.mount .socket .swap .automount .path .timer .device`). The top bar keeps 30 samples, the card 150.
 The first sample is *no data*, never 0%, and stale numbers are never drawn as live.
 
+GNOME 50 turns the extension off on every lock **and on every idle screen blank**: a blank enters the
+lock screen's session mode even when locking is disabled, and an extension without that mode is
+disabled there. So nothing samples while the screen is blanked or locked, and both histories (the top
+bar's 60 s, the card's 5 minutes) start over afterwards. That is by decision: the histories are not
+kept across a blank or a lock.
+
 ### Every number, defined
 
 | Number | Definition | Source |

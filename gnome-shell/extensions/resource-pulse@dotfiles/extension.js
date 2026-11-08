@@ -4,8 +4,11 @@
 // overview hides it, so the sampler's app scan runs only while the overview is hidden.
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
-// the unlock-dialog session mode the shell disables the extension on every lock and enables it on unlock, so
-// enable() and disable() run many times a day and must leave nothing behind:
+// the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
+// when it pops. In GNOME 50 that is every lock AND every idle blank: a blank goes through ScreenShield.activate(),
+// which pushes unlock-dialog even with locking off. So the histories restart after every blank and every lock
+// (by the user's decision they are not kept), and enable() and disable() run many times a day and must leave
+// nothing behind:
 // - enable() builds everything synchronously and returns. GNOME 50's extension manager awaits enable() and calls
 //   disable() only on an extension it has marked ACTIVE (extensionSystem.js _callExtensionEnable and
 //   _callExtensionDisable), so an await inside enable() would let a lock that lands during it go unanswered and
@@ -72,8 +75,9 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Creates the sampler, scanning apps only while the overview is hidden; puts the indicator just left of the
-     * system menu; puts the card on the desktop and keeps it placed; follows the screen shield to pause while the
-     * display is off; then starts sampling once the sampler has initialized.
+     * system menu; puts the card on the desktop and keeps it placed; keeps sampling paused while the screen shield
+     * is still up (an enable as a blank or a lock ends comes just before the shield goes down); then starts
+     * sampling once the sampler has initialized.
      *
      * @returns {void}
      * @throws {Error} Whatever a synchronous step threw, after tearing down everything built so far.
@@ -179,7 +183,13 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Pauses sampling while the screen shield is up (the display is blanked, locked or not) and resumes it after.
+     * Pauses sampling while the screen shield is up and resumes it once the shield is down.
+     *
+     * The shield being up rarely reaches a live extension: in GNOME 50 every blank and every lock pushes the
+     * unlock-dialog session mode, which disables this extension outright before the shield reports active. What
+     * this bridges is the end of one: the mode pops, and this extension is enabled again, about 250 ms before the
+     * shield's 'active-changed' says it is down (measured in the nested shell), so the new sampler starts paused
+     * and resumes on that signal. It is also the defence should the shield ever be up while the extension runs.
      *
      * @returns {void}
      */

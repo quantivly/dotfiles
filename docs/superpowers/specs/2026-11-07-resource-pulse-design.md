@@ -4,7 +4,7 @@
 
 **Amended 2026-11-08 (build):** the app scan runs every 10 s, not 6 s, and skips .mount/.socket/.swap/.automount/.path/.timer/.device leaves — measured cost 0.86% → ~0.42% of one core; see docs/GNOME_CONFIGURATION_GUIDE.md.
 
-**Amended 2026-11-08 (nested run):** test in a nested shell only with scripts/resource-pulse-nested.sh — the plain --devkit recipe in Verification §2 reaches the live session (crash-guard file, logind, GDM, GeoClue, extensions.gnome.org).
+**Amended 2026-11-08 (nested run):** test in a nested shell only with scripts/resource-pulse-nested.sh — the plain --devkit recipe in Verification §2 reaches the live session (crash-guard file, logind, GDM, GeoClue, extensions.gnome.org). Every idle blank in GNOME 50 pushes the unlock-dialog session mode, so the extension is disabled on every blank as well as every lock (not only paused, as "Display off" below says), and its histories restart after either; by the user's decision they are not persisted.
 
 ## Context
 
