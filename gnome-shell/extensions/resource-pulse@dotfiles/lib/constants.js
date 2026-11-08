@@ -26,3 +26,7 @@ export const RESOURCES_APP_IDS = ['net.nokyan.Resources.desktop', 'org.gnome.Sys
 export const HOVER_LABEL_DELAY_MS = 300;
 /** Prefix of every journal line this extension writes. */
 export const LOG_PREFIX = 'resource-pulse:';
+/** Name of the computed pseudo-app that takes the CPU and memory no scanned cgroup accounts for. */
+export const KERNEL_AND_OTHER_LABEL = 'kernel & other';
+/** Display names for service units whose own name reads badly, keyed by unit name without suffix. */
+export const UNIT_DISPLAY_ALIASES = {'herdr-server': 'herdr agents', 'org.gnome.Shell': 'GNOME Shell'};
