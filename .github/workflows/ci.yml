@@ -543,10 +543,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install gjs
+      # zsh runs gnome-status (zsh/functions/system.sh) against stubs.
+      - name: Install gjs and zsh
         uses: ./.github/actions/apt-install
         with:
-          packages: gjs
+          packages: gjs zsh
 
       - name: Run the Resource Pulse state table
         run: ./scripts/test-resource-pulse.sh

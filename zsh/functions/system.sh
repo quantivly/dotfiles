@@ -2382,6 +2382,21 @@ gnome-status() {
       rp_state="${rp_state:-not known to the shell (log out / in after linking)}"
     fi
     echo "Resource Pulse: linked=$rp_linked enabled=$rp_enabled state=$rp_state"
+    # Asked for (in enabled-extensions) but not running: name the settings that
+    # keep GNOME 50 from loading it. With the user dir skipped the shell does not
+    # know the extension at all, so `gnome-extensions list --enabled` omits it.
+    case "$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null)" in
+      *"'$rp_uuid'"*)
+        if [ "$rp_state" != "ACTIVE" ] &&
+          [ "$(gsettings get org.gnome.shell allow-extension-installation 2>/dev/null)" = "false" ]; then
+          echo "  allow-extension-installation is false: GNOME 50 skips ~/.local/share/gnome-shell/extensions, where it is linked"
+        fi
+        if [ "$rp_state" != "ACTIVE" ] &&
+          [ "$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null)" = "true" ]; then
+          echo "  disable-user-extensions is true: GNOME loads no user extension"
+        fi
+        ;;
+    esac
   )
 }
 

@@ -113,7 +113,9 @@ itself. To turn it on:
    commented; `gnome-init` creates the file).
 2. Run `gnome-apply`. The helper appends the uuid to `enabled-extensions` (keeping every other entry),
    removes it from `disabled-extensions` (which wins over `enabled-extensions` in GNOME 50) and warns
-   when `disable-user-extensions` is true, since then nothing user-installed loads.
+   when `disable-user-extensions` is true, since then nothing user-installed loads, or when
+   `allow-extension-installation` is false, since GNOME 50 then skips the user extension directory
+   where the extension is linked.
 3. Log out and back in once: GNOME on Wayland discovers a new extension only at login.
 
 To turn it off, remove the line and `gnome-extensions disable resource-pulse@dotfiles`.
@@ -121,7 +123,9 @@ To turn it off, remove the line and `gnome-extensions disable resource-pulse@dot
 ### Checking that it runs
 
 `gnome-status` prints `Resource Pulse: linked=… enabled=… state=…`. The state is the shell's own
-verdict (`ACTIVE`, `ERROR`, `OUT OF DATE`), so a failure after a GNOME update is visible. Problems
+verdict (`ACTIVE`, `ERROR`, `OUT OF DATE`), so a failure after a GNOME update is visible. When
+`enabled-extensions` asks for it but it is not `ACTIVE`, the next line names either setting above that
+keeps it from loading (the shell then does not know it at all, so `enabled=no`). Problems
 are logged to the journal under `resource-pulse:` (each distinct message at most once per 10 minutes):
 `journalctl --user -b -g resource-pulse`.
 
@@ -174,7 +178,7 @@ skipped unit types.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (239 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (241 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.

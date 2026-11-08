@@ -16,11 +16,11 @@
 # say what GNOME 50 needs. Those rows read the files, and a missing file makes
 # them FAIL, never pass.
 #
-# "Could not run" is exit 2, never a pass: a missing gjs, find or timeout, or a
+# "Could not run" is exit 2, never a pass: a missing gjs, zsh, find or timeout, or a
 # missing tally line (an import error prints none) is fatal. The suite asserts
 # its own row total.
 #
-# Requires: bash, gjs, find, timeout. No network, no root.
+# Requires: bash, gjs, zsh (for gnome-status), find, timeout. No network, no root.
 #
 # Usage: scripts/test-resource-pulse.sh
 #   RESOURCE_PULSE_EXT_DIR=<dir> points the file rows at a copy of the
@@ -42,7 +42,7 @@ fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
 [[ -r "$RUNNER" ]] || fatal "cannot read $RUNNER"
 [[ -d "$EXT_DIR" ]] || fatal "no extension directory at $EXT_DIR"
-for required_tool in gjs find timeout; do
+for required_tool in gjs zsh find timeout; do
   command -v "$required_tool" >/dev/null || fatal "$required_tool is required"
 done
 
@@ -271,9 +271,10 @@ case "$1" in
     if [[ -f "$STUB_STATE/$2/$3" ]]; then cat "$STUB_STATE/$2/$3"
     else
       case "$3" in
-        *-extensions)            echo '@as []' ;;
-        disable-user-extensions) echo 'false' ;;
-        *)                       echo "''" ;;
+        *-extensions)                 echo '@as []' ;;
+        disable-user-extensions)      echo 'false' ;;
+        allow-extension-installation) echo 'true' ;;
+        *)                            echo "''" ;;
       esac
     fi ;;
   set) mkdir -p "$STUB_STATE/$2" && printf '%s\n' "$4" >"$STUB_STATE/$2/$3" ;;
@@ -291,12 +292,14 @@ STUB_BUS_SEEN_LOG="$WIRING_TMP/stub-bus-seen"
 # APPLY_OUTPUT and its exit status in APPLY_EXIT.
 #   $1 enabled-extensions  $2 disabled-extensions  $3 disable-user-extensions
 #   $4 schemas listed by the stub (newline separated)
+#   $5 allow-extension-installation (optional; unset, the stub answers true)
 run_apply_against_stub() {
   rm -rf "${STUB_STATE:?}"/*
   mkdir -p "$STUB_STATE/$SHELL_SCHEMA"
   printf '%s\n' "$1" >"$STUB_STATE/$SHELL_SCHEMA/enabled-extensions"
   printf '%s\n' "$2" >"$STUB_STATE/$SHELL_SCHEMA/disabled-extensions"
   printf '%s\n' "$3" >"$STUB_STATE/$SHELL_SCHEMA/disable-user-extensions"
+  if (( $# >= 5 )); then printf '%s\n' "$5" >"$STUB_STATE/$SHELL_SCHEMA/allow-extension-installation"; fi
   printf '%s' "$4" >"$STUB_STATE/schemas"
   : >"$STUB_CALLS_LOG"
   : >"$STUB_BUS_SEEN_LOG"
@@ -319,10 +322,63 @@ run_apply_against_stub '@as []' "['$EXTENSION_UUID', 'x@y']" false "$SHELL_SCHEM
 check "genable_extension: removes the uuid from disabled-extensions, which wins in GNOME 50" "$(stub_value disabled-extensions)" "['x@y']"
 run_apply_against_stub '@as []' '@as []' true "$SHELL_SCHEMA"
 check "genable_extension: disable-user-extensions=true warns by name" "$(grep -c -F 'disable-user-extensions' <<<"$APPLY_OUTPUT")" 1
+# GNOME 50 reads the user extension dir, where ./install links the extension,
+# only while allow-extension-installation is true (extensionSystem.js).
+run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA" false
+installation_off_warnings="$(grep -c -F 'allow-extension-installation is false' <<<"$APPLY_OUTPUT")"
+run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA" true
+installation_on_warnings="$(grep -c -F 'allow-extension-installation' <<<"$APPLY_OUTPUT")"
+check "genable_extension: allow-extension-installation=false warns by name (GNOME 50 then skips the user dir); true does not" \
+  "false=$installation_off_warnings true=$installation_on_warnings" "false=1 true=0"
 run_apply_against_stub '@as []' '@as []' false ""
 check "genable_extension: an absent org.gnome.shell schema warns" "$(grep -c -F "Schema '$SHELL_SCHEMA' not found" <<<"$APPLY_OUTPUT")" 1
 check "genable_extension: an absent schema writes nothing" "$(stub_value enabled-extensions)" "@as []"
 check "genable_extension: the apply script still exits 0 without the schema" "$APPLY_EXIT" 0
+
+printf '\ngnome-status (zsh, with gsettings, gnome-extensions and gnome-shell stubs)\n'
+# gnome-status (zsh/functions/system.sh) reads gsettings and asks the shell,
+# through gnome-extensions, for the extension's State. With the user extension
+# dir skipped the shell does not know the extension at all, so the stub answers
+# like the real tool does then: nothing listed, and info fails.
+GNOME_STATUS_STUB_BIN="$WIRING_TMP/gnome-status-bin"
+GNOME_STATUS_HOME="$WIRING_TMP/gnome-status-home"
+mkdir -p "$GNOME_STATUS_HOME" || fatal "cannot create gnome-status's fixture home"
+install_stub "$GNOME_STATUS_STUB_BIN" gsettings "$GENABLE_GSETTINGS_STUB"
+# shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
+install_stub "$GNOME_STATUS_STUB_BIN" gnome-extensions '#!/usr/bin/env bash
+# GNOME_STATUS_SHELL_STATE is the State the shell reports; empty means the shell does not know the extension.
+[[ -n "$GNOME_STATUS_SHELL_STATE" ]] || { [[ "$1" == list ]] && exit 0; echo "Extension does not exist" >&2; exit 2; }
+case "$1" in
+  list) echo resource-pulse@dotfiles ;;
+  info) printf "resource-pulse@dotfiles\n  State: %s\n" "$GNOME_STATUS_SHELL_STATE" ;;
+esac'
+install_stub "$GNOME_STATUS_STUB_BIN" gnome-shell '#!/usr/bin/env bash
+echo "GNOME Shell 50.1"'
+# gnome_status_hints <enabled-extensions> <allow-extension-installation> <disable-user-extensions> <State or ''>
+# prints how many lines name each setting, and gnome-status's exit status.
+gnome_status_hints() {
+  local status_output status_exit
+  rm -rf "${STUB_STATE:?}"/*
+  mkdir -p "$STUB_STATE/$SHELL_SCHEMA"
+  printf '%s\n' "$1" >"$STUB_STATE/$SHELL_SCHEMA/enabled-extensions"
+  printf '%s\n' "$2" >"$STUB_STATE/$SHELL_SCHEMA/allow-extension-installation"
+  printf '%s\n' "$3" >"$STUB_STATE/$SHELL_SCHEMA/disable-user-extensions"
+  # shellcheck disable=SC2016  # Expanded by zsh.
+  status_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_STUB_BIN:$PATH" \
+    STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" \
+    GNOME_STATUS_SHELL_STATE="$4" zsh -c 'source "$1" && gnome-status' gnome-status \
+    "$DOTFILES/zsh/functions/system.sh" 2>&1)"
+  status_exit=$?
+  printf '%s/%s/rc%s' "$(grep -c -F 'allow-extension-installation is false' <<<"$status_output")" \
+    "$(grep -c -F 'disable-user-extensions is true' <<<"$status_output")" "$status_exit"
+}
+asked_for="['$EXTENSION_UUID']"
+gnome_status_summary="installation-off=$(gnome_status_hints "$asked_for" false false '')"
+gnome_status_summary+=" user-extensions-off=$(gnome_status_hints "$asked_for" true true '')"
+gnome_status_summary+=" running=$(gnome_status_hints "$asked_for" false true ACTIVE)"
+gnome_status_summary+=" not-asked-for=$(gnome_status_hints '@as []' false true '')"
+check "gnome-status names the setting that keeps an enabled Resource Pulse from loading, and only then" \
+  "$gnome_status_summary" "installation-off=1/0/rc0 user-extensions-off=0/1/rc0 running=0/0/rc0 not-asked-for=0/0/rc0"
 
 printf '\nlink and template\n'
 check "install.conf.yaml links the extension directory" \
@@ -959,7 +1015,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=239
+EXPECTED_ROWS=241
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

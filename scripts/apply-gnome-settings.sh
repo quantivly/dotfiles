@@ -190,7 +190,9 @@ format_array_value() {
 # Opt an in-repo GNOME Shell extension in: idempotently append its uuid to
 # enabled-extensions (gset would replace the whole list and clobber the others),
 # drop it from disabled-extensions (which wins over enabled-extensions in
-# GNOME 50), and warn when disable-user-extensions makes both moot. Nothing in
+# GNOME 50), and warn when disable-user-extensions or a false
+# allow-extension-installation (GNOME 50 then skips the user extension dir)
+# makes both moot. Nothing in
 # the portable core calls this: only ~/.gnome-settings.local does, so an
 # extension is never switched on for someone who did not ask.
 # Arguments:
@@ -225,6 +227,11 @@ genable_extension() {
 
     if [[ "$(gsettings get "$schema" disable-user-extensions 2>/dev/null || true)" == "true" ]]; then
         log WARNING "disable-user-extensions is true — GNOME will load no user extension, so $uuid stays off until it is false"
+    fi
+    # GNOME 50 reads the user extension dir only while installation is allowed
+    # (extensionSystem.js _loadExtensions), and ./install links $uuid there.
+    if [[ "$(gsettings get "$schema" allow-extension-installation 2>/dev/null || true)" == "false" ]]; then
+        log WARNING "allow-extension-installation is false — GNOME 50 skips ~/.local/share/gnome-shell/extensions, where $uuid is linked, so it stays off until it is true"
     fi
 }
 
