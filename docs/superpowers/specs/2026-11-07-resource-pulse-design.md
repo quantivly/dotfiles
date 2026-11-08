@@ -8,6 +8,8 @@
 
 **Amended 2026-11-08 (user decisions):** the memory half of "heaviest" names real apps only — "kernel & other" stays a candidate for the CPU half (kernel CPU such as reclaim and compression is a real "why slow" answer) but never for memory, and unattributed memory still counts in the MEM total. The "waiting on" meters are drawn cells (three per meter, a dash for no data), not ▮▯ glyphs, which are not in Ubuntu Sans and fell back to DejaVu Sans.
 
+**Amended 2026-11-08 (final review):** swap is read from /proc/swaps — zram used = Σ Used of /dev/zram* entries, on disk = Σ Used of the others; zram orig_data_size under-counts zram's swap share (same_pages, slot use), so the original formula reported phantom disk swap.
+
 ## Context
 
 The user wants live CPU and memory state on this laptop: a **minimal** indicator in the top bar and a

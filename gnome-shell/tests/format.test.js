@@ -31,14 +31,12 @@ const indicatorAt = x => ({x, y: 0, width: INDICATOR_WIDTH_PX, height: INDICATOR
 /**
  * Builds a swap summary in the shape lib/memory.js produces.
  *
- * @param {number} swappedBytes - Swap in use.
- * @param {number} zramStoredBytes - Of it, held in zram.
- * @param {number} zramRamBytes - RAM the zram itself takes.
+ * @param {number} zramUsedBytes - Swap in use on zram areas.
+ * @param {number} zramRamBytes - RAM those zram devices take.
+ * @param {number} diskBytes - Swap in use on every other area.
  * @returns {object} A swap summary.
  */
-const swapOf = (swappedBytes, zramStoredBytes, zramRamBytes) => ({
-    swappedBytes, zramStoredBytes, zramRamBytes, diskBytes: Math.max(0, swappedBytes - zramStoredBytes),
-});
+const swapOf = (zramUsedBytes, zramRamBytes, diskBytes) => ({zramUsedBytes, zramRamBytes, diskBytes});
 
 const FULL_SNAPSHOT = {
     cpuBusyPercent: 23, memory: {usedBytes: 16.4 * GIB, totalBytes: 30.3 * GIB},
@@ -51,7 +49,7 @@ const CARD_SNAPSHOT = {
     cpuBusyPercent: 23,
     cpuClusters: {performancePercent: 41, efficiencyPercent: 6},
     memory: FULL_SNAPSHOT.memory,
-    swap: swapOf(1.6 * GIB, 1.6 * GIB, 0.4 * GIB),
+    swap: swapOf(1.6 * GIB, 0.4 * GIB, 0),
     pressureAvg10: {cpu: 12, memory: 3, io: 0},
     apps: {topCpu: {name: 'Chromium', cpuPercent: 31}, topMemory: {name: 'herdr agents', memoryBytes: 15.7 * GIB}},
     isComplete: true,
@@ -96,13 +94,15 @@ test('memoryLine: used of total GiB', () =>
 test('memoryLine: null is "no data"', () => assertEqual(memoryLine(null), 'no data'));
 
 test('swapLine with zram and disk', () =>
-    assertEqual(swapLine(swapOf(2048000000, 1536000000, 400000000)), 'swap 1.9 GiB (0.4 in RAM) + 0.5 on disk'));
+    assertEqual(swapLine(swapOf(2048000000, 400000000, 512000000)), 'swap 1.9 GiB (0.4 in RAM) + 0.5 on disk'));
+test('swapLine leads with the zram part alone, so "+ X on disk" adds to it rather than being inside it', () =>
+    assertEqual(swapLine(swapOf(GIB, 0.2 * GIB, GIB)), 'swap 1.0 GiB (0.2 in RAM) + 1.0 on disk'));
 test('swapLine all in zram omits the disk part', () =>
-    assertEqual(swapLine(swapOf(1536000000, 1536000000, 400000000)), 'swap 1.4 GiB (0.4 in RAM)'));
+    assertEqual(swapLine(swapOf(1536000000, 400000000, 0)), 'swap 1.4 GiB (0.4 in RAM)'));
 test('swapLine with nothing swapped is "swap none"', () => assertEqual(swapLine(swapOf(0, 0, 0)), 'swap none'));
 test('swapLine null is "swap no data"', () => assertEqual(swapLine(null), 'swap no data'));
-test('swapLine without zram shows disk only, no "0.0 in RAM"', () =>
-    assertEqual(swapLine(swapOf(2 * GIB, 0, 0)), 'swap 2.0 GiB on disk'));
+test('swapLine without zram swap shows disk only, no "0.0 in RAM"', () =>
+    assertEqual(swapLine(swapOf(0, 0, 2 * GIB)), 'swap 2.0 GiB on disk'));
 
 test('clusterSuffix both sides', () =>
     assertEqual(clusterSuffix({performancePercent: 80, efficiencyPercent: 40}), 'P 80 · E 40'));
@@ -157,8 +157,8 @@ test('hoverLabel with no last-good time is plain "no data"', () => assertEqual(h
 
 test('swapAmount is swapLine without its "swap" label, in every case', () => {
     const swapCases = [
-        swapOf(2048000000, 1536000000, 400000000), swapOf(1536000000, 1536000000, 400000000), swapOf(0, 0, 0),
-        null, swapOf(2 * GIB, 0, 0),
+        swapOf(2048000000, 400000000, 512000000), swapOf(1536000000, 400000000, 0), swapOf(0, 0, 0),
+        null, swapOf(0, 0, 2 * GIB),
     ];
     assertEqual(swapCases.map(swapAmount),
         ['1.9 GiB (0.4 in RAM) + 0.5 on disk', '1.4 GiB (0.4 in RAM)', 'none', 'no data', '2.0 GiB on disk']);

@@ -5,6 +5,7 @@ import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
 import {Sampler, groupOfCgroup} from '../extensions/resource-pulse@dotfiles/sampler.js';
 import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
+import {cardText} from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {
     APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, ERROR_LOG_REPEAT_INTERVAL_USEC, KERNEL_AND_OTHER_LABEL,
     LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
@@ -16,7 +17,9 @@ const APP_SCAN_SPACING_USEC = 6_000_000;
 const SAMPLE_SPACING_USEC = 2_000_000;
 const BYTES_PER_KIB = 1024;
 const FIXTURE_MEMORY_USED_KIB = 20_000_000;
-const FIXTURE_SWAP_ON_DISK_BYTES = 512_000_000;
+/** root-a's /dev/zram0 Used (1,600,000 KiB), above its orig_data_size of 1,536,000,000 B; /swap.img Used is 0. */
+const FIXTURE_ZRAM_SWAP_USED_BYTES = 1_600_000 * BYTES_PER_KIB;
+const FIXTURE_ZRAM_RAM_BYTES = 400_000_000;
 const FIXTURE_CLOCK_LABEL = '14:02';
 const TIMER_INTERVAL_SECONDS = 1;
 const TIMER_RUN_MS = 2500;
@@ -179,11 +182,35 @@ test('sampler: memory used is MemTotal − MemAvailable in bytes, and its histor
         [{usedBytes: FIXTURE_MEMORY_USED_KIB * BYTES_PER_KIB, totalBytes: 32_768_000_000}, [0.625]]);
 });
 
-test('sampler: swap on disk is swapped minus what zram stores', async () => {
-    const {sampler} = makeSampler('root-a');
+test('sampler: swap comes from /proc/swaps, so zram holding more swap than orig_data_size shows no disk swap',
+    async () => {
+        // root-a is this laptop's case: zram0's Used is above its orig_data_size and /swap.img is idle. The old
+        // formula (SwapTotal − SwapFree − Σ orig_data_size) put 0.1 GiB "on disk" with nothing on disk.
+        const {sampler} = makeSampler('root-a');
+        const snapshot = await sampler.sampleOnce();
+        assertEqual([snapshot.swap, cardText(snapshot, null).swapValue], [
+            {zramUsedBytes: FIXTURE_ZRAM_SWAP_USED_BYTES, zramRamBytes: FIXTURE_ZRAM_RAM_BYTES, diskBytes: 0},
+            '1.5 GiB (0.4 in RAM)',
+        ]);
+    });
+
+test('sampler: swap on disk is real disk Used, and a zram device that is not swap (zram1) adds no "in RAM"',
+    async () => {
+        // root-swap-disk: /dev/zram0 1 GiB used with 200 MiB of RAM, /swap.img 0.5 GiB used, and a zram1 that is
+        // not in /proc/swaps whose 300 MiB of RAM must not count.
+        const {sampler} = makeSampler('root-swap-disk');
+        const snapshot = await sampler.sampleOnce();
+        assertEqual([snapshot.swap, cardText(snapshot, null).swapValue], [
+            {zramUsedBytes: 1_048_576 * BYTES_PER_KIB, zramRamBytes: 209_715_200, diskBytes: 524_288 * BYTES_PER_KIB},
+            '1.0 GiB (0.2 in RAM) + 0.5 on disk',
+        ]);
+    });
+
+test('sampler: an unreadable /proc/swaps is swap no data (logged), while memory stays', async () => {
+    const {sampler, logged} = makeSampler('root-no-swaps');
     const snapshot = await sampler.sampleOnce();
-    assertEqual([snapshot.swap.diskBytes, snapshot.swap.zramStoredBytes, snapshot.swap.zramRamBytes],
-        [FIXTURE_SWAP_ON_DISK_BYTES, 1_536_000_000, 400_000_000]);
+    assertEqual([snapshot.swap, cardText(snapshot, null).swapValue, snapshot.memory !== null, snapshot.isComplete,
+        logged.some(line => line.includes('proc/swaps'))], [null, 'no data', true, false, true]);
 });
 
 test('sampler: PSI cpu some avg10 is 12.5, memory and io 0', async () => {

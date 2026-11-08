@@ -6,6 +6,16 @@ import {pressureBand} from '../extensions/resource-pulse@dotfiles/lib/pressure.j
 import {RingBuffer} from '../extensions/resource-pulse@dotfiles/lib/history.js';
 
 const KIB = 1024;
+const GIB = 1024 ** 3;
+
+/**
+ * One row of /proc/swaps as parseProcSwaps returns it.
+ *
+ * @param {string} filename - The swap area, for example '/dev/zram0' or '/swap.img'.
+ * @param {number} usedBytes - Swap in use there.
+ * @returns {{filename: string, usedBytes: number}} The parsed row.
+ */
+const swapArea = (filename, usedBytes) => ({filename, usedBytes});
 
 /**
  * Builds a CpuTimes record with the fields these tests care about.
@@ -65,15 +75,24 @@ test('memory used = MemTotal - MemAvailable, not MemTotal - MemFree', () =>
         ['MemAvailable', 12000000 * KIB]])).usedBytes, 20000000 * KIB));
 test('memory without MemAvailable is no data', () =>
     assertEqual(memoryUsage(new Map([['MemTotal', 1], ['MemFree', 1]])), null));
-test('swap on disk = swapped - zram stored', () =>
-    assertEqual(swapSummary(new Map([['SwapTotal', 24000000 * KIB], ['SwapFree', 22000000 * KIB]]),
-        [{storedBytes: 1536000000, ramBytes: 400000000}]).diskBytes, 2048000000 - 1536000000));
-test('no zram: all swap is on disk', () =>
-    assertEqual(swapSummary(new Map([['SwapTotal', 100 * KIB], ['SwapFree', 40 * KIB]]), []),
-        {swappedBytes: 60 * KIB, zramStoredBytes: 0, zramRamBytes: 0, diskBytes: 60 * KIB}));
-test('swap disk bytes never go negative', () =>
-    assertEqual(swapSummary(new Map([['SwapTotal', 10 * KIB], ['SwapFree', 9 * KIB]]),
-        [{storedBytes: 5 * KIB, ramBytes: 2 * KIB}]).diskBytes, 0));
+test('swap: zram\'s share is the Used of its /dev/zram* areas, so an idle disk area is no disk swap', () =>
+    // zram0 holds 1.6 GiB of swap while storing only 1.4 GiB of data (orig_data_size leaves out same-filled pages),
+    // which is what made the old formula report swapped − stored = 0.2 GiB "on disk" with nothing on disk.
+    assertEqual(swapSummary([swapArea('/swap.img', 0), swapArea('/dev/zram0', 1.6 * GIB)],
+        [{deviceName: 'zram0', storedBytes: 1.4 * GIB, ramBytes: 0.4 * GIB}]),
+    {zramUsedBytes: 1.6 * GIB, zramRamBytes: 0.4 * GIB, diskBytes: 0}));
+test('swap on disk is the Used of every area that is not zram, summed', () =>
+    assertEqual(swapSummary([swapArea('/swap.img', 0.5 * GIB), swapArea('/dev/zram0', GIB),
+        swapArea('/dev/nvme0n1p3', 0.25 * GIB)], [{deviceName: 'zram0', storedBytes: GIB, ramBytes: 0.25 * GIB}]),
+    {zramUsedBytes: GIB, zramRamBytes: 0.25 * GIB, diskBytes: 0.75 * GIB}));
+test('swap: a zram device that is not a swap area (no /proc/swaps row) adds nothing to "in RAM"', () =>
+    assertEqual(swapSummary([swapArea('/dev/zram0', GIB)], [
+        {deviceName: 'zram0', storedBytes: GIB, ramBytes: 0.25 * GIB},
+        {deviceName: 'zram1', storedBytes: 2 * GIB, ramBytes: 0.5 * GIB},
+    ]), {zramUsedBytes: GIB, zramRamBytes: 0.25 * GIB, diskBytes: 0}));
+test('swap: no zram swap area puts everything on disk; no area at all is nothing used', () =>
+    assertEqual([swapSummary([swapArea('/swap.img', GIB)], []), swapSummary([], [])],
+        [{zramUsedBytes: 0, zramRamBytes: 0, diskBytes: GIB}, {zramUsedBytes: 0, zramRamBytes: 0, diskBytes: 0}]));
 
 test('PSI bands at the edges', () =>
     assertEqual([9.99, 10, 24.99, 25, 49.99, 50, null].map(pressureBand), [0, 1, 1, 2, 2, 3, null]));

@@ -17,7 +17,9 @@ import {
     APP_MEMORY_STAT_MIN_BYTES, SAMPLE_INTERVAL_SECONDS,
 } from './lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from './lib/errorLog.js';
-import {parseMeminfo, parsePressureSomeAvg10, parseProcStat, parseUid, parseZramMmStat} from './lib/procParsers.js';
+import {
+    parseMeminfo, parsePressureSomeAvg10, parseProcStat, parseProcSwaps, parseUid, parseZramMmStat,
+} from './lib/procParsers.js';
 import {parseCpuStatUsageUsec, parseMemoryStatReclaimableBytes, parseSingleNumber} from './lib/cgroupParsers.js';
 import {buildClusterMap, clusterBusyFraction, cpuBusyFraction, parseCpuList} from './lib/cpu.js';
 import {memoryUsage, swapSummary} from './lib/memory.js';
@@ -32,6 +34,7 @@ Gio._promisify(Gio.FileEnumerator.prototype, 'close_async', 'close_finish');
 // Paths, relative to the sampler's fsRoot.
 const PROC_STAT_PATH = 'proc/stat';
 const PROC_MEMINFO_PATH = 'proc/meminfo';
+const PROC_SWAPS_PATH = 'proc/swaps';
 const PROC_SELF_STATUS_PATH = 'proc/self/status';
 const CPU_PRESSURE_PATH = 'proc/pressure/cpu';
 const MEMORY_PRESSURE_PATH = 'proc/pressure/memory';
@@ -81,8 +84,9 @@ const UTF8_DECODER = new TextDecoder();
  * @property {{performancePercent: number|null, efficiencyPercent: number|null}|null} cpuClusters - Busy percent
  *     per core type. Null on a single-cluster machine and whenever cpuBusyPercent has no delta.
  * @property {{usedBytes: number, totalBytes: number}|null} memory - MemTotal − MemAvailable, and MemTotal.
- * @property {{swappedBytes: number, zramStoredBytes: number, zramRamBytes: number, diskBytes: number}|null} swap
- *     - Swap split between zram and disk.
+ * @property {{zramUsedBytes: number, zramRamBytes: number, diskBytes: number}|null} swap - Swap in use on zram
+ *     areas (and the RAM those devices take) and on every other area, from /proc/swaps; null when /proc/swaps or
+ *     the zram devices could not be read.
  * @property {{cpu: number|null, memory: number|null, io: number|null}} pressureAvg10 - PSI `some avg10` percents.
  * @property {AppRanking|null} apps - The latest app scan; null before the first one, while scanning is off, and
  *     after a scan that threw.
@@ -225,11 +229,12 @@ async function listChildDirectoryNames(directoryPath, cancellable) {
 }
 
 /**
- * Reads mm_stat of every zram device.
+ * Reads mm_stat of every zram device, keeping each device's name so swap can tell which ones are swap areas.
  *
  * @param {string} fsRoot - The filesystem root.
  * @param {Gio.Cancellable} cancellable - Cancels the reads.
- * @returns {Promise<Array<{storedBytes: number, ramBytes: number}>>} One entry per device; empty without zram.
+ * @returns {Promise<Array<{deviceName: string, storedBytes: number, ramBytes: number}>>} One entry per device;
+ *     empty without zram.
  */
 async function readZramDevices(fsRoot, cancellable) {
     const blockDevicesPath = joinPath(fsRoot, BLOCK_DEVICES_PATH);
@@ -240,7 +245,7 @@ async function readZramDevices(fsRoot, cancellable) {
         const zramDevice = parseZramMmStat(await readTextFile(mmStatPath, cancellable));
         if (zramDevice === null)
             throw new Error(`cannot parse ${mmStatPath}`);
-        return zramDevice;
+        return {deviceName, ...zramDevice};
     }));
 }
 
@@ -681,14 +686,16 @@ export class Sampler {
         const takenAtUsec = this._nowUsec();
         const statPath = joinPath(fsRoot, PROC_STAT_PATH);
         const meminfoPath = joinPath(fsRoot, PROC_MEMINFO_PATH);
+        const swapsPath = joinPath(fsRoot, PROC_SWAPS_PATH);
         const cpuPressurePath = joinPath(fsRoot, CPU_PRESSURE_PATH);
         const memoryPressurePath = joinPath(fsRoot, MEMORY_PRESSURE_PATH);
         const ioPressurePath = joinPath(fsRoot, IO_PRESSURE_PATH);
         const blockDevicesPath = joinPath(fsRoot, BLOCK_DEVICES_PATH);
-        const [statRead, meminfoRead, cpuPressureRead, memoryPressureRead, ioPressureRead, zramRead] =
+        const [statRead, meminfoRead, swapsRead, cpuPressureRead, memoryPressureRead, ioPressureRead, zramRead] =
             await Promise.allSettled([
                 readTextFile(statPath, this._cancellable),
                 readTextFile(meminfoPath, this._cancellable),
+                readTextFile(swapsPath, this._cancellable),
                 readTextFile(cpuPressurePath, this._cancellable),
                 readTextFile(memoryPressurePath, this._cancellable),
                 readTextFile(ioPressurePath, this._cancellable),
@@ -699,6 +706,7 @@ export class Sampler {
 
         const procStat = this._parseSettledRead(statRead, statPath, parseUsableProcStat);
         const meminfo = this._parseSettledRead(meminfoRead, meminfoPath, parseMeminfo);
+        const swapAreas = this._parseSettledRead(swapsRead, swapsPath, parseProcSwaps);
         const zramDevices = this._parseSettledRead(zramRead, blockDevicesPath, devices => devices);
         const pressureAvg10 = {
             cpu: this._parseSettledRead(cpuPressureRead, cpuPressurePath, parsePressureSomeAvg10),
@@ -707,9 +715,7 @@ export class Sampler {
         };
         const memory = meminfo === null ? null
             : this._requirePart(memoryUsage(meminfo), `cannot find MemTotal and MemAvailable in ${meminfoPath}`);
-        const missingSwapMessage = `cannot find SwapTotal and SwapFree in ${meminfoPath}`;
-        const swap = meminfo === null || zramDevices === null ? null
-            : this._requirePart(swapSummary(meminfo, zramDevices), missingSwapMessage);
+        const swap = swapAreas === null || zramDevices === null ? null : swapSummary(swapAreas, zramDevices);
         const previousProcStat = this._previousProcStat;
         const cpuBusyPercent = previousProcStat === null || procStat === null ? null
             : fractionToPercent(cpuBusyFraction(previousProcStat.aggregate, procStat.aggregate));

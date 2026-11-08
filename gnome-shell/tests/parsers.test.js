@@ -1,13 +1,16 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
-import {parseProcStat, parseMeminfo, parsePressureSomeAvg10, parseZramMmStat, parseUid}
+import {parseProcStat, parseMeminfo, parsePressureSomeAvg10, parseProcSwaps, parseZramMmStat, parseUid}
     from '../extensions/resource-pulse@dotfiles/lib/procParsers.js';
 import {parseCpuStatUsageUsec, parseMemoryStatReclaimableBytes, parseSingleNumber}
     from '../extensions/resource-pulse@dotfiles/lib/cgroupParsers.js';
 
 const REAL_FIXTURE_DIRECTORY_URI = GLib.uri_resolve_relative(import.meta.url, './fixtures/real/', GLib.UriFlags.NONE);
 const EXPECTED_REAL_CPU_COUNT = 8;
+const BYTES_PER_KIB = 1024;
+/** /proc/swaps's header, as the kernel writes it (tab separated). */
+const PROC_SWAPS_HEADER = 'Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n';
 
 /**
  * Reads a committed real capture from fixtures/real/ (tests may block).
@@ -61,3 +64,19 @@ test('memory.current: a single number parses, "max" is null', () => {
     assertEqual(parseSingleNumber('4096\n'), 4096);
     assertEqual(parseSingleNumber('max\n'), null);
 });
+
+test('/proc/swaps: each area\'s Used column, KiB → bytes, from the real tab-and-space-separated capture', () =>
+    assertEqual(parseProcSwaps(readRealFixture('proc-swaps')), [
+        {filename: '/swap.img', usedBytes: 0},
+        {filename: '/dev/zram0', usedBytes: 5_594_672 * BYTES_PER_KIB},
+    ]));
+test('/proc/swaps: a header with no area under it is an empty list (no swap), not no data', () =>
+    assertEqual(parseProcSwaps(PROC_SWAPS_HEADER), []));
+test('/proc/swaps: a malformed Used, a row short of a column or a header without Used is no data (null)', () =>
+    assertEqual([
+        parseProcSwaps(`${PROC_SWAPS_HEADER}/swap.img\tfile\t8388604\tmany\t-1\n`),
+        // Every column up to Used is there, so only the column count can refuse it.
+        parseProcSwaps(`${PROC_SWAPS_HEADER}/swap.img\tfile\t8388604\t0\n`),
+        parseProcSwaps('Filename\tType\tSize\tPriority\n/swap.img\tfile\t8388604\t-1\n'),
+        parseProcSwaps(''),
+    ], [null, null, null, null]));

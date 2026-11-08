@@ -1,3 +1,6 @@
+/** A /proc/swaps file name that is a zram device, capturing the device's name in /sys/block. */
+const ZRAM_SWAP_AREA_PATTERN = /^\/dev\/(zram\d+)$/;
+
 /**
  * Memory in use, as the kernel's own estimate: MemTotal - MemAvailable.
  *
@@ -13,21 +16,32 @@ export function memoryUsage(meminfo) {
 }
 
 /**
- * Swap split between compressed zram and real disk.
+ * Swap in use, split between compressed zram and real disk, from each swap area's own Used. zram's share is never
+ * derived from its orig_data_size: that leaves out same-filled pages and slot use, so it under-counts zram and
+ * turned the difference into swap "on disk" that did not exist.
  *
- * @param {Map<string, number>} meminfo - parseMeminfo output, in bytes.
- * @param {Array<{storedBytes: number, ramBytes: number}>} zramDevices - zram mm_stat per device.
- * @returns {{swappedBytes: number, zramStoredBytes: number, zramRamBytes: number, diskBytes: number}|null}
- *     Null when SwapTotal or SwapFree is missing.
+ * @param {Array<{filename: string, usedBytes: number}>} swapAreas - parseProcSwaps output.
+ * @param {Array<{deviceName: string, ramBytes: number}>} zramDevices - Every zram device's mm_stat, with its
+ *     /sys/block name.
+ * @returns {{zramUsedBytes: number, zramRamBytes: number, diskBytes: number}} Swap in use on /dev/zram* areas,
+ *     the RAM those same devices take (a zram device that is not a swap area adds nothing), and swap in use on
+ *     every other area.
  */
-export function swapSummary(meminfo, zramDevices) {
-    const swapTotalBytes = meminfo.get('SwapTotal');
-    const swapFreeBytes = meminfo.get('SwapFree');
-    if (swapTotalBytes === undefined || swapFreeBytes === undefined)
-        return null;
-    const swappedBytes = swapTotalBytes - swapFreeBytes;
-    const zramStoredBytes = zramDevices.reduce((sum, device) => sum + device.storedBytes, 0);
-    const zramRamBytes = zramDevices.reduce((sum, device) => sum + device.ramBytes, 0);
-    const diskBytes = Math.max(0, swappedBytes - zramStoredBytes);
-    return {swappedBytes, zramStoredBytes, zramRamBytes, diskBytes};
+export function swapSummary(swapAreas, zramDevices) {
+    const zramSwapDeviceNames = new Set();
+    let zramUsedBytes = 0;
+    let diskBytes = 0;
+    for (const {filename, usedBytes} of swapAreas) {
+        const zramMatch = ZRAM_SWAP_AREA_PATTERN.exec(filename);
+        if (zramMatch === null) {
+            diskBytes += usedBytes;
+            continue;
+        }
+        zramSwapDeviceNames.add(zramMatch[1]);
+        zramUsedBytes += usedBytes;
+    }
+    const zramRamBytes = zramDevices
+        .filter(zramDevice => zramSwapDeviceNames.has(zramDevice.deviceName))
+        .reduce((sum, zramDevice) => sum + zramDevice.ramBytes, 0);
+    return {zramUsedBytes, zramRamBytes, diskBytes};
 }

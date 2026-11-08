@@ -12,6 +12,9 @@ const UID_LINE_PATTERN = /^Uid:\s+(\d+)/;
 const ZRAM_MM_STAT_STORED_FIELD_INDEX = 0;
 const ZRAM_MM_STAT_RAM_FIELD_INDEX = 2; // mem_used_total, not compr_data_size
 const ZRAM_MM_STAT_MIN_FIELD_COUNT = 3;
+const PROC_SWAPS_FILENAME_COLUMN = 'Filename';
+const PROC_SWAPS_USED_KIB_COLUMN = 'Used';
+const WHITESPACE_RUN_PATTERN = /\s+/;
 const DECIMAL_RADIX = 10;
 
 /**
@@ -116,6 +119,35 @@ export function parseZramMmStat(text) {
         storedBytes: fields[ZRAM_MM_STAT_STORED_FIELD_INDEX],
         ramBytes: fields[ZRAM_MM_STAT_RAM_FIELD_INDEX],
     };
+}
+
+/**
+ * Parses /proc/swaps: a header naming the columns, then one row per active swap area. Columns are separated by
+ * runs of tabs and spaces, and the kernel escapes whitespace inside a file name, so a name is always one field.
+ *
+ * @param {string} text - File contents.
+ * @returns {Array<{filename: string, usedBytes: number}>|null} Each area's file name and the swap in use there
+ *     (the Used column, KiB → bytes); an empty list when no area is active. Null when the header has no Filename
+ *     or Used column, or any row is malformed.
+ */
+export function parseProcSwaps(text) {
+    const [headerLine, ...rowLines] = text.split('\n');
+    const columnNames = headerLine.trim().split(WHITESPACE_RUN_PATTERN);
+    const filenameIndex = columnNames.indexOf(PROC_SWAPS_FILENAME_COLUMN);
+    const usedKibIndex = columnNames.indexOf(PROC_SWAPS_USED_KIB_COLUMN);
+    if (filenameIndex === -1 || usedKibIndex === -1)
+        return null;
+    const swapAreas = [];
+    for (const rowLine of rowLines) {
+        if (rowLine.trim() === '')
+            continue;
+        const fields = rowLine.trim().split(WHITESPACE_RUN_PATTERN);
+        const usedKib = fields.length === columnNames.length ? parseNonNegativeIntegers([fields[usedKibIndex]]) : null;
+        if (usedKib === null)
+            return null;
+        swapAreas.push({filename: fields[filenameIndex], usedBytes: usedKib[0] * BYTES_PER_KIB});
+    }
+    return swapAreas;
 }
 
 /**

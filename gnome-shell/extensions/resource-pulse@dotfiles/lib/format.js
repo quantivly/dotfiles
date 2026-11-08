@@ -4,6 +4,7 @@ import {APP_NAME_MAX_CHARS, BYTES_PER_GIBIBYTE} from './constants.js';
 import {pressureBand} from './pressure.js';
 
 const NO_DATA_TEXT = 'no data';
+const NO_SWAP_TEXT = 'none';
 const SEPARATOR = ' · ';
 const ELLIPSIS = '…';
 const EM_DASH = '—';
@@ -52,32 +53,30 @@ export function memoryLine(memory) {
 }
 
 /**
- * Describes swap use without the leading "swap", split into what zram holds (and the RAM that costs) and what is
- * on disk. The desktop card shows "swap" as a separate, muted label.
+ * Describes swap use without the leading "swap": what zram holds (and the RAM that costs), then what is on disk.
+ * The lead number is zram's part alone, so "+ X on disk" adds to it. The desktop card shows "swap" as a separate,
+ * muted label.
  *
- * @param {{swappedBytes: number, zramStoredBytes: number, zramRamBytes: number, diskBytes: number}|null} swap
- *     Swap summary.
- * @returns {string} For example '1.9 GiB (0.4 in RAM) + 0.5 on disk', 'none' or 'no data'.
+ * @param {{zramUsedBytes: number, zramRamBytes: number, diskBytes: number}|null} swap - Swap summary.
+ * @returns {string} For example '1.9 GiB (0.4 in RAM) + 0.5 on disk', '2.0 GiB on disk', 'none' or 'no data'.
  */
 export function swapAmount(swap) {
     if (swap === null || swap === undefined)
         return NO_DATA_TEXT;
-    if (swap.swappedBytes <= 0)
-        return 'none';
-    const swappedText = formatGibibytes(swap.swappedBytes);
-    // Without zram everything is on disk, so a "(0.0 in RAM)" would only be noise.
-    if (swap.zramStoredBytes <= 0)
-        return `${swappedText} GiB on disk`;
-    const inRamText = `(${formatGibibytes(swap.zramRamBytes)} in RAM)`;
-    const onDiskText = swap.diskBytes > 0 ? ` + ${formatGibibytes(swap.diskBytes)} on disk` : '';
-    return `${swappedText} GiB ${inRamText}${onDiskText}`;
+    if (swap.zramUsedBytes <= 0 && swap.diskBytes <= 0)
+        return NO_SWAP_TEXT;
+    const diskText = formatGibibytes(swap.diskBytes);
+    // With no zram swap in use everything is on disk, so a "0.0 GiB (0.0 in RAM)" would only be noise.
+    if (swap.zramUsedBytes <= 0)
+        return `${diskText} GiB on disk`;
+    const zramText = `${formatGibibytes(swap.zramUsedBytes)} GiB (${formatGibibytes(swap.zramRamBytes)} in RAM)`;
+    return swap.diskBytes > 0 ? `${zramText} + ${diskText} on disk` : zramText;
 }
 
 /**
  * Describes swap use on one line.
  *
- * @param {{swappedBytes: number, zramStoredBytes: number, zramRamBytes: number, diskBytes: number}|null} swap
- *     Swap summary.
+ * @param {{zramUsedBytes: number, zramRamBytes: number, diskBytes: number}|null} swap - Swap summary.
  * @returns {string} For example 'swap 1.9 GiB (0.4 in RAM) + 0.5 on disk', 'swap none' or 'swap no data'.
  */
 export function swapLine(swap) {
