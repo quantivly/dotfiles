@@ -175,8 +175,13 @@ scripts/resource-pulse-cost.sh --rss-check <kib>     # exit 1 if it grew more th
 It reads only `comm`, `stat` and `status` under `/proc`. Measured on the reference laptop in plain
 `gjs`, outside the shell, the sampler's work (the app scan plus the 2 s fast tick) went from 0.86% to
 about 0.42% of one core when the scan moved from every 6 s to every 10 s with the skipped unit types.
-That figure leaves out what drawing costs inside the shell (the graphs' repaints and the card's
-relayout); only a `resource-pulse-cost.sh` reading of gnome-shell itself, as above, includes it.
+Reading the scan's files at low priority, so that their completions wait behind redraws, then added
+10–20% to the scan's whole-process CPU (alternating runs of the two versions, 2026-11-08), which puts
+the figure near 0.5%. Under heavy load these plain-`gjs` figures roughly double, so they guide rather
+than decide. They also leave out what drawing costs inside the shell (the graphs' repaints and the
+card's relayout). Only a `resource-pulse-cost.sh` reading of gnome-shell itself, as above, includes
+it, and that reading is the budget: under 0.5% of one core added at idle. Over it, the remedy is a
+longer scan interval (`APP_SCAN_INTERVAL_SECONDS`), never a shorter history.
 
 ### Tests
 
