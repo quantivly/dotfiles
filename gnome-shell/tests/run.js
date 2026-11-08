@@ -3,6 +3,7 @@
 // error and never a silently smaller run.
 import GLib from 'gi://GLib';
 import {runAll} from './harness.js';
+import './harness.test.js';
 import './parsers.test.js';
 
 const EXIT_CODE_TEST_FAILURE = 1;

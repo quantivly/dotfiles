@@ -21,8 +21,15 @@ export function test(name, body) {
  * @returns {string} JSON text.
  */
 function toComparableJson(value) {
-    return JSON.stringify(value, (_key, inner) =>
-        inner instanceof Map ? [...inner.entries()] : inner);
+    // JSON.stringify turns NaN and +/-Infinity into null, which would make
+    // assertEqual(NaN, null) pass; tag them so they stay distinct.
+    return JSON.stringify(value, (_key, inner) => {
+        if (inner instanceof Map)
+            return [...inner.entries()];
+        if (typeof inner === 'number' && !Number.isFinite(inner))
+            return `<non-finite number ${String(inner)}>`;
+        return inner;
+    });
 }
 
 /**
