@@ -296,12 +296,22 @@ mkro "$R/young555" '-6 days' 555
 mkro "$R/wt-out/ro" '-10 days' 555
 mkro "$R/claude-$U/s/ro10" '-10 days' 555
 mkro "$R/m000" '-10 days' 000
+# What systemd-tmpfiles exits with for m000 depends on its version. m000 is one
+# entry among many under the root's d line: systemd 255 reuses dir_cleanup()'s r
+# (see the claude-<uid> rows below), so its status followed readdir order and
+# came out 0 on every runner image this row met; v259 keeps the failure, so 73.
+# The script passes either through; the claude-<uid> rows pin the 73 itself.
+TMPFILES_MAJOR="$(systemd-tmpfiles --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+[[ "$TMPFILES_MAJOR" =~ ^[0-9]+$ ]] || fatal "could not read the systemd-tmpfiles version"
+TMPFILES_KEEPS_FAILURE_FROM_MAJOR=259
+M000_TMPFILES_RC=0
+(( TMPFILES_MAJOR >= TMPFILES_KEEPS_FAILURE_FROM_MAJOR )) && M000_TMPFILES_RC=73
 rc="$(run)"
 check "an old 555 dir holding an old 555 dir and an old file goes, under the root and under claude-<uid>, and the run exits 0" \
   "$rc:$(here "$R/gopath"):$(here "$R/claude-$U/sess")" "0:gone:gone"
-check "... and the log counts the four directories given u+w, and the one it could not open (m000)" \
-  "$(lastlog)" "mode=apply guarded=1 chmod=4 rc=0 failed=1"
-check "... which is warned of, though under the d line systemd-tmpfiles exited 0" \
+check "... and the log counts the four directories given u+w, and the one it could not open (m000), with systemd $TMPFILES_MAJOR's status" \
+  "$(lastlog)" "mode=apply guarded=1 chmod=4 rc=$M000_TMPFILES_RC failed=1"
+check "... which is warned of, once" \
   "$(grep -c -F 'tmpdir-clean: WARNING: failed=1:' "$T/err")" 1
 check "an old directory with a FRESH atime goes, empty or holding only an old file (directory atime is not counted)" \
   "$(here "$R/emptyold"):$(here "$R/dirold")" "gone:gone"

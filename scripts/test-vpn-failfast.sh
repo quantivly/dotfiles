@@ -1548,9 +1548,14 @@ printf '#!/bin/sh\nexit 0\n' > "$STANDIN"; chmod +x "$STANDIN"
 sed "s#^ExecStart=.*#ExecStart=$STANDIN --watch#; s#^ExecStopPost=.*#ExecStopPost=$STANDIN --clear#" \
     "$UNITDIR/vpn-failfast.service" > "$UNITDIR/probe.service"
 
-# Any output at all is a finding: systemd-analyze is silent on a clean unit.
-SA_SYS="$(systemd-analyze verify "$UNITDIR/probe.service" 2>&1 | grep -v 'probe.service: Command' || true)"
-check "vpn-failfast.service: systemd-analyze is silent" "$SA_SYS" ""
+# Any line about this unit is a finding: systemd-analyze is silent on a clean
+# unit. Scope to ours, as the user row below does: verify also loads every system
+# unit that the default targets pull in, so a unit the host ships reports its own
+# pre-existing faults (the ubuntu-26.04 runner's xfs_scrub_all.service, wanted by
+# timers.target, warns that CPUAccounting= was removed). Every line about ours
+# names it: "<path>/probe.service:<n>: ..." or "probe.service: ...".
+SA_SYS="$(systemd-analyze verify "$UNITDIR/probe.service" 2>&1 | grep -F 'probe.service' | grep -v 'probe.service: Command' || true)"
+check "vpn-failfast.service: systemd-analyze is silent about it" "$SA_SYS" ""
 
 # ROOT MUST NOT EXECUTE OUT OF \$HOME. This is the row the worktree incident
 # earned: /usr/local/bin is where backup-verify.sh and restic-notify already

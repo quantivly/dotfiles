@@ -428,6 +428,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two state-table rows failed on Ubuntu 26.04, which CI's `ubuntu-latest` became on 2026-11-08
+  and this laptop already runs.** `scripts/test-vpn-failfast.sh`'s system-unit `systemd-analyze`
+  row now reads only the lines about its own unit, as the user-unit row already did: verify also
+  loads the host's units, and the runner's `xfs_scrub_all.service` warns that `CPUAccounting=` was
+  removed. `scripts/test-tmpdir-clean.sh`'s m000 row expects `systemd-tmpfiles`' status from the
+  installed version: 73 from systemd 259, which keeps the failure, and 0 below it, where 255's
+  readdir order hid it. Neither script changed; both rows still fail on the fault they pin.
+
 - **`claude-cred-reconcile.timer` no longer stops for a whole boot when the user manager starts
   late.** With `Persistent=true`, an `OnBootSec=2min` already past at manager start was dropped,
   and `OnUnitActiveSec=` had no run to count from, so the timer sat `elapsed` with no next run and
