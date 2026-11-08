@@ -67,8 +67,8 @@ everyone and **off until you opt in** — see [Resource Pulse](#resource-pulse).
 
 ## Resource Pulse
 
-A top-bar CPU / memory / pressure indicator and a desktop card that answers "why is this machine slow
-right now". It lives in `gnome-shell/extensions/resource-pulse@dotfiles/` (GNOME Shell 50 only) and
+A top-bar CPU and memory indicator, and a desktop card that adds swap, pressure and the heaviest apps
+to answer "why is this machine slow right now". It lives in `gnome-shell/extensions/resource-pulse@dotfiles/` (GNOME Shell 50 only) and
 runs inside the shell without ever blocking it: no subprocess, no synchronous file read, no network.
 It samples every 2 s (`SAMPLE_INTERVAL_SECONDS`) and scans per-app cgroups every 10 s
 (`APP_SCAN_INTERVAL_SECONDS`, every 5th tick), skipping leaves whose unit type never hosts an app
@@ -172,9 +172,11 @@ scripts/resource-pulse-cost.sh --rss-kib             # resident memory
 scripts/resource-pulse-cost.sh --rss-check <kib>     # exit 1 if it grew more than 64 MiB since <kib>
 ```
 
-It reads only `comm`, `stat` and `status` under `/proc`. Measured on the reference laptop, the app
-scan went from 0.86% to about 0.42% of one core when it moved from every 6 s to every 10 s with the
-skipped unit types.
+It reads only `comm`, `stat` and `status` under `/proc`. Measured on the reference laptop in plain
+`gjs`, outside the shell, the sampler's work (the app scan plus the 2 s fast tick) went from 0.86% to
+about 0.42% of one core when the scan moved from every 6 s to every 10 s with the skipped unit types.
+That figure leaves out what drawing costs inside the shell (the graphs' repaints and the card's
+relayout); only a `resource-pulse-cost.sh` reading of gnome-shell itself, as above, includes it.
 
 ### Tests
 

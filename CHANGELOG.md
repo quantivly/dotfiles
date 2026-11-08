@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Resource Pulse, an opt-in GNOME Shell 50 extension: a top-bar CPU/memory/pressure indicator and a
-  desktop card.** Lives in `gnome-shell/extensions/resource-pulse@dotfiles/`; `./install` links it for
+- **Resource Pulse, an opt-in GNOME Shell 50 extension: a top-bar CPU/memory indicator and a desktop
+  card that adds swap, pressure and the heaviest apps.** Lives in `gnome-shell/extensions/resource-pulse@dotfiles/`; `./install` links it for
   everyone, but nothing enables it until `~/.gnome-settings.local` says `genable_extension
   resource-pulse@dotfiles` (new helper in `scripts/apply-gnome-settings.sh`: appends to
-  `enabled-extensions`, removes from `disabled-extensions`, warns on `disable-user-extensions`). It
+  `enabled-extensions`, removes from `disabled-extensions`, warns on `disable-user-extensions` and on a
+  false `allow-extension-installation`, which makes GNOME 50 skip the user extension directory). It
   samples every 2 s and scans per-app cgroups every 10 s, never blocks the shell and never draws stale
   numbers as live. `gnome-status` gains a `Resource Pulse:` line (linked, enabled, shell State);
   `scripts/resource-pulse-cost.sh` measures gnome-shell CPU and memory; every number is defined in
