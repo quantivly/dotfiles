@@ -6,6 +6,13 @@ export const SAMPLE_INTERVAL_SECONDS = 2;
 export const APP_SCAN_INTERVAL_SECONDS = 6;
 /** Sample ticks between per-app scans. */
 export const APP_SCAN_EVERY_N_TICKS = 3;
+/**
+ * memory.current above which an app scan also reads a cgroup's memory.stat to subtract its page cache (64 MiB).
+ * A leaf at or under it ranks by memory.current as it is: too small to top the ranking, so not worth a third read.
+ */
+export const APP_MEMORY_STAT_MIN_BYTES = 64 * 1024 ** 2;
+/** Directory entries fetched per step of an asynchronous directory listing. */
+export const DIRECTORY_LISTING_BATCH_ENTRIES = 64;
 /** Samples kept for the top-bar sparkline. */
 export const TOPBAR_HISTORY_SAMPLES = 30;
 /** Samples kept for the desktop card graphs. */
