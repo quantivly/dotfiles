@@ -840,3 +840,85 @@ test('sampler: a scan turned off between two batches of leaf reads is dropped', 
         removeTree(rootPath);
     }
 });
+
+test('sampler: runTick scans at tick 0, at the warm-up tick 1, then every APP_SCAN_EVERY_N_TICKS-th tick, no other',
+    async () => {
+        // A scan every tick would cost five times as much; a missing warm-up scan leaves "heaviest" without its
+        // CPU half for about 12 s after every enable (see the next row).
+        const {sampler, clock} = makeSampler('root-a');
+        await sampler.initialize();
+        const scannedTicks = [];
+        let currentTick = null;
+        const scanAppsOnceForReal = sampler.scanAppsOnce.bind(sampler);
+        sampler.scanAppsOnce = () => {
+            scannedTicks.push(currentTick);
+            return scanAppsOnceForReal();
+        };
+        for (currentTick = 0; currentTick <= 2 * APP_SCAN_EVERY_N_TICKS + 1; currentTick++) {
+            clock.nowUsec += SAMPLE_SPACING_USEC;
+            await sampler.runTick(currentTick);
+        }
+        sampler.destroy();
+        assertEqual(scannedTicks, [0, 1, APP_SCAN_EVERY_N_TICKS, 2 * APP_SCAN_EVERY_N_TICKS]);
+    });
+
+test('sampler: after enable, a resume and the scan turned back on, "heaviest" has its CPU half again by tick 2',
+    async () => {
+        // Each of the three restarts drops the app baseline and restarts the tick count at 0, so tick 0's scan is
+        // only a baseline; the warm-up scan at tick 1 gives the CPU delta that tick 2's snapshot carries.
+        await withTimerSpy(async spy => {
+            const {sampler, clock} = makeSampler('root-a', {sampleIntervalSeconds: QUIET_INTERVAL_SECONDS});
+            await sampler.initialize();
+            const tickRuns = [];
+            const runTickForReal = sampler.runTick.bind(sampler);
+            sampler.runTick = tickNumber => {
+                const tickRun = runTickForReal(tickNumber);
+                tickRuns.push({tickNumber, tickRun});
+                return tickRun;
+            };
+            /** @returns {Promise<void>} Fires the timer's callback once and waits for the tick it runs. */
+            const fireTimer = async () => {
+                clock.nowUsec += SAMPLE_SPACING_USEC;
+                spy.added.at(-1).callback();
+                await tickRuns.at(-1).tickRun;
+            };
+            /**
+             * @param {number} firstTickIndex - Index in tickRuns of the restart's first tick.
+             * @returns {{ticks: number[], hasCpuHalf: boolean}} The restart's tick numbers and whether tick 2's
+             *     snapshot names a top app by CPU.
+             */
+            const describeRestart = firstTickIndex => ({
+                ticks: tickRuns.slice(firstTickIndex).map(tickRun => tickRun.tickNumber),
+                hasCpuHalf: (sampler.latestSnapshot.apps?.topCpu ?? null) !== null,
+            });
+
+            clock.nowUsec += SAMPLE_SPACING_USEC;
+            sampler.start();
+            await tickRuns.at(-1).tickRun;
+            await fireTimer();
+            await fireTimer();
+            const afterEnable = describeRestart(0);
+
+            let firstTickIndex = tickRuns.length;
+            sampler.setPaused(true);
+            clock.nowUsec += SAMPLE_SPACING_USEC;
+            sampler.setPaused(false);
+            await tickRuns.at(-1).tickRun;
+            await fireTimer();
+            await fireTimer();
+            const afterResume = describeRestart(firstTickIndex);
+
+            firstTickIndex = tickRuns.length;
+            sampler.setAppScanEnabled(false);
+            sampler.setAppScanEnabled(true);
+            await fireTimer();
+            await fireTimer();
+            await fireTimer();
+            const afterScanTurnedBackOn = describeRestart(firstTickIndex);
+            sampler.destroy();
+
+            const expectedRestart = {ticks: [0, 1, 2], hasCpuHalf: true};
+            assertEqual([afterEnable, afterResume, afterScanTurnedBackOn],
+                [expectedRestart, expectedRestart, expectedRestart]);
+        });
+    });

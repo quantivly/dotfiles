@@ -15,7 +15,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {
-    APP_SCAN_EVERY_N_TICKS, APP_SCAN_READ_BATCH_LEAVES, APP_SCAN_SKIPPED_UNIT_SUFFIXES, CARD_HISTORY_SAMPLES,
+    APP_SCAN_EVERY_N_TICKS, APP_SCAN_READ_BATCH_LEAVES, APP_SCAN_SKIPPED_UNIT_SUFFIXES, APP_SCAN_WARM_UP_TICK,
+    CARD_HISTORY_SAMPLES,
     DIRECTORY_LISTING_BATCH_ENTRIES, APP_MEMORY_STAT_MIN_BYTES, FILE_READ_CHUNK_BYTES, SAMPLE_INTERVAL_SECONDS,
 } from './lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from './lib/errorLog.js';
@@ -332,6 +333,18 @@ async function readCgroupLeaf(leafPath, readFile, cancellable) {
 }
 
 /**
+ * Says whether a tick scans apps: tick 0 and every APP_SCAN_EVERY_N_TICKS-th after it, plus the warm-up tick
+ * (APP_SCAN_WARM_UP_TICK). The tick count restarts at 0 after every baseline reset, so the warm-up scan follows each
+ * reset once.
+ *
+ * @param {number} tickNumber - The tick's number since the last reset.
+ * @returns {boolean} True when the tick scans (while scanning is enabled).
+ */
+function isAppScanTick(tickNumber) {
+    return tickNumber % APP_SCAN_EVERY_N_TICKS === 0 || tickNumber === APP_SCAN_WARM_UP_TICK;
+}
+
+/**
  * Says whether a cgroup leaf belongs to a unit type that can host an app (a service, a scope, or a slice too deep
  * to descend into), as opposed to a mount, socket, timer and the like.
  *
@@ -522,7 +535,7 @@ export class Sampler {
 
     /**
      * Turns the periodic app scan on or off. Off drops the last ranking and its baseline; on scans at the next
-     * tick.
+     * tick and the one after it (the warm-up scan), so the CPU half of "heaviest" is back two ticks later.
      *
      * @param {boolean} isEnabled - True while the card could be visible.
      * @returns {void}
@@ -560,20 +573,21 @@ export class Sampler {
     }
 
     /**
-     * Does one tick's work: a sample, then an app scan when one is due and enabled. The sample comes first, so a
-     * slow or failing scan can never delay or skip it; a ranking from this tick's scan appears in the next tick's
-     * snapshot. Neither step rejects: a sample that throws publishes no data, and a scan that throws drops the
-     * ranking.
+     * Does one tick's work: a sample, then an app scan when one is due (isAppScanTick) and enabled. The sample comes
+     * first, so a slow or failing scan can never delay or skip it; a ranking from this tick's scan appears in the
+     * next tick's snapshot. Neither step rejects: a sample that throws publishes no data, and a scan that throws
+     * drops the ranking.
      *
-     * @param {number} tickNumber - The timer's tick count; it restarts at 0 on resume and when the scan is
-     *     re-enabled, so the first tick after either scans at once.
+     * @param {number} tickNumber - The timer's tick count; it restarts at 0 on enable, on resume and when the scan
+     *     is re-enabled, so the first tick after any of them scans at once (a baseline) and the next one scans
+     *     again (the CPU delta).
      * @returns {Promise<void>} Settles when the tick is done.
      */
     async runTick(tickNumber) {
         if (this._isDestroyed)
             return;
         await this.sampleOnce();
-        const isAppScanDue = this._isAppScanEnabled && tickNumber % APP_SCAN_EVERY_N_TICKS === 0;
+        const isAppScanDue = this._isAppScanEnabled && isAppScanTick(tickNumber);
         if (isAppScanDue && !this._isDestroyed)
             await this.scanAppsOnce();
     }

@@ -72,7 +72,10 @@ right now". It lives in `gnome-shell/extensions/resource-pulse@dotfiles/` (GNOME
 runs inside the shell without ever blocking it: no subprocess, no synchronous file read, no network.
 It samples every 2 s (`SAMPLE_INTERVAL_SECONDS`) and scans per-app cgroups every 10 s
 (`APP_SCAN_INTERVAL_SECONDS`, every 5th tick), skipping leaves whose unit type never hosts an app
-(`.mount .socket .swap .automount .path .timer .device`). The top bar keeps 30 samples, the card 150.
+(`.mount .socket .swap .automount .path .timer .device`). The scan reads at low priority, below the
+shell's redraws, 16 leaves at a time. After it starts, resumes or comes back from the overview, it scans
+once more on the second tick, so "heaviest" has its CPU half within about 4 s rather than 12. The top
+bar keeps 30 samples, the card 150.
 The first sample is *no data*, never 0%, and stale numbers are never drawn as live.
 
 GNOME 50 turns the extension off on every lock **and on every idle screen blank**: a blank enters the
@@ -169,7 +172,7 @@ skipped unit types.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (235 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (237 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.

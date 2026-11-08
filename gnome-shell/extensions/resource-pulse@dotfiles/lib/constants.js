@@ -10,6 +10,12 @@ export const APP_SCAN_INTERVAL_SECONDS = 10;
 /** Sample ticks between per-app scans. */
 export const APP_SCAN_EVERY_N_TICKS = 5;
 /**
+ * The tick that scans once more than the cadence would, after every baseline reset (enable, resume, the scan turned
+ * back on), which restarts the tick count at 0. Tick 0's scan is only a baseline, so without this the CPU half of
+ * "heaviest" would wait for tick APP_SCAN_EVERY_N_TICKS (about 12 s); with it, tick 2's snapshot has it (about 4 s).
+ */
+export const APP_SCAN_WARM_UP_TICK = 1;
+/**
  * Cgroup leaves with these suffixes are left out of the app scan. Such units (mounts, sockets, swap, automounts,
  * paths, timers, devices) never host an app process, and skipping them is the scan's main cost lever: on the
  * reference laptop they were 64 of 171 leaves.
