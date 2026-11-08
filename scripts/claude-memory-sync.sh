@@ -44,13 +44,18 @@
 # TIME. Per store, at most: gh-route GH_ROUTE_TIMEOUT_SECONDS (20 s), the fetch and the push
 # NETWORK_TIMEOUT_SECONDS each (60 s), each of those three killed NETWORK_KILL_AFTER_SECONDS (5 s)
 # after that, and the lock wait LOCK_WAIT_SECONDS (120 s). Across the stores, RUN_DEADLINE_SECONDS
-# (240 s from the start of the run): no gh-route call, fetch or push STARTS after it, and no lock wait
-# runs past it (MIN_LOCK_WAIT_SECONDS, 1 s, at least). A store whose fetch or push would start after it
-# is still committed, and records unreachable, `run deadline`. The deadline is looked at between steps
-# and never cuts one short, so this script never interrupts a merge and its commit. A run therefore
-# ends within the deadline, plus the one gh-route call, fetch or push in flight at it (65 s at most),
-# plus the local git work of the stores after it: about 305 s and that local work at the defaults,
-# which is what the unit's time limit has to allow.
+# (240 s from the start of the run), measured on the kernel's monotonic uptime (/proc/uptime: every
+# host this runs on is Linux), so a step of the wall clock moves it neither way. Whether a store does
+# network work at all is decided ONCE, before its first network step: a store that begins past the
+# deadline asks gh-route nothing and fetches nothing, and records unreachable, `run deadline`, after
+# its local commit. A store that began before it asks gh-route and fetches; its push is looked at
+# again and does not start past the deadline either (unreachable, `run deadline`): a later look can
+# only drop network work, never add it. No lock wait runs past the deadline (MIN_LOCK_WAIT_SECONDS,
+# 1 s, at least). The deadline is looked at between steps and never cuts one short, so this script
+# never interrupts a merge and its commit. A run therefore ends within the deadline, plus a gh-route
+# call and a fetch that began just before it (90 s at most), plus the local git work of the stores
+# after it: about 330 s and that local work at the defaults, which is what the unit's time limit has
+# to allow.
 #
 # NO HOOK RUNS AND NO MONITOR STARTS. Every git call, a read as much as a write, is made with
 # core.hooksPath=/dev/null and core.fsmonitor=false (GIT_SAFETY_OPTIONS, applied by git_in_store), and
@@ -244,9 +249,21 @@ MIN_LOCK_WAIT_SECONDS=1
 RUN_DEADLINE_DETAIL='run deadline'
 WHOLE_SECONDS_RE='^[1-9][0-9]*$'
 # What git leaves in its directory while each operation that a commit would conclude is unfinished.
-UNFINISHED_OPERATION_MARKERS=(MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply)
+# The pseudorefs are asked of git, since a reftable repository keeps CHERRY_PICK_HEAD and REVERT_HEAD
+# in its table and not as files; the rebase states are directories in either.
+UNFINISHED_OPERATION_PSEUDOREFS=(MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD)
+UNFINISHED_OPERATION_DIRECTORIES=(rebase-merge rebase-apply)
 declare -A OPERATION_OF_MARKER=([MERGE_HEAD]=merge [CHERRY_PICK_HEAD]=cherry-pick [REVERT_HEAD]=revert
     [rebase-merge]=rebase [rebase-apply]=rebase)
+# The run deadline's clock: seconds since boot, with two decimals, as the first field.
+UPTIME_FILE_DEFAULT='/proc/uptime'
+UPTIME_RE='^([0-9]+)\.([0-9]{2})( |$)'
+CENTISECONDS_PER_SECOND=100
+# network_git_in_store's status when it refused a call with no settled route mode: none of git's or
+# timeout's.
+UNROUTED_NETWORK_CALL_STATUS=200
+# fetch_origin and push_to_origin: the store could not run (reported), apart from a network failure.
+NETWORK_STEP_COULD_NOT_RUN=2
 # How a run authenticates, by gh-route's answer.
 ROUTE_MODE_PINNED='pinned'
 ROUTE_MODE_UNPINNED='unpinned'
@@ -370,6 +387,7 @@ REDACTOR="$DOTFILES/$REDACTOR_RELATIVE"
 GH_ROUTE="${CLAUDE_MEMORY_GH_ROUTE:-$DOTFILES/$GH_ROUTE_RELATIVE}"
 GH_ROUTE_TIMEOUT_SECONDS="${CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS:-$GH_ROUTE_TIMEOUT_SECONDS_DEFAULT}"
 RUN_DEADLINE_SECONDS="${CLAUDE_MEMORY_RUN_DEADLINE_SECONDS:-$RUN_DEADLINE_SECONDS_DEFAULT}"
+UPTIME_FILE="${CLAUDE_MEMORY_UPTIME_FILE:-$UPTIME_FILE_DEFAULT}"
 
 MODE=''                         # check | scan | apply | status
 ONLY_STORE=''                   # --store
@@ -382,7 +400,8 @@ FAILED_STORES=()                # stores that could not run, reported at the end
 NEEDS_ATTENTION=0               # --check or --scan found something
 LINK_LOCK_FD=''                 # the open descriptor of link.lock while it is held
 LOCK_WAIT_THIS_STORE=''         # the lock wait, cut to the run deadline, set by settle_lock_wait
-RUN_STARTED_EPOCH=''            # when main began: the run deadline counts from it
+RUN_STARTED_CENTISECONDS=''     # the uptime when main began, in hundredths: the run deadline counts from it
+STORE_IS_PAST_DEADLINE=0        # decided once per store, before its first network step
 LAST_OK_FAILURE_DETAIL=''       # why last-ok could not be written, for the status detail
 GIT_RUNNER_PREFIX=()            # what runs git: empty, or timeout for a network call
 STORE_HAS_ORIGIN=0              # what check_origin found
@@ -496,21 +515,28 @@ git_in_store() {
 # switch, for one a later git reads).
 # When the route pinned an account, the token and the account's config dir are in this one git
 # process's environment, and every configured credential helper is cleared for the one that reads it.
-# The token is never in an argument.
+# The token is never in an argument. Only a route that said unpinned runs with git's own helpers: any
+# other mode, an empty one included, is refused (UNROUTED_NETWORK_CALL_STATUS, having said so), since
+# falling back to the host's helpers for a store gh-route would have pinned is a push as the wrong account.
 network_git_in_store() {
-    local store_dir=$1
+    local store_dir=$1 shown_route_mode
     shift
     # Read by git_in_store, which this call reaches: bash scopes a local to the calls it makes.
     # shellcheck disable=SC2034
     local GIT_RUNNER_PREFIX=(timeout --kill-after="$NETWORK_KILL_AFTER_SECONDS" "$NETWORK_TIMEOUT_SECONDS")
-    if [[ "$ROUTE_MODE" == "$ROUTE_MODE_PINNED" ]]; then
-        CLAUDE_MEMORY_GIT_TOKEN=$ROUTED_TOKEN GH_CONFIG_DIR=$ROUTED_GH_CONFIG_DIR \
-            LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GIT_TRACE_REDACT=1 \
-            git_in_store "$store_dir" -c "$CLEARED_CREDENTIAL_HELPERS" \
-                -c "credential.helper=$PINNED_CREDENTIAL_HELPER" "$@"
-    else
-        LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GIT_TRACE_REDACT=1 git_in_store "$store_dir" "$@"
-    fi
+    case "$ROUTE_MODE" in
+        "$ROUTE_MODE_PINNED")
+            CLAUDE_MEMORY_GIT_TOKEN=$ROUTED_TOKEN GH_CONFIG_DIR=$ROUTED_GH_CONFIG_DIR \
+                LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GIT_TRACE_REDACT=1 \
+                git_in_store "$store_dir" -c "$CLEARED_CREDENTIAL_HELPERS" \
+                    -c "credential.helper=$PINNED_CREDENTIAL_HELPER" "$@" ;;
+        "$ROUTE_MODE_UNPINNED")
+            LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GIT_TRACE_REDACT=1 git_in_store "$store_dir" "$@" ;;
+        *)
+            shown_route_mode=$(escaped_for_one_line "$ROUTE_MODE")
+            printf "%s: refusing a network call: the route mode is '%s'\n" "$SCRIPT_NAME" "$shown_route_mode" >&2
+            return "$UNROUTED_NETWORK_CALL_STATUS" ;;
+    esac
 }
 
 # stderr_redacted COMMAND… — COMMAND, with what it says on stderr passed through the redactor's shape
@@ -758,24 +784,41 @@ print_file_content() {
 # --apply: stage, gate and commit, holding the link script's lock.
 # ---------------------------------------------------------------------------------------------
 
-# seconds_until_run_deadline — how many whole seconds are left before the run deadline; 0 or less once
-# it has passed.
-seconds_until_run_deadline() {
-    local now
-    printf -v now '%(%s)T' -1
-    printf '%s' $(( RUN_STARTED_EPOCH + RUN_DEADLINE_SECONDS - now ))
+# read_uptime_centiseconds VARIABLE — set VARIABLE to the seconds since boot, in hundredths, from
+# UPTIME_FILE: a clock that only moves forward, whatever the wall clock does. Returns 1 when it cannot be
+# read.
+# shellcheck disable=SC2034  # uptime_target is a nameref: assigning it sets the caller's variable
+read_uptime_centiseconds() {
+    local -n uptime_target="$1"
+    local uptime_line=''
+    # A file with no final newline still yields its line; the pattern decides.
+    { IFS= read -r uptime_line < "$UPTIME_FILE"; } 2>/dev/null
+    [[ "$uptime_line" =~ $UPTIME_RE ]] || return 1
+    uptime_target=$(( 10#${BASH_REMATCH[1]} * CENTISECONDS_PER_SECOND + 10#${BASH_REMATCH[2]} ))
+}
+
+# centiseconds_until_run_deadline — how many hundredths of a second are left before the run deadline:
+# 0 or less once it has passed, and 0 when the clock cannot be read, since no time is then left that
+# this script can vouch for.
+centiseconds_until_run_deadline() {
+    local now_centiseconds
+    if ! read_uptime_centiseconds now_centiseconds; then
+        printf '0'
+        return 0
+    fi
+    printf '%s' $(( RUN_STARTED_CENTISECONDS + RUN_DEADLINE_SECONDS * CENTISECONDS_PER_SECOND - now_centiseconds ))
 }
 
 # run_deadline_has_passed — status 0 once RUN_DEADLINE_SECONDS have passed since the run started.
 run_deadline_has_passed() {
-    (( $(seconds_until_run_deadline) <= 0 ))
+    (( $(centiseconds_until_run_deadline) <= 0 ))
 }
 
-# settle_lock_wait — LOCK_WAIT_THIS_STORE: LOCK_WAIT_SECONDS, cut to the time left before the run
-# deadline, and never under MIN_LOCK_WAIT_SECONDS.
+# settle_lock_wait — LOCK_WAIT_THIS_STORE: LOCK_WAIT_SECONDS, cut to the whole seconds left before the
+# run deadline, and never under MIN_LOCK_WAIT_SECONDS.
 settle_lock_wait() {
     local seconds_left
-    seconds_left=$(seconds_until_run_deadline)
+    seconds_left=$(( $(centiseconds_until_run_deadline) / CENTISECONDS_PER_SECOND ))
     LOCK_WAIT_THIS_STORE=$LOCK_WAIT_SECONDS
     if (( seconds_left < LOCK_WAIT_THIS_STORE )); then LOCK_WAIT_THIS_STORE=$seconds_left; fi
     if (( LOCK_WAIT_THIS_STORE < MIN_LOCK_WAIT_SECONDS )); then LOCK_WAIT_THIS_STORE=$MIN_LOCK_WAIT_SECONDS; fi
@@ -952,7 +995,12 @@ resolve_route() {
 refuse_unfinished_operation() {
     local store=$1 store_dir=$2 marker marker_path unmerged_entries branch_status
     CURRENT_BRANCH=''
-    for marker in "${UNFINISHED_OPERATION_MARKERS[@]}"; do
+    for marker in "${UNFINISHED_OPERATION_PSEUDOREFS[@]}"; do
+        git_in_store "$store_dir" rev-parse -q --verify "$marker" >/dev/null || continue
+        report_store_failure "$store" "a ${OPERATION_OF_MARKER[$marker]} is in progress: conclude or abort it by hand"
+        return 1
+    done
+    for marker in "${UNFINISHED_OPERATION_DIRECTORIES[@]}"; do
         if ! marker_path=$(git_in_store "$store_dir" rev-parse --path-format=absolute --git-path "$marker"); then
             report_store_failure "$store" "git could not find its own directory"
             return 1
@@ -995,14 +1043,27 @@ record_network_failure() {
     NETWORK_DETAIL=$(redacted_text "$git_errors")
 }
 
-# fetch_origin STORE_DIR — fetch the store's origin. Returns 1 with NETWORK_OUTCOME and NETWORK_DETAIL
-# set when it failed.
+# report_unrouted_network_call STORE STEP — the store could not run: network_git_in_store refused its
+# STEP for want of a settled route mode.
+report_unrouted_network_call() {
+    local shown_route_mode
+    shown_route_mode=$(escaped_for_one_line "$ROUTE_MODE")
+    report_store_failure "$1" "refused the $2: no route was settled for it (route mode '$shown_route_mode')"
+}
+
+# fetch_origin STORE STORE_DIR — fetch the store's origin. Returns 1 with NETWORK_OUTCOME and
+# NETWORK_DETAIL set when it failed, and NETWORK_STEP_COULD_NOT_RUN, having reported the store, when the
+# call was refused for want of a route.
 fetch_origin() {
-    local store_dir=$1 fetch_errors fetch_status
+    local store=$1 store_dir=$2 fetch_errors fetch_status
     fetch_errors=$(network_git_in_store "$store_dir" fetch --quiet --no-recurse-submodules \
         "$ORIGIN_REMOTE_NAME" 2>&1 >/dev/null)
     fetch_status=$?
     (( fetch_status != 0 )) || return 0
+    if (( fetch_status == UNROUTED_NETWORK_CALL_STATUS )); then
+        report_unrouted_network_call "$store" fetch
+        return "$NETWORK_STEP_COULD_NOT_RUN"
+    fi
     record_network_failure "$fetch_status" "$fetch_errors" "$OUTCOME_UNREACHABLE"
     return 1
 }
@@ -1241,12 +1302,14 @@ integrate_origin() {
     INTEGRATION_OUTCOME=$OUTCOME_KEPT_BOTH
 }
 
-# push_to_origin STORE_DIR — push HEAD to its branch on origin, once, unless origin already holds HEAD
-# or there is nothing to push. Sets PUSHED. Returns 1 with NETWORK_OUTCOME and NETWORK_DETAIL set when
-# the push failed: auth-failed, push-rejected when origin refused the ref, unreachable otherwise, and
-# unreachable `run deadline` when the run deadline has passed before it could start.
+# push_to_origin STORE STORE_DIR — push HEAD to its branch on origin, once, unless origin already holds
+# HEAD or there is nothing to push. Sets PUSHED. Returns 1 with NETWORK_OUTCOME and NETWORK_DETAIL set
+# when the push failed: auth-failed, push-rejected when origin refused the ref, unreachable otherwise,
+# and unreachable `run deadline` when the run deadline passed before it could start (a store reaches
+# this only after a fetch, so this look can only drop the push, never add one); and
+# NETWORK_STEP_COULD_NOT_RUN, having reported the store, when the call was refused for want of a route.
 push_to_origin() {
-    local store_dir=$1 tracking_ref head_id tracking_id push_errors push_status otherwise
+    local store=$1 store_dir=$2 tracking_ref head_id tracking_id push_errors push_status otherwise
     PUSHED=0
     if head_is_unborn "$store_dir"; then return 0; fi
     tracking_ref="refs/remotes/$ORIGIN_REMOTE_NAME/$CURRENT_BRANCH"
@@ -1263,6 +1326,10 @@ push_to_origin() {
     if (( push_status == 0 )); then
         PUSHED=1
         return 0
+    fi
+    if (( push_status == UNROUTED_NETWORK_CALL_STATUS )); then
+        report_unrouted_network_call "$store" push
+        return "$NETWORK_STEP_COULD_NOT_RUN"
     fi
     otherwise=$OUTCOME_UNREACHABLE
     if [[ "$push_errors" =~ $PUSH_REJECTED_ERE ]]; then otherwise=$OUTCOME_PUSH_REJECTED; fi
@@ -1348,26 +1415,30 @@ commit_and_integrate() {
     integrate_origin "$1" "$2"
 }
 
-# apply_store STORE STORE_DIR — the route, the origin check and the refusal of an unfinished
-# operation; the fetch; stage, gate, commit and merge under the lock; the push; then the status. Past
-# the run deadline the route is not asked and the fetch and the push do not start. Returns 1 when the
-# store could not run.
-apply_store() {
-    local store=$1 store_dir=$2 has_fetched=0 locked_status
+# sync_store STORE STORE_DIR — the route, the origin check and the refusal of an unfinished operation;
+# the fetch; stage, gate, commit and merge under the lock; the push; then the status. Whether the store
+# does network work at all is decided once, before its first network step: past the run deadline the
+# route is not asked and nothing is fetched or pushed. Returns 1 when the store could not run.
+sync_store() {
+    local store=$1 store_dir=$2 has_fetched=0 locked_status fetch_status push_status
     NETWORK_OUTCOME='' NETWORK_DETAIL='' INTEGRATION_OUTCOME='' INTEGRATION_DETAIL='' MERGED_FROM_ORIGIN=0
     KEPT_BOTH_COUNT=0 PUSHED=0 COMMITTED_COUNT=0 WITHHELD_REDACTED_PATHS=() LAST_OK_FAILURE_DETAIL=''
-    ROUTE_MODE=''
+    ROUTE_MODE='' STORE_IS_PAST_DEADLINE=0
+    if run_deadline_has_passed; then STORE_IS_PAST_DEADLINE=1; fi
     # Past the deadline nothing reaches the network, so the route that serves it is not asked either.
-    if ! run_deadline_has_passed; then resolve_route "$store" "$store_dir" || return 1; fi
+    if (( ! STORE_IS_PAST_DEADLINE )); then resolve_route "$store" "$store_dir" || return 1; fi
     check_origin "$store" "$store_dir" || return 1
     refuse_unfinished_operation "$store" "$store_dir" || return 1
     if (( STORE_HAS_ORIGIN )); then
         if [[ "$ROUTE_MODE" == "$ROUTE_MODE_NO_TOKEN" ]]; then
             NETWORK_OUTCOME=$OUTCOME_SKIPPED_NO_TOKEN NETWORK_DETAIL=$NO_TOKEN_DETAIL
-        elif run_deadline_has_passed; then
+        elif (( STORE_IS_PAST_DEADLINE )); then
             NETWORK_OUTCOME=$OUTCOME_UNREACHABLE NETWORK_DETAIL=$RUN_DEADLINE_DETAIL
-        elif fetch_origin "$store_dir"; then
-            has_fetched=1
+        else
+            fetch_origin "$store" "$store_dir"
+            fetch_status=$?
+            if (( fetch_status == NETWORK_STEP_COULD_NOT_RUN )); then return 1; fi
+            if (( fetch_status == 0 )); then has_fetched=1; fi
         fi
     fi
     take_link_lock_reporting "$store" || return 1
@@ -1384,13 +1455,17 @@ apply_store() {
             printf '%s: merged %s/%s\n' "$store" "$ORIGIN_REMOTE_NAME" "$CURRENT_BRANCH"
         fi
     fi
-    if (( has_fetched )) && [[ "$INTEGRATION_OUTCOME" != "$OUTCOME_BLOCKED" ]] && push_to_origin "$store_dir"; then
-        if (( PUSHED )); then printf '%s: pushed\n' "$store"; fi
-        if ! write_last_ok "$store"; then
-            LAST_OK_FAILURE_DETAIL="could not write $STATE_DIR/$store$LAST_OK_FILE_SUFFIX"
+    if (( has_fetched )) && [[ "$INTEGRATION_OUTCOME" != "$OUTCOME_BLOCKED" ]]; then
+        push_to_origin "$store" "$store_dir"
+        push_status=$?
+        if (( push_status == NETWORK_STEP_COULD_NOT_RUN )); then return 1; fi
+        if (( push_status == 0 )); then
+            if (( PUSHED )); then printf '%s: pushed\n' "$store"; fi
+            if ! write_last_ok "$store"; then
+                LAST_OK_FAILURE_DETAIL="could not write $STATE_DIR/$store$LAST_OK_FILE_SUFFIX"
+            fi
         fi
     fi
-    ROUTED_TOKEN=''
     # The outcome is recorded even when last-ok could not be: its detail then says so, and the run
     # still ends as could not run.
     record_store_outcome "$store" || { FAILED_STORES+=("$store"); return 1; }
@@ -1398,6 +1473,16 @@ apply_store() {
         FAILED_STORES+=("$store")
         return 1
     fi
+}
+
+# apply_store STORE STORE_DIR — sync_store, then the token goes, whichever way the store's run ended:
+# it never stays in this process past its own store.
+apply_store() {
+    local store_status
+    sync_store "$@"
+    store_status=$?
+    ROUTED_TOKEN=''
+    return "$store_status"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -1700,6 +1785,8 @@ prepare_apply() {
         || die "CLAUDE_MEMORY_RUN_DEADLINE_SECONDS '$RUN_DEADLINE_SECONDS' is not a whole number of seconds above 0"
     [[ "$GH_ROUTE_TIMEOUT_SECONDS" =~ $WHOLE_SECONDS_RE ]] \
         || die "CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS '$GH_ROUTE_TIMEOUT_SECONDS' is not a whole number of seconds above 0"
+    [[ -n "$RUN_STARTED_CENTISECONDS" ]] \
+        || die "could not read the uptime from $UPTIME_FILE, which the run deadline is measured on (Linux only)"
     command -v flock >/dev/null || die "flock is required"
     command -v timeout >/dev/null || die "timeout is required"
     [[ -x "$GH_ROUTE" ]] || die "$GH_ROUTE is not executable"
@@ -1718,8 +1805,8 @@ settle_stale_after_minutes() {
 
 main() {
     local store store_dir
-    # The run deadline counts from here.
-    printf -v RUN_STARTED_EPOCH '%(%s)T' -1
+    # The run deadline counts from here; prepare_apply refuses a run whose clock could not be read.
+    read_uptime_centiseconds RUN_STARTED_CENTISECONDS || RUN_STARTED_CENTISECONDS=''
     parse_args "$@"
     # Every default path hangs off HOME.
     [[ -n "${HOME:-}" ]] || die "HOME is not set"

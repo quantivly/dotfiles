@@ -121,6 +121,13 @@ HANG_BOUND_SECONDS=30
 # them meet them.
 RUN_DEADLINE_SECONDS_FOR_ROWS=600
 GH_ROUTE_TIMEOUT_SECONDS_FOR_ROWS=20
+# The run deadline is measured on the kernel's uptime. The clock row hands the script a fixture file
+# instead, one the git wrapper moves: past the deadline on a fetch, back to the start on any call in
+# FIXTURE_CLOCK_BACK_DIR.
+REAL_UPTIME_FILE='/proc/uptime'
+FIXTURE_UPTIME_FILE="$TMPROOT/fixture-uptime"
+FIXTURE_UPTIME_START='1000.00 0.00'
+FIXTURE_UPTIME_PAST_DEADLINE='1005.00 0.00'
 # The deadline row: a deadline two seconds into the run, and a fetch that takes three, so the first
 # store's fetch starts before it and everything after that fetch starts after it.
 DEADLINE_ROW_DEADLINE_SECONDS=2
@@ -263,6 +270,10 @@ for argument in "$@"; do
         printf '%s' "${argument#credential.helper=!}" > "$FIXTURE_CREDENTIAL_HELPER_FILE"
     fi
 done
+if [[ -n "${FIXTURE_CLOCK_STEPS:-}" ]]; then
+    if [[ "$subcommand" == fetch ]]; then printf '%s\n' "$FIXTURE_UPTIME_PAST_DEADLINE" > "$FIXTURE_UPTIME_FILE"; fi
+    if [[ " $* " == *" -C $FIXTURE_CLOCK_BACK_DIR "* ]]; then printf '%s\n' "$FIXTURE_UPTIME_START" > "$FIXTURE_UPTIME_FILE"; fi
+fi
 if [[ "$subcommand" == fetch && "${FIXTURE_GIT_ON_FETCH:-}" == slow ]]; then
     sleep "$FIXTURE_FETCH_SECONDS"
 fi
@@ -308,7 +319,8 @@ FIXTURE_LEFTOVER_CHILD_SECONDS=$LEFTOVER_CHILD_SECONDS
 export FIXTURE_HOOK_MARKER FIXTURE_HOOK_STAGED_PATH FIXTURE_REAL_GIT FIXTURE_GIT_CALL_LOG \
     FIXTURE_LOCK_PROBE_RESULT FIXTURE_LEFTOVER_CHILD_PID FIXTURE_LINK_LOCK FIXTURE_LEFTOVER_CHILD_SECONDS \
     FIXTURE_REAL_CAT FIXTURE_CAT_READ_COUNT FIXTURE_GIT_ENV_LOG FIXTURE_CREDENTIAL_HELPER_FILE \
-    FIXTURE_FSMONITOR_MARKER FIXTURE_OWNER FIXTURE_GIT_SETTINGS_LOG
+    FIXTURE_FSMONITOR_MARKER FIXTURE_OWNER FIXTURE_GIT_SETTINGS_LOG FIXTURE_UPTIME_FILE FIXTURE_UPTIME_START \
+    FIXTURE_UPTIME_PAST_DEADLINE
 
 # write_default_config — alpha and beta each in a store with its own remote.
 write_default_config() {
@@ -484,18 +496,20 @@ tree_fingerprint() {
 
 # run_sut ARGS… → combined output in $OUT, exit status in $RC. Every override is always set; a row
 # shortens the lock wait, the run deadline or the gh-route limit by calling it as
-# SUT_LOCK_WAIT_SECONDS=<n> run_sut …, and likewise SUT_RUN_DEADLINE_SECONDS or SUT_GH_ROUTE_TIMEOUT_SECONDS.
+# SUT_LOCK_WAIT_SECONDS=<n> run_sut …, and likewise SUT_RUN_DEADLINE_SECONDS or SUT_GH_ROUTE_TIMEOUT_SECONDS;
+# SUT_UPTIME_FILE hands it the fixture clock.
 SUT_RUNNER_PREFIX=()
 SUT_LOCK_WAIT_SECONDS=$LOCK_WAIT_SECONDS_FOR_ROWS
 SUT_RUN_DEADLINE_SECONDS=$RUN_DEADLINE_SECONDS_FOR_ROWS
 SUT_GH_ROUTE_TIMEOUT_SECONDS=$GH_ROUTE_TIMEOUT_SECONDS_FOR_ROWS
+SUT_UPTIME_FILE=$REAL_UPTIME_FILE
 run_sut() {
     OUT=$(CLAUDE_MEMORY_PROJECTS_DIR="$PROJECTS_DIR" CLAUDE_MEMORY_STORES_ROOT="$STORES_ROOT" \
         CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_STATE_DIR="$STATE_DIR" \
         CLAUDE_MEMORY_HOST="$FIXTURE_HOST" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" \
         CLAUDE_MEMORY_GH_ROUTE="$GH_ROUTE_STUB" CLAUDE_MEMORY_LOCK_WAIT_SECONDS="$SUT_LOCK_WAIT_SECONDS" \
         CLAUDE_MEMORY_RUN_DEADLINE_SECONDS="$SUT_RUN_DEADLINE_SECONDS" \
-        CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS="$SUT_GH_ROUTE_TIMEOUT_SECONDS" \
+        CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS="$SUT_GH_ROUTE_TIMEOUT_SECONDS" CLAUDE_MEMORY_UPTIME_FILE="$SUT_UPTIME_FILE" \
         "${SUT_RUNNER_PREFIX[@]}" "$SUT" "$@" 2>&1); RC=$?
 }
 
@@ -1283,6 +1297,34 @@ check "apply: a cherry-pick or a revert in progress is could-not-run, and nothin
     "$cherry_pick_result|$RC|$(contains "$OUT" "$ALPHA_STORE: a revert is in progress")|$(local_head)|$(status_field_of "$ALPHA_STORE" 2)" \
     "2|yes|$head_before|could-not-run|2|yes|$head_before_revert|could-not-run"
 
+# On a reftable store CHERRY_PICK_HEAD is a ref in the table, not a file in the git directory.
+reset_scene
+rm -rf "$ALPHA_DIR"
+git init -q -b main --ref-format=reftable "$ALPHA_DIR" || fatal "could not create a reftable store"
+write_file "$ALPHA_DIR/seed.md" 'seed body'
+fixture_commit "$ALPHA_DIR" 'seed'
+git -C "$ALPHA_DIR" checkout -q -b side || fatal "could not branch the reftable store"
+write_file "$ALPHA_DIR/seed.md" 'side body'
+fixture_commit "$ALPHA_DIR" 'side'
+side_commit=$(local_head)
+git -C "$ALPHA_DIR" checkout -q main || fatal "could not go back to main"
+write_file "$ALPHA_DIR/seed.md" 'main body'
+fixture_commit "$ALPHA_DIR" 'main'
+git -C "$ALPHA_DIR" cherry-pick "$side_commit" >/dev/null 2>&1
+write_file "$ALPHA_DIR/seed.md" 'resolved body'
+git -C "$ALPHA_DIR" add seed.md || fatal "could not stage the resolution"
+if ! git -C "$ALPHA_DIR" rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null \
+    || [[ -n "$(git -C "$ALPHA_DIR" ls-files -u)" ]]; then
+    fatal "the reftable cherry-pick did not stop resolved"
+fi
+reftable_marker_state=$([[ -e "$(git -C "$ALPHA_DIR" rev-parse --path-format=absolute --git-path CHERRY_PICK_HEAD)" ]] \
+    || printf 'no file')
+head_before=$(local_head)
+run_sut --apply
+check "apply: a cherry-pick in progress on a reftable store is could-not-run" \
+    "$reftable_marker_state|$RC|$(contains "$OUT" "$ALPHA_STORE: a cherry-pick is in progress")|$(local_head)|$(status_field_of "$ALPHA_STORE" 2)" \
+    "no file|2|yes|$head_before|could-not-run"
+
 printf 'auth: the route and the token\n'
 reset_scene
 make_tracked_store "$ALPHA_STORE"
@@ -1394,7 +1436,7 @@ check "push: a rejected push is outcome push-rejected, exit 0, one attempt" \
     "0|push-rejected|1|$remote_before|(absent)"
 
 # ---------------------------------------------------------------------------------------------
-# --status: one or more lines per checked-out store, store<TAB>level<TAB>message
+# network: last-ok, the run deadline, what a network call's environment holds
 # ---------------------------------------------------------------------------------------------
 
 printf 'network: last-ok, the run deadline, the child environment\n'
@@ -1425,6 +1467,37 @@ SUT_RUN_DEADLINE_SECONDS=$DEADLINE_ROW_DEADLINE_SECONDS PATH="$GIT_WRAPPER_DIR:$
 check "deadline: no gh-route, fetch or push starts after the run deadline; a store past it is committed and reads unreachable, run deadline" \
     "$RC|$(status_field_of "$BETA_STORE" 2)|$(status_field_of "$BETA_STORE" 3)|$(status_field_of "$ALPHA_STORE" 2)|$(status_field_of "$ALPHA_STORE" 3)|fetch $(calls_of fetch) push $(calls_of push)|$(wc -l < "$FIXTURE_GH_ROUTE_CALLS" | tr -d ' ')|$(parent_count "$ALPHA_DIR")|$(merge_head_state)|$([[ -e "$BETA_DIR/.git/MERGE_HEAD" ]] && printf 'a merge in progress')|$(commit_count "$BETA_DIR")|$(git -C "$REMOTES_DIR/$BETA_STORE.git" rev-parse main)" \
     "0|unreachable|run deadline|unreachable|run deadline|fetch 1 push 0|1|3|||$beta_commits_after_its_local_commit|$beta_remote_before"
+
+# A network call with a route mode that is neither pinned nor unpinned is called here directly, from
+# the script's own functions: no run reaches one, and the call must still not fall back to the host's
+# own credential helpers.
+unrouted_call_results=''
+for unsettled_route_mode in '' 'not-a-mode'; do
+    reset_scene
+    make_tracked_store "$ALPHA_STORE"
+    # shellcheck disable=SC2016  # expanded by the bash -c, not this one
+    unrouted_call_output=$(PATH="$GIT_WRAPPER_DIR:$PATH" bash -c 'source "$1" && ROUTE_MODE=$2 && network_git_in_store "$3" fetch --quiet origin' \
+        _ "$SUT" "$unsettled_route_mode" "$ALPHA_DIR" 2>&1)
+    unrouted_call_status=$?
+    unrouted_call_results+="$([[ "$unrouted_call_status" != 0 ]] && printf refused)|$(contains "$unrouted_call_output" "refusing a network call: the route mode is '$unsettled_route_mode'")|$(cat "$FIXTURE_GIT_CALL_LOG") "
+done
+check "auth: a network call with no settled route mode is refused, and git is never called" \
+    "$unrouted_call_results" "refused|yes| refused|yes| "
+
+# The clock is the fixture's: the alpha fetch moves it past the deadline, and the beta store's first git
+# call moves it back. The beta store, past the deadline when it began, makes no network call: the
+# decision is made once, before its first network step, and nothing later in the store re-opens it.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+make_beta_tracked_store
+write_file "$BETA_DIR/b.md" 'b body'
+printf '%s\n' "$FIXTURE_UPTIME_START" > "$FIXTURE_UPTIME_FILE" || fatal "could not set the fixture clock"
+SUT_UPTIME_FILE=$FIXTURE_UPTIME_FILE SUT_RUN_DEADLINE_SECONDS=$DEADLINE_ROW_DEADLINE_SECONDS \
+    PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_CLOCK_STEPS=1 FIXTURE_CLOCK_BACK_DIR="$BETA_DIR" run_sut --apply
+check "deadline: a store past the deadline makes no network call, decided once, even when the clock then steps back" \
+    "$RC|$(status_field_of "$BETA_STORE" 2)|$(status_field_of "$BETA_STORE" 3)|fetch $(calls_of fetch) push $(calls_of push)|$(wc -l < "$FIXTURE_GH_ROUTE_CALLS" | tr -d ' ')|$(cat "$FIXTURE_UPTIME_FILE")" \
+    "0|unreachable|run deadline|fetch 1 push 0|1|$FIXTURE_UPTIME_START"
 
 # A deadline of two seconds and a lock wait of twenty: the wait is cut to the time left, so the run
 # gives up on a lock the holder keeps for four seconds rather than waiting it out.
@@ -1463,9 +1536,16 @@ reset_scene
 make_tracked_store "$ALPHA_STORE"
 write_file "$ALPHA_DIR/a.md" 'a body'
 PATH="$GIT_WRAPPER_DIR:$PATH" GIT_ASKPASS="$TMPROOT/fixture-askpass" GIT_TERMINAL_PROMPT=1 run_sut --apply
-check "network: a fetch and a push run with no prompt, no askpass program and the C locale, whatever the caller set" \
-    "$RC|$(network_call_settings prompt)|$(remote_head)" \
-    "0|fetch askpass: prompt:0 locale:C push askpass: prompt:0 locale:C |$(local_head)"
+unpinned_prompt_settings="$RC|$(network_call_settings prompt)|$([[ "$(remote_head)" == "$(local_head)" ]] && printf pushed)"
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+printf '%s\n' "$FAKE_TOKEN" > "$FIXTURE_TOKEN_FILE"
+PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GH_ROUTE_MODE=matched GIT_ASKPASS="$TMPROOT/fixture-askpass" \
+    GIT_TERMINAL_PROMPT=1 run_sut --apply
+check "network: a fetch and a push run with no prompt, no askpass program and the C locale, whatever the caller set, pinned or not" \
+    "$unpinned_prompt_settings|$RC|$(network_call_settings prompt)|$([[ "$(remote_head)" == "$(local_head)" ]] && printf pushed)" \
+    "0|fetch askpass: prompt:0 locale:C push askpass: prompt:0 locale:C |pushed|0|fetch askpass: prompt:0 locale:C push askpass: prompt:0 locale:C |pushed"
 
 reset_scene
 make_tracked_store "$ALPHA_STORE"
@@ -1485,6 +1565,10 @@ run_sut --apply
 check "push: a last-ok that cannot be written still records the outcome, naming the failure, and is exit 2" \
     "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$(status_field_of "$ALPHA_STORE" 3)" "could not write $STATE_DIR/$ALPHA_STORE.last-ok")|$(remote_head)" \
     "2|ok|yes|$(local_head)"
+
+# ---------------------------------------------------------------------------------------------
+# --status: one or more lines per checked-out store, store<TAB>level<TAB>message
+# ---------------------------------------------------------------------------------------------
 
 printf 'status: --status, read-only\n'
 reset_scene
@@ -1563,7 +1647,7 @@ check "status: an index line naming a missing file, or one file named by two ind
     "0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago${NL}$ALPHA_STORE${TAB}warn${TAB}.: 1 index lines name a missing file, 0 files are named by more than one index line${NL}$ALPHA_STORE${TAB}warn${TAB}repos/$FIXTURE_OWNER/demo: 1 index lines name a missing file, 1 files are named by more than one index line"
 
 printf '\n'
-EXPECTED_ROWS=91
+EXPECTED_ROWS=94
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
