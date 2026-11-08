@@ -1,0 +1,7 @@
+# Masked for scripts/resource-pulse-nested.sh: with this app visible, GNOME 50 decides extension updates are
+# supported (extensionSystem.js updatesSupported) and posts the extension uuids to extensions.gnome.org.
+[Desktop Entry]
+Type=Application
+Name=masked for the nested Resource Pulse test
+Exec=false
+Hidden=true

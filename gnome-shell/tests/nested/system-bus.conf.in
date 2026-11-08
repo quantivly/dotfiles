@@ -1,0 +1,21 @@
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<!-- The nested shell's FAKE system bus (scripts/resource-pulse-nested.sh renders @RUN_DIR@). It is empty but
+     for fake-gdm.js, so what the shell would otherwise do on the real system bus has nowhere to go: no logind
+     inhibitor or SetLockedHint on the live session, no GDM registration, no GeoClue agent, no NetworkManager or
+     polkit. It runs as an ordinary user daemon (type session), listens on a path socket inside the 0700 run
+     directory, and can activate nothing: no service directory at all, which the script checks before starting
+     it. -->
+<busconfig>
+  <type>session</type>
+  <keep_umask/>
+  <listen>unix:path=@RUN_DIR@/bus/system.sock</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="*"/>
+  </policy>
+  <limit name="service_start_timeout">120000</limit>
+  <limit name="auth_timeout">240000</limit>
+</busconfig>

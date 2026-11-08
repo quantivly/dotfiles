@@ -467,7 +467,7 @@ See the [SSH Configuration Guide](docs/SSH_CONFIG_GUIDE.md) for complete setup i
 
 ### GNOME Desktop (Ubuntu)
 
-A clean, modern GNOME desktop using **stock GNOME/Yaru only** — no third-party extensions or themes:
+A clean, modern GNOME desktop using **stock GNOME/Yaru** — no third-party extensions or themes; one in-repo, opt-in extension (Resource Pulse):
 
 ```bash
 gnome-apply  # Apply curated config (also runs during ./install on GNOME)

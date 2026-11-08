@@ -1,0 +1,7 @@
+{
+  "uuid": "resource-pulse@dotfiles",
+  "name": "Resource Pulse",
+  "description": "Live CPU and memory in the top bar and on the desktop.",
+  "shell-version": ["50"],
+  "url": "https://github.com/quantivly/dotfiles"
+}

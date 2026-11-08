@@ -563,15 +563,15 @@ session on the wrong account, use the [claude-accounts](.claude/skills/claude-ac
 
 ## GNOME Desktop Configuration
 
-Clean, modern GNOME (dark `Yaru-prussiangreen-dark`, floating autohiding **bottom** dock, empty desktop, tmux-friendly keys) applied reproducibly via **stock GNOME/Yaru only** — no third-party extensions or themes.
+Clean, modern GNOME (dark `Yaru-prussiangreen-dark`, floating autohiding **bottom** dock, empty desktop, tmux-friendly keys) applied reproducibly via **stock GNOME/Yaru** — no third-party extensions or themes; one in-repo, opt-in extension (Resource Pulse).
 
 - **Mechanism:** a curated, schema-validated, idempotent `gsettings` script — **not** `dconf dump` (GNOME has no first-party export/import). `scripts/apply-gnome-settings.sh` is the portable core; `~/.gnome-settings.local` (`gnome-init`) is the machine-specific layer. `./install` runs them on GNOME only; `gnome-apply` re-runs them.
-- **The `.local` layer runs LAST and silently wins**, so a line there can undo one the portable layer just applied — that is how `grp:alt_shift_toggle` killed all four of herdr's `alt+shift+arrow` bindings while `gnome-apply` printed two ✓ lines. An overriding set now prints `(overrides <previous>, set above)`.
-- **Tmux integration:** the script moves GNOME workspace switching off `Ctrl+Alt+Arrow` onto `Super`-based shortcuts, so tmux pane-resize works.
+- **The `.local` layer runs LAST and silently wins**, so a line there can undo one the portable layer just applied — that is how `grp:alt_shift_toggle` killed all four of herdr's `alt+shift+arrow` bindings while `gnome-apply` printed two ✓ lines. An overriding set prints `(overrides <previous>, set above)`.
+- **Tmux integration:** workspace switching moves off `Ctrl+Alt+Arrow` onto `Super`, so tmux pane-resize works.
 - **Wayland:** changes apply live, dock relayout is guaranteed after one log out / log in, and `Alt+F2 r` / `Meta.restart` are X11-only — never use them.
 - **`xdg-repair`** (`scripts/repair-xdg-user-dirs.sh`) keeps `~/Desktop`, `~/Documents`, … real directories so `snapd-desktop-integration` cannot turn them into broken self-referential symlinks. Idempotent; `./install` runs it on graphical workstations. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-See [docs/GNOME_CONFIGURATION_GUIDE.md](docs/GNOME_CONFIGURATION_GUIDE.md) for the full guide.
+Full guide: [docs/GNOME_CONFIGURATION_GUIDE.md](docs/GNOME_CONFIGURATION_GUIDE.md).
 
 ## Backup & Restore
 

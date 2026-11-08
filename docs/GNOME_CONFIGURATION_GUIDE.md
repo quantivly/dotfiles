@@ -58,11 +58,137 @@ Everything is set via `gsettings` (the schema-validated front end to dconf). The
 - The **lid** is logind's, not GNOME's, so it is set by `dock-lid-setup`, not here: closing it
   locks the screen and never suspends. See [DOCK_LID_SUSPEND.md](DOCK_LID_SUSPEND.md).
 
-### Extensions — left as-is
-No extensions are enabled or disabled. The decluttered look comes purely from
-hiding visible items. All stock Canonical extensions stay exactly as Ubuntu ships
-them (`ding`, `ubuntu-dock`, `tiling-assistant`, `ubuntu-appindicators`, snapd/web
-search providers).
+### Extensions — one of our own
+No third-party extension is installed, and none of the stock ones is enabled or disabled: the
+decluttered look comes purely from hiding visible items. All stock Canonical extensions stay exactly
+as Ubuntu ships them (`ding`, `ubuntu-dock`, `tiling-assistant`, `ubuntu-appindicators`, snapd/web
+search providers). The one addition is **Resource Pulse**, an in-repo extension that is linked for
+everyone and **off until you opt in** — see [Resource Pulse](#resource-pulse).
+
+## Resource Pulse
+
+A top-bar CPU and memory indicator, and a desktop card that adds swap, pressure and the heaviest apps
+to answer "why is this machine slow right now". It lives in `gnome-shell/extensions/resource-pulse@dotfiles/` (GNOME Shell 50 only) and
+runs inside the shell without ever blocking it: no subprocess, no synchronous file read, no network.
+It samples every 2 s (`SAMPLE_INTERVAL_SECONDS`) and scans per-app cgroups every 10 s
+(`APP_SCAN_INTERVAL_SECONDS`, every 5th tick), skipping leaves whose unit type never hosts an app
+(`.mount .socket .swap .automount .path .timer .device`). The scan reads at low priority, below the
+shell's redraws, 16 leaves at a time. After it starts, resumes or comes back from the overview, it scans
+once more on the second tick, so "heaviest" has its CPU half within about 4 s rather than 12. The top
+bar keeps 30 samples, the card 150.
+The first sample is *no data*, never 0%, and stale numbers are never drawn as live: a sample whose
+reads hang turns both surfaces to *no data* about 8 s in (`SAMPLE_STALL_TICKS`), and its late result is
+dropped.
+
+GNOME 50 turns the extension off on every lock **and on every idle screen blank**: a blank enters the
+lock screen's session mode even when locking is disabled, and an extension without that mode is
+disabled there. So nothing samples while the screen is blanked or locked, and both histories (the top
+bar's 60 s, the card's 5 minutes) start over afterwards. That is by decision: the histories are not
+kept across a blank or a lock.
+
+### Every number, defined
+
+| Number | Definition | Source |
+|---|---|---|
+| CPU busy % (total) | `1 − Δ(idle+iowait) / Δtotal` over the interval. `total` = user+nice+system+idle+iowait+irq+softirq+steal. guest/guest_nice are excluded because the kernel already counts them in user. 100% = every core. | `/proc/stat` `cpu` line |
+| P / E busy % | The same formula over the per-CPU lines of each cluster. | `/proc/stat` `cpuN` lines, cluster map below |
+| Cluster map | The hybrid PMU (`/sys/devices/cpu_core/cpus`, `/sys/devices/cpu_atom/cpus`). Fallback: group by distinct `cpu_capacity`. Fallback: one cluster, and the P/E row is hidden. | sysfs, read once at enable |
+| Memory used | `MemTotal − MemAvailable`, shown as "16.4 of 30.3 GiB". It already includes zram's RAM cost. | `/proc/meminfo` |
+| Swap | "swap 1.6 GiB (0.4 in RAM)". The lead number is zram's swap alone: Σ `Used` of the `/dev/zram*` areas in `/proc/swaps`. In RAM = Σ zram `mem_used_total` of those same devices (a zram device that is not a swap area does not count). **Swap on disk** = Σ `Used` of every other area. It is shown only when it is above 0, as a separate "+ X on disk" note that adds to the lead number, because paging to disk is a real "why slow" signal. With no zram swap in use the line is "swap X GiB on disk"; with nothing in use, "swap none"; with `/proc/swaps` unreadable, "swap no data". zram's `orig_data_size` is not used: it under-counts zram's share of swap (same-filled pages, slot use), and a formula built on it reported disk swap that did not exist. | `/proc/swaps`, `/sys/block/zram*/mm_stat` |
+| Waiting on | PSI `some avg10` for cpu, memory and **io**. It is a 10 s average by definition, so it lags on purpose. Each is a drawn meter of three cells (not glyphs, which fell back to another font): none filled < 10%, one 10–25%, two 25–50%, all three ≥ 50%. The top band matches oomd's 50% kill limit. With no data the cells give way to a dash, so it never reads as calm. | `/proc/pressure/*` |
+| App CPU | Each leaf cgroup's Δ`cpu.stat usage_usec` / (interval × ncpu), as a % of the whole machine, so it is comparable with the total. | cgroup v2 |
+| App memory | Each leaf cgroup's memory **minus reclaimable page cache**: `memory.current − (active_file + inactive_file)`. This matches the MemAvailable semantics, so cache never counts as used. | cgroup v2 `memory.current`, `memory.stat` |
+| "kernel & other" | A computed pseudo-app that ranks **for CPU only**: the root `/sys/fs/cgroup/cpu.stat` Δ minus the Σ of the scanned leaves, clamped at 0. That covers kswapd, zram compression, writeback, `init.scope` and ssh `session-N.scope`, so reclaim stays nameable: kernel CPU is a real "why slow" answer. It is **not a memory candidate** (the user's decision): memory no cgroup is charged for (kernel memory, zram's RAM, GPU buffers, unscanned scopes) is mostly not attributable to anything nameable, so the memory half of "heaviest" names real apps only. That memory still counts in the MEM total. | root cgroup |
+| Heaviest | **One line**, as in the mockup: the top app by CPU (which may be "kernel & other"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. When the same app tops both, it collapses to `herdr agents 31% · 15.7 GiB`. | the two rankings above |
+
+In CPU, "kernel & other" also absorbs the unit types the app scan skips and any cgroup that started
+or ended between two scans.
+
+### Enabling it
+
+`./install` links the extension into `~/.local/share/gnome-shell/extensions/`, which does nothing by
+itself. To turn it on:
+
+1. Put `genable_extension resource-pulse@dotfiles` in `~/.gnome-settings.local` (the template has it
+   commented; `gnome-init` creates the file).
+2. Run `gnome-apply`. The helper appends the uuid to `enabled-extensions` (keeping every other entry),
+   removes it from `disabled-extensions` (which wins over `enabled-extensions` in GNOME 50) and warns
+   when `disable-user-extensions` is true, since then nothing user-installed loads, or when
+   `allow-extension-installation` is false, since GNOME 50 then skips the user extension directory
+   where the extension is linked.
+3. Log out and back in once: GNOME on Wayland discovers a new extension only at login.
+
+To turn it off, remove the line and `gnome-extensions disable resource-pulse@dotfiles`.
+
+### Checking that it runs
+
+`gnome-status` prints `Resource Pulse: linked=… enabled=… state=…`. The state is the shell's own
+verdict (`ACTIVE`, `ERROR`, `OUT OF DATE`), so a failure after a GNOME update is visible. When
+`enabled-extensions` asks for it but it is not `ACTIVE`, the next line names either setting above that
+keeps it from loading (the shell then does not know it at all, so `enabled=no`). Problems
+are logged to the journal under `resource-pulse:` (each distinct message at most once per 10 minutes):
+`journalctl --user -b -g resource-pulse`.
+
+### Trying changes in a nested shell
+
+Never restart the live shell to test a change, and never use the plain
+`dbus-run-session gnome-shell --devkit --wayland` recipe: even with its own config, data and cache it
+writes the live session's crash-guard file, takes a logind inhibitor and sets the live session's
+locked hint, registers with GDM and GeoClue, and posts your extension list to extensions.gnome.org.
+Use `scripts/resource-pulse-nested.sh`, which starts a headless nested shell that can reach none of
+that, with a copy of the checkout's extension enabled:
+
+```bash
+scripts/resource-pulse-nested.sh start        # prints the nested shell's private bus address
+scripts/resource-pulse-nested.sh eval 'Main.extensionManager.lookup("resource-pulse@dotfiles").state'
+scripts/resource-pulse-nested.sh screenshot card.png 2600 40 470 200   # x y width height, optional
+scripts/resource-pulse-nested.sh stop         # logs and screenshots stay in the run directory
+```
+
+Everything it creates is in one 0700 run directory under `$XDG_RUNTIME_DIR` (the path is
+printed; `RESOURCE_PULSE_NESTED_BASE` picks another base, which must be yours with no group or
+other access): a private runtime dir, HOME and XDG dirs, a private session bus that can activate
+only dconf and a fake empty system bus with a fake GDM, both on path sockets inside the run
+directory (never abstract sockets, which any local process could reach), an `env -i` allowlist (no
+tokens, no live display or bus), nested settings that never lock, blank, use the network or check
+for extension updates, and the extension-update apps masked. Unsafe mode (which `eval` and
+`screenshot` need) comes from a throwaway helper extension that exists only in that directory and
+refuses to act anywhere else, and `eval` and `screenshot` refuse a run whose supervisor and
+recorded gnome-shell are not both running in its own session. A run lives at most 20 minutes
+(`setsid timeout`). `stop` signals only processes in the run's own session, and only while that
+session is still led by the run's own `timeout`: a run that already ended is just cleaned up, since
+its session id may since belong to something else. Any isolation step that fails stops the run with
+exit 2, and a shell whose unsafe-mode helper did not load is reported within 15 s. It needs gnome-shell and a GPU, so CI does not run it; its
+hermetic rows are in the suite below.
+
+### What it costs
+
+`scripts/resource-pulse-cost.sh` measures gnome-shell, which is where the extension's cost lands.
+Take a reading with the extension off and one with it on:
+
+```bash
+scripts/resource-pulse-cost.sh --cpu-percent 60      # gnome-shell CPU over 60 s, % of one core
+scripts/resource-pulse-cost.sh --rss-kib             # resident memory
+scripts/resource-pulse-cost.sh --rss-check <kib>     # exit 1 if it grew more than 64 MiB since <kib>
+```
+
+It reads only `comm`, `stat` and `status` under `/proc`. Measured on the reference laptop in plain
+`gjs`, outside the shell, the sampler's work (the app scan plus the 2 s fast tick) went from 0.86% to
+about 0.42% of one core when the scan moved from every 6 s to every 10 s with the skipped unit types.
+Reading the scan's files at low priority, so that their completions wait behind redraws, then added
+10–20% to the scan's whole-process CPU (alternating runs of the two versions, 2026-11-08), which puts
+the figure near 0.5%. Under heavy load these plain-`gjs` figures roughly double, so they guide rather
+than decide. They also leave out what drawing costs inside the shell (the graphs' repaints and the
+card's relayout). Only a `resource-pulse-cost.sh` reading of gnome-shell itself, as above, includes
+it, and that reading is the budget: under 0.5% of one core added at idle. Over it, the remedy is a
+longer scan interval (`APP_SCAN_INTERVAL_SECONDS`), never a shorter history.
+
+### Tests
+
+`scripts/test-resource-pulse.sh` (251 checks) runs the `gjs -m` unit tests of the pure modules
+against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
+exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
+hermetic: it never touches the real session.
 
 ## Keyboard-driven workflow (no extensions needed)
 

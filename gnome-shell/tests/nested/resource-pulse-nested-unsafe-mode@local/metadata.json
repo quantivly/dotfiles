@@ -1,0 +1,7 @@
+{
+    "uuid": "resource-pulse-nested-unsafe-mode@local",
+    "name": "Resource Pulse nested test: unsafe mode",
+    "description": "For scripts/resource-pulse-nested.sh only: turns on unsafe mode in the NESTED shell, so org.gnome.Shell.Eval and Screenshot answer on its private bus. It refuses to act in any other shell.",
+    "shell-version": ["50"],
+    "session-modes": ["user", "unlock-dialog"]
+}

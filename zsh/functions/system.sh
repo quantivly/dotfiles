@@ -2370,6 +2370,33 @@ gnome-status() {
       echo "Enabled extensions:"
       gnome-extensions list --enabled 2>/dev/null | sed 's/^/  /'
     fi
+    # Resource Pulse (opt-in, in-repo): linked by ./install, enabled by
+    # `genable_extension` in ~/.gnome-settings.local. State is the shell's own
+    # verdict (ACTIVE / ERROR / OUT OF DATE), so a silent failure after an update shows here.
+    rp_uuid="resource-pulse@dotfiles"
+    rp_linked="no"; rp_enabled="no"; rp_state="n/a"
+    [ -e "$HOME/.local/share/gnome-shell/extensions/$rp_uuid" ] && rp_linked="yes"
+    if has_command gnome-extensions; then
+      gnome-extensions list --enabled 2>/dev/null | grep -qx "$rp_uuid" && rp_enabled="yes"
+      rp_state="$(gnome-extensions info "$rp_uuid" 2>/dev/null | sed -n 's/^ *State: *//p')"
+      rp_state="${rp_state:-not known to the shell (log out / in after linking)}"
+    fi
+    echo "Resource Pulse: linked=$rp_linked enabled=$rp_enabled state=$rp_state"
+    # Asked for (in enabled-extensions) but not running: name the settings that
+    # keep GNOME 50 from loading it. With the user dir skipped the shell does not
+    # know the extension at all, so `gnome-extensions list --enabled` omits it.
+    case "$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null)" in
+      *"'$rp_uuid'"*)
+        if [ "$rp_state" != "ACTIVE" ] &&
+          [ "$(gsettings get org.gnome.shell allow-extension-installation 2>/dev/null)" = "false" ]; then
+          echo "  allow-extension-installation is false: GNOME 50 skips ~/.local/share/gnome-shell/extensions, where it is linked"
+        fi
+        if [ "$rp_state" != "ACTIVE" ] &&
+          [ "$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null)" = "true" ]; then
+          echo "  disable-user-extensions is true: GNOME loads no user extension"
+        fi
+        ;;
+    esac
   )
 }
 

@@ -1,0 +1,352 @@
+// The desktop card ("quiet card"): one small translucent card at the top right of the primary monitor's work
+// area, laid out as the mockup the user picked:
+//
+//   CPU   23%  P 41 · E 6        [five-minute CPU graph]
+//   MEM   16.4 of 30.3 GiB       [memory used bar]
+//   swap  1.6 GiB (0.4 in RAM)
+//
+//   waiting on:  CPU [meter]  mem [meter]  io [meter]
+//   heaviest:  Chromium 31% · herdr agents 15.7 GiB
+//
+// Each meter is three drawn cells (graph.js drawPressureMeter), not glyphs: the ▮ and ▯ glyphs are not in Ubuntu
+// Sans, fell back to DejaVu Sans, and the empty ones read as missing-glyph boxes.
+//
+// Shell glue only: every string and meter band comes from lib/format.js (cardText), every shape from graph.js and
+// the position from lib/layout.js (cardPosition). The extension adds it to the layout manager's background group, above the
+// wallpaper and below every window, which the overview hides. It is display-only: ding's desktop window lies over
+// it and takes every click, so nothing here is reactive. Destroying it removes its sampler listener, the only
+// thing it adds outside itself.
+import Clutter from 'gi://Clutter';
+import GObject from 'gi://GObject';
+import St from 'gi://St';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+
+import {drawAreaGraph, drawPressureMeter, drawUsedBar, padWithLeadingGaps} from './graph.js';
+import {
+    BASELINE_RGBA, CARD_CPU_GRAPH_HEIGHT_PX, CARD_CPU_GRAPH_WIDTH_PX, CARD_HISTORY_SAMPLES, CARD_MARGIN_PX,
+    CARD_MEMORY_BAR_HEIGHT_PX, CARD_MEMORY_BAR_WIDTH_PX, CPU_GRAPH_RGBA, MEMORY_GRAPH_RGBA, PRESSURE_METER_FILL_RGBA,
+    PRESSURE_METER_HEIGHT_PX, PRESSURE_METER_TRACK_RGBA, PRESSURE_METER_WIDTH_PX, USED_BAR_TRACK_RGBA,
+} from './lib/constants.js';
+import {cardText} from './lib/format.js';
+import {cardPosition} from './lib/layout.js';
+
+const CARD_STYLE_CLASS = 'resource-pulse-card';
+/** The top section: CPU, memory and swap, in label, value and graph columns. */
+const METERS_STYLE_CLASS = 'resource-pulse-card-meters';
+/** The bottom section: the "waiting on" and "heaviest" lines. */
+const DETAILS_STYLE_CLASS = 'resource-pulse-card-details';
+const DETAIL_ROW_STYLE_CLASS = 'resource-pulse-card-detail-row';
+const CPU_FIGURE_BOX_STYLE_CLASS = 'resource-pulse-card-cpu-figure';
+const LABEL_STYLE_CLASS = 'resource-pulse-card-label';
+const VALUE_STYLE_CLASS = 'resource-pulse-card-value';
+/** The big numbers: the CPU percent and the memory line. */
+const FIGURE_STYLE_CLASS = 'resource-pulse-card-figure';
+const SUFFIX_STYLE_CLASS = 'resource-pulse-card-suffix';
+/** The three "waiting on" meters, side by side. */
+const PRESSURE_METERS_STYLE_CLASS = 'resource-pulse-card-pressure-meters';
+/** One meter: its label, then its drawn cells. */
+const PRESSURE_GROUP_STYLE_CLASS = 'resource-pulse-card-pressure-group';
+/** One meter each for CPU, memory and io, in the order lib/format.js waitingOnMeters lists them. */
+const WAITING_ON_METER_COUNT = 3;
+
+// Cells of the meters grid: [column, row], and how many columns a cell spans.
+const LABEL_COLUMN = 0;
+const VALUE_COLUMN = 1;
+const GRAPHIC_COLUMN = 2;
+const CPU_ROW = 0;
+const MEMORY_ROW = 1;
+const SWAP_ROW = 2;
+const ONE_CELL = 1;
+/** The swap value has no graphic, so it may run on under the graphs. */
+const VALUE_AND_GRAPHIC_CELLS = 2;
+
+// St scales CSS lengths by the theme's scale factor, so sizing the graphs in CSS keeps them right at any scale.
+const CPU_GRAPH_SIZE_STYLE = `width: ${CARD_CPU_GRAPH_WIDTH_PX}px; height: ${CARD_CPU_GRAPH_HEIGHT_PX}px;`;
+const MEMORY_BAR_SIZE_STYLE = `width: ${CARD_MEMORY_BAR_WIDTH_PX}px; height: ${CARD_MEMORY_BAR_HEIGHT_PX}px;`;
+const PRESSURE_METER_SIZE_STYLE = `width: ${PRESSURE_METER_WIDTH_PX}px; height: ${PRESSURE_METER_HEIGHT_PX}px;`;
+
+/**
+ * Sets a label's text only when it changed, so an unchanged row never costs a relayout.
+ *
+ * @param {St.Label} label - The label.
+ * @param {string} text - Its new text.
+ * @returns {void}
+ */
+function setLabelText(label, text) {
+    if (label.text !== text)
+        label.text = text;
+}
+
+/**
+ * Makes a text label for the card. Text sits on the bottom of its cell, so labels of different sizes on one row
+ * share (nearly) a baseline.
+ *
+ * @param {string} styleClass - Its style class (muted label, value, big figure or dim suffix).
+ * @returns {St.Label} The label, with no text yet.
+ */
+function newCardLabel(styleClass) {
+    return new St.Label({style_class: styleClass, y_align: Clutter.ActorAlign.END});
+}
+
+export const PulseCard = GObject.registerClass(
+class PulseCard extends St.BoxLayout {
+    /**
+     * Builds the rows, shows "no data" until the first snapshot, and starts listening to the sampler. The
+     * listener is added last, after everything that could throw, so a failed construction leaves nothing in the
+     * sampler.
+     *
+     * @param {import('./sampler.js').Sampler} sampler - The one sampler; the card draws its CPU and memory
+     *     histories.
+     * @returns {void}
+     */
+    _init(sampler) {
+        super._init({
+            style_class: CARD_STYLE_CLASS,
+            orientation: Clutter.Orientation.VERTICAL,
+            reactive: false,
+        });
+        // Every field _onDestroy reads is set before anything below can throw.
+        this._sampler = sampler;
+        this._snapshotListenerId = null;
+        this.connect('destroy', () => this._onDestroy());
+
+        this._buildMeters(sampler.cpuHistory, sampler.memoryHistory);
+        this._buildDetails();
+        this.update(sampler.latestSnapshot, sampler.lastGoodClockLabel);
+        this._snapshotListenerId = sampler.addListener(
+            snapshot => this.update(snapshot, this._sampler.lastGoodClockLabel));
+    }
+
+    /**
+     * Shows a snapshot: every row's text, and a redraw of the CPU graph, the memory bar and the three "waiting on"
+     * meters. A part with no data reads "no data" and draws as a gap (an empty bar, or a meter's no-data dash),
+     * never as the last good number.
+     *
+     * @param {import('./sampler.js').Snapshot|null} snapshot - The latest snapshot, or null before the first.
+     * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data, for "no data since".
+     * @returns {void}
+     */
+    update(snapshot, lastGoodClockLabel) {
+        const text = cardText(snapshot, lastGoodClockLabel);
+        setLabelText(this._cpuLabel, text.cpuLabel);
+        setLabelText(this._cpuValue, text.cpuValue);
+        setLabelText(this._cpuClusterSuffix, text.cpuClusterSuffix);
+        // An empty suffix would still take the figure box's spacing.
+        this._cpuClusterSuffix.visible = text.cpuClusterSuffix !== '';
+        setLabelText(this._memoryLabel, text.memoryLabel);
+        setLabelText(this._memoryValue, text.memoryValue);
+        setLabelText(this._swapLabel, text.swapLabel);
+        setLabelText(this._swapValue, text.swapValue);
+        setLabelText(this._waitingOnLabel, text.waitingOnLabel);
+        this._pressureMeters.forEach((pressureMeter, meterIndex) => {
+            const {label, band} = text.waitingOnMeters[meterIndex];
+            setLabelText(pressureMeter.label, label);
+            pressureMeter.band = band;
+            pressureMeter.drawingArea.queue_repaint();
+        });
+        setLabelText(this._heaviestLabel, text.heaviestLabel);
+        setLabelText(this._heaviestValue, text.heaviestValue);
+        this._cpuGraph.queue_repaint();
+        this._memoryBar.queue_repaint();
+    }
+
+    /**
+     * Moves the card to the top right of the primary monitor's work area, inset by CARD_MARGIN_PX, at its current
+     * width. With no monitor at all (primaryIndex is -1 then) it stays where it is until the monitors come back.
+     *
+     * @returns {void}
+     */
+    placeOnPrimaryMonitor() {
+        const {primaryIndex} = Main.layoutManager;
+        if (primaryIndex < 0)
+            return;
+        const workArea = Main.layoutManager.getWorkAreaForMonitor(primaryIndex);
+        const {x, y} = cardPosition(workArea, this.width, CARD_MARGIN_PX);
+        // Whole logical pixels keep the text sharp.
+        this.set_position(Math.floor(x), Math.floor(y));
+    }
+
+    /**
+     * Builds the top section, a grid so the values and the graphs line up in columns: CPU with its graph, memory
+     * with its used bar, then swap.
+     *
+     * @param {import('./lib/history.js').RingBuffer} cpuHistory - CPU busy fractions, for the graph.
+     * @param {import('./lib/history.js').RingBuffer} memoryHistory - Memory used fractions, for the bar.
+     * @returns {void}
+     */
+    _buildMeters(cpuHistory, memoryHistory) {
+        const metersLayout = new Clutter.GridLayout();
+        // The layout must belong to its widget before attach() is called: attach() adds nothing otherwise.
+        const meters = new St.Widget({style_class: METERS_STYLE_CLASS, layout_manager: metersLayout});
+        // Reads the grid's spacing-rows and spacing-columns from the stylesheet (environment.js patches this in).
+        metersLayout.hookup_style(meters);
+        /**
+         * Puts an actor in one row of the grid (which also adds it to the grid's widget).
+         *
+         * @param {Clutter.Actor} actor - The cell's content.
+         * @param {number} column - Its column.
+         * @param {number} row - Its row.
+         * @param {number} [columnSpan] - How many columns it covers.
+         * @returns {void}
+         */
+        const attachCell = (actor, column, row, columnSpan = ONE_CELL) =>
+            metersLayout.attach(actor, column, row, columnSpan, ONE_CELL);
+
+        this._cpuLabel = newCardLabel(LABEL_STYLE_CLASS);
+        this._cpuValue = newCardLabel(FIGURE_STYLE_CLASS);
+        this._cpuClusterSuffix = newCardLabel(SUFFIX_STYLE_CLASS);
+        const cpuFigureBox = new St.BoxLayout({style_class: CPU_FIGURE_BOX_STYLE_CLASS});
+        cpuFigureBox.add_child(this._cpuValue);
+        cpuFigureBox.add_child(this._cpuClusterSuffix);
+        this._cpuGraph = new St.DrawingArea({style: CPU_GRAPH_SIZE_STYLE, y_align: Clutter.ActorAlign.CENTER});
+        this._cpuGraph.connect('repaint', () => this._paintCpuGraph(cpuHistory));
+        attachCell(this._cpuLabel, LABEL_COLUMN, CPU_ROW);
+        attachCell(cpuFigureBox, VALUE_COLUMN, CPU_ROW);
+        attachCell(this._cpuGraph, GRAPHIC_COLUMN, CPU_ROW);
+
+        this._memoryLabel = newCardLabel(LABEL_STYLE_CLASS);
+        this._memoryValue = newCardLabel(FIGURE_STYLE_CLASS);
+        this._memoryBar = new St.DrawingArea({style: MEMORY_BAR_SIZE_STYLE, y_align: Clutter.ActorAlign.CENTER});
+        this._memoryBar.connect('repaint', () => this._paintMemoryBar(memoryHistory));
+        attachCell(this._memoryLabel, LABEL_COLUMN, MEMORY_ROW);
+        attachCell(this._memoryValue, VALUE_COLUMN, MEMORY_ROW);
+        attachCell(this._memoryBar, GRAPHIC_COLUMN, MEMORY_ROW);
+
+        this._swapLabel = newCardLabel(LABEL_STYLE_CLASS);
+        this._swapValue = newCardLabel(VALUE_STYLE_CLASS);
+        attachCell(this._swapLabel, LABEL_COLUMN, SWAP_ROW);
+        attachCell(this._swapValue, VALUE_COLUMN, SWAP_ROW, VALUE_AND_GRAPHIC_CELLS);
+
+        this.add_child(meters);
+    }
+
+    /**
+     * Builds the bottom section: the "waiting on" line (a muted label, then a labelled drawn meter for each of
+     * CPU, memory and io) and the "heaviest" line (a muted label, then its value).
+     *
+     * @returns {void}
+     */
+    _buildDetails() {
+        const details = new St.BoxLayout({
+            style_class: DETAILS_STYLE_CLASS,
+            orientation: Clutter.Orientation.VERTICAL,
+        });
+        const waitingOnRow = this._addDetailRow(details);
+        this._waitingOnLabel = newCardLabel(LABEL_STYLE_CLASS);
+        waitingOnRow.add_child(this._waitingOnLabel);
+        const pressureMetersBox = new St.BoxLayout({style_class: PRESSURE_METERS_STYLE_CLASS});
+        this._pressureMeters = Array.from({length: WAITING_ON_METER_COUNT},
+            () => this._addPressureMeter(pressureMetersBox));
+        waitingOnRow.add_child(pressureMetersBox);
+
+        const heaviestRow = this._addDetailRow(details);
+        this._heaviestLabel = newCardLabel(LABEL_STYLE_CLASS);
+        this._heaviestValue = newCardLabel(VALUE_STYLE_CLASS);
+        heaviestRow.add_child(this._heaviestLabel);
+        heaviestRow.add_child(this._heaviestValue);
+        this.add_child(details);
+    }
+
+    /**
+     * Adds one empty line to the bottom section.
+     *
+     * @param {St.BoxLayout} details - The bottom section.
+     * @returns {St.BoxLayout} The line, for its label and value.
+     */
+    _addDetailRow(details) {
+        const detailRow = new St.BoxLayout({style_class: DETAIL_ROW_STYLE_CLASS});
+        details.add_child(detailRow);
+        return detailRow;
+    }
+
+    /**
+     * Adds one "waiting on" meter: a label, then a drawing area sized in CSS that draws the meter's band on every
+     * repaint. The drawing area is the card's child, so its repaint handler goes when the card is destroyed.
+     *
+     * @param {St.BoxLayout} pressureMetersBox - Where the meter goes.
+     * @returns {{label: St.Label, drawingArea: St.DrawingArea, band: 0|1|2|3|null}} The meter; update() sets its
+     *     label text and band, and band starts as no data.
+     */
+    _addPressureMeter(pressureMetersBox) {
+        const pressureGroup = new St.BoxLayout({style_class: PRESSURE_GROUP_STYLE_CLASS});
+        const pressureMeter = {
+            label: newCardLabel(VALUE_STYLE_CLASS),
+            drawingArea: new St.DrawingArea({style: PRESSURE_METER_SIZE_STYLE, y_align: Clutter.ActorAlign.CENTER}),
+            band: null,
+        };
+        pressureMeter.drawingArea.connect('repaint', () => this._paintPressureMeter(pressureMeter));
+        pressureGroup.add_child(pressureMeter.label);
+        pressureGroup.add_child(pressureMeter.drawingArea);
+        pressureMetersBox.add_child(pressureGroup);
+        return pressureMeter;
+    }
+
+    /**
+     * Draws the five-minute CPU history, right-aligned in one slot per sample, and frees the context whatever
+     * happens (as the shell's own drawing areas do).
+     *
+     * @param {import('./lib/history.js').RingBuffer} cpuHistory - CPU busy fractions, oldest first.
+     * @returns {void}
+     */
+    _paintCpuGraph(cpuHistory) {
+        const slotFractions = padWithLeadingGaps(cpuHistory.values(), CARD_HISTORY_SAMPLES);
+        const [widthPx, heightPx] = this._cpuGraph.get_surface_size();
+        const cr = this._cpuGraph.get_context();
+        try {
+            drawAreaGraph(cr, widthPx, heightPx, slotFractions, CPU_GRAPH_RGBA, BASELINE_RGBA);
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    /**
+     * Draws the memory bar at the newest memory fraction: the sampler pushes it from the same snapshot the memory
+     * line shows, before telling listeners, so the bar and the text agree. With no data (none yet, or a failed
+     * sample) the bar is all track.
+     *
+     * @param {import('./lib/history.js').RingBuffer} memoryHistory - Memory used fractions, oldest first.
+     * @returns {void}
+     */
+    _paintMemoryBar(memoryHistory) {
+        const [newestFraction = null] = memoryHistory.lastValues(1);
+        const [widthPx, heightPx] = this._memoryBar.get_surface_size();
+        const cr = this._memoryBar.get_context();
+        try {
+            drawUsedBar(cr, widthPx, heightPx, newestFraction, MEMORY_GRAPH_RGBA, USED_BAR_TRACK_RGBA);
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    /**
+     * Draws one "waiting on" meter at its band, and frees the context whatever happens.
+     *
+     * @param {{drawingArea: St.DrawingArea, band: 0|1|2|3|null}} pressureMeter - The meter being repainted.
+     * @returns {void}
+     */
+    _paintPressureMeter(pressureMeter) {
+        const [widthPx, heightPx] = pressureMeter.drawingArea.get_surface_size();
+        const cr = pressureMeter.drawingArea.get_context();
+        try {
+            drawPressureMeter(cr, widthPx, heightPx, pressureMeter.band, PRESSURE_METER_FILL_RGBA,
+                PRESSURE_METER_TRACK_RGBA);
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    /**
+     * Removes the sampler listener, the one thing the card added outside itself. Runs on 'destroy', so it runs
+     * however the card is destroyed.
+     *
+     * @returns {void}
+     */
+    _onDestroy() {
+        if (this._snapshotListenerId !== null) {
+            this._sampler.removeListener(this._snapshotListenerId);
+            this._snapshotListenerId = null;
+        }
+        this._sampler = null;
+    }
+});

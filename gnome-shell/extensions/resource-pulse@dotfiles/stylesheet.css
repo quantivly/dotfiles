@@ -1,0 +1,82 @@
+/* Resource Pulse. Sizes that the code computes with (the graphs) live in lib/constants.js; this file holds the
+   look. */
+
+/* Top-bar indicator: the CPU and memory graphs, side by side inside the panel button. */
+.resource-pulse-graphs {
+  spacing: 4px;
+}
+
+/* The hover label under the indicator, styled after the dock's labels: Yaru's .dash-label (gnome-shell.css,
+   the same in the light and dark themes), copied rather than reused, so a theme change cannot leave the label
+   unstyled. Tabular numerals keep the digits from jittering as they update. */
+.resource-pulse-hover-label {
+  background-color: rgba(0, 0, 0, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  border-radius: 999px;
+  padding: 6px 12px;
+  text-align: center;
+  font-feature-settings: "tnum";
+  -y-offset: 8px;
+}
+
+/* The desktop card: a solid translucent surface, never a live blur (a blur re-renders whenever a window moves
+   over it). The font, its tabular numerals and the colour are inherited by every row, so digits keep their width
+   as they change. min-width covers the usual rows (about 24em of text at the shell's 11pt), so the card's left
+   edge does not move as the "heaviest" names change; only an unusually long line widens it. */
+.resource-pulse-card {
+  background-color: rgba(30, 30, 30, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 14px 18px;
+  spacing: 12px;
+  min-width: 25em;
+  color: white;
+  font-family: "Ubuntu Sans", sans-serif;
+  font-feature-settings: "tnum";
+}
+
+/* CPU, memory and swap: label, value and graph columns (the grid reads these through hookup_style). */
+.resource-pulse-card-meters {
+  spacing-rows: 6px;
+  spacing-columns: 12px;
+}
+
+/* The big numbers. */
+.resource-pulse-card-figure {
+  font-size: 1.3em;
+  font-weight: bold;
+}
+
+/* Labels, and the dim P/E suffix, are muted to 60%; values stay full white. */
+.resource-pulse-card-label,
+.resource-pulse-card-suffix {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.resource-pulse-card-suffix {
+  font-size: 0.9em;
+}
+
+.resource-pulse-card-cpu-figure {
+  spacing: 8px;
+}
+
+/* "waiting on" and "heaviest", below the meters. */
+.resource-pulse-card-details {
+  spacing: 4px;
+}
+
+.resource-pulse-card-detail-row {
+  spacing: 8px;
+}
+
+/* The "waiting on" meters: wider gaps between the three, a narrow one between each label and its drawn cells
+   (sized from lib/constants.js, since graph.js lays the cells out in that size). */
+.resource-pulse-card-pressure-meters {
+  spacing: 12px;
+}
+
+.resource-pulse-card-pressure-group {
+  spacing: 4px;
+}
