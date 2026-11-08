@@ -33,6 +33,8 @@
     ~/.config/Code/User/settings.json: vscode/settings.json
     ~/.config/helix/config.toml: helix/config.toml
     ~/.config/herdr/config.toml: config/herdr/config.toml
+    # Resource Pulse: inert until ~/.gnome-settings.local says genable_extension resource-pulse@dotfiles.
+    ~/.local/share/gnome-shell/extensions/resource-pulse@dotfiles: gnome-shell/extensions/resource-pulse@dotfiles
     # Sound files config.toml names by RELATIVE path, which herdr resolves against
     # the directory of the config.toml symlink, not the repo. Without this link
     # done_path is missing and herdr's per-turn beep silently comes back.

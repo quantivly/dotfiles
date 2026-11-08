@@ -46,3 +46,10 @@ gset org.gnome.shell favorite-apps "['firefox_firefox.desktop', 'alacritty_alacr
 # Prefer a neutral dark theme instead of the green tint:
 # gset org.gnome.desktop.interface gtk-theme  "'Yaru-dark'"
 # gset org.gnome.desktop.interface icon-theme "'Yaru-dark'"
+
+# ---------------------------------------------------------------------------
+# Resource Pulse   (optional — opt in, uncomment to enable)
+# ---------------------------------------------------------------------------
+# A top-bar CPU/memory/pressure indicator and a desktop card, shipped in this repo.
+# Linked for everyone by ./install but off until this line runs; needs one logout/login.
+# genable_extension resource-pulse@dotfiles

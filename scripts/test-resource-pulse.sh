@@ -171,7 +171,140 @@ check "metadata.json: uuid equals the directory name" "$metadata_uuid" "$(basena
 check 'metadata.json: shell-version is exactly ["50"]' "$metadata_shell_version" '["50"]'
 check "metadata.json: no session-modes key, so the lock screen disables it" "$metadata_session_modes" "absent"
 
-EXPECTED_ROWS=149
+# ---------------------------------------------------------------------------
+# Repo wiring: the opt-in helper, the link, the template and the cost script.
+# Every genable_extension row runs apply-gnome-settings.sh against a STATEFUL
+# gsettings stub on PATH (values under $WIRING_TMP/gsettings/<schema>/<key>), so
+# nothing here can reach the real session's dconf database.
+# ---------------------------------------------------------------------------
+APPLY_SCRIPT="$DOTFILES/scripts/apply-gnome-settings.sh"
+COST_SCRIPT="$DOTFILES/scripts/resource-pulse-cost.sh"
+EXTENSION_UUID="resource-pulse@dotfiles"
+SHELL_SCHEMA="org.gnome.shell"
+WIRING_TMP="$(mktemp -d)" || fatal "mktemp -d failed"
+trap 'rm -rf "$WIRING_TMP"' EXIT
+STUB_BIN="$WIRING_TMP/bin"
+STUB_STATE="$WIRING_TMP/gsettings"
+mkdir -p "$STUB_BIN" "$STUB_STATE" || fatal "cannot create the gsettings stub directory"
+cat >"$STUB_BIN/gsettings" <<'STUB'
+#!/usr/bin/env bash
+# Stateful gsettings stand-in: get/set/list-schemas over files under $STUB_STATE.
+case "$1" in
+  list-schemas) cat "$STUB_STATE/schemas" 2>/dev/null ;;
+  get)
+    if [[ -f "$STUB_STATE/$2/$3" ]]; then cat "$STUB_STATE/$2/$3"
+    else
+      case "$3" in
+        *-extensions)            echo '@as []' ;;
+        disable-user-extensions) echo 'false' ;;
+        *)                       echo "''" ;;
+      esac
+    fi ;;
+  set) mkdir -p "$STUB_STATE/$2" && printf '%s\n' "$4" >"$STUB_STATE/$2/$3" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$STUB_BIN/gsettings"
+printf 'genable_extension %s\n' "$EXTENSION_UUID" >"$WIRING_TMP/local-overrides"
+
+REAL_ENABLED_BEFORE="$(gsettings get "$SHELL_SCHEMA" enabled-extensions 2>&1)"
+
+# Reset the stub to a state, run the apply script, leave its stderr+stdout in
+# APPLY_OUTPUT and its exit status in APPLY_EXIT.
+#   $1 enabled-extensions  $2 disabled-extensions  $3 disable-user-extensions
+#   $4 schemas listed by the stub (newline separated)
+run_apply_against_stub() {
+  rm -rf "${STUB_STATE:?}"/*
+  mkdir -p "$STUB_STATE/$SHELL_SCHEMA"
+  printf '%s\n' "$1" >"$STUB_STATE/$SHELL_SCHEMA/enabled-extensions"
+  printf '%s\n' "$2" >"$STUB_STATE/$SHELL_SCHEMA/disabled-extensions"
+  printf '%s\n' "$3" >"$STUB_STATE/$SHELL_SCHEMA/disable-user-extensions"
+  printf '%s' "$4" >"$STUB_STATE/schemas"
+  APPLY_OUTPUT="$(PATH="$STUB_BIN:$PATH" STUB_STATE="$STUB_STATE" XDG_CURRENT_DESKTOP=GNOME \
+    GNOME_LOCAL_OVERRIDES="$WIRING_TMP/local-overrides" bash "$APPLY_SCRIPT" 2>&1)"
+  APPLY_EXIT=$?
+}
+stub_value() { cat "$STUB_STATE/$SHELL_SCHEMA/$1" 2>/dev/null; }
+
+printf '\ngenable_extension (stateful gsettings stub)\n'
+run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
+check "genable_extension: an empty list becomes just the uuid" "$(stub_value enabled-extensions)" "['$EXTENSION_UUID']"
+run_apply_against_stub "['ding@rastersoft.com']" '@as []' false "$SHELL_SCHEMA"
+check "genable_extension: appends and keeps the existing entry first" "$(stub_value enabled-extensions)" "['ding@rastersoft.com', '$EXTENSION_UUID']"
+run_apply_against_stub "['ding@rastersoft.com', '$EXTENSION_UUID']" '@as []' false "$SHELL_SCHEMA"
+check "genable_extension: an already-present uuid leaves the list unchanged" "$(stub_value enabled-extensions)" "['ding@rastersoft.com', '$EXTENSION_UUID']"
+check "genable_extension: no change prints no enabled-extensions line" "$(grep -c -F 'enabled-extensions →' <<<"$APPLY_OUTPUT")" 0
+run_apply_against_stub '@as []' "['$EXTENSION_UUID', 'x@y']" false "$SHELL_SCHEMA"
+check "genable_extension: removes the uuid from disabled-extensions, which wins in GNOME 50" "$(stub_value disabled-extensions)" "['x@y']"
+run_apply_against_stub '@as []' '@as []' true "$SHELL_SCHEMA"
+check "genable_extension: disable-user-extensions=true warns by name" "$(grep -c -F 'disable-user-extensions' <<<"$APPLY_OUTPUT")" 1
+run_apply_against_stub '@as []' '@as []' false ""
+check "genable_extension: an absent org.gnome.shell schema warns" "$(grep -c -F "Schema '$SHELL_SCHEMA' not found" <<<"$APPLY_OUTPUT")" 1
+check "genable_extension: an absent schema writes nothing" "$(stub_value enabled-extensions)" "@as []"
+check "genable_extension: the apply script still exits 0 without the schema" "$APPLY_EXIT" 0
+
+printf '\nlink and template\n'
+check "install.conf.yaml links the extension directory" \
+  "$(grep -c -x -F "    ~/.local/share/gnome-shell/extensions/$EXTENSION_UUID: gnome-shell/extensions/$EXTENSION_UUID" "$DOTFILES/install.conf.yaml")" 1
+check "the template carries a commented genable_extension line" \
+  "$(grep -c -x -F "# genable_extension $EXTENSION_UUID" "$DOTFILES/examples/gnome-settings.local.template")" 1
+
+printf '\nresource-pulse-cost.sh (fake PROC_ROOT)\n'
+# make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry.
+make_fake_proc() {
+  mkdir -p "$1/$2"
+  printf '%s\n' "$3" >"$1/$2/comm"
+  printf 'Name:\t%s\nVmRSS:\t%s kB\n' "$3" "$4" >"$1/$2/status"
+  printf '%s (%s) S 1 1 1 0 -1 0 0 0 0 0 100 50 0 0 20 0 1 0 1 0 0\n' "$2" "$3" >"$1/$2/stat"
+}
+ONE_SHELL_ROOT="$WIRING_TMP/proc-one"
+TWO_SHELLS_ROOT="$WIRING_TMP/proc-two"
+NO_SHELL_ROOT="$WIRING_TMP/proc-none"
+FAKE_SHELL_RSS_KIB=400000
+make_fake_proc "$ONE_SHELL_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+make_fake_proc "$ONE_SHELL_ROOT" 4300 bash 1000
+make_fake_proc "$TWO_SHELLS_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+make_fake_proc "$TWO_SHELLS_ROOT" 4243 gnome-shell "$FAKE_SHELL_RSS_KIB"
+make_fake_proc "$NO_SHELL_ROOT" 4300 bash 1000
+cost_run() { # <proc root> <args...>; leaves COST_OUTPUT and COST_EXIT
+  local proc_root="$1"; shift
+  COST_OUTPUT="$(env -u GNOME_SHELL_PID PROC_ROOT="$proc_root" bash "$COST_SCRIPT" "$@" 2>&1)"
+  COST_EXIT=$?
+}
+cost_run "$ONE_SHELL_ROOT" --rss-kib
+check "cost: --rss-kib prints the VmRSS of the one gnome-shell" "$COST_OUTPUT" "$FAKE_SHELL_RSS_KIB"
+cost_run "$ONE_SHELL_ROOT" --rss-check 380000
+check "cost: growth inside the tolerance exits 0" "$COST_EXIT" 0
+cost_run "$ONE_SHELL_ROOT" --rss-check 300000
+check "cost: growth beyond the tolerance exits 1" "$COST_EXIT" 1
+check "cost: a failed check prints both the baseline and the current number" \
+  "$(grep -c -F '300000' <<<"$COST_OUTPUT")$(grep -c -F "$FAKE_SHELL_RSS_KIB" <<<"$COST_OUTPUT")" 11
+cost_run "$TWO_SHELLS_ROOT" --rss-kib
+check "cost: two gnome-shell candidates exit 2" "$COST_EXIT" 2
+cost_run "$NO_SHELL_ROOT" --rss-kib
+check "cost: no gnome-shell candidate exits 2" "$COST_EXIT" 2
+# Spelled by pieces so this row's own source is not what it finds in the script.
+FORBIDDEN_READS_PATTERN="cmd""line|env""iron\\b|pgre""p|\\bps -"
+check "cost: the script never reads an argument list or environment, or runs ps" \
+  "$(grep -c -E "$FORBIDDEN_READS_PATTERN" "$COST_SCRIPT" 2>/dev/null)" 0
+
+printf '\nthe real session was not touched\n'
+check "the real enabled-extensions is unchanged by this run" \
+  "$(gsettings get "$SHELL_SCHEMA" enabled-extensions 2>&1)" "$REAL_ENABLED_BEFORE"
+
+# The guide must state this suite's own row count, as test-dock-wifi.sh does.
+docs_claim() {
+  local f="$DOTFILES/$1"
+  [[ -r "$f" ]] || { printf 'cannot read %s' "$1"; return; }
+  tr -s '[:space:]' ' ' <"$f" \
+    | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
+}
+
+EXPECTED_ROWS=170
+
+printf '\nthe count this suite is documented as running\n'
+check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
+check "a documented file that cannot be read is not a pass" "$(docs_claim no/such/file.md)" "cannot read no/such/file.md"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

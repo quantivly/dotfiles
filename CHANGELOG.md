@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Resource Pulse, an opt-in GNOME Shell 50 extension: a top-bar CPU/memory/pressure indicator and a
+  desktop card.** Lives in `gnome-shell/extensions/resource-pulse@dotfiles/`; `./install` links it for
+  everyone, but nothing enables it until `~/.gnome-settings.local` says `genable_extension
+  resource-pulse@dotfiles` (new helper in `scripts/apply-gnome-settings.sh`: appends to
+  `enabled-extensions`, removes from `disabled-extensions`, warns on `disable-user-extensions`). It
+  samples every 2 s and scans per-app cgroups every 10 s, never blocks the shell and never draws stale
+  numbers as live. `gnome-status` gains a `Resource Pulse:` line (linked, enabled, shell State);
+  `scripts/resource-pulse-cost.sh` measures gnome-shell CPU and memory; every number is defined in
+  `docs/GNOME_CONFIGURATION_GUIDE.md`. State table: `scripts/test-resource-pulse.sh`.
+
 - **`scripts/claude-memory-link.sh` links Claude Code's memory directories into git-backed stores,
   on a host with a store table (DO-891).** The link half of D7 in the shared-configuration design
   (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, amendments M1-M8). A host opts

@@ -2,6 +2,8 @@
 
 **Status:** approved by Zvi 2026-11-08 (brainstorm, research, builder check and his answers recorded below). Implementation plan: docs/superpowers/plans/2026-11-08-resource-pulse.md.
 
+**Amended 2026-11-08 (build):** the app scan runs every 10 s, not 6 s, and skips .mount/.socket/.swap/.automount/.path/.timer/.device leaves — measured cost 0.86% → ~0.42% of one core; see docs/GNOME_CONFIGURATION_GUIDE.md.
+
 ## Context
 
 The user wants live CPU and memory state on this laptop: a **minimal** indicator in the top bar and a

@@ -2370,6 +2370,18 @@ gnome-status() {
       echo "Enabled extensions:"
       gnome-extensions list --enabled 2>/dev/null | sed 's/^/  /'
     fi
+    # Resource Pulse (opt-in, in-repo): linked by ./install, enabled by
+    # `genable_extension` in ~/.gnome-settings.local. State is the shell's own
+    # verdict (ACTIVE / ERROR / OUT OF DATE), so a silent failure after an update shows here.
+    rp_uuid="resource-pulse@dotfiles"
+    rp_linked="no"; rp_enabled="no"; rp_state="n/a"
+    [ -e "$HOME/.local/share/gnome-shell/extensions/$rp_uuid" ] && rp_linked="yes"
+    if has_command gnome-extensions; then
+      gnome-extensions list --enabled 2>/dev/null | grep -qx "$rp_uuid" && rp_enabled="yes"
+      rp_state="$(gnome-extensions info "$rp_uuid" 2>/dev/null | sed -n 's/^ *State: *//p')"
+      rp_state="${rp_state:-not known to the shell (log out / in after linking)}"
+    fi
+    echo "Resource Pulse: linked=$rp_linked enabled=$rp_enabled state=$rp_state"
   )
 }
 

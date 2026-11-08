@@ -160,6 +160,75 @@ gset() {
 }
 
 #######################################
+# Print the quoted entries of a `gsettings get` string-array value, one per line.
+# `@as []` and `[]` print nothing. Extension uuids never contain quotes or commas.
+# Arguments:
+#   $1 - value in `gsettings get` form, e.g. ['a@b', 'c@d']
+#######################################
+list_array_entries() {
+    local array_value="$1" quoted_entry
+    while IFS= read -r quoted_entry; do
+        [[ -n "$quoted_entry" ]] && printf '%s\n' "${quoted_entry//\'/}"
+    done < <(grep -o "'[^']*'" <<<"$array_value" || true)
+}
+
+#######################################
+# Join entries into `gsettings` array form: ['a', 'b'], or @as [] when empty.
+# Arguments:
+#   $@ - entries
+#######################################
+format_array_value() {
+    (( $# )) || { printf '@as []'; return; }
+    local joined="" entry
+    for entry in "$@"; do
+        joined+="${joined:+, }'$entry'"
+    done
+    printf '[%s]' "$joined"
+}
+
+#######################################
+# Opt an in-repo GNOME Shell extension in: idempotently append its uuid to
+# enabled-extensions (gset would replace the whole list and clobber the others),
+# drop it from disabled-extensions (which wins over enabled-extensions in
+# GNOME 50), and warn when disable-user-extensions makes both moot. Nothing in
+# the portable core calls this: only ~/.gnome-settings.local does, so an
+# extension is never switched on for someone who did not ask.
+# Arguments:
+#   $1 - extension uuid (e.g. resource-pulse@dotfiles)
+#######################################
+genable_extension() {
+    local uuid="$1" schema="org.gnome.shell"
+
+    if ! grep -qx "$schema" <<<"$SCHEMAS"; then
+        log WARNING "Schema '$schema' not found — skipping enabled-extensions for $uuid"
+        return 0
+    fi
+
+    local enabled_value disabled_value entry
+    local -a enabled_entries=() disabled_entries=() kept_disabled_entries=()
+    enabled_value="$(gsettings get "$schema" enabled-extensions 2>/dev/null || true)"
+    disabled_value="$(gsettings get "$schema" disabled-extensions 2>/dev/null || true)"
+    mapfile -t enabled_entries < <(list_array_entries "$enabled_value")
+    mapfile -t disabled_entries < <(list_array_entries "$disabled_value")
+
+    if ! printf '%s\n' "${enabled_entries[@]}" | grep -qxF "$uuid"; then
+        enabled_entries+=("$uuid")
+        gset "$schema" enabled-extensions "$(format_array_value "${enabled_entries[@]}")"
+    fi
+
+    for entry in "${disabled_entries[@]}"; do
+        [[ "$entry" == "$uuid" ]] || kept_disabled_entries+=("$entry")
+    done
+    if (( ${#kept_disabled_entries[@]} != ${#disabled_entries[@]} )); then
+        gset "$schema" disabled-extensions "$(format_array_value "${kept_disabled_entries[@]}")"
+    fi
+
+    if [[ "$(gsettings get "$schema" disable-user-extensions 2>/dev/null || true)" == "true" ]]; then
+        log WARNING "disable-user-extensions is true — GNOME will load no user extension, so $uuid stays off until it is false"
+    fi
+}
+
+#######################################
 # Verify we are on a GNOME desktop with gsettings available.
 # Returns: 0 if GNOME, 1 otherwise
 #######################################
