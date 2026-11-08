@@ -76,7 +76,7 @@ bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for tool in bash git jq flock sha256sum find sort timeout touch sleep cat stat sh; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
+for tool in bash git jq flock sha256sum find sort timeout touch sleep cat stat sh base64; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
 (( $(id -u) != 0 )) || fatal "the table cannot run as root: its unreadable-file rows would assert nothing"
 [[ -x "$SUT" ]] || fatal "$SUT is not executable — every row below would assert nothing"
 [[ -x "$REDACTOR" ]] || fatal "$REDACTOR is not executable — the gate rows could not show their fixtures are right"
@@ -117,6 +117,18 @@ REDACTED_FAKE_TOKEN='<REDACTED:github-token>'
 LINK_LOCK="$STATE_DIR/link.lock"
 LOCK_HOLD_SECONDS=2
 HANG_BOUND_SECONDS=30
+# Every run's run deadline and gh-route limit: far past anything a row does, so only the rows about
+# them meet them.
+RUN_DEADLINE_SECONDS_FOR_ROWS=600
+GH_ROUTE_TIMEOUT_SECONDS_FOR_ROWS=20
+# The deadline row: a deadline two seconds into the run, and a fetch that takes three, so the first
+# store's fetch starts before it and everything after that fetch starts after it.
+DEADLINE_ROW_DEADLINE_SECONDS=2
+DEADLINE_ROW_FETCH_SECONDS=3
+# The gh-route limit row: a limit of one second, and a gh-route that would answer only after the row's
+# hang bound.
+GH_ROUTE_LIMIT_ROW_SECONDS=1
+FIXTURE_GH_ROUTE_HANG_SECONDS=$(( HANG_BOUND_SECONDS + 10 ))
 # The lock wait every run is given: past LOCK_HOLD_SECONDS, so the waiting row waits it out, and short of
 # HANG_BOUND_SECONDS, so a run that times out says so before the bound kills it.
 LOCK_WAIT_SECONDS_FOR_ROWS=20
@@ -156,11 +168,13 @@ case "$FIXTURE_GH_ROUTE_MODE" in
     matched) jq -cn --arg dir "$FIXTURE_GH_CONFIG_DIR" --arg token_file "$FIXTURE_TOKEN_FILE" \
                  '{state: "matched", dir: $dir, token_file: $token_file, why: "fixture: matched"}' ;;
     fail)    printf 'gh-route: fixture: the tables are malformed\n' >&2; exit 2 ;;
+    hang)    exec sleep "$FIXTURE_GH_ROUTE_HANG_SECONDS" ;;
 esac
 STUB
 chmod +x "$ROUTE_STUB" "$SIGNING_STUB" "$GH_ROUTE_STUB"
 mkdir -p "$FIXTURE_GH_CONFIG_DIR" "$(dirname "$FIXTURE_TOKEN_FILE")"
-export FIXTURE_GH_ROUTE_CALLS FIXTURE_GH_CONFIG_DIR FIXTURE_TOKEN_FILE FIXTURE_GH_ROUTE_MODE
+export FIXTURE_GH_ROUTE_CALLS FIXTURE_GH_CONFIG_DIR FIXTURE_TOKEN_FILE FIXTURE_GH_ROUTE_MODE \
+    FIXTURE_GH_ROUTE_HANG_SECONDS
 
 # A third global config whose core.hooksPath holds hooks that stage the withheld file and leave a mark:
 # pre-commit and post-index-change can each put a file into the commit the gate just kept it out of.
@@ -215,6 +229,7 @@ FIXTURE_REAL_GIT=$(command -v git)
 GIT_WRAPPER_DIR="$TMPROOT/git-wrapper-bin"
 FIXTURE_GIT_CALL_LOG="$TMPROOT/git-calls"
 FIXTURE_GIT_ENV_LOG="$TMPROOT/git-call-environments"
+FIXTURE_GIT_SETTINGS_LOG="$TMPROOT/git-call-settings"
 FIXTURE_CREDENTIAL_HELPER_FILE="$TMPROOT/credential-helper"
 FIXTURE_LOCK_PROBE_RESULT="$TMPROOT/lock-probe-result"
 FIXTURE_LEFTOVER_CHILD_PID="$TMPROOT/leftover-child-pid"
@@ -237,11 +252,20 @@ if [[ -n "${CLAUDE_MEMORY_GIT_TOKEN:-}" ]]; then
     if [[ "$CLAUDE_MEMORY_GIT_TOKEN" == "${FIXTURE_EXPECTED_TOKEN:-}" ]]; then token_state=expected; fi
 fi
 printf '%s token:%s gh-config:%s\n' "$subcommand" "$token_state" "${GH_CONFIG_DIR:-unset}" >> "$FIXTURE_GIT_ENV_LOG"
+# What else the call's environment says about prompts, the locale and tracing: unset, or the value
+# (an empty one shows as nothing after the colon).
+trace_variable_names=$(compgen -v GIT_TRACE | grep -vx GIT_TRACE_REDACT | tr '\n' ',')
+printf '%s askpass:%s prompt:%s locale:%s trace-variables:%s curl-verbose:%s trace-redact:%s\n' "$subcommand" \
+    "${GIT_ASKPASS-unset}" "${GIT_TERMINAL_PROMPT-unset}" "${LC_ALL-unset}" "$trace_variable_names" \
+    "${GIT_CURL_VERBOSE-unset}" "${GIT_TRACE_REDACT-unset}" >> "$FIXTURE_GIT_SETTINGS_LOG"
 for argument in "$@"; do
     if [[ "$argument" == 'credential.helper=!'* ]]; then
         printf '%s' "${argument#credential.helper=!}" > "$FIXTURE_CREDENTIAL_HELPER_FILE"
     fi
 done
+if [[ "$subcommand" == fetch && "${FIXTURE_GIT_ON_FETCH:-}" == slow ]]; then
+    sleep "$FIXTURE_FETCH_SECONDS"
+fi
 if [[ "$subcommand" == fetch && "${FIXTURE_GIT_ON_FETCH:-}" == not-found ]]; then
     printf "remote: Repository not found.\nfatal: repository 'https://github.com/%s/alpha-memory.git/' not found\n" \
         "$FIXTURE_OWNER" >&2
@@ -284,7 +308,7 @@ FIXTURE_LEFTOVER_CHILD_SECONDS=$LEFTOVER_CHILD_SECONDS
 export FIXTURE_HOOK_MARKER FIXTURE_HOOK_STAGED_PATH FIXTURE_REAL_GIT FIXTURE_GIT_CALL_LOG \
     FIXTURE_LOCK_PROBE_RESULT FIXTURE_LEFTOVER_CHILD_PID FIXTURE_LINK_LOCK FIXTURE_LEFTOVER_CHILD_SECONDS \
     FIXTURE_REAL_CAT FIXTURE_CAT_READ_COUNT FIXTURE_GIT_ENV_LOG FIXTURE_CREDENTIAL_HELPER_FILE \
-    FIXTURE_FSMONITOR_MARKER FIXTURE_OWNER
+    FIXTURE_FSMONITOR_MARKER FIXTURE_OWNER FIXTURE_GIT_SETTINGS_LOG
 
 # write_default_config — alpha and beta each in a store with its own remote.
 write_default_config() {
@@ -310,6 +334,7 @@ reset_scene() {
         "$FIXTURE_GH_ROUTE_CALLS" "$FIXTURE_CREDENTIAL_HELPER_FILE"
     : > "$FIXTURE_GIT_CALL_LOG"
     : > "$FIXTURE_GIT_ENV_LOG"
+    : > "$FIXTURE_GIT_SETTINGS_LOG"
     rm -f "$FIXTURE_TOKEN_FILE"
     mkdir -p "$HOME" "$STORES_ROOT"
     git init -q -b main "$ALPHA_DIR" || fatal "could not create the alpha store"
@@ -458,15 +483,54 @@ tree_fingerprint() {
 }
 
 # run_sut ARGS… → combined output in $OUT, exit status in $RC. Every override is always set; a row
-# shortens the lock wait by calling it as SUT_LOCK_WAIT_SECONDS=<n> run_sut ….
+# shortens the lock wait, the run deadline or the gh-route limit by calling it as
+# SUT_LOCK_WAIT_SECONDS=<n> run_sut …, and likewise SUT_RUN_DEADLINE_SECONDS or SUT_GH_ROUTE_TIMEOUT_SECONDS.
 SUT_RUNNER_PREFIX=()
 SUT_LOCK_WAIT_SECONDS=$LOCK_WAIT_SECONDS_FOR_ROWS
+SUT_RUN_DEADLINE_SECONDS=$RUN_DEADLINE_SECONDS_FOR_ROWS
+SUT_GH_ROUTE_TIMEOUT_SECONDS=$GH_ROUTE_TIMEOUT_SECONDS_FOR_ROWS
 run_sut() {
     OUT=$(CLAUDE_MEMORY_PROJECTS_DIR="$PROJECTS_DIR" CLAUDE_MEMORY_STORES_ROOT="$STORES_ROOT" \
         CLAUDE_MEMORY_CONFIG="$CONFIG" CLAUDE_MEMORY_STATE_DIR="$STATE_DIR" \
         CLAUDE_MEMORY_HOST="$FIXTURE_HOST" CLAUDE_MEMORY_TENANT_ROUTE="$ROUTE_STUB" \
         CLAUDE_MEMORY_GH_ROUTE="$GH_ROUTE_STUB" CLAUDE_MEMORY_LOCK_WAIT_SECONDS="$SUT_LOCK_WAIT_SECONDS" \
+        CLAUDE_MEMORY_RUN_DEADLINE_SECONDS="$SUT_RUN_DEADLINE_SECONDS" \
+        CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS="$SUT_GH_ROUTE_TIMEOUT_SECONDS" \
         "${SUT_RUNNER_PREFIX[@]}" "$SUT" "$@" 2>&1); RC=$?
+}
+
+# make_beta_tracked_store — the beta store becomes a clone of its own bare remote, a copy of the alpha
+# store's remote as it stands, and the table's remote for beta is that remote's path.
+make_beta_tracked_store() {
+    git clone -q --bare "$REMOTES_DIR/$ALPHA_STORE.git" "$REMOTES_DIR/$BETA_STORE.git" \
+        || fatal "could not create the remote of the beta store"
+    git clone -q "$REMOTES_DIR/$BETA_STORE.git" "$BETA_DIR" || fatal "could not clone the beta store"
+    set_store_remote "$BETA_STORE" "$REMOTES_DIR/$BETA_STORE.git"
+}
+
+# network_call_settings FIELDS — for each logged fetch and push, its subcommand and what FIELDS
+# (prompt: askpass, prompt and locale; trace: trace variables, curl-verbose, trace-redact) say, each
+# call followed by a space.
+network_call_settings() {
+    local logged_call summary=''
+    while IFS= read -r logged_call; do
+        [[ "$logged_call" == 'fetch '* || "$logged_call" == 'push '* ]] || continue
+        case "$1" in
+            prompt) summary+="${logged_call%% trace-variables:*} " ;;
+            trace)  summary+="${logged_call%% *} trace-variables:${logged_call#* trace-variables:} " ;;
+        esac
+    done < "$FIXTURE_GIT_SETTINGS_LOG"
+    printf '%s' "$summary"
+}
+
+# calls_with_trace_variables — how many logged git calls had a GIT_TRACE variable (GIT_TRACE_REDACT
+# aside) or GIT_CURL_VERBOSE in their environment.
+calls_with_trace_variables() {
+    local logged_call calls=0
+    while IFS= read -r logged_call; do
+        if [[ "$logged_call" != *' trace-variables: curl-verbose:unset '* ]]; then calls=$(( calls + 1 )); fi
+    done < "$FIXTURE_GIT_SETTINGS_LOG"
+    printf '%s' "$calls"
 }
 
 # wait_for_file PATH — status 0 once PATH exists, 1 when it has not appeared after every look.
@@ -1164,6 +1228,61 @@ check "apply: no run leaves MERGE_HEAD behind, even on a conflict it cannot reso
     "$RC|$(merge_head_state)|$([[ -e "$ALPHA_DIR/d~HEAD" ]] && printf 'd~HEAD left')|$(body_of "$ALPHA_DIR/d")|$(git -C "$ALPHA_DIR" status --porcelain)|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$OUT" "$ALPHA_STORE: a conflict the sync does not resolve")" \
     "2|||local file d||could-not-run|yes"
 
+# A conflict left in the index with no MERGE_HEAD, as a conflicted `git stash pop` leaves one: a stage
+# would take the file with its markers, and a commit would conclude it.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push seed.md 'remote body'
+write_file "$ALPHA_DIR/seed.md" 'local body'
+fixture_commit "$ALPHA_DIR" 'local'
+git -C "$ALPHA_DIR" fetch -q origin || fatal "could not fetch into the alpha store"
+git -C "$ALPHA_DIR" merge -q --no-edit origin/main >/dev/null 2>&1
+rm -f "$ALPHA_DIR/.git/MERGE_HEAD" "$ALPHA_DIR/.git/MERGE_MSG" "$ALPHA_DIR/.git/MERGE_MODE"
+[[ -n "$(git -C "$ALPHA_DIR" ls-files -u)" ]] || fatal "the fixture left no unmerged entry"
+store_before=$(tree_fingerprint "$ALPHA_DIR")
+head_before=$(local_head)
+run_sut --apply
+check "apply: unmerged index entries with no merge in progress are could-not-run, and no conflict marker is committed" \
+    "$RC|$(contains "$OUT" "$ALPHA_STORE: the index holds unmerged entries")|$(tree_fingerprint "$ALPHA_DIR")|$(local_head)|$(status_field_of "$ALPHA_STORE" 2)" \
+    "2|yes|$store_before|$head_before|could-not-run"
+
+# Each stopped on a conflict that was then staged, so no unmerged entry is left: the marker file alone
+# says the operation is unfinished, and a commit would conclude it.
+# make_diverged_alpha — a tracked alpha store whose main and a side branch each changed seed.md; sets
+# side_commit.
+make_diverged_alpha() {
+    reset_scene
+    make_tracked_store "$ALPHA_STORE"
+    git -C "$ALPHA_DIR" checkout -q -b side || fatal "could not branch the alpha store"
+    write_file "$ALPHA_DIR/seed.md" 'side body'
+    fixture_commit "$ALPHA_DIR" 'side'
+    side_commit=$(local_head)
+    git -C "$ALPHA_DIR" checkout -q main || fatal "could not go back to main"
+    write_file "$ALPHA_DIR/seed.md" 'main body'
+    fixture_commit "$ALPHA_DIR" 'main'
+}
+
+make_diverged_alpha
+git -C "$ALPHA_DIR" cherry-pick "$side_commit" >/dev/null 2>&1
+write_file "$ALPHA_DIR/seed.md" 'resolved body'
+git -C "$ALPHA_DIR" add seed.md || fatal "could not stage the resolution"
+[[ -e "$ALPHA_DIR/.git/CHERRY_PICK_HEAD" && -z "$(git -C "$ALPHA_DIR" ls-files -u)" ]] \
+    || fatal "the fixture cherry-pick did not stop resolved"
+head_before=$(local_head)
+run_sut --apply
+cherry_pick_result="$RC|$(contains "$OUT" "$ALPHA_STORE: a cherry-pick is in progress")|$(local_head)|$(status_field_of "$ALPHA_STORE" 2)"
+make_diverged_alpha
+git -C "$ALPHA_DIR" revert --no-edit "$side_commit" >/dev/null 2>&1
+write_file "$ALPHA_DIR/seed.md" 'resolved body'
+git -C "$ALPHA_DIR" add seed.md || fatal "could not stage the resolution"
+[[ -e "$ALPHA_DIR/.git/REVERT_HEAD" && -z "$(git -C "$ALPHA_DIR" ls-files -u)" ]] \
+    || fatal "the fixture revert did not stop resolved"
+head_before_revert=$(local_head)
+run_sut --apply
+check "apply: a cherry-pick or a revert in progress is could-not-run, and nothing is committed" \
+    "$cherry_pick_result|$RC|$(contains "$OUT" "$ALPHA_STORE: a revert is in progress")|$(local_head)|$(status_field_of "$ALPHA_STORE" 2)" \
+    "2|yes|$head_before|could-not-run|2|yes|$head_before_revert|could-not-run"
+
 printf 'auth: the route and the token\n'
 reset_scene
 make_tracked_store "$ALPHA_STORE"
@@ -1278,6 +1397,95 @@ check "push: a rejected push is outcome push-rejected, exit 0, one attempt" \
 # --status: one or more lines per checked-out store, store<TAB>level<TAB>message
 # ---------------------------------------------------------------------------------------------
 
+printf 'network: last-ok, the run deadline, the child environment\n'
+# Nothing to commit and nothing to push: the fetch is the check, and a quiet host is still in sync.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+printf -v epoch_before '%(%s)T' -1
+PATH="$GIT_WRAPPER_DIR:$PATH" run_sut --apply
+printf -v epoch_after '%(%s)T' -1
+last_ok_epoch=$(last_ok_of "$ALPHA_STORE")
+check "push: an up-to-date run is ok, pushes nothing, and still stamps last-ok" \
+    "$RC|$OUT|$(status_field_of "$ALPHA_STORE" 2)|$(status_field_of "$ALPHA_STORE" 3)|fetch $(calls_of fetch) push $(calls_of push)|$([[ "$last_ok_epoch" =~ ^[0-9]+$ ]] && (( last_ok_epoch >= epoch_before && last_ok_epoch <= epoch_after )) && printf 'stamped now')" \
+    "0||ok|up to date|fetch 1 push 0|stamped now"
+
+# The deadline is two seconds into the run and the alpha store's fetch takes three: that fetch starts
+# before it, and its merge is committed whole after it; the alpha push, and the beta store's gh-route
+# and fetch, would all start after it.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push theirs.md 'their body'
+write_file "$ALPHA_DIR/ours.md" 'our body'
+make_beta_tracked_store
+write_file "$BETA_DIR/b.md" 'b body'
+beta_remote_before=$(git -C "$REMOTES_DIR/$BETA_STORE.git" rev-parse main)
+beta_commits_after_its_local_commit=$(( $(commit_count "$BETA_DIR") + 1 ))
+SUT_RUN_DEADLINE_SECONDS=$DEADLINE_ROW_DEADLINE_SECONDS PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GIT_ON_FETCH=slow \
+    FIXTURE_FETCH_SECONDS=$DEADLINE_ROW_FETCH_SECONDS run_sut_bounded --apply
+check "deadline: no gh-route, fetch or push starts after the run deadline; a store past it is committed and reads unreachable, run deadline" \
+    "$RC|$(status_field_of "$BETA_STORE" 2)|$(status_field_of "$BETA_STORE" 3)|$(status_field_of "$ALPHA_STORE" 2)|$(status_field_of "$ALPHA_STORE" 3)|fetch $(calls_of fetch) push $(calls_of push)|$(wc -l < "$FIXTURE_GH_ROUTE_CALLS" | tr -d ' ')|$(parent_count "$ALPHA_DIR")|$(merge_head_state)|$([[ -e "$BETA_DIR/.git/MERGE_HEAD" ]] && printf 'a merge in progress')|$(commit_count "$BETA_DIR")|$(git -C "$REMOTES_DIR/$BETA_STORE.git" rev-parse main)" \
+    "0|unreachable|run deadline|unreachable|run deadline|fetch 1 push 0|1|3|||$beta_commits_after_its_local_commit|$beta_remote_before"
+
+# A deadline of two seconds and a lock wait of twenty: the wait is cut to the time left, so the run
+# gives up on a lock the holder keeps for four seconds rather than waiting it out.
+reset_scene
+write_file "$ALPHA_DIR/pending.md" 'pending body'
+mkdir -p "$STATE_DIR" || fatal "could not create the state dir"
+rm -f "$lock_taken_file" "$lock_release_file"
+# shellcheck disable=SC2016  # expanded by the bash -c, not this one
+flock "$LINK_LOCK" timeout "$TIMEOUT_ROW_HOLD_SECONDS" \
+    bash -c ': > "$1"; while [[ ! -e "$2" ]]; do sleep "$3"; done' \
+    _ "$lock_taken_file" "$lock_release_file" "$LOCK_TAKEN_POLL_INTERVAL_SECONDS" &
+lock_holder_pid=$!
+wait_for_file "$lock_taken_file" || fatal "the row's lock holder never took the lock"
+SUT_RUN_DEADLINE_SECONDS=$DEADLINE_ROW_DEADLINE_SECONDS run_sut_bounded --apply
+: > "$lock_release_file"
+wait "$lock_holder_pid"
+check "deadline: no lock wait runs past the run deadline" \
+    "$RC|$(contains "$OUT" "$ALPHA_STORE: the lock $LINK_LOCK was still held after")|$(commit_count "$ALPHA_DIR")|$(status_field_of "$ALPHA_STORE" 2)" \
+    "2|yes|0|could-not-run"
+
+# A caller can set these; git then writes its trace, curl's headers among them, to stderr, which a
+# status detail and the output keep.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+seed_write_push theirs.md 'their body'
+write_file "$ALPHA_DIR/a.md" 'a body'
+printf '%s\n' "$FAKE_TOKEN" > "$FIXTURE_TOKEN_FILE"
+encoded_credential=$(printf 'x-access-token:%s' "$FAKE_TOKEN" | base64 | tr -d '\n')
+PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GH_ROUTE_MODE=matched GIT_TRACE=1 GIT_TRACE_CURL=1 GIT_TRACE_PACKET=1 \
+    GIT_CURL_VERBOSE=1 GIT_TRACE_REDACT=0 run_sut --apply
+check "network: git's trace and curl-verbose variables reach no git call, a network call redacts its trace, and no credential is in the output or the status" \
+    "$RC|$(calls_with_trace_variables)|$(network_call_settings trace)|$(contains "$OUT" 'Authorization')|$(contains "$OUT" "$encoded_credential")|$(contains "$(status_line_of "$ALPHA_STORE")" "$encoded_credential")|$(remote_head)" \
+    "0|0|fetch trace-variables: curl-verbose:unset trace-redact:1 push trace-variables: curl-verbose:unset trace-redact:1 |no|no|no|$(local_head)"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+PATH="$GIT_WRAPPER_DIR:$PATH" GIT_ASKPASS="$TMPROOT/fixture-askpass" GIT_TERMINAL_PROMPT=1 run_sut --apply
+check "network: a fetch and a push run with no prompt, no askpass program and the C locale, whatever the caller set" \
+    "$RC|$(network_call_settings prompt)|$(remote_head)" \
+    "0|fetch askpass: prompt:0 locale:C push askpass: prompt:0 locale:C |$(local_head)"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+SUT_GH_ROUTE_TIMEOUT_SECONDS=$GH_ROUTE_LIMIT_ROW_SECONDS PATH="$GIT_WRAPPER_DIR:$PATH" FIXTURE_GH_ROUTE_MODE=hang \
+    run_sut_bounded --apply
+check "auth: a gh-route that does not answer within its limit is could-not-run, naming gh-route, and git is never called" \
+    "$RC|$(contains "$OUT" "$ALPHA_STORE: gh-route did not answer within $GH_ROUTE_LIMIT_ROW_SECONDS s")|$(cat "$FIXTURE_GIT_CALL_LOG")|$(status_field_of "$ALPHA_STORE" 2)" \
+    "2|yes||could-not-run"
+
+# The push succeeds and last-ok cannot be written: a directory stands where its temporary file goes.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$ALPHA_DIR/a.md" 'a body'
+mkdir -p "$STATE_DIR/$ALPHA_STORE.last-ok.new" || fatal "could not put a directory in last-ok's way"
+run_sut --apply
+check "push: a last-ok that cannot be written still records the outcome, naming the failure, and is exit 2" \
+    "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$(status_field_of "$ALPHA_STORE" 3)" "could not write $STATE_DIR/$ALPHA_STORE.last-ok")|$(remote_head)" \
+    "2|ok|yes|$(local_head)"
+
 printf 'status: --status, read-only\n'
 reset_scene
 make_tracked_store "$ALPHA_STORE"
@@ -1355,7 +1563,7 @@ check "status: an index line naming a missing file, or one file named by two ind
     "0|$ALPHA_STORE${TAB}ok${TAB}last synced 0 min ago${NL}$ALPHA_STORE${TAB}warn${TAB}.: 1 index lines name a missing file, 0 files are named by more than one index line${NL}$ALPHA_STORE${TAB}warn${TAB}repos/$FIXTURE_OWNER/demo: 1 index lines name a missing file, 1 files are named by more than one index line"
 
 printf '\n'
-EXPECTED_ROWS=82
+EXPECTED_ROWS=91
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

@@ -23,8 +23,10 @@
 # A STORE PUSHES ONLY TO ITS OWN REMOTE. Every verb first checks that every fetch and push URL of the
 # store's `origin` is the table's `remote`: a difference is could-not-run for that store, with nothing
 # staged, counted or scanned. The URLs are git's own answer (`git remote get-url [--push] --all
-# origin`, insteadOf applied), since those are the ones a push would use. A URL is never printed: it
-# can carry a credential. A store with no `origin` at all is local-only.
+# origin`, insteadOf applied), since those are the ones a push would use. This script never prints a
+# URL of its own accord, since one can carry a credential; git's own error text, which can name the
+# URL, is printed and kept in a status detail only after the redactor. A store with no `origin` at all
+# is local-only.
 #
 # NO IGNORE RULE DECIDES WHAT IS MEMORY. `git add -A` skips ignored paths without a word, and a global
 # ignore file, .git/info/exclude and a nested .gitignore all apply otherwise, so the stage is
@@ -35,10 +37,20 @@
 # never staged. A run waits for it CLAUDE_MEMORY_LOCK_WAIT_SECONDS at most (120 by default), then
 # gives up on that store as could-not-run. The merge runs under the same hold, since it writes into the
 # tree the link script writes into; the fetch runs before the lock and the push after it, so no network
-# wait ever holds up a link run, and the fetch, the lock wait and the push (60 + 120 + 60 s at most) fit
-# a unit's five minutes. Every git call is made with the lock's descriptor closed in git's own process,
-# so nothing git starts (a hook, a file-system monitor, a detached maintenance) can hold the lock past
-# the end of this run and stop every later link run.
+# wait ever holds up a link run. Every git call is made with the lock's descriptor closed in git's own
+# process, so nothing git starts (a hook, a file-system monitor, a detached maintenance) can hold the
+# lock past the end of this run and stop every later link run.
+#
+# TIME. Per store, at most: gh-route GH_ROUTE_TIMEOUT_SECONDS (20 s), the fetch and the push
+# NETWORK_TIMEOUT_SECONDS each (60 s), each of those three killed NETWORK_KILL_AFTER_SECONDS (5 s)
+# after that, and the lock wait LOCK_WAIT_SECONDS (120 s). Across the stores, RUN_DEADLINE_SECONDS
+# (240 s from the start of the run): no gh-route call, fetch or push STARTS after it, and no lock wait
+# runs past it (MIN_LOCK_WAIT_SECONDS, 1 s, at least). A store whose fetch or push would start after it
+# is still committed, and records unreachable, `run deadline`. The deadline is looked at between steps
+# and never cuts one short, so this script never interrupts a merge and its commit. A run therefore
+# ends within the deadline, plus the one gh-route call, fetch or push in flight at it (65 s at most),
+# plus the local git work of the stores after it: about 305 s and that local work at the defaults,
+# which is what the unit's time limit has to allow.
 #
 # NO HOOK RUNS AND NO MONITOR STARTS. Every git call, a read as much as a write, is made with
 # core.hooksPath=/dev/null and core.fsmonitor=false (GIT_SAFETY_OPTIONS, applied by git_in_store), and
@@ -65,12 +77,17 @@
 #     missing, empty or unreadable   or pushed
 #   none, no-repo or no-remotes      git's own credential helpers, unpinned
 # The token is in no argument, no output and no status. A network call has no prompt and no askpass
-# program, runs in the C locale (its errors are read), and is cut off after NETWORK_TIMEOUT_SECONDS.
+# program, runs in the C locale (its errors are read), redacts any trace git writes, and is cut off
+# after NETWORK_TIMEOUT_SECONDS. git's trace variables (GIT_TRACE and every GIT_TRACE_*) and
+# GIT_CURL_VERBOSE are unset when the run starts: with them, git writes curl's headers, the
+# Authorization header among them, to the stderr this script keeps in a status detail, and the redactor
+# has no rule for a Basic credential.
 #
 # ONE ATTEMPT PER RUN, for a store with an origin:
-#   refuse   a merge or a rebase in progress, or a detached HEAD, is could-not-run before anything is
-#            staged, and is never reset: a commit would conclude the merge with whatever the tree
-#            holds. A person finishes or aborts it
+#   refuse   a merge, a cherry-pick, a revert or a rebase in progress, unmerged entries in the index
+#            (a conflicted `git stash pop` leaves them with no MERGE_HEAD), or a detached HEAD, is
+#            could-not-run before anything is staged, and is never reset: a stage would take the
+#            conflict markers and a commit would conclude the operation. A person finishes or aborts it
 #   fetch    failure: auth-failed when git's error names an auth or not-found failure, unreachable for
 #            anything else. The store is still committed
 #   merge    unless HEAD already holds origin/<branch>: one `git merge` (M8: a rebase empties the tree
@@ -176,9 +193,10 @@
 #       2 could not run (HOME unset, no jq, git or sha256sum, a bad store table, an unknown --store, a
 #         revision that does not resolve, an origin that is not the table's remote, an unusable host
 #         name; on --apply also no flock or timeout, a gh-route that is not executable or could not
-#         answer, an unusable lock wait, a lock still held when the wait ran out, a merge or rebase in
-#         progress or a detached HEAD, a conflict the sync does not resolve, and a lock, stage, gate,
-#         commit, merge or status write that failed, reported once the other stores have run)
+#         answer in time, an unusable lock wait, run deadline or gh-route limit, a lock still held when
+#         the wait ran out, a merge, cherry-pick, revert or rebase in progress, unmerged index entries
+#         or a detached HEAD, a conflict the sync does not resolve, and a lock, stage, gate, commit,
+#         merge, status or last-ok write that failed, reported once the other stores have run)
 #       64 usage
 #   --apply exits only 0 or 2: a withheld file, a conflict copy, a blocked merge, a rejected push, a
 #   missing token or an unreachable remote is a status for the doctor, not a failed unit. --status
@@ -189,7 +207,8 @@
 # (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the host in a commit message, a
 # conflict copy's name and the staleness threshold), CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long
 # --apply waits for link.lock; a whole number above 0), CLAUDE_MEMORY_GH_ROUTE (the sibling
-# scripts/gh-route).
+# scripts/gh-route), CLAUDE_MEMORY_RUN_DEADLINE_SECONDS (240) and CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS
+# (20), whole numbers above 0 (see TIME above).
 
 set -uo pipefail
 
@@ -214,9 +233,24 @@ LOCK_WAIT_RAN_OUT=2
 # a call may start stays in the foreground.
 GIT_SAFETY_OPTIONS=(-c core.hooksPath=/dev/null -c core.fsmonitor=false -c maintenance.autoDetach=false
     -c gc.autoDetach=false)
-# A fetch or a push is cut off after this long, and killed this long after that.
+# A fetch or a push is cut off after this long, and killed this long after that (gh-route as well).
 NETWORK_TIMEOUT_SECONDS=60
 NETWORK_KILL_AFTER_SECONDS=5
+# gh-route is a zsh script that sources tables and runs git: it answers in well under a second.
+GH_ROUTE_TIMEOUT_SECONDS_DEFAULT=20
+# No gh-route call, fetch or push starts this long after the run started, and no lock wait runs past it.
+RUN_DEADLINE_SECONDS_DEFAULT=240
+MIN_LOCK_WAIT_SECONDS=1
+RUN_DEADLINE_DETAIL='run deadline'
+WHOLE_SECONDS_RE='^[1-9][0-9]*$'
+# What git leaves in its directory while each operation that a commit would conclude is unfinished.
+UNFINISHED_OPERATION_MARKERS=(MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply)
+declare -A OPERATION_OF_MARKER=([MERGE_HEAD]=merge [CHERRY_PICK_HEAD]=cherry-pick [REVERT_HEAD]=revert
+    [rebase-merge]=rebase [rebase-apply]=rebase)
+# How a run authenticates, by gh-route's answer.
+ROUTE_MODE_PINNED='pinned'
+ROUTE_MODE_UNPINNED='unpinned'
+ROUTE_MODE_NO_TOKEN='no-token'
 # timeout's status when the time ran out, and when it then had to kill.
 TIMEOUT_EXPIRED_STATUS=124
 TIMEOUT_KILLED_STATUS=137
@@ -250,6 +284,7 @@ STAGE_MASK_DELETED_BY_THEM=3    # base and ours: git status UD
 STAGE_MASK_DELETED_BY_US=5      # base and theirs: git status DU
 STAGE_MASK_BOTH_ADDED=6         # ours and theirs: git status AA
 STAGE_MASK_BOTH_MODIFIED=7      # all three: git status UU
+STAGE_MASK_UNRESOLVABLE='unresolvable'   # anything else, or a submodule on either side
 OURS_STAGE=2
 THEIRS_STAGE=3
 # The modes of a regular file: an index unions only these, and anything else in its place is kept
@@ -333,6 +368,8 @@ LINK_LOCK_PATH="$STATE_DIR/$LINK_LOCK_FILE_NAME"
 LOCK_WAIT_SECONDS="${CLAUDE_MEMORY_LOCK_WAIT_SECONDS:-$LOCK_WAIT_SECONDS_DEFAULT}"
 REDACTOR="$DOTFILES/$REDACTOR_RELATIVE"
 GH_ROUTE="${CLAUDE_MEMORY_GH_ROUTE:-$DOTFILES/$GH_ROUTE_RELATIVE}"
+GH_ROUTE_TIMEOUT_SECONDS="${CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS:-$GH_ROUTE_TIMEOUT_SECONDS_DEFAULT}"
+RUN_DEADLINE_SECONDS="${CLAUDE_MEMORY_RUN_DEADLINE_SECONDS:-$RUN_DEADLINE_SECONDS_DEFAULT}"
 
 MODE=''                         # check | scan | apply | status
 ONLY_STORE=''                   # --store
@@ -344,12 +381,15 @@ declare -A REMOTE_OF_STORE=()   # store → the table's remote
 FAILED_STORES=()                # stores that could not run, reported at the end
 NEEDS_ATTENTION=0               # --check or --scan found something
 LINK_LOCK_FD=''                 # the open descriptor of link.lock while it is held
+LOCK_WAIT_THIS_STORE=''         # the lock wait, cut to the run deadline, set by settle_lock_wait
+RUN_STARTED_EPOCH=''            # when main began: the run deadline counts from it
+LAST_OK_FAILURE_DETAIL=''       # why last-ok could not be written, for the status detail
 GIT_RUNNER_PREFIX=()            # what runs git: empty, or timeout for a network call
 STORE_HAS_ORIGIN=0              # what check_origin found
 CURRENT_BRANCH=''               # the branch HEAD names, set by refuse_unfinished_operation
 WITHHELD_REDACTED_PATHS=()      # what gate_staged_paths held back, each with its shapes redacted
 COMMITTED_COUNT=0               # how many paths commit_staged_paths committed
-ROUTE_MODE=''                   # pinned | unpinned | no-token, set by resolve_route
+ROUTE_MODE=''                   # a ROUTE_MODE_* set by resolve_route; empty past the run deadline
 ROUTED_TOKEN=''                 # the pinned account's token: never printed, written or put in an argument
 ROUTED_GH_CONFIG_DIR=''         # the pinned account's gh config dir
 NO_TOKEN_DETAIL=''              # why a pinned route has no token
@@ -451,7 +491,9 @@ git_in_store() {
 }
 
 # network_git_in_store STORE_DIR ARGS… — git_in_store for a call that reaches the remote: cut off after
-# NETWORK_TIMEOUT_SECONDS, in the C locale (its errors are read), with no prompt and no askpass program.
+# NETWORK_TIMEOUT_SECONDS, in the C locale (its errors are read), with no prompt and no askpass program,
+# and with any trace git writes redacted (main has unset the trace variables already; this is a second
+# switch, for one a later git reads).
 # When the route pinned an account, the token and the account's config dir are in this one git
 # process's environment, and every configured credential helper is cleared for the one that reads it.
 # The token is never in an argument.
@@ -461,13 +503,13 @@ network_git_in_store() {
     # Read by git_in_store, which this call reaches: bash scopes a local to the calls it makes.
     # shellcheck disable=SC2034
     local GIT_RUNNER_PREFIX=(timeout --kill-after="$NETWORK_KILL_AFTER_SECONDS" "$NETWORK_TIMEOUT_SECONDS")
-    if [[ "$ROUTE_MODE" == pinned ]]; then
+    if [[ "$ROUTE_MODE" == "$ROUTE_MODE_PINNED" ]]; then
         CLAUDE_MEMORY_GIT_TOKEN=$ROUTED_TOKEN GH_CONFIG_DIR=$ROUTED_GH_CONFIG_DIR \
-            LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' \
+            LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GIT_TRACE_REDACT=1 \
             git_in_store "$store_dir" -c "$CLEARED_CREDENTIAL_HELPERS" \
                 -c "credential.helper=$PINNED_CREDENTIAL_HELPER" "$@"
     else
-        LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' git_in_store "$store_dir" "$@"
+        LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS='' GIT_TRACE_REDACT=1 git_in_store "$store_dir" "$@"
     fi
 }
 
@@ -716,14 +758,38 @@ print_file_content() {
 # --apply: stage, gate and commit, holding the link script's lock.
 # ---------------------------------------------------------------------------------------------
 
-# take_link_lock — wait LOCK_WAIT_SECONDS at most for <state dir>/link.lock, the link script's lock,
+# seconds_until_run_deadline — how many whole seconds are left before the run deadline; 0 or less once
+# it has passed.
+seconds_until_run_deadline() {
+    local now
+    printf -v now '%(%s)T' -1
+    printf '%s' $(( RUN_STARTED_EPOCH + RUN_DEADLINE_SECONDS - now ))
+}
+
+# run_deadline_has_passed — status 0 once RUN_DEADLINE_SECONDS have passed since the run started.
+run_deadline_has_passed() {
+    (( $(seconds_until_run_deadline) <= 0 ))
+}
+
+# settle_lock_wait — LOCK_WAIT_THIS_STORE: LOCK_WAIT_SECONDS, cut to the time left before the run
+# deadline, and never under MIN_LOCK_WAIT_SECONDS.
+settle_lock_wait() {
+    local seconds_left
+    seconds_left=$(seconds_until_run_deadline)
+    LOCK_WAIT_THIS_STORE=$LOCK_WAIT_SECONDS
+    if (( seconds_left < LOCK_WAIT_THIS_STORE )); then LOCK_WAIT_THIS_STORE=$seconds_left; fi
+    if (( LOCK_WAIT_THIS_STORE < MIN_LOCK_WAIT_SECONDS )); then LOCK_WAIT_THIS_STORE=$MIN_LOCK_WAIT_SECONDS; fi
+}
+
+# take_link_lock — wait LOCK_WAIT_THIS_STORE at most for <state dir>/link.lock, the link script's lock,
 # and hold it in LINK_LOCK_FD. Returns LOCK_WAIT_RAN_OUT when another run still held it at the end of
 # the wait, 1 when it could not be opened or locked.
 take_link_lock() {
     local flock_status
+    settle_lock_wait
     mkdir -p -- "$STATE_DIR" || return 1
     exec {LINK_LOCK_FD}>> "$LINK_LOCK_PATH" || return 1
-    flock -w "$LOCK_WAIT_SECONDS" "$LINK_LOCK_FD"
+    flock -w "$LOCK_WAIT_THIS_STORE" "$LINK_LOCK_FD"
     flock_status=$?
     (( flock_status != 0 )) || return 0
     release_link_lock
@@ -836,12 +902,19 @@ route_fields_of() {
 # resolve_route STORE STORE_DIR — ask gh-route which account the store's directory routes to, before any
 # git call, and set ROUTE_MODE: pinned (the token read into ROUTED_TOKEN, the config dir into
 # ROUTED_GH_CONFIG_DIR), unpinned, or no-token (NO_TOKEN_DETAIL says why). gh-route's own errors pass
-# through the redactor. Returns 1, having reported the store, when gh-route could not answer or gave an
-# answer this script does not know.
+# through the redactor. gh-route gets GH_ROUTE_TIMEOUT_SECONDS. Returns 1, having reported the store,
+# when gh-route could not answer, did not answer in time, or gave an answer this script does not know.
 resolve_route() {
-    local store=$1 store_dir=$2 route_json route_fields=() state config_dir token_file shown_token_file
+    local store=$1 store_dir=$2 route_json route_status route_fields=() state config_dir token_file
+    local shown_token_file
     ROUTE_MODE='' ROUTED_TOKEN='' ROUTED_GH_CONFIG_DIR='' NO_TOKEN_DETAIL=''
-    if ! route_json=$(stderr_redacted "$GH_ROUTE" "$store_dir"); then
+    route_json=$(stderr_redacted timeout --kill-after="$NETWORK_KILL_AFTER_SECONDS" "$GH_ROUTE_TIMEOUT_SECONDS" \
+        "$GH_ROUTE" "$store_dir")
+    route_status=$?
+    if (( route_status == TIMEOUT_EXPIRED_STATUS || route_status == TIMEOUT_KILLED_STATUS )); then
+        report_store_failure "$store" "gh-route did not answer within $GH_ROUTE_TIMEOUT_SECONDS s"
+        return 1
+    elif (( route_status != 0 )); then
         report_store_failure "$store" "gh-route could not answer for the store"
         return 1
     fi
@@ -851,7 +924,7 @@ resolve_route() {
     fi
     state=${route_fields[0]} config_dir=${route_fields[1]} token_file=${route_fields[2]}
     if is_one_of "$state" "${UNPINNED_ROUTE_STATES[@]}"; then
-        ROUTE_MODE=unpinned
+        ROUTE_MODE=$ROUTE_MODE_UNPINNED
         return 0
     fi
     if ! is_one_of "$state" "${PINNED_ROUTE_STATES[@]}" || [[ -z "$config_dir" ]]; then
@@ -864,33 +937,38 @@ resolve_route() {
         ROUTED_TOKEN=$(< "$token_file")
     fi
     if [[ -n "$ROUTED_TOKEN" ]]; then
-        ROUTE_MODE=pinned
+        ROUTE_MODE=$ROUTE_MODE_PINNED
         return 0
     fi
-    ROUTE_MODE=no-token
+    ROUTE_MODE=$ROUTE_MODE_NO_TOKEN
     shown_token_file=$(printable_path "${token_file:-<none>}")
     NO_TOKEN_DETAIL="the token file $shown_token_file is missing, empty or unreadable"
 }
 
 # refuse_unfinished_operation STORE STORE_DIR — set CURRENT_BRANCH. Returns 1, having reported the store,
-# when a merge or a rebase is in progress or HEAD is detached: a commit would then conclude the merge with
+# when a merge, a cherry-pick, a revert or a rebase is in progress, the index holds unmerged entries, or
+# HEAD is detached: a stage would then take conflict markers, a commit would conclude the operation with
 # whatever the tree holds, or land on no branch. It never resets anything; a person finishes or aborts it.
 refuse_unfinished_operation() {
-    local store=$1 store_dir=$2 state_name state_path branch_status
+    local store=$1 store_dir=$2 marker marker_path unmerged_entries branch_status
     CURRENT_BRANCH=''
-    for state_name in MERGE_HEAD rebase-merge rebase-apply; do
-        if ! state_path=$(git_in_store "$store_dir" rev-parse --path-format=absolute --git-path "$state_name"); then
+    for marker in "${UNFINISHED_OPERATION_MARKERS[@]}"; do
+        if ! marker_path=$(git_in_store "$store_dir" rev-parse --path-format=absolute --git-path "$marker"); then
             report_store_failure "$store" "git could not find its own directory"
             return 1
         fi
-        [[ -e "$state_path" ]] || continue
-        if [[ "$state_name" == MERGE_HEAD ]]; then
-            report_store_failure "$store" "a merge is in progress: conclude or abort it by hand"
-        else
-            report_store_failure "$store" "a rebase is in progress: conclude or abort it by hand"
-        fi
+        [[ -e "$marker_path" ]] || continue
+        report_store_failure "$store" "a ${OPERATION_OF_MARKER[$marker]} is in progress: conclude or abort it by hand"
         return 1
     done
+    if ! unmerged_entries=$(git_in_store "$store_dir" ls-files -u); then
+        report_store_failure "$store" "git could not list the index's unmerged entries"
+        return 1
+    fi
+    if [[ -n "$unmerged_entries" ]]; then
+        report_store_failure "$store" "the index holds unmerged entries: resolve them by hand"
+        return 1
+    fi
     CURRENT_BRANCH=$(git_in_store "$store_dir" symbolic-ref -q --short HEAD)
     branch_status=$?
     (( branch_status != 0 )) || return 0
@@ -952,7 +1030,6 @@ blocking_paths_of() {
 
 # index_entry_of STORE_DIR PATH — PATH's stage-0 entry in the index, `<mode> <id>`, or nothing.
 index_entry_of() {
-    local index_line
     local index_line index_mode index_id index_stage
     index_line=$(git_in_store "$1" --literal-pathspecs ls-files -s -- "$2") || return 1
     [[ -n "$index_line" ]] || return 0
@@ -1074,12 +1151,12 @@ resolve_conflicts() {
         case "$stage_mask" in
             "$STAGE_MASK_BOTH_MODIFIED"|"$STAGE_MASK_BOTH_ADDED")
                 if [[ "${ours_modes[index]}" == "$GITLINK_MODE" || "${theirs_modes[index]}" == "$GITLINK_MODE" ]]; then
-                    stage_mask=unknown
+                    stage_mask=$STAGE_MASK_UNRESOLVABLE
                 fi ;;
             "$STAGE_MASK_DELETED_BY_US"|"$STAGE_MASK_DELETED_BY_THEM") ;;
-            *) stage_mask=unknown ;;
+            *) stage_mask=$STAGE_MASK_UNRESOLVABLE ;;
         esac
-        if [[ "$stage_mask" == unknown ]]; then
+        if [[ "$stage_mask" == "$STAGE_MASK_UNRESOLVABLE" ]]; then
             report_store_failure "$store" "a conflict the sync does not resolve, at $(printable_path "${unmerged_paths[index]}")"
             return 1
         fi
@@ -1166,7 +1243,8 @@ integrate_origin() {
 
 # push_to_origin STORE_DIR — push HEAD to its branch on origin, once, unless origin already holds HEAD
 # or there is nothing to push. Sets PUSHED. Returns 1 with NETWORK_OUTCOME and NETWORK_DETAIL set when
-# the push failed: auth-failed, push-rejected when origin refused the ref, unreachable otherwise.
+# the push failed: auth-failed, push-rejected when origin refused the ref, unreachable otherwise, and
+# unreachable `run deadline` when the run deadline has passed before it could start.
 push_to_origin() {
     local store_dir=$1 tracking_ref head_id tracking_id push_errors push_status otherwise
     PUSHED=0
@@ -1175,6 +1253,10 @@ push_to_origin() {
     head_id=$(git_in_store "$store_dir" rev-parse -q --verify HEAD)
     tracking_id=$(git_in_store "$store_dir" rev-parse -q --verify "$tracking_ref^{commit}")
     if [[ -n "$head_id" && "$head_id" == "$tracking_id" ]]; then return 0; fi
+    if run_deadline_has_passed; then
+        NETWORK_OUTCOME=$OUTCOME_UNREACHABLE NETWORK_DETAIL=$RUN_DEADLINE_DETAIL
+        return 1
+    fi
     push_errors=$(network_git_in_store "$store_dir" push --quiet --no-verify --recurse-submodules=no \
         "$ORIGIN_REMOTE_NAME" "HEAD:refs/heads/$CURRENT_BRANCH" 2>&1 >/dev/null)
     push_status=$?
@@ -1192,7 +1274,8 @@ push_to_origin() {
 write_last_ok() {
     local store=$1 epoch last_ok_path="$STATE_DIR/$1$LAST_OK_FILE_SUFFIX"
     printf -v epoch '%(%s)T' -1
-    if ! printf '%s\n' "$epoch" > "$last_ok_path$STATUS_TEMP_SUFFIX" \
+    # The shell's own complaint about the redirection is dropped: the line below names the file.
+    if ! { printf '%s\n' "$epoch" > "$last_ok_path$STATUS_TEMP_SUFFIX"; } 2>/dev/null \
         || ! mv -f -- "$last_ok_path$STATUS_TEMP_SUFFIX" "$last_ok_path"; then
         printf '%s: %s: could not write %s\n' "$SCRIPT_NAME" "$store" "$last_ok_path" >&2
         return 1
@@ -1206,7 +1289,7 @@ take_link_lock_reporting() {
     lock_status=$?
     (( lock_status != 0 )) || return 0
     if (( lock_status == LOCK_WAIT_RAN_OUT )); then
-        report_store_failure "$1" "the lock $LINK_LOCK_PATH was still held after $LOCK_WAIT_SECONDS s"
+        report_store_failure "$1" "the lock $LINK_LOCK_PATH was still held after $LOCK_WAIT_THIS_STORE s"
     else
         report_store_failure "$1" "could not take the lock $LINK_LOCK_PATH"
     fi
@@ -1253,6 +1336,7 @@ record_store_outcome() {
             detail+="; withheld: $joined_paths"
         fi
     fi
+    if [[ -n "$LAST_OK_FAILURE_DETAIL" ]]; then detail+="; $LAST_OK_FAILURE_DETAIL"; fi
     write_status "$store" "$outcome" "$detail"
 }
 
@@ -1265,18 +1349,23 @@ commit_and_integrate() {
 }
 
 # apply_store STORE STORE_DIR — the route, the origin check and the refusal of an unfinished
-# operation; the fetch; stage, gate, commit and merge under the lock; the push; then the status.
-# Returns 1 when the store could not run.
+# operation; the fetch; stage, gate, commit and merge under the lock; the push; then the status. Past
+# the run deadline the route is not asked and the fetch and the push do not start. Returns 1 when the
+# store could not run.
 apply_store() {
     local store=$1 store_dir=$2 has_fetched=0 locked_status
     NETWORK_OUTCOME='' NETWORK_DETAIL='' INTEGRATION_OUTCOME='' INTEGRATION_DETAIL='' MERGED_FROM_ORIGIN=0
-    KEPT_BOTH_COUNT=0 PUSHED=0 COMMITTED_COUNT=0 WITHHELD_REDACTED_PATHS=()
-    resolve_route "$store" "$store_dir" || return 1
+    KEPT_BOTH_COUNT=0 PUSHED=0 COMMITTED_COUNT=0 WITHHELD_REDACTED_PATHS=() LAST_OK_FAILURE_DETAIL=''
+    ROUTE_MODE=''
+    # Past the deadline nothing reaches the network, so the route that serves it is not asked either.
+    if ! run_deadline_has_passed; then resolve_route "$store" "$store_dir" || return 1; fi
     check_origin "$store" "$store_dir" || return 1
     refuse_unfinished_operation "$store" "$store_dir" || return 1
     if (( STORE_HAS_ORIGIN )); then
-        if [[ "$ROUTE_MODE" == no-token ]]; then
+        if [[ "$ROUTE_MODE" == "$ROUTE_MODE_NO_TOKEN" ]]; then
             NETWORK_OUTCOME=$OUTCOME_SKIPPED_NO_TOKEN NETWORK_DETAIL=$NO_TOKEN_DETAIL
+        elif run_deadline_has_passed; then
+            NETWORK_OUTCOME=$OUTCOME_UNREACHABLE NETWORK_DETAIL=$RUN_DEADLINE_DETAIL
         elif fetch_origin "$store_dir"; then
             has_fetched=1
         fi
@@ -1297,10 +1386,18 @@ apply_store() {
     fi
     if (( has_fetched )) && [[ "$INTEGRATION_OUTCOME" != "$OUTCOME_BLOCKED" ]] && push_to_origin "$store_dir"; then
         if (( PUSHED )); then printf '%s: pushed\n' "$store"; fi
-        write_last_ok "$store" || { FAILED_STORES+=("$store"); return 1; }
+        if ! write_last_ok "$store"; then
+            LAST_OK_FAILURE_DETAIL="could not write $STATE_DIR/$store$LAST_OK_FILE_SUFFIX"
+        fi
     fi
     ROUTED_TOKEN=''
+    # The outcome is recorded even when last-ok could not be: its detail then says so, and the run
+    # still ends as could not run.
     record_store_outcome "$store" || { FAILED_STORES+=("$store"); return 1; }
+    if [[ -n "$LAST_OK_FAILURE_DETAIL" ]]; then
+        FAILED_STORES+=("$store")
+        return 1
+    fi
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -1599,6 +1696,10 @@ prepare_apply() {
     settle_host_name
     [[ "$LOCK_WAIT_SECONDS" =~ $LOCK_WAIT_SECONDS_RE ]] \
         || die "CLAUDE_MEMORY_LOCK_WAIT_SECONDS '$LOCK_WAIT_SECONDS' is not a whole number of seconds above 0"
+    [[ "$RUN_DEADLINE_SECONDS" =~ $WHOLE_SECONDS_RE ]] \
+        || die "CLAUDE_MEMORY_RUN_DEADLINE_SECONDS '$RUN_DEADLINE_SECONDS' is not a whole number of seconds above 0"
+    [[ "$GH_ROUTE_TIMEOUT_SECONDS" =~ $WHOLE_SECONDS_RE ]] \
+        || die "CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS '$GH_ROUTE_TIMEOUT_SECONDS' is not a whole number of seconds above 0"
     command -v flock >/dev/null || die "flock is required"
     command -v timeout >/dev/null || die "timeout is required"
     [[ -x "$GH_ROUTE" ]] || die "$GH_ROUTE is not executable"
@@ -1617,11 +1718,16 @@ settle_stale_after_minutes() {
 
 main() {
     local store store_dir
+    # The run deadline counts from here.
+    printf -v RUN_STARTED_EPOCH '%(%s)T' -1
     parse_args "$@"
     # Every default path hangs off HOME.
     [[ -n "${HOME:-}" ]] || die "HOME is not set"
     # These would point this script's git calls at another repository: a git hook exports them.
     unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+    # With these, git writes its trace, curl's headers and an Authorization header among them, to the
+    # stderr this script keeps in a status detail.
+    unset GIT_CURL_VERBOSE "${!GIT_TRACE@}"
     # A symlink whose target is gone is what a mid-deploy overlay leaves behind: a fault, not a
     # choice not to configure this host.
     if [[ -L "$CONFIG_PATH" && ! -e "$CONFIG_PATH" ]]; then
