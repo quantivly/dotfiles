@@ -1,7 +1,7 @@
 import {test, assertEqual} from './harness.js';
 import {
-    formatGibibytes, formatWholePercent, memoryLine, swapLine, clusterSuffix, pressureMeter,
-    waitingOnLine, ellipsize, heaviestLine, hoverLabel,
+    formatGibibytes, formatWholePercent, memoryLine, swapLine, swapAmount, clusterSuffix, pressureMeter,
+    waitingOnLine, ellipsize, heaviestLine, hoverLabel, cardText,
 } from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {cardPosition} from '../extensions/resource-pulse@dotfiles/lib/layout.js';
 
@@ -25,6 +25,49 @@ const swapOf = (swappedBytes, zramStoredBytes, zramRamBytes) => ({
 const FULL_SNAPSHOT = {
     cpuBusyPercent: 23, memory: {usedBytes: 16.4 * GIB, totalBytes: 30.3 * GIB},
 };
+
+// A whole Snapshot as the sampler publishes it (sampler.js), for the desktop card's rows.
+const CARD_SNAPSHOT = {
+    takenAtUsec: 1_000_000,
+    takenAtClockLabel: '14:02',
+    cpuBusyPercent: 23,
+    cpuClusters: {performancePercent: 41, efficiencyPercent: 6},
+    memory: FULL_SNAPSHOT.memory,
+    swap: swapOf(1.6 * GIB, 1.6 * GIB, 0.4 * GIB),
+    pressureAvg10: {cpu: 12, memory: 3, io: 0},
+    apps: {topCpu: {name: 'Chromium', cpuPercent: 31}, topMemory: {name: 'herdr agents', memoryBytes: 15.7 * GIB}},
+    isComplete: true,
+};
+// The snapshot a failed tick publishes (sampler.js _publishNoDataSnapshot): every number null.
+const FAILED_TICK_SNAPSHOT = {
+    takenAtUsec: 3_000_000,
+    takenAtClockLabel: '14:04',
+    cpuBusyPercent: null,
+    cpuClusters: null,
+    memory: null,
+    swap: null,
+    pressureAvg10: {cpu: null, memory: null, io: null},
+    apps: null,
+    isComplete: false,
+};
+// The card's muted labels, the same in every state.
+const CARD_LABELS = {
+    cpuLabel: 'CPU', memoryLabel: 'MEM', swapLabel: 'swap', waitingOnLabel: 'waiting on:', heaviestLabel: 'heaviest:',
+};
+// What the card shows with no numbers at all, before the CPU row's "since".
+const CARD_NO_DATA_VALUES = {
+    cpuClusterSuffix: '', memoryValue: 'no data', swapValue: 'no data',
+    waitingOnValue: 'CPU ···  mem ···  io ···', heaviestValue: '—',
+};
+
+/**
+ * Picks the given fields of an object, so a row compares only what it is about.
+ *
+ * @param {object} source - The object.
+ * @param {string[]} fieldNames - Fields to keep.
+ * @returns {object} Those fields, in the order given.
+ */
+const pickFields = (source, fieldNames) => Object.fromEntries(fieldNames.map(fieldName => [fieldName, source[fieldName]]));
 
 test('formatGibibytes uses 1024^3, not 1000^3', () => assertEqual(formatGibibytes(20480000000), '19.1'));
 test('formatGibibytes rounds to one decimal rather than truncating', () => assertEqual(formatGibibytes(1.96 * GIB), '2.0'));
@@ -91,6 +134,43 @@ test('hoverLabel partial: the missing half says "no data", the present half stay
         hoverLabel({cpuBusyPercent: null, memory: FULL_SNAPSHOT.memory}, '14:02')],
     ['cpu 23% · mem no data', 'cpu no data · mem 16.4 of 30.3 GiB']));
 test('hoverLabel with no last-good time is plain "no data"', () => assertEqual(hoverLabel(null, null), 'no data'));
+
+test('swapAmount is swapLine without its "swap" label, in every case', () => {
+    const swapCases = [
+        swapOf(2048000000, 1536000000, 400000000), swapOf(1536000000, 1536000000, 400000000), swapOf(0, 0, 0),
+        null, swapOf(2 * GIB, 0, 0),
+    ];
+    assertEqual(swapCases.map(swapAmount),
+        ['1.9 GiB (0.4 in RAM) + 0.5 on disk', '1.4 GiB (0.4 in RAM)', 'none', 'no data', '2.0 GiB on disk']);
+    assertEqual(swapCases.map(swap => `swap ${swapAmount(swap)}`), swapCases.map(swapLine), 'swapLine');
+});
+test('cardText with every part: the mockup\'s labels and rows, from the same formatters as the top bar', () => {
+    const expected = {
+        ...CARD_LABELS,
+        cpuValue: '23%', cpuClusterSuffix: 'P 41 · E 6', memoryValue: '16.4 of 30.3 GiB',
+        swapValue: '1.6 GiB (0.4 in RAM)', waitingOnValue: 'CPU ▮▯▯  mem ▯▯▯  io ▯▯▯',
+        heaviestValue: 'Chromium 31% · herdr agents 15.7 GiB',
+    };
+    assertEqual(pickFields(cardText(CARD_SNAPSHOT, '14:02'), Object.keys(expected)), expected);
+});
+test('cardText before any snapshot: no number anywhere, never 0%', () => {
+    const expected = {...CARD_LABELS, ...CARD_NO_DATA_VALUES, cpuValue: 'no data'};
+    assertEqual(pickFields(cardText(null, null), Object.keys(expected)), expected);
+});
+test('cardText after a failed tick: the CPU row says since when, every other row no data', () => {
+    const expected = {...CARD_LABELS, ...CARD_NO_DATA_VALUES, cpuValue: 'no data since 14:02'};
+    assertEqual(pickFields(cardText(FAILED_TICK_SNAPSHOT, '14:02'), Object.keys(expected)), expected);
+});
+test('cardText partial: a first sample says plain "no data" for CPU, a missing memory says "no data"', () => {
+    const shownFields = ['cpuValue', 'cpuClusterSuffix', 'memoryValue'];
+    const firstSample = {...CARD_SNAPSHOT, cpuBusyPercent: null, cpuClusters: null};
+    const memoryMissing = {...CARD_SNAPSHOT, memory: null};
+    assertEqual([pickFields(cardText(firstSample, '14:02'), shownFields),
+        pickFields(cardText(memoryMissing, '14:02'), shownFields)], [
+        {cpuValue: 'no data', cpuClusterSuffix: '', memoryValue: '16.4 of 30.3 GiB'},
+        {cpuValue: '23%', cpuClusterSuffix: 'P 41 · E 6', memoryValue: 'no data'},
+    ]);
+});
 
 test('cardPosition: top-right of the work area, inset by the margin', () =>
     assertEqual(cardPosition({x: 0, y: 32, width: 1536, height: 928}, CARD_WIDTH_PX, CARD_MARGIN_PX), {x: 1172, y: 56}));

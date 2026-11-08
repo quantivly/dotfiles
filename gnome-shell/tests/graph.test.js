@@ -8,7 +8,7 @@ import {
     areaGraphPolygons, drawAreaGraph, drawUsedBar, padWithLeadingGaps, usedBarFillWidthPx,
 } from '../extensions/resource-pulse@dotfiles/graph.js';
 import {
-    BASELINE_RGBA, CPU_GRAPH_RGBA, GRAPH_BASELINE_THICKNESS_PX, MEMORY_GRAPH_RGBA,
+    BASELINE_RGBA, CPU_GRAPH_RGBA, GRAPH_BASELINE_THICKNESS_PX, MEMORY_GRAPH_RGBA, USED_BAR_TRACK_RGBA,
 } from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 // The top-bar graph's size, as the brief names it for the no-throw rows.
@@ -168,4 +168,5 @@ test('graph colour constants are [red, green, blue, alpha], each 0–1', () => {
     assertEqual(isRgbaInUnitRange(CPU_GRAPH_RGBA), true, 'CPU_GRAPH_RGBA');
     assertEqual(isRgbaInUnitRange(MEMORY_GRAPH_RGBA), true, 'MEMORY_GRAPH_RGBA');
     assertEqual(isRgbaInUnitRange(BASELINE_RGBA), true, 'BASELINE_RGBA');
+    assertEqual(isRgbaInUnitRange(USED_BAR_TRACK_RGBA), true, 'USED_BAR_TRACK_RGBA');
 });

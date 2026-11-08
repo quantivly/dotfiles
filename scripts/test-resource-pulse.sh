@@ -171,7 +171,7 @@ check "metadata.json: uuid equals the directory name" "$metadata_uuid" "$(basena
 check 'metadata.json: shell-version is exactly ["50"]' "$metadata_shell_version" '["50"]'
 check "metadata.json: no session-modes key, so the lock screen disables it" "$metadata_session_modes" "absent"
 
-EXPECTED_ROWS=144
+EXPECTED_ROWS=149
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

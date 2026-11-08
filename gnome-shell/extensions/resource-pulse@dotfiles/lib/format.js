@@ -11,6 +11,13 @@ const SEPARATOR = ' · ';
 const ELLIPSIS = '…';
 const EM_DASH = '—';
 const WAITING_ON_GROUP_SEPARATOR = '  ';
+const SWAP_LABEL = 'swap';
+// The desktop card's row labels, as in the mockup the user picked (the spec's "Decided by the user", item 1).
+const CARD_CPU_LABEL = 'CPU';
+const CARD_MEMORY_LABEL = 'MEM';
+const CARD_WAITING_ON_LABEL = 'waiting on:';
+const CARD_HEAVIEST_LABEL = 'heaviest:';
+const NO_PRESSURE_DATA = {cpu: null, memory: null, io: null};
 
 /**
  * Formats a byte count as GiB with one decimal and no unit.
@@ -45,24 +52,36 @@ export function memoryLine(memory) {
 }
 
 /**
- * Describes swap use, split into what zram holds (and the RAM that costs) and what is on disk.
+ * Describes swap use without the leading "swap", split into what zram holds (and the RAM that costs) and what is
+ * on disk. The desktop card shows "swap" as a separate, muted label.
+ *
+ * @param {{swappedBytes: number, zramStoredBytes: number, zramRamBytes: number, diskBytes: number}|null} swap
+ *     Swap summary.
+ * @returns {string} For example '1.9 GiB (0.4 in RAM) + 0.5 on disk', 'none' or 'no data'.
+ */
+export function swapAmount(swap) {
+    if (swap === null || swap === undefined)
+        return NO_DATA_TEXT;
+    if (swap.swappedBytes <= 0)
+        return 'none';
+    const swappedText = formatGibibytes(swap.swappedBytes);
+    // Without zram everything is on disk, so a "(0.0 in RAM)" would only be noise.
+    if (swap.zramStoredBytes <= 0)
+        return `${swappedText} GiB on disk`;
+    const inRamText = `(${formatGibibytes(swap.zramRamBytes)} in RAM)`;
+    const onDiskText = swap.diskBytes > 0 ? ` + ${formatGibibytes(swap.diskBytes)} on disk` : '';
+    return `${swappedText} GiB ${inRamText}${onDiskText}`;
+}
+
+/**
+ * Describes swap use on one line.
  *
  * @param {{swappedBytes: number, zramStoredBytes: number, zramRamBytes: number, diskBytes: number}|null} swap
  *     Swap summary.
  * @returns {string} For example 'swap 1.9 GiB (0.4 in RAM) + 0.5 on disk', 'swap none' or 'swap no data'.
  */
 export function swapLine(swap) {
-    if (swap === null || swap === undefined)
-        return `swap ${NO_DATA_TEXT}`;
-    if (swap.swappedBytes <= 0)
-        return 'swap none';
-    const swappedText = formatGibibytes(swap.swappedBytes);
-    // Without zram everything is on disk, so a "(0.0 in RAM)" would only be noise.
-    if (swap.zramStoredBytes <= 0)
-        return `swap ${swappedText} GiB on disk`;
-    const inRamText = `(${formatGibibytes(swap.zramRamBytes)} in RAM)`;
-    const onDiskText = swap.diskBytes > 0 ? ` + ${formatGibibytes(swap.diskBytes)} on disk` : '';
-    return `swap ${swappedText} GiB ${inRamText}${onDiskText}`;
+    return `${SWAP_LABEL} ${swapAmount(swap)}`;
 }
 
 /**
@@ -149,6 +168,18 @@ export function heaviestLine(apps) {
 }
 
 /**
+ * Says there is no data, and since when when that is known.
+ *
+ * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data.
+ * @returns {string} 'no data since 14:02', or 'no data' without a last good time.
+ */
+function noDataSince(lastGoodClockLabel) {
+    if (lastGoodClockLabel === null || lastGoodClockLabel === undefined)
+        return NO_DATA_TEXT;
+    return `${NO_DATA_TEXT} since ${lastGoodClockLabel}`;
+}
+
+/**
  * Builds the top-bar hover label. A missing half says 'no data' rather than showing a stale number.
  *
  * @param {{cpuBusyPercent: number|null, memory: {usedBytes: number, totalBytes: number}|null}|null} snapshot
@@ -159,11 +190,66 @@ export function heaviestLine(apps) {
 export function hoverLabel(snapshot, lastGoodClockLabel) {
     const cpuPercent = snapshot?.cpuBusyPercent ?? null;
     const memory = snapshot?.memory ?? null;
-    if (cpuPercent === null && memory === null) {
-        return lastGoodClockLabel === null || lastGoodClockLabel === undefined
-            ? NO_DATA_TEXT
-            : `${NO_DATA_TEXT} since ${lastGoodClockLabel}`;
-    }
+    if (cpuPercent === null && memory === null)
+        return noDataSince(lastGoodClockLabel);
     const cpuText = cpuPercent === null ? NO_DATA_TEXT : formatWholePercent(cpuPercent);
     return `cpu ${cpuText}${SEPARATOR}mem ${memoryLine(memory)}`;
+}
+
+/**
+ * The desktop card's CPU value. When the snapshot has no CPU and no memory (a failed tick, or none yet) it says
+ * since when, as the hover label does; when only the CPU is missing (the first sample has no delta) it says plain
+ * "no data", never 0%.
+ *
+ * @param {number|null} cpuPercent - Whole-machine CPU busy percent, or null.
+ * @param {boolean} hasNoNumbers - True when the snapshot has neither CPU nor memory.
+ * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data.
+ * @returns {string} For example '23%', 'no data' or 'no data since 14:02'.
+ */
+function cardCpuValue(cpuPercent, hasNoNumbers, lastGoodClockLabel) {
+    if (cpuPercent !== null)
+        return formatWholePercent(cpuPercent);
+    return hasNoNumbers ? noDataSince(lastGoodClockLabel) : NO_DATA_TEXT;
+}
+
+/**
+ * @typedef {object} CardText
+ * @property {string} cpuLabel - 'CPU'.
+ * @property {string} cpuValue - For example '23%', 'no data' or 'no data since 14:02'.
+ * @property {string} cpuClusterSuffix - The dim per-core-type load, for example 'P 41 · E 6'; '' when unknown.
+ * @property {string} memoryLabel - 'MEM'.
+ * @property {string} memoryValue - memoryLine: for example '16.4 of 30.3 GiB'.
+ * @property {string} swapLabel - 'swap'.
+ * @property {string} swapValue - swapAmount: for example '1.6 GiB (0.4 in RAM)'.
+ * @property {string} waitingOnLabel - 'waiting on:'.
+ * @property {string} waitingOnValue - waitingOnLine: for example 'CPU ▮▯▯  mem ▯▯▯  io ▯▯▯'.
+ * @property {string} heaviestLabel - 'heaviest:'.
+ * @property {string} heaviestValue - heaviestLine: for example 'Chromium 31% · herdr agents 15.7 GiB'.
+ */
+
+/**
+ * Every string on the desktop card, from one snapshot: a muted label and a value per row, as in the mockup. A
+ * missing part says "no data" (or '···', or '—') rather than showing a stale number as live.
+ *
+ * @param {import('../sampler.js').Snapshot|null} snapshot - The latest snapshot, or null before the first.
+ * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data.
+ * @returns {CardText} The card's strings.
+ */
+export function cardText(snapshot, lastGoodClockLabel) {
+    const cpuPercent = snapshot?.cpuBusyPercent ?? null;
+    const memory = snapshot?.memory ?? null;
+    const hasNoNumbers = cpuPercent === null && memory === null;
+    return {
+        cpuLabel: CARD_CPU_LABEL,
+        cpuValue: cardCpuValue(cpuPercent, hasNoNumbers, lastGoodClockLabel),
+        cpuClusterSuffix: clusterSuffix(snapshot?.cpuClusters ?? null),
+        memoryLabel: CARD_MEMORY_LABEL,
+        memoryValue: memoryLine(memory),
+        swapLabel: SWAP_LABEL,
+        swapValue: swapAmount(snapshot?.swap ?? null),
+        waitingOnLabel: CARD_WAITING_ON_LABEL,
+        waitingOnValue: waitingOnLine(snapshot?.pressureAvg10 ?? NO_PRESSURE_DATA),
+        heaviestLabel: CARD_HEAVIEST_LABEL,
+        heaviestValue: heaviestLine(snapshot?.apps ?? null),
+    };
 }

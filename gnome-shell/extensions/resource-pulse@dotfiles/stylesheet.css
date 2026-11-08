@@ -19,3 +19,54 @@
   font-feature-settings: "tnum";
   -y-offset: 8px;
 }
+
+/* The desktop card: a solid translucent surface, never a live blur (a blur re-renders whenever a window moves
+   over it). The font, its tabular numerals and the colour are inherited by every row, so digits keep their width
+   as they change. min-width covers the usual rows (about 24em of text at the shell's 11pt), so the card's left
+   edge does not move as the "heaviest" names change; only an unusually long line widens it. */
+.resource-pulse-card {
+  background-color: rgba(30, 30, 30, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 14px 18px;
+  spacing: 12px;
+  min-width: 25em;
+  color: white;
+  font-family: "Ubuntu Sans", sans-serif;
+  font-feature-settings: "tnum";
+}
+
+/* CPU, memory and swap: label, value and graph columns (the grid reads these through hookup_style). */
+.resource-pulse-card-meters {
+  spacing-rows: 6px;
+  spacing-columns: 12px;
+}
+
+/* The big numbers. */
+.resource-pulse-card-figure {
+  font-size: 1.3em;
+  font-weight: bold;
+}
+
+/* Labels, and the dim P/E suffix, are muted to 60%; values stay full white. */
+.resource-pulse-card-label,
+.resource-pulse-card-suffix {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.resource-pulse-card-suffix {
+  font-size: 0.9em;
+}
+
+.resource-pulse-card-cpu-figure {
+  spacing: 8px;
+}
+
+/* "waiting on" and "heaviest", below the meters. */
+.resource-pulse-card-details {
+  spacing: 4px;
+}
+
+.resource-pulse-card-detail-row {
+  spacing: 8px;
+}

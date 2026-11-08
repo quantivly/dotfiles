@@ -51,6 +51,16 @@ export const TOPBAR_GRAPH_SLOT_WIDTH_PX = 1;
 export const TOPBAR_GRAPH_WIDTH_PX = TOPBAR_HISTORY_SAMPLES * TOPBAR_GRAPH_SLOT_WIDTH_PX;
 /** Height of each top-bar graph, in logical pixels: the height of a panel status icon. */
 export const TOPBAR_GRAPH_HEIGHT_PX = 16;
+/** Width of one desktop-card CPU graph slot for a sample, in logical pixels: whole pixels keep the slots crisp. */
+export const CARD_GRAPH_SLOT_WIDTH_PX = 1;
+/** Width of the desktop card's CPU graph, in logical pixels: one slot per sample of its five-minute history. */
+export const CARD_CPU_GRAPH_WIDTH_PX = CARD_HISTORY_SAMPLES * CARD_GRAPH_SLOT_WIDTH_PX;
+/** Height of the desktop card's CPU graph, in logical pixels: a little under its row's big number. */
+export const CARD_CPU_GRAPH_HEIGHT_PX = 20;
+/** Width of the desktop card's memory bar, in logical pixels: the CPU graph's, so the two line up. */
+export const CARD_MEMORY_BAR_WIDTH_PX = CARD_CPU_GRAPH_WIDTH_PX;
+/** Height of the desktop card's memory bar, in logical pixels. */
+export const CARD_MEMORY_BAR_HEIGHT_PX = 8;
 /** Thickness of the faint line along the bottom of every graph, in logical pixels. */
 export const GRAPH_BASELINE_THICKNESS_PX = 1;
 /** Fill of the CPU graph as [red, green, blue, alpha], each 0–1: Yaru's teal accent, #2190a4. */
@@ -59,6 +69,8 @@ export const CPU_GRAPH_RGBA = [0x21 / 0xff, 0x90 / 0xff, 0xa4 / 0xff, 1];
 export const MEMORY_GRAPH_RGBA = [0x91 / 0xff, 0x41 / 0xff, 0xac / 0xff, 1];
 /** The faint line under every graph as [red, green, blue, alpha], each 0–1, so an empty graph still shows. */
 export const BASELINE_RGBA = [1, 1, 1, 0.25];
+/** The unused part of the desktop card's memory bar as [red, green, blue, alpha], each 0–1: a faint groove. */
+export const USED_BAR_TRACK_RGBA = [1, 1, 1, 0.15];
 /** Prefix of every journal line this extension writes. */
 export const LOG_PREFIX = 'resource-pulse:';
 /** Name of the computed pseudo-app that takes the CPU and memory no scanned cgroup accounts for. */
