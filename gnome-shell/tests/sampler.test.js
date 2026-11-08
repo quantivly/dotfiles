@@ -4,8 +4,10 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
 import {Sampler, groupOfCgroup} from '../extensions/resource-pulse@dotfiles/sampler.js';
-import {ERROR_LOG_REPEAT_INTERVAL_USEC, KERNEL_AND_OTHER_LABEL, LOG_PREFIX}
-    from '../extensions/resource-pulse@dotfiles/lib/constants.js';
+import {
+    APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, ERROR_LOG_REPEAT_INTERVAL_USEC, KERNEL_AND_OTHER_LABEL,
+    LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
+} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const [TEST_FILE_PATH] = GLib.filename_from_uri(import.meta.url);
 const FIXTURES_DIRECTORY = GLib.build_filenamev([GLib.path_get_dirname(TEST_FILE_PATH), 'fixtures']);
@@ -233,7 +235,17 @@ test('sampler: app scan root-a → root-b ranks herdr agents top for CPU (50%) a
     }, []]);
 });
 
-test('sampler: app CPU divides by the real time between scans, not the nominal 6 s', async () => {
+test('sampler: the app scan interval is exactly APP_SCAN_EVERY_N_TICKS sample intervals', () =>
+    assertEqual(APP_SCAN_INTERVAL_SECONDS, SAMPLE_INTERVAL_SECONDS * APP_SCAN_EVERY_N_TICKS));
+
+test('sampler: the app scan skips units that never host an app (.mount, .socket), at both depths', async () => {
+    // boot.mount (5 MB, in system.slice) and example.socket (9 MB, in a sub-slice) would each top memory if scanned.
+    const {sampler} = makeSampler('root-unit-types');
+    const ranking = await sampler.scanAppsOnce();
+    assertEqual(ranking.topMemory, {name: 'example-daemon', memoryBytes: 1_000_000});
+});
+
+test('sampler: app CPU divides by the real time between scans, not the nominal interval', async () => {
     // The second scan runs 12 s after the first: herdr's 6 s of CPU over 12 s × 2 CPUs is 25%, not 50%.
     const {sampler, clock} = makeSampler('root-a');
     await sampler.initialize();

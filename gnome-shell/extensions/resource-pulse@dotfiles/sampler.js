@@ -11,8 +11,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {
-    APP_SCAN_EVERY_N_TICKS, CARD_HISTORY_SAMPLES, DIRECTORY_LISTING_BATCH_ENTRIES, APP_MEMORY_STAT_MIN_BYTES,
-    ERROR_LOG_REPEAT_INTERVAL_USEC, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
+    APP_SCAN_EVERY_N_TICKS, APP_SCAN_SKIPPED_UNIT_SUFFIXES, CARD_HISTORY_SAMPLES, DIRECTORY_LISTING_BATCH_ENTRIES,
+    APP_MEMORY_STAT_MIN_BYTES, ERROR_LOG_REPEAT_INTERVAL_USEC, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS,
 } from './lib/constants.js';
 import {parseMeminfo, parsePressureSomeAvg10, parseProcStat, parseUid, parseZramMmStat} from './lib/procParsers.js';
 import {parseCpuStatUsageUsec, parseMemoryStatReclaimableBytes, parseSingleNumber} from './lib/cgroupParsers.js';
@@ -260,6 +260,17 @@ async function readCgroupLeaf(leafPath, cancellable) {
     if (reclaimableBytes === null)
         throw new Error(`cannot parse ${memoryStatPath}`);
     return {usageUsec, memoryBytes: Math.max(0, memoryCurrentBytes - reclaimableBytes)};
+}
+
+/**
+ * Says whether a cgroup leaf belongs to a unit type that can host an app (a service, a scope, or a slice too deep
+ * to descend into), as opposed to a mount, socket, timer and the like.
+ *
+ * @param {string} cgroupPath - The leaf's path.
+ * @returns {boolean} False for a suffix in APP_SCAN_SKIPPED_UNIT_SUFFIXES.
+ */
+function canHostApp(cgroupPath) {
+    return !APP_SCAN_SKIPPED_UNIT_SUFFIXES.some(unitSuffix => cgroupPath.endsWith(unitSuffix));
 }
 
 /**
@@ -760,7 +771,8 @@ export class Sampler {
 
     /**
      * Lists the cgroup leaves to rank: the children of the user service's app, session and background slices and
-     * of system.slice, descending one level more into a child that is itself a slice.
+     * of system.slice, descending one level more into a child that is itself a slice. Leaves of a unit type that
+     * never hosts an app (APP_SCAN_SKIPPED_UNIT_SUFFIXES) are left out at both depths, unread.
      *
      * @param {string} cgroupRootPath - Absolute path of the cgroup v2 root.
      * @returns {Promise<string[]>} Leaf paths relative to the cgroup root (stable across fsRoot changes); empty
@@ -776,16 +788,20 @@ export class Sampler {
         const subSliceRelativePaths = [];
         parentListings.forEach((parentListing, index) => {
             for (const childRelativePath of this._childPaths(parentListing, parentRelativePaths[index])) {
-                const isSubSlice = childRelativePath.endsWith(SLICE_SUFFIX);
-                (isSubSlice ? subSliceRelativePaths : leafRelativePaths).push(childRelativePath);
+                if (childRelativePath.endsWith(SLICE_SUFFIX))
+                    subSliceRelativePaths.push(childRelativePath);
+                else if (canHostApp(childRelativePath))
+                    leafRelativePaths.push(childRelativePath);
             }
         });
         const subSliceListings = await Promise.allSettled(subSliceRelativePaths.map(subSliceRelativePath =>
             listChildDirectoryNames(joinPath(cgroupRootPath, subSliceRelativePath), this._cancellable)));
         if (this._isDestroyed)
             return [];
-        subSliceListings.forEach((subSliceListing, index) =>
-            leafRelativePaths.push(...this._childPaths(subSliceListing, subSliceRelativePaths[index])));
+        subSliceListings.forEach((subSliceListing, index) => {
+            const childRelativePaths = this._childPaths(subSliceListing, subSliceRelativePaths[index]);
+            leafRelativePaths.push(...childRelativePaths.filter(canHostApp));
+        });
         return leafRelativePaths;
     }
 

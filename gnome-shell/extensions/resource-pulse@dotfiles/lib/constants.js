@@ -2,10 +2,21 @@
 
 /** Seconds between CPU, memory and pressure samples. */
 export const SAMPLE_INTERVAL_SECONDS = 2;
-/** Seconds between per-app scans (a multiple of the sample interval). */
-export const APP_SCAN_INTERVAL_SECONDS = 6;
+/**
+ * Seconds between per-app scans: SAMPLE_INTERVAL_SECONDS × APP_SCAN_EVERY_N_TICKS, which a test row enforces.
+ * 10 rather than the spec's first 6, to keep the scan inside the < 0.5%-of-one-core idle budget.
+ */
+export const APP_SCAN_INTERVAL_SECONDS = 10;
 /** Sample ticks between per-app scans. */
-export const APP_SCAN_EVERY_N_TICKS = 3;
+export const APP_SCAN_EVERY_N_TICKS = 5;
+/**
+ * Cgroup leaves with these suffixes are left out of the app scan. Such units (mounts, sockets, swap, automounts,
+ * paths, timers, devices) never host an app process, and skipping them is the scan's main cost lever: on the
+ * reference laptop they were 64 of 171 leaves.
+ */
+export const APP_SCAN_SKIPPED_UNIT_SUFFIXES = [
+    '.mount', '.socket', '.swap', '.automount', '.path', '.timer', '.device',
+];
 /**
  * memory.current above which an app scan also reads a cgroup's memory.stat to subtract its page cache (64 MiB).
  * A leaf at or under it ranks by memory.current as it is: too small to top the ranking, so not worth a third read.
