@@ -369,24 +369,40 @@ function countersAfter(countersUsec, deltasUsec) {
 }
 
 /**
- * Scans an in-memory tree twice, two seconds apart (the first tick, then the warm-up tick): FIRST_SCAN_COUNTERS_USEC,
- * then those plus the deltas.
+ * Copies counters or deltas without one cgroup, as if it did not exist.
+ *
+ * @param {Object<string, number>} usecByCgroup - Counters or deltas by cgroup path.
+ * @param {string} cgroupPath - The cgroup to leave out.
+ * @returns {Object<string, number>} The copy.
+ */
+function withoutCgroup(usecByCgroup, cgroupPath) {
+    const remainingUsecByCgroup = {...usecByCgroup};
+    delete remainingUsecByCgroup[cgroupPath];
+    return remainingUsecByCgroup;
+}
+
+/**
+ * Scans an in-memory tree twice, two seconds apart (the first tick, then the warm-up tick): the first scan's
+ * counters, then those plus the deltas.
  *
  * @param {Object<string, number>} deltasUsec - What each cgroup spends between the scans.
- * @param {object} [hooks] - Changes to the tree before each scan.
- * @param {(tree: object) => void} [hooks.beforeFirstScan] - Runs before the first.
- * @param {(tree: object) => void} [hooks.beforeSecondScan] - Runs before the second.
+ * @param {object} [options] - The first scan's counters, and changes to the tree before each scan.
+ * @param {Object<string, number>} [options.firstScanCountersUsec] - Defaults to FIRST_SCAN_COUNTERS_USEC.
+ * @param {(tree: object) => void} [options.beforeFirstScan] - Runs before the first.
+ * @param {(tree: object) => void} [options.beforeSecondScan] - Runs before the second.
  * @returns {{topCpu: object|null, logged: string[]}} The second scan's top CPU entry, and what was logged.
  */
-function topCpuAfterTwoScans(deltasUsec, {beforeFirstScan = () => {}, beforeSecondScan = () => {}} = {}) {
+function topCpuAfterTwoScans(deltasUsec, {
+    firstScanCountersUsec = FIRST_SCAN_COUNTERS_USEC, beforeFirstScan = () => {}, beforeSecondScan = () => {},
+} = {}) {
     const tree = makeFakeTreeWithSampleFiles();
-    writeCgroupCounters(tree, FIRST_SCAN_COUNTERS_USEC);
+    writeCgroupCounters(tree, firstScanCountersUsec);
     const {sampler, clock, logged} = makeTreeSampler(tree);
     sampler.initialize();
     beforeFirstScan(tree);
     sampler.runTick(0);
     clock.nowUsec += SAMPLE_SPACING_USEC;
-    writeCgroupCounters(tree, countersAfter(FIRST_SCAN_COUNTERS_USEC, deltasUsec));
+    writeCgroupCounters(tree, countersAfter(firstScanCountersUsec, deltasUsec));
     beforeSecondScan(tree);
     sampler.runTick(1);
     const topCpu = sampler.latestSnapshot.apps?.topCpu ?? null;
@@ -720,6 +736,16 @@ test('service sampler: a scan in which a parent cannot be listed ranks neither k
             listingError),
     });
     assertEqual(topCpu, {groupKey: 'unit:org.gnome.Shell', name: 'GNOME Shell', cpuPercent: 5});
+});
+
+test('service sampler: a scanned parent that does not exist (systemd removes an empty slice) counts as listed, so ' +
+    'kernel and short jobs still rank', () => {
+    // No background.slice in either scan: the other parents spend 900,000 µs, so kernel is 2,100,000 of 4,000,000.
+    const {topCpu, logged} = topCpuAfterTwoScans(
+        {...withoutCgroup(STEADY_DELTAS_USEC, BACKGROUND_SLICE), [ROOT_CGROUP_KEY]: 3_000_000},
+        {firstScanCountersUsec: withoutCgroup(FIRST_SCAN_COUNTERS_USEC, BACKGROUND_SLICE)});
+    assertEqual([topCpu, logged],
+        [{groupKey: 'pseudo:kernel', name: KERNEL_LABEL, cpuPercent: 2_100_000 / 4_000_000 * 100}, []]);
 });
 
 test('service sampler: unwatched, a fresh sampler scans at tick 0 (first), 1 (warm-up) and 31, and no other', () =>
