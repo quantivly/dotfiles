@@ -2384,9 +2384,12 @@ gnome-status() {
     rp_bus_name="io.github.quantivly.dotfiles.ResourcePulse1"
     rp_object_path="/io/github/quantivly/dotfiles/ResourcePulse1"
     rp_get_state_method="$rp_bus_name.GetState"
-    # gdbus's own reply timeout, and the hard bound `timeout` puts on the whole call.
+    # gdbus's own reply timeout, and the hard bound `timeout` puts on every call
+    # to systemctl or gdbus, so gnome-status never hangs on a wedged manager or bus.
     rp_reply_timeout_seconds=2
     rp_call_limit_seconds=3
+    rp_call_limit=()
+    has_command timeout && rp_call_limit=(timeout "$rp_call_limit_seconds")
     # The extension shows no data once SAMPLE_STALL_TICKS (3) × 2 s pass without a sample.
     rp_stall_seconds=6
     rp_usec_per_second=1000000
@@ -2397,7 +2400,7 @@ gnome-status() {
     # are microseconds. %N is sliced because uutils date ignores a %6N width.
     rp_epoch_nsec_digits=19
     rp_epoch_usec_digits=16
-    rp_linked="no"; rp_enabled="no"; rp_state="n/a"; rp_shell_knows_it="unknown"
+    rp_linked="no"; rp_enabled="no"; rp_disabled="no"; rp_state="n/a"; rp_shell_knows_it="unknown"
     rp_load_hints=(); rp_warnings=()
 
     # rp_first_number_after <text> <key>: the digits right after the first
@@ -2452,19 +2455,34 @@ gnome-status() {
       print -r -- $(( boot_epoch + ${stat_fields[20]} / clock_ticks_per_second ))
     }
 
+    # rp_unescaped_gvariant_string <gdbus reply>: the reply with GVariant's string
+    # escapes undone, so the JSON inside reads as JSON whichever quotes gdbus
+    # chose. A string holding an apostrophe makes it quote with " and escape every
+    # " inside as \"; either way a backslash is \\. Quotes first: each escaped
+    # quote's backslash is the one right before it, so a \\ pair never loses half.
+    rp_unescaped_gvariant_string() {
+      local text="$1"
+      if [[ "$text" == '("'* ]]; then
+        text="${text//\\\"/\"}"
+      else
+        text="${text//\\\'/\'}"
+      fi
+      print -r -- "${text//\\\\/\\}"
+    }
+
     # rp_describe_running_service: asks the active service for GetState and sets
     # rp_service_line ("active, protocol 1, last sample 1 s ago"), adding a ⚠
     # line when it does not answer within rp_call_limit_seconds or its last
-    # sample is older than rp_stall_seconds.
+    # sample is more than rp_stall_seconds old (compared in microseconds, as the
+    # extension does; the age shown is in whole seconds).
     rp_describe_running_service() {
-      local state_reply top_level_fields protocol_version latest_sampled_at_usec now_usec age_seconds sample_text
-      local -a call_limit=()
+      local state_reply top_level_fields protocol_version latest_sampled_at_usec now_usec age_usec age_seconds
+      local sample_text
       if ! has_command gdbus; then
         rp_service_line="active (gdbus not found, so not asked)"
         return 0
       fi
-      has_command timeout && call_limit=(timeout "$rp_call_limit_seconds")
-      if ! state_reply="$("${call_limit[@]}" gdbus call --session --dest "$rp_bus_name" \
+      if ! state_reply="$("${rp_call_limit[@]}" gdbus call --session --dest "$rp_bus_name" \
           --object-path "$rp_object_path" --method "$rp_get_state_method" \
           --timeout "$rp_reply_timeout_seconds" 2>/dev/null)"; then
         rp_service_line="active, no answer"
@@ -2473,15 +2491,17 @@ gnome-status() {
       fi
       # The service writes protocol, its times and the sequence before the
       # snapshot (lib/protocol.js buildStatePayload): only that part is read.
+      state_reply="$(rp_unescaped_gvariant_string "$state_reply")"
       top_level_fields="${state_reply%%\"snapshot\":*}"
       protocol_version="$(rp_first_number_after "$top_level_fields" protocol)" || protocol_version="unknown"
       if latest_sampled_at_usec="$(rp_first_number_after "$top_level_fields" latestSampledAtUsec)"; then
         if now_usec="$(rp_now_usec)"; then
-          age_seconds=$(( (now_usec - latest_sampled_at_usec) / rp_usec_per_second ))
-          (( age_seconds < 0 )) && age_seconds=0
+          age_usec=$(( now_usec - latest_sampled_at_usec ))
+          (( age_usec < 0 )) && age_usec=0
+          age_seconds=$(( age_usec / rp_usec_per_second ))
           sample_text="last sample $(rp_age_text "$age_seconds") ago"
-          if (( age_seconds > rp_stall_seconds )); then
-            rp_warnings+=("$rp_service_unit has not sampled for $(rp_age_text "$age_seconds"): the extension shows no data after $rp_stall_seconds s — journalctl --user -u $rp_service_unit -e")
+          if (( age_usec > rp_stall_seconds * rp_usec_per_second )); then
+            rp_warnings+=("$rp_service_unit has not sampled for over $rp_stall_seconds s (the last $(rp_age_text "$age_seconds") ago), so the extension shows no data — journalctl --user -u $rp_service_unit -e")
           fi
         else
           sample_text="last sample at a time date cannot compare"
@@ -2501,6 +2521,9 @@ gnome-status() {
     case "$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null)" in
       *"'$rp_uuid'"*) rp_enabled="yes" ;;
     esac
+    case "$(gsettings get org.gnome.shell disabled-extensions 2>/dev/null)" in
+      *"'$rp_uuid'"*) rp_disabled="yes" ;;
+    esac
     if has_command gnome-extensions; then
       rp_state="$(gnome-extensions info "$rp_uuid" 2>/dev/null | sed -n 's/^ *State: *//p')"
       if [ -n "$rp_state" ]; then rp_shell_knows_it="yes"; else rp_shell_knows_it="no"; fi
@@ -2509,6 +2532,9 @@ gnome-status() {
     # Asked for but not running: name the settings that keep GNOME 50 from loading
     # it. With the user dir skipped the shell does not know the extension at all.
     if [ "$rp_enabled" = "yes" ] && [ "$rp_state" != "ACTIVE" ]; then
+      if [ "$rp_disabled" = "yes" ]; then
+        rp_load_hints+=("disabled-extensions also lists it, and wins in GNOME 50: it does not load (gnome-apply removes it there)")
+      fi
       if [ "$(gsettings get org.gnome.shell allow-extension-installation 2>/dev/null)" = "false" ]; then
         rp_load_hints+=("allow-extension-installation is false: GNOME 50 skips ~/.local/share/gnome-shell/extensions, where it is linked")
       fi
@@ -2523,34 +2549,68 @@ gnome-status() {
     echo "Resource Pulse: linked=$rp_linked enabled=$rp_enabled_text state=$rp_state"
     for rp_hint in "${rp_load_hints[@]}"; do echo "  $rp_hint"; done
 
-    # The sampler service. Failed, or not running while the extension is enabled,
-    # is a ⚠: ./install's refresh step only warns (it never fails the install), so
-    # this is where a stopped, stalled or out-of-date service shows. Before the
-    # first login after linking (the shell does not know the extension yet) the
-    # extension has not run, so a service not started yet is no fault.
-    rp_service_state=""
-    if has_command systemctl; then
-      rp_service_state="$(systemctl --user show -p ActiveState --value "$rp_service_unit" 2>/dev/null)" ||
-        rp_service_state=""
+    # The sampler service. Failed or restarting after a failure is always a ⚠;
+    # anything else not running is one while the extension should be running it:
+    # enabled, not also disabled, and known to the shell (before the first login
+    # after linking it has not run yet, so a service not started yet is no
+    # fault). ./install's refresh step only warns, never failing the install, so
+    # this is where a missing, stopped, stalled or out-of-date service shows.
+    # Each state names its own remedy: a unit not found (merged without
+    # ./install) needs ./install, and only a loaded, inactive one is started.
+    rp_extension_runs_it="no"
+    if [ "$rp_enabled" = "yes" ] && [ "$rp_disabled" = "no" ] && [ "$rp_shell_knows_it" != "no" ]; then
+      rp_extension_runs_it="yes"
     fi
-    case "$rp_service_state" in
-      "") rp_service_line="unknown (no systemd user manager answered)" ;;
-      active) rp_describe_running_service ;;
-      *)
-        rp_service_line="$rp_service_state (not running)"
-        if [ "$rp_service_state" = "failed" ]; then
-          rp_warnings+=("$rp_service_unit failed — journalctl --user -u $rp_service_unit -e")
-        elif [ "$rp_enabled" = "yes" ] && [ "$rp_shell_knows_it" != "no" ]; then
-          rp_warnings+=("$rp_service_unit is not running while the extension is enabled, so it shows no data — systemctl --user start $rp_service_unit")
-        fi
-        ;;
-    esac
+    rp_load_state=""; rp_service_state=""; rp_sub_state=""
+    if has_command systemctl &&
+      rp_unit_properties="$("${rp_call_limit[@]}" systemctl --user show -p LoadState -p ActiveState -p SubState \
+        "$rp_service_unit" 2>/dev/null)"; then
+      for rp_unit_property in "${(@f)rp_unit_properties}"; do
+        case "$rp_unit_property" in
+          LoadState=*) rp_load_state="${rp_unit_property#LoadState=}" ;;
+          ActiveState=*) rp_service_state="${rp_unit_property#ActiveState=}" ;;
+          SubState=*) rp_sub_state="${rp_unit_property#SubState=}" ;;
+        esac
+      done
+    fi
+    rp_journal_hint="journalctl --user -u $rp_service_unit -e"
+    if [ -z "$rp_load_state" ] || [ -z "$rp_service_state" ]; then
+      rp_service_line="unknown (no systemd user manager answered)"
+    elif [ "$rp_load_state" = "not-found" ]; then
+      rp_service_line="not installed (LoadState=not-found)"
+      [ "$rp_extension_runs_it" = "yes" ] &&
+        rp_warnings+=("$rp_service_unit is not installed, so the extension cannot start it — run ./install")
+    elif [ "$rp_load_state" != "loaded" ]; then
+      rp_service_line="cannot load (LoadState=$rp_load_state)"
+      [ "$rp_extension_runs_it" = "yes" ] &&
+        rp_warnings+=("$rp_service_unit cannot load (LoadState=$rp_load_state) — systemctl --user status $rp_service_unit")
+    else
+      case "$rp_service_state" in
+        active) rp_describe_running_service ;;
+        failed)
+          rp_service_line="failed (not running)"
+          rp_warnings+=("$rp_service_unit failed — $rp_journal_hint") ;;
+        inactive)
+          rp_service_line="inactive (not running)"
+          [ "$rp_extension_runs_it" = "yes" ] &&
+            rp_warnings+=("$rp_service_unit is not running while the extension is enabled, so it shows no data — systemctl --user start $rp_service_unit") ;;
+        *)
+          if [ "$rp_sub_state" = "auto-restart" ]; then
+            rp_service_line="$rp_service_state (auto-restart: restarting after a failure)"
+            rp_warnings+=("$rp_service_unit is restarting after a failure — $rp_journal_hint")
+          else
+            rp_service_line="$rp_service_state ($rp_sub_state)"
+            [ "$rp_extension_runs_it" = "yes" ] &&
+              rp_warnings+=("$rp_service_unit is $rp_service_state ($rp_sub_state), not serving yet — $rp_journal_hint")
+          fi ;;
+      esac
+    fi
     echo "  service: $rp_service_line"
     # Data side: a file under service/ or lib/ changed after the service started
     # means it runs older code than the checkout.
     if [ "$rp_service_state" = "active" ] && [ "$rp_linked" = "yes" ]; then
-      rp_service_started_at="$(systemctl --user show -p ActiveEnterTimestamp --value --timestamp=unix \
-        "$rp_service_unit" 2>/dev/null)"
+      rp_service_started_at="$("${rp_call_limit[@]}" systemctl --user show -p ActiveEnterTimestamp --value \
+        --timestamp=unix "$rp_service_unit" 2>/dev/null)"
       if [[ "$rp_service_started_at" == @<-> ]] &&
         rp_changed_files="$(find -H "$rp_extension_dir/service" "$rp_extension_dir/lib" -type f \
           -newermt "$rp_service_started_at" -print 2>/dev/null)" && [ -n "$rp_changed_files" ]; then
@@ -2558,19 +2618,25 @@ gnome-status() {
         rp_warnings+=("$rp_service_unit runs older code: ${rp_changed_file#"$rp_extension_dir"/} changed after it started — systemctl --user try-restart $rp_service_unit (its histories start again)")
       fi
     fi
-    # Drawing side: the shell loads the extension's JS once per login, so a file
-    # outside service/ changed after the desktop's gnome-shell started is not what
-    # runs. The oldest gnome-shell of this user is the desktop's (a nested test
-    # shell is younger); pgrep prints pids only. Whole seconds: a change within the
-    # second the shell started also warns.
-    if [ "$rp_linked" = "yes" ] && [ "$rp_enabled" = "yes" ] && [ "$rp_shell_knows_it" = "yes" ] &&
+    # Drawing side: the shell loads the extension's JS once per login, so drawing
+    # code (the *.js beside extension.js, and lib/) changed after the desktop's
+    # gnome-shell started is not what runs. The stylesheet does not count: GNOME
+    # re-reads it at every enable (ruling R20). The oldest gnome-shell of this
+    # user is the desktop's (a nested test shell is younger); pgrep prints pids
+    # only. Whole seconds: a change within the second the shell started also warns.
+    if [ "$rp_linked" = "yes" ] && [ "$rp_extension_runs_it" = "yes" ] && [ "$rp_shell_knows_it" = "yes" ] &&
       has_command pgrep; then
       rp_shell_pid="$(pgrep -o -x -u "$UID" gnome-shell 2>/dev/null)"
       if rp_shell_started_at="$(rp_started_at_epoch "$rp_shell_pid")" &&
-        rp_changed_files="$(find -H "$rp_extension_dir" -path "$rp_extension_dir/service" -prune -o -type f \
-          -newermt "@$rp_shell_started_at" -print 2>/dev/null)" && [ -n "$rp_changed_files" ]; then
+        rp_changed_files="$(find -H "$rp_extension_dir" -maxdepth 1 -type f -name '*.js' \
+          -newermt "@$rp_shell_started_at" -print 2>/dev/null)" &&
+        rp_changed_lib_files="$(find -H "$rp_extension_dir/lib" -type f \
+          -newermt "@$rp_shell_started_at" -print 2>/dev/null)"; then
         rp_changed_file="${rp_changed_files%%$'\n'*}"
-        rp_warnings+=("the desktop runs an older copy; takes effect at next login (${rp_changed_file#"$rp_extension_dir"/} changed after this login)")
+        [ -n "$rp_changed_file" ] || rp_changed_file="${rp_changed_lib_files%%$'\n'*}"
+        if [ -n "$rp_changed_file" ]; then
+          rp_warnings+=("the desktop runs an older copy; takes effect at next login (${rp_changed_file#"$rp_extension_dir"/} changed after this login)")
+        fi
       fi
     fi
     for rp_warning in "${rp_warnings[@]}"; do echo "  ⚠ $rp_warning"; done

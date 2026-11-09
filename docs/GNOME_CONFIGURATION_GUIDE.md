@@ -102,8 +102,11 @@ So:
 - a **drawing** change (`extension.js`, `card.js`, `indicator.js`, `graph.js`, `pulseClient.js`) waits
   for the next login, because the shell loads an extension's JS once per login. `lib/` is both: the
   service runs it at once, the shell at the next login. `gnome-status` says when the desktop runs an
-  older copy. The stylesheet is re-read at every enable while the JS is not, so a stylesheet change
-  only ever adds classes;
+  older copy of that code;
+- a **stylesheet** change is live at the next enable (the next lock or blank), since GNOME re-reads
+  the stylesheet at every enable, while the JS that sets its classes waits for the login. So the rule
+  this repo follows is that a stylesheet change only adds classes, and never renames or removes one
+  the previous release's JS still sets;
 - every other deploy leaves the service, and its histories, alone.
 
 **Lock and blank.** GNOME 50 turns the extension off on every lock **and on every idle screen blank**
@@ -192,15 +195,25 @@ Resource Pulse: linked=yes enabled=yes state=ACTIVE
   does not know the extension yet (after linking, before the next login).
 - `state=` is the shell's own verdict (`ACTIVE`, `ERROR`, `OUT OF DATE`), so a failure after a GNOME
   update is visible. When `enabled-extensions` asks for it but it is not `ACTIVE`, the next line names
-  either setting above that keeps it from loading.
-- `service:` is the unit's `ActiveState`; for an active service, also the protocol and the age of its
-  last sample, asked with `GetState` through `gdbus` and bounded at 3 s ("no answer" otherwise).
-- A ⚠ line follows for each of: the service **failed**; it is **not running** while the extension is
-  enabled (from the first login after linking on); it does **not answer**; it has **not sampled for more than 6 s** (the extension shows no
-  data then); it **runs older code** than the checkout (a file under `service/` or `lib/` changed after
-  it started, as when the deploy's restart failed: `systemctl --user try-restart
-  resource-pulse.service`); and **the desktop runs an older copy** (a file outside `service/` changed
-  after this login: it takes effect at the next login).
+  what keeps it from loading: it is also in `disabled-extensions`, which wins in GNOME 50, or one of
+  the two settings above.
+- `service:` is the unit's state, from its `LoadState`, `ActiveState` and `SubState`: for an active
+  service, also the protocol and the age of its last sample, asked with `GetState` through `gdbus`.
+  Every call to `systemctl` and `gdbus` is bounded at 3 s ("no answer", or "unknown", otherwise).
+- A ⚠ line follows, with its own remedy, for each of:
+  - the service **failed**, or is **restarting after a failure** (`auto-restart`): its journal;
+  - while the extension is enabled (and not also disabled), from the first login after linking on:
+    the unit is **not installed** (merged without `./install`: run `./install`); it **cannot load**
+    (`systemctl --user status`); it is **not running** (`systemctl --user start`); or it is still
+    **starting**;
+  - it does **not answer**, or it has **not sampled for more than 6 s**, compared to the
+    microsecond as the extension does (it shows no data then);
+  - it **runs older code** than the checkout: a file under `service/` or `lib/` changed after it
+    started, as when the deploy's restart failed (`systemctl --user try-restart
+    resource-pulse.service`);
+  - **the desktop runs an older copy**: drawing code (a `*.js` beside `extension.js`, or a file under
+    `lib/`) changed after this login, and takes effect at the next. A stylesheet change does not count,
+    since GNOME re-reads the stylesheet at every enable.
 
 The service logs to its unit's journal, `journalctl --user -u resource-pulse.service`; the extension
 logs under `resource-pulse:` in the shell's, `journalctl --user -b -g resource-pulse`. Each distinct
@@ -268,26 +281,28 @@ scripts/resource-pulse-cost.sh --rss-kib                    # gnome-shell's resi
 scripts/resource-pulse-cost.sh --rss-check <kib>            # exit 1 if gnome-shell grew more than 64 MiB since <kib>
 ```
 
-It reads only `comm`, `stat` and `status` under `/proc`. Over a budget, the remedy is a longer
-interval, or pruning slices that cannot beat the current leader; never a shorter history. Before the
-service existed the sampling ran inside gnome-shell, measured in plain `gjs` at about 0.5% of one core
-on the reference laptop: that work is the service's now. In plain `gjs`, a full garbage collection
-after every scan held the service's resident memory flat at about 52 MB, where natural collection let
-it pile up to about 480 MB.
+It reads only `comm`, `stat` and `status` under `/proc`. `--service` may stand anywhere on the line,
+and any other word left over is a usage error (exit 2), never ignored. To meet these budgets the app
+scan's interval moved from v1's 10 s to 20 s while a detail watch is held and 60 s with none. Over a
+budget, the remedy is a longer interval, or pruning slices that cannot beat the current leader; never a
+shorter history. Before the service existed the sampling ran inside gnome-shell, measured in plain
+`gjs` at about 0.5% of one core on the reference laptop: that work is the service's now. In plain
+`gjs`, a full garbage collection after every scan held the service's resident memory flat at about
+52 MB, where natural collection let it pile up to about 480 MB.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (447 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (453 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
 version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the
 Shell glue, enforces the no-blocking and `metadata.json` rules, and covers `genable_extension`,
 `gnome-status`, the unit and its install step, the cost script and the nested harness against stubs.
 It never touches the live session, but it is **not fully hermetic**: the `service/main.js` rows sample
-this machine's real `/proc` and `/sys`. It needs `gjs`, `zsh`, `dbus-run-session` (package
-`dbus-daemon`), `gdbus` (`libglib2.0-bin`), and for the card-width row Pango's typelibs
-(`gir1.2-pango-1.0`) and the card's font, Ubuntu Sans (`fonts-ubuntu`). A missing tool is exit 2,
-never a pass.
+this machine's real `/proc` and `/sys`. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
+(package `dbus-daemon`) and `gdbus` (`libglib2.0-bin`): without any of them it stops with exit 2. The
+card-width row also needs Pango's typelibs (`gir1.2-pango-1.0`) and the card's font, Ubuntu Sans
+(`fonts-ubuntu`): without them that row fails. Neither is ever a pass.
 
 ## Keyboard-driven workflow (no extensions needed)
 

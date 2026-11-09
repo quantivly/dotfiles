@@ -21,6 +21,9 @@
 #       RSS_GROWTH_TOLERANCE_MIB since the baseline, 1 otherwise; prints both
 #       numbers either way. The service's RSS budget is absolute, not a growth
 #       (at most SERVICE_RSS_BUDGET_MIB): read it with --service --rss-kib.
+# --service may stand anywhere on the line. Any other argument left over, or a
+# mode without its value, is a usage error (exit 2): an ignored word could make
+# a reading of gnome-shell pass for one of the service.
 #
 # Finding gnome-shell: the one process of this user whose comm is "gnome-shell".
 # GNOME_SHELL_PID names it outright. More than one candidate, or none, is exit 2:
@@ -184,28 +187,40 @@ check_rss_growth() {
 }
 
 main() {
-    local measured="$MEASURED_GNOME_SHELL" mode measured_pid
-    if [[ "${1:-}" == "$SERVICE_FLAG" ]]; then
-        measured="$MEASURED_SERVICE"
-        shift
-    fi
-    mode="${1:-}"
+    local measured="$MEASURED_GNOME_SHELL" argument mode mode_value measured_pid
+    local -a mode_arguments=()
+    local usage_text="usage: $0 [$SERVICE_FLAG] --cpu-percent <seconds> | [$SERVICE_FLAG] --rss-kib | --rss-check <baseline_kib>"
+    # --service anywhere; everything else is the mode and its value.
+    for argument in "$@"; do
+        if [[ "$argument" == "$SERVICE_FLAG" ]]; then
+            measured="$MEASURED_SERVICE"
+        else
+            mode_arguments+=("$argument")
+        fi
+    done
+    mode="${mode_arguments[0]:-}"
+    mode_value="${mode_arguments[1]:-}"
     case "$mode" in
         --cpu-percent)
-            [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || die "usage: [$SERVICE_FLAG] --cpu-percent <whole seconds>"
+            if (( ${#mode_arguments[@]} != 2 )) || ! [[ "$mode_value" =~ ^[1-9][0-9]*$ ]]; then
+                die "$usage_text"
+            fi
             measured_pid="$(find_measured_pid "$measured")" || exit $?
-            measure_cpu_percent "$measured_pid" "$2" ;;
+            measure_cpu_percent "$measured_pid" "$mode_value" ;;
         --rss-kib)
+            (( ${#mode_arguments[@]} == 1 )) || die "$usage_text"
             measured_pid="$(find_measured_pid "$measured")" || exit $?
             read_rss_kib "$measured_pid" || exit $?
             printf '\n' ;;
         --rss-check)
             [[ "$measured" == "$MEASURED_GNOME_SHELL" ]] || die "--rss-check is gnome-shell's growth tripwire; the service's" \
                 "budget is absolute: $SERVICE_FLAG --rss-kib must read at most $(( SERVICE_RSS_BUDGET_MIB * KIB_PER_MIB ))"
-            [[ -n "${2:-}" ]] || die "usage: --rss-check <baseline_kib>"
+            if (( ${#mode_arguments[@]} != 2 )) || [[ -z "$mode_value" ]]; then
+                die "$usage_text"
+            fi
             measured_pid="$(find_gnome_shell_pid)" || exit $?
-            check_rss_growth "$measured_pid" "$2" ;;
-        *) die "usage: $0 [$SERVICE_FLAG] --cpu-percent <seconds> | [$SERVICE_FLAG] --rss-kib | --rss-check <baseline_kib>" ;;
+            check_rss_growth "$measured_pid" "$mode_value" ;;
+        *) die "$usage_text" ;;
     esac
 }
 

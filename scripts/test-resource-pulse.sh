@@ -509,18 +509,30 @@ check "gnome-status names the setting that keeps an enabled Resource Pulse from 
 
 # The service half of the block: systemctl, gdbus, pgrep and date are stubs too.
 # Each answers from GNOME_STATUS_* variables and logs its call to
-# GNOME_STATUS_CALLS; systemctl answers only the two properties gnome-status
-# reads, gdbus answers GetState in its own text form, ('<json>',), and date
-# answers `+%s%N` with a fixed now (anything else goes to the real date).
+# GNOME_STATUS_CALLS; systemctl answers only the properties gnome-status reads
+# (in systemd's own order, measured: LoadState, ActiveState, SubState, whatever
+# order -p names them) or hangs; gdbus answers GetState in its own text form,
+# ('<json>',), or a given reply word for word; and date answers `+%s%N` with a
+# fixed now (anything else goes to the real date).
 GNOME_STATUS_CALLS="$WIRING_TMP/gnome-status-calls"
 REAL_DATE_PATH="$(command -v date)" || fatal "date is required"
 GNOME_STATUS_SYSTEMCTL_STUB="$(cat <<'STUB'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
+[[ "${GNOME_STATUS_SYSTEMCTL_MODE:-}" != hang ]] || exec sleep 30
+[[ "${GNOME_STATUS_SYSTEMCTL_MODE:-}" != hang-on-start-time || "$*" != *ActiveEnterTimestamp* ]] || exec sleep 30
+active_state="${GNOME_STATUS_SERVICE_ACTIVE_STATE-inactive}"
+case "$active_state" in
+  active) default_sub_state=running ;;
+  failed) default_sub_state=failed ;;
+  activating) default_sub_state=start ;;
+  *) default_sub_state=dead ;;
+esac
 case "$*" in
-  "--user show -p ActiveState --value resource-pulse.service")
+  "--user show -p LoadState -p ActiveState -p SubState resource-pulse.service")
     [[ -z "${GNOME_STATUS_NO_MANAGER:-}" ]] || { echo "Failed to connect to user scope bus" >&2; exit 1; }
-    printf '%s\n' "${GNOME_STATUS_SERVICE_ACTIVE_STATE-inactive}" ;;
+    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\n' "${GNOME_STATUS_SERVICE_LOAD_STATE:-loaded}" \
+      "$active_state" "${GNOME_STATUS_SERVICE_SUB_STATE:-$default_sub_state}" ;;
   "--user show -p ActiveEnterTimestamp --value --timestamp=unix resource-pulse.service")
     printf '%s\n' "${GNOME_STATUS_SERVICE_STARTED_AT-}" ;;
   *) printf 'unexpected systemctl call: %s\n' "$*" >&2; exit 64 ;;
@@ -530,10 +542,12 @@ STUB
 install_stub "$GNOME_STATUS_STUB_BIN" systemctl "$GNOME_STATUS_SYSTEMCTL_STUB"
 GNOME_STATUS_GDBUS_STUB="$(cat <<'STUB'
 #!/usr/bin/env bash
-# answer: GetState's JSON as gdbus prints it; hang: never answers; anything else: no owner.
+# answer: GetState's JSON as gdbus prints it when no string holds an apostrophe;
+# verbatim: GNOME_STATUS_GDBUS_REPLY as it is; hang: never answers; anything else: no owner.
 printf 'gdbus %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
 case "${GNOME_STATUS_GDBUS_MODE:-fail}" in
   answer) printf "('%s',)\n" "$GNOME_STATUS_STATE_JSON" ;;
+  verbatim) printf '%s\n' "$GNOME_STATUS_GDBUS_REPLY" ;;
   hang) exec sleep 30 ;;
   *) echo "Error: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable" >&2; exit 1 ;;
 esac
@@ -581,18 +595,24 @@ mkdir -p "$GNOME_STATUS_LINKED_HOME/.local/share/gnome-shell/extensions" \
 ln -s "$STATUS_EXTENSION_DIR" "$GNOME_STATUS_LINKED_HOME/.local/share/gnome-shell/extensions/$EXTENSION_UUID" \
   || fatal "cannot link gnome-status's fixture extension"
 # reset_status_extension <card.js mtime> <lib/format.js mtime> <service/main.js mtime>
-# (epoch seconds); extension.js is always older than the shell.
+# [<stylesheet.css mtime>] (epoch seconds); extension.js and metadata.json are
+# always older than the shell, and the stylesheet is too unless given.
 reset_status_extension() {
+  local stylesheet_mtime="${4:-$BEFORE_SHELL_START_EPOCH}"
   rm -rf "$STATUS_EXTENSION_DIR"
   mkdir -p "$STATUS_EXTENSION_DIR/lib" "$STATUS_EXTENSION_DIR/service" || fatal "cannot create $STATUS_EXTENSION_DIR"
   : >"$STATUS_EXTENSION_DIR/extension.js"
+  : >"$STATUS_EXTENSION_DIR/metadata.json"
   : >"$STATUS_EXTENSION_DIR/card.js"
+  : >"$STATUS_EXTENSION_DIR/stylesheet.css"
   : >"$STATUS_EXTENSION_DIR/lib/format.js"
   : >"$STATUS_EXTENSION_DIR/service/main.js"
-  touch -d "@$BEFORE_SHELL_START_EPOCH" "$STATUS_EXTENSION_DIR/extension.js" || fatal "touch -d failed"
+  touch -d "@$BEFORE_SHELL_START_EPOCH" "$STATUS_EXTENSION_DIR/extension.js" "$STATUS_EXTENSION_DIR/metadata.json" \
+    || fatal "touch -d failed"
   touch -d "@$1" "$STATUS_EXTENSION_DIR/card.js" || fatal "touch -d @$1 failed"
   touch -d "@$2" "$STATUS_EXTENSION_DIR/lib/format.js" || fatal "touch -d @$2 failed"
   touch -d "@$3" "$STATUS_EXTENSION_DIR/service/main.js" || fatal "touch -d @$3 failed"
+  touch -d "@$stylesheet_mtime" "$STATUS_EXTENSION_DIR/stylesheet.css" || fatal "touch -d @$stylesheet_mtime failed"
 }
 reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
 
@@ -601,16 +621,27 @@ reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "
 # one: only the FIRST match is the service's.
 STATUS_NOW_EPOCH=1794000100
 STATUS_NOW_NSEC="${STATUS_NOW_EPOCH}000000000"
-# state_json_sampled <seconds before now | null | absent>: a GetState JSON.
-state_json_sampled() {
-  local latest_field
+STATUS_USEC_PER_SECOND=1000000
+STATUS_NOW_USEC=$((STATUS_NOW_EPOCH * STATUS_USEC_PER_SECOND))
+DECOY_APP_NAME='decoy'
+# state_json_usec_before <microseconds before now | null | absent> [app name]: a
+# GetState JSON whose top CPU app has that name.
+state_json_usec_before() {
+  local latest_field app_name="${2:-$DECOY_APP_NAME}"
   case "$1" in
     absent) latest_field='' ;;
     null) latest_field='"latestSampledAtUsec":null,' ;;
-    *) latest_field="\"latestSampledAtUsec\":$(( (STATUS_NOW_EPOCH - $1) * 1000000 ))," ;;
+    *) latest_field="\"latestSampledAtUsec\":$((STATUS_NOW_USEC - $1))," ;;
   esac
-  printf '{"protocol":1,"serviceStartedAtUsec":1793990000000000,%s"sequence":42,"snapshot":{"apps":{"topCpu":{"name":"decoy","latestSampledAtUsec":5}}},"histories":{"cpu":[],"memory":[]}}' \
-    "$latest_field"
+  printf '{"protocol":1,"serviceStartedAtUsec":1793990000000000,%s"sequence":42,"snapshot":{"apps":{"topCpu":{"name":"%s","latestSampledAtUsec":5}}},"histories":{"cpu":[],"memory":[]}}' \
+    "$latest_field" "$app_name"
+}
+# state_json_sampled <seconds before now | null | absent>: the same, in whole seconds.
+state_json_sampled() {
+  case "$1" in
+    absent | null) state_json_usec_before "$1" ;;
+    *) state_json_usec_before "$(( $1 * STATUS_USEC_PER_SECOND ))" ;;
+  esac
 }
 GNOME_STATUS_STUB_DEFAULTS=(GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
   GNOME_STATUS_GDBUS_MODE=answer "GNOME_STATUS_STATE_JSON=$(state_json_sampled 3)"
@@ -620,11 +651,15 @@ GNOME_STATUS_STUB_DEFAULTS=(GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE
 # runs gnome-status against every stub, settings reset to those two, with the
 # defaults above overridden by the assignments (HOME=... included). Leaves its
 # output in GNOME_STATUS_OUTPUT; the stubs' calls are in GNOME_STATUS_CALLS.
+# disabled-extensions is STATUS_DISABLED_EXTENSIONS when set (the stub's empty list otherwise).
 gnome_status_run() {
   rm -rf "${STUB_STATE:?}"/*
   mkdir -p "$STUB_STATE/$SHELL_SCHEMA"
   printf '%s\n' "$1" >"$STUB_STATE/$SHELL_SCHEMA/enabled-extensions"
   printf '%s\n' "$2" >"$STUB_STATE/$SHELL_SCHEMA/allow-extension-installation"
+  if [[ -n "${STATUS_DISABLED_EXTENSIONS:-}" ]]; then
+    printf '%s\n' "$STATUS_DISABLED_EXTENSIONS" >"$STUB_STATE/$SHELL_SCHEMA/disabled-extensions"
+  fi
   shift 2
   : >"$GNOME_STATUS_CALLS"
   # shellcheck disable=SC2016  # Expanded by zsh.
@@ -660,13 +695,28 @@ check "gnome-status: a running service shows its state, protocol and the age of 
   "line=[active, protocol 1, last sample 3 s ago] warnings=0 call=[gdbus call --session --dest $RESOURCE_PULSE_BUS_NAME --object-path $RESOURCE_PULSE_OBJECT_PATH --method $RESOURCE_PULSE_BUS_NAME.GetState --timeout 2]"
 
 stall_summary=""
-for sample_age_seconds in 6 7 60 150; do
-  gnome_status_run "$ASKED_FOR_SETTING" true "GNOME_STATUS_STATE_JSON=$(state_json_sampled "$sample_age_seconds")"
-  stall_summary+="$sample_age_seconds=[$(status_service_line)]/$(status_warnings_naming 'has not sampled') "
+# Ages in microseconds: 6.9 s is past the extension's 6 s though it shows as 6 s.
+for sample_age_usec in 6000000 6900000 7000000 60000000 150000000; do
+  gnome_status_run "$ASKED_FOR_SETTING" true "GNOME_STATUS_STATE_JSON=$(state_json_usec_before "$sample_age_usec")"
+  stall_summary+="$sample_age_usec=[$(status_service_line)]/$(status_warnings_naming 'has not sampled') "
 done
-check "gnome-status: a last sample older than the extension's 6 s is a ⚠ naming it; 6 s is not; from 120 s it reads in minutes" \
+check "gnome-status: a last sample more than the extension's 6 s old is a ⚠ (6.9 s too), exactly 6 s is not; from 120 s it reads in minutes" \
   "$stall_summary" \
-  "6=[active, protocol 1, last sample 6 s ago]/0 7=[active, protocol 1, last sample 7 s ago]/1 60=[active, protocol 1, last sample 60 s ago]/1 150=[active, protocol 1, last sample 2 min ago]/1 "
+  "6000000=[active, protocol 1, last sample 6 s ago]/0 6900000=[active, protocol 1, last sample 6 s ago]/1 7000000=[active, protocol 1, last sample 7 s ago]/1 60000000=[active, protocol 1, last sample 60 s ago]/1 150000000=[active, protocol 1, last sample 2 min ago]/1 "
+
+# A string holding an apostrophe makes gdbus print the reply in double quotes,
+# escaping every " and \ inside it. The reply is printed by GLib itself
+# (GLib.Variant.print, which gdbus uses), from a JSON whose app name holds ', "
+# and \, with a sample ten minutes old.
+APOSTROPHE_APP_NAME_JSON='Bob'"'"'s \"quoted\" \\ app'
+TEN_MINUTES_USEC=600000000
+# shellcheck disable=SC2016  # JavaScript source.
+apostrophe_reply="$(gjs -c 'const {GLib} = imports.gi; print(new GLib.Variant("(s)", [ARGV[0]]).print(true));' \
+  "$(state_json_usec_before "$TEN_MINUTES_USEC" "$APOSTROPHE_APP_NAME_JSON")")"
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_GDBUS_MODE=verbatim "GNOME_STATUS_GDBUS_REPLY=$apostrophe_reply"
+check "gnome-status: a reply gdbus prints in double quotes (a string holding an apostrophe) still gives the protocol, the age and the stall ⚠" \
+  "double-quoted=$([[ "$apostrophe_reply" == '("{\"protocol\":1,'* ]] && printf yes || printf no) line=[$(status_service_line)] stalled=$(status_warnings_naming 'has not sampled')" \
+  "double-quoted=yes line=[active, protocol 1, last sample 10 min ago] stalled=1"
 
 gnome_status_run "$ASKED_FOR_SETTING" true "GNOME_STATUS_STATE_JSON=$(state_json_sampled null)"
 unsampled_summary="null=[$(status_service_line)]/$(status_warning_count)"
@@ -702,7 +752,57 @@ gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_NO_MANAGER=1
 not_running_summary+="no-manager=[$(status_service_line)]/$(status_warning_count)/$(status_gdbus_calls)"
 check "gnome-status: a failed service always warns, one not running only while enabled and loaded, no manager never; none is asked GetState" \
   "$not_running_summary" \
-  "failed/enabled=[failed (not running)]/1/0 failed/off=[failed (not running)]/1/0 inactive/enabled=[inactive (not running)]/1/0 inactive/off=[inactive (not running)]/0/0 activating/enabled=[activating (not running)]/1/0 inactive/before-login=[inactive (not running)]/0/0 no-manager=[unknown (no systemd user manager answered)]/0/0"
+  "failed/enabled=[failed (not running)]/1/0 failed/off=[failed (not running)]/1/0 inactive/enabled=[inactive (not running)]/1/0 inactive/off=[inactive (not running)]/0/0 activating/enabled=[activating (start)]/1/0 inactive/before-login=[inactive (not running)]/0/0 no-manager=[unknown (no systemd user manager answered)]/0/0"
+
+# Each state gets its own remedy: a unit not found (merged without ./install)
+# says to run ./install; one restarting after a crash says so; only a loaded,
+# inactive unit suggests starting it.
+status_remedies() {
+  printf '[%s]/%s/start=%s/install=%s/restarting=%s/status=%s' "$(status_service_line)" "$(status_warning_count)" \
+    "$(status_warnings_naming 'systemctl --user start')" "$(status_warnings_naming 'run ./install')" \
+    "$(status_warnings_naming 'restarting after a failure')" "$(status_warnings_naming 'systemctl --user status')"
+}
+remedies_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_SERVICE_LOAD_STATE=not-found GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive
+remedies_summary+="not-found/enabled=$(status_remedies) "
+gnome_status_run "$NOT_ASKED_FOR_SETTING" true GNOME_STATUS_SERVICE_LOAD_STATE=not-found GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive
+remedies_summary+="not-found/off=$(status_remedies) "
+gnome_status_run "$NOT_ASKED_FOR_SETTING" true GNOME_STATUS_SERVICE_ACTIVE_STATE=activating GNOME_STATUS_SERVICE_SUB_STATE=auto-restart
+remedies_summary+="auto-restart/off=$(status_remedies) "
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_SERVICE_ACTIVE_STATE=activating
+remedies_summary+="starting/enabled=$(status_remedies) "
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive
+remedies_summary+="inactive/enabled=$(status_remedies) "
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_SERVICE_LOAD_STATE=bad-setting GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive
+remedies_summary+="bad-setting/enabled=$(status_remedies)"
+check "gnome-status: a missing unit says run ./install, a crashed one that it is restarting, and only a loaded inactive one to start it" \
+  "$remedies_summary" \
+  "not-found/enabled=[not installed (LoadState=not-found)]/1/start=0/install=1/restarting=0/status=0 not-found/off=[not installed (LoadState=not-found)]/0/start=0/install=0/restarting=0/status=0 auto-restart/off=[activating (auto-restart: restarting after a failure)]/1/start=0/install=0/restarting=1/status=0 starting/enabled=[activating (start)]/1/start=0/install=0/restarting=0/status=0 inactive/enabled=[inactive (not running)]/1/start=1/install=0/restarting=0/status=0 bad-setting/enabled=[cannot load (LoadState=bad-setting)]/1/start=0/install=0/restarting=0/status=1"
+
+hung_systemctl_started_seconds=$SECONDS
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_SYSTEMCTL_MODE=hang
+hung_systemctl_elapsed_seconds=$((SECONDS - hung_systemctl_started_seconds))
+hung_systemctl_summary="state-call=[$(status_service_line)]/$( (( hung_systemctl_elapsed_seconds < HUNG_CALL_BOUND_SECONDS )) && printf bounded || printf 'after-%ss' "$hung_systemctl_elapsed_seconds")"
+# The start-time call (linked, so the data-side check runs) is bounded too.
+hung_systemctl_started_seconds=$SECONDS
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" GNOME_STATUS_SYSTEMCTL_MODE=hang-on-start-time
+hung_systemctl_elapsed_seconds=$((SECONDS - hung_systemctl_started_seconds))
+hung_systemctl_summary+=" start-time-call=[$(status_service_line)]/$( (( hung_systemctl_elapsed_seconds < HUNG_CALL_BOUND_SECONDS )) && printf bounded || printf 'after-%ss' "$hung_systemctl_elapsed_seconds")"
+check "gnome-status: a systemctl that hangs is bounded like gdbus, in both of its calls" \
+  "$hung_systemctl_summary" \
+  "state-call=[unknown (no systemd user manager answered)]/bounded start-time-call=[active, protocol 1, last sample 3 s ago]/bounded"
+
+# Asked for in enabled-extensions but also in disabled-extensions, which wins in
+# GNOME 50: a load hint, like the other two, and the service is not blamed.
+disabled_summary=""
+STATUS_DISABLED_EXTENSIONS="$ASKED_FOR_SETTING" gnome_status_run "$ASKED_FOR_SETTING" true \
+  GNOME_STATUS_SHELL_STATE=INACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive
+disabled_summary+="known=[$(status_enabled_field)]/hint=$(grep -c -F '  disabled-extensions also lists it' <<<"$GNOME_STATUS_OUTPUT")/warnings=$(status_warning_count)"
+STATUS_DISABLED_EXTENSIONS="$ASKED_FOR_SETTING" gnome_status_run "$ASKED_FOR_SETTING" true \
+  GNOME_STATUS_SHELL_STATE= GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive
+disabled_summary+=" unknown-to-shell=[$(status_enabled_field)]/hint=$(grep -c -F '  disabled-extensions also lists it' <<<"$GNOME_STATUS_OUTPUT")/warnings=$(status_warning_count)"
+check "gnome-status: an extension also in disabled-extensions gets a load hint, and the service is not blamed" \
+  "$disabled_summary" "known=[yes]/hint=1/warnings=0 unknown-to-shell=[yes]/hint=1/warnings=0"
 
 older_code_summary=""
 STATUS_SERVICE_STARTED_AT="GNOME_STATUS_SERVICE_STARTED_AT=@$SUITE_STARTED_AT_EPOCH"
@@ -736,13 +836,18 @@ older_copy_summary+=" lib=$(status_warnings_naming "$OLDER_COPY_NEEDLE (lib/form
 reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$AFTER_SHELL_START_EPOCH"
 gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME"
 older_copy_summary+=" service-only=$(status_warnings_naming "$OLDER_COPY_NEEDLE")"
+# GNOME re-reads the stylesheet at every enable, so a CSS-only change is not an older copy (ruling R20).
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" \
+  "$AFTER_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME"
+older_copy_summary+=" css-only=$(status_warnings_naming "$OLDER_COPY_NEEDLE")"
 reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
 gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME"
 older_copy_summary+=" unchanged=$(status_warnings_naming "$OLDER_COPY_NEEDLE")"
 older_copy_summary+=" pgrep=[$(grep '^pgrep ' "$GNOME_STATUS_CALLS")]"
-check "gnome-status: a file outside service/ newer than the desktop's gnome-shell says the desktop runs an older copy, and only then" \
+check "gnome-status: drawing code (*.js, lib/) newer than the desktop's gnome-shell says the desktop runs an older copy, and only then" \
   "$older_copy_summary" \
-  "card=1 no-shell=0 unknown-to-shell=0 lib=1 service-only=0 unchanged=0 pgrep=[pgrep -o -x -u $(id -u) gnome-shell]"
+  "card=1 no-shell=0 unknown-to-shell=0 lib=1 service-only=0 css-only=0 unchanged=0 pgrep=[pgrep -o -x -u $(id -u) gnome-shell]"
 
 # Spelled by pieces so this row's own source is not what it finds.
 GNOME_STATUS_FORBIDDEN_PATTERN="cmd""line|env""iron\\b|\\bps -|pgre""p -[a-z]*[al]\\b"
@@ -987,12 +1092,16 @@ check "service/main.js owns the name, answers GetState with protocol 1 and a sam
 check "a second service/main.js finds the name taken and exits 1, while the first keeps serving" \
   "second-exit=$service_second_exit after-second=$service_after_second" \
   "second-exit=1 after-second=protocol=1 sample=yes memory=yes"
-# The age is the real one, so its shape is compared, not its number.
+# The age is the real one, so its shape is compared, not its number: any whole
+# number of seconds, so under 2 minutes, a bound generous enough for a loaded CI
+# runner. For the same reason a stall ⚠ is left out of the count here; the
+# stubbed rows above pin the 6 s threshold.
 REAL_BUS_SERVICE_LINE_PATTERN='^  service: active, protocol 1, last sample [0-9]+ s ago$'
 real_bus_service_line="$(grep -E '^  service: ' "$GNOME_STATUS_REAL_BUS_OUTPUT" 2>/dev/null)"
 real_bus_line_shape="$([[ "$real_bus_service_line" =~ $REAL_BUS_SERVICE_LINE_PATTERN ]] && printf ok || printf '[%s]' "$real_bus_service_line")"
-check "gnome-status reads the real service's GetState through the real gdbus: protocol 1 and a fresh last sample, no ⚠" \
-  "exit=$gnome_status_real_bus_exit shape=$real_bus_line_shape warnings=$(grep -c -F '  ⚠ ' "$GNOME_STATUS_REAL_BUS_OUTPUT" 2>/dev/null)" \
+real_bus_other_warnings="$(grep -F '  ⚠ ' "$GNOME_STATUS_REAL_BUS_OUTPUT" 2>/dev/null | grep -c -v -F 'has not sampled')"
+check "gnome-status reads the real service's GetState through the real gdbus: protocol 1 and a recent last sample, no other ⚠" \
+  "exit=$gnome_status_real_bus_exit shape=$real_bus_line_shape warnings=$real_bus_other_warnings" \
   "exit=0 shape=ok warnings=0"
 # Warnings of gjs and GLib themselves only (a deprecated API, a misused call,
 # an uncaught error): the service's own lines are Gjs-Console-*, and a read
@@ -1337,8 +1446,7 @@ FAKE_SERVICE_RSS_KIB=52000
 SERVICE_UNIT_NAME="resource-pulse.service"
 make_fake_proc "$SERVICE_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
 make_fake_proc "$SERVICE_PROC_ROOT" "$FAKE_SERVICE_PID" gjs "$FAKE_SERVICE_RSS_KIB"
-printf '%s (gjs) S 1 1 1 0 -1 0 0 0 0 3 10 5 7 9 20 0 1 0 1 0 0\n' "$FAKE_SERVICE_PID" \
-  >"$SERVICE_PROC_ROOT/$FAKE_SERVICE_PID/stat"
+FAKE_SERVICE_STAT_BEFORE="$FAKE_SERVICE_PID (gjs) S 1 1 1 0 -1 0 0 0 0 3 10 5 7 9 20 0 1 0 1 0 0"
 COST_SERVICE_STAT_AFTER="$WIRING_TMP/cost-service-stat-after"
 printf '%s (gjs) S 1 1 1 0 -1 0 0 0 5 40 40 20 57 99 20 0 1 0 1 0 0\n' "$FAKE_SERVICE_PID" >"$COST_SERVICE_STAT_AFTER"
 COST_SYSTEMCTL_STUB_BIN="$WIRING_TMP/cost-systemctl-bin"
@@ -1352,9 +1460,12 @@ printf "%s\n" "$COST_SERVICE_MAIN_PID"
 exit "${COST_SYSTEMCTL_EXIT:-0}"'
 # cost_service_run <MainPID answer> <args...> [-- with COST_SYSTEMCTL_EXIT in the
 # caller's environment]; leaves COST_OUTPUT, COST_EXIT and the systemctl calls.
+# Each run starts from the service's "before" stat, which the sleep stub moves on.
 cost_service_run() {
   local main_pid_answer="$1"
   shift
+  printf '%s\n' "$FAKE_SERVICE_STAT_BEFORE" >"$SERVICE_PROC_ROOT/$FAKE_SERVICE_PID/stat" \
+    || fatal "cannot reset the fake service's stat"
   : >"$COST_SYSTEMCTL_CALLS"
   : >"$COST_SLEEP_CALLS"
   COST_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$COST_STUB_BIN:$COST_SYSTEMCTL_STUB_BIN:$PATH" \
@@ -1389,6 +1500,26 @@ cost_service_run "$FAKE_SERVICE_PID" --service
 cost_service_usage_summary+=" alone=$COST_EXIT/$(grep -c -F 'usage:' <<<"$COST_OUTPUT")"
 check "cost: --service --rss-check is refused (the service's RSS budget is absolute), and --service alone is a usage error" \
   "$cost_service_usage_summary calls=$(wc -l <"$COST_SYSTEMCTL_CALLS")" "rss-check=2/1 alone=2/1 calls=0"
+# --service anywhere on the line: after the mode, it must still measure the
+# service, never silently gnome-shell.
+cost_flag_order_summary=""
+cost_service_run "$FAKE_SERVICE_PID" --rss-kib --service
+cost_flag_order_summary+="rss-kib=$COST_EXIT/$COST_OUTPUT"
+cost_service_run "$FAKE_SERVICE_PID" --cpu-percent "$COST_WINDOW_SECONDS" --service
+cost_flag_order_summary+=" cpu-percent=$COST_EXIT/$COST_OUTPUT"
+check "cost: --service after the mode still measures the service" \
+  "$cost_flag_order_summary" "rss-kib=0/$FAKE_SERVICE_RSS_KIB cpu-percent=0/9.00"
+# Anything left over is a usage error, never ignored.
+cost_leftover_summary=""
+cost_service_run "$FAKE_SERVICE_PID" --rss-kib --serivce
+cost_leftover_summary+="misspelt-flag=$COST_EXIT/$(grep -c -F 'usage:' <<<"$COST_OUTPUT")"
+cost_service_run "$FAKE_SERVICE_PID" --service --cpu-percent "$COST_WINDOW_SECONDS" 60
+cost_leftover_summary+=" extra-number=$COST_EXIT/$(grep -c -F 'usage:' <<<"$COST_OUTPUT")"
+cost_run "$ONE_SHELL_ROOT" --rss-check 380000 extra
+cost_leftover_summary+=" rss-check-extra=$COST_EXIT/$(grep -c -F 'usage:' <<<"$COST_OUTPUT")"
+check "cost: an unknown or leftover argument is a usage error (exit 2), never ignored" \
+  "$cost_leftover_summary calls=$(wc -l <"$COST_SYSTEMCTL_CALLS")" \
+  "misspelt-flag=2/1 extra-number=2/1 rss-check-extra=2/1 calls=0"
 # Spelled by pieces so this row's own source is not what it finds in the script.
 FORBIDDEN_READS_PATTERN="cmd""line|env""iron\\b|pgre""p|\\bps -"
 check "cost: the script never reads an argument list or environment, or runs ps" \
@@ -2132,7 +2263,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=447
+EXPECTED_ROWS=453
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

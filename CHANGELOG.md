@@ -34,9 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on reveal.
   - **Status and cost.** `gnome-status` gains a `Resource Pulse:` line (linked, enabled from the
     setting, shell State) and a `service:` line (its state, protocol and the age of its last sample),
-    with a ⚠ line for a failed, stopped, silent, stalled or out-of-date service and for a desktop that
-    runs an older copy. `scripts/resource-pulse-cost.sh` measures gnome-shell, and with `--service` the
-    service; every number and budget is defined in `docs/GNOME_CONFIGURATION_GUIDE.md`.
+    with a ⚠ line, naming its remedy, for a missing, failed, restarting, stopped, silent, stalled or
+    out-of-date service and for a desktop that runs an older copy of the drawing code. Every call it
+    makes is bounded at 3 s. `scripts/resource-pulse-cost.sh` measures gnome-shell, and with
+    `--service` (anywhere on the line; a leftover word is a usage error) the service; every number and budget is defined in `docs/GNOME_CONFIGURATION_GUIDE.md`.
     `check-timer-health.sh` reports a unit with no `[Install]` as started on demand, not as an arming
     decision.
   - **Nested shell.** `scripts/resource-pulse-nested.sh` (`start`, `eval`, `screenshot`, `stop`) runs
