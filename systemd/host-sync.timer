@@ -1,0 +1,33 @@
+# systemd/host-sync.timer
+# =======================
+# Runs host-sync.service once a day, on an armed host only (see that unit's
+# ConditionPathExists). It replaces dev-sync.timer, which keeps its link one release.
+#
+# WHY DAILY, NOT WEEKLY. Every step is gated on drift, so a day with nothing upstream is a
+# few `git ls-remote`s and one registry request. Weekly would let the clones go up to
+# seven days stale, and once herdr-draft starts work sessions on dev by default (plan step
+# B2), stale clones are what a new session starts from. Claude Code goes to `latest` here
+# because the laptop's own auto-updater follows that channel, so a host is never further
+# behind than the laptop by more than a day.
+#
+# 05:00 host-local with a half-hour jitter: off the working day in both time zones, and
+# Persistent=true catches up a run missed while the user manager was down. Persistent=true does
+# NOT fire at once on a timer enabled with `enable --now` from inside a running dev-sync.service
+# (the arming move, D8 / H2): systemd records that activation as the last trigger and schedules
+# the next calendar elapse, so the host's first migrating run is not raced by this timer (probed
+# for the plan review, 2026-11-09).
+
+[Unit]
+Description=Daily host-sync: keep this host's tooling and Claude Code configuration level with git
+Documentation=file://%h/.dotfiles/scripts/host-sync
+
+[Timer]
+OnCalendar=*-*-* 05:00:00
+RandomizedDelaySec=30min
+Persistent=true
+AccuracySec=5min
+
+[Install]
+# CHANGING THIS FIELD DOES NOT MOVE AN EXISTING SYMLINK; run ./install, never
+# `systemctl --user reenable` (see systemd/herdr-server.service's [Install]).
+WantedBy=default.target

@@ -339,6 +339,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`scripts/dev-sync` is now `scripts/host-sync`, one sync loop for every agent host, and it reads
+  the host profile (DO-894).** Step 6 of the shared-configuration design
+  (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, D8, amendments H1-H4, H9 and
+  H10). `host-sync` requires `--host <alias>` from the laptop or `--here` on the host; `scripts/dev-sync`
+  stays one release as a wrapper that supplies `--host dev`, and `systemd/dev-sync.{service,timer}`
+  stay linked for that release beside the new `systemd/host-sync.{service,timer}`. The first
+  `--apply` on a host armed before the rename moves it over, in an order that never leaves the host
+  without a timer whose condition holds: the lock is taken first, in the old state dir, and only
+  then does `~/.local/state/dev-sync/` become `~/.local/state/host-sync/`; `host-sync.timer` is
+  enabled and read back enabled and active, and only then do `~/.config/dev-sync/{armed,disarmed}`
+  move file by file to `~/.config/host-sync/` and `dev-sync.timer` stop and lose its `.wants` link.
+  Neither unit is ever `disable`d or `reenable`d, and a new timer that cannot be armed leaves the old
+  one armed and says so. "Not armed" is now a `·` information row rather than drift: drift is an
+  `armed` marker without a live `host-sync.timer`, or `dev-sync.timer` still carrying the arming.
+  With a profile marker (`~/.config/claude-host-profile`), the run clones `~/.dotfiles-local` before
+  the public `./install`, whose settings render refuses a marker with no overlay, keeps it on
+  `origin/main` as it keeps `~/.dotfiles`, and prints the profile and its tenants; the `~/quantivly`
+  clones are skipped only once the tenants are known and leave out the work tenant. Where clauth
+  manages the accounts (`~/.clauth`), the long-lived-token rows give way to one information row, and
+  `claude auth status` is not asked. `scripts/test-host-sync.sh` goes from 325 to 437 rows.
+
 - **The VPN docs and comments stop describing a full tunnel.** The Client VPN endpoint has been a
   split tunnel since 2026-11-08: one `/32` route per allowlisted server plus the VPC range, pushed
   with a gateway, so `tunnel_up()` in vpn-failfast and vpn-notify is unchanged and measured correct

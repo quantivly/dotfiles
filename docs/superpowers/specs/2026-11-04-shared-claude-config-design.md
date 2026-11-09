@@ -394,6 +394,41 @@ the last hour (D7); stale agents/skills absent. The timer unit becomes `host-syn
 armed per host by the marker as today. The laptop runs the render and link steps through
 `./install` and the memory timer; its versions are the reference the remotes follow.
 
+**Amended 2026-11-09 (DO-894):** six amendments, from the plan
+`docs/superpowers/plans/2026-11-09-claude-host-sync.md`. Where they differ from the text above, they
+win. H5–H8 are recorded with DO-895, the plan's second PR.
+
+- **(H1) The profile marker gates the overlay-dependent rows:** `dotfiles-local`, `settings`, the
+  memory store clones and the memory timer, and the `retire` move. With no
+  `~/.config/claude-host-profile` none of those runs. The `plugin` and `marketplace` rows read the
+  live `settings.json` on every host (H4), so a marker-less host's declaration is whatever that file
+  already says; what that changes on dev between PR 2 and step 7 is recorded in PR 2's body (its 19
+  `true` entries become ✓ rows instead of today's 4; nothing is installed, enabled or disabled by
+  it).
+- **(H2) Marker and state move, in that order of safety.** `~/.local/state/dev-sync/` becomes
+  `~/.local/state/host-sync/`, moved under the lock on the first `--apply`.
+  `~/.config/dev-sync/{armed,disarmed}` become `~/.config/host-sync/{armed,disarmed}`, moved file by
+  file **only after** `host-sync.timer` reads back enabled and active, so every intermediate state
+  has at least one timer whose `ConditionPathExists` holds. `systemd/dev-sync.{service,timer}` stay
+  linked one release; `dev-sync.timer` is stopped and its `.wants` link pruned by hand (never
+  `disable`, never `reenable`) only after that read-back; when the new timer cannot be armed, the
+  old one is left armed and the run says so.
+- **(H3) "Not armed" is information, not drift.** Arming is a per-host decision, like the memory
+  timer's. Drift is an `armed` marker without an enabled, active `host-sync.timer`, or a
+  `dev-sync.timer` still carrying the arming. `--apply` re-arms on a marker without `--arm`.
+- **(H4) The plugin declaration is the live `settings.json`** (rendered on a host with a profile):
+  the `enabledPlugins` entries that are `true`, and `extraKnownMarketplaces`, with
+  `claude-plugins-official` implicit. The sync adds and refreshes marketplaces and installs missing
+  plugins; it updates only the directory-marketplace plugin whose version the checkout carries
+  (`linear-key`); it never enables or disables a plugin (the render owns enablement; the superseded
+  list and the official-Linear rule leave the script). D5's weekly update of marketplace plugins
+  stays unimplemented and is carried to step 10. Every `claude plugin` call the sync makes runs with
+  `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
+- **(H9) The auth rows do not apply where clauth manages accounts** (`~/.clauth` exists): one
+  information row, no `claude auth status` call.
+- **(H10) `host-sync` requires `--host <alias>` or `--here`;** `scripts/dev-sync` stays one release
+  as a wrapper that supplies `--host dev`.
+
 ### D9. The doctor says whether the live config is the declared one
 
 `claude-doctor` gains a "config" section on every host: every declared link is a symlink

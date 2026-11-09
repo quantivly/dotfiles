@@ -55,7 +55,7 @@
 # THE MAPPING. A key's store is the one whose `tenants` holds the tenant `scripts/tenant-route <dir>`
 # answers, asked once per candidate; a tenant no store lists is exit 2, never a default. The
 # directory in the store is repos/<owner>/<repo> for a checkout with an origin (lowercased, by the
-# rule of repo_of_url in scripts/dev-sync), or dirs/<slug> for a directory with no .git or a repo
+# rule of repo_of_url in scripts/host-sync), or dirs/<slug> for a directory with no .git or a repo
 # with no origin (the path relative to $HOME, / becoming -, lowercased; `home` for $HOME itself).
 # Outside $HOME such a directory has no slug, which is exit 2. An origin's URL is never printed: it
 # can carry a credential.
@@ -418,7 +418,7 @@ tenant_of_directory() {
 }
 
 # repo_of_url URL — owner/repo from a remote URL, lowercased. The rule of repo_of_url in
-# scripts/dev-sync, reproduced because that script cannot be sourced.
+# scripts/host-sync, reproduced because that script cannot be sourced.
 repo_of_url() {
     printf '%s\n' "$1" | sed -E 's#/+$##; s#\.git$##; s#^.*[:/]([^/:]+)/([^/:]+)$#\1/\2#' | tr '[:upper:]' '[:lower:]'
 }

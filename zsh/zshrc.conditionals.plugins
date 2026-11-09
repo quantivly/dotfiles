@@ -149,11 +149,11 @@ _setup_ssh_agent() {
   # or down the probes above fail, the shell used to start `ssh-agent -s`. That agent
   # outlives the shell: on 2026-11-03 dev had one orphan under pid 1 per dev-sync run, the
   # slow probe being the likely shape under that run's load. With no agent here, ssh uses the
-  # key files and dev-sync's agent row says what the link is; a person restarts the agent.
+  # key files and host-sync's agent row says what the link is; a person restarts the agent.
   #
   # It still exports a path. zshrc sources ~/.zshrc.local next, and the workstation template's
   # block there starts `ssh-agent -s` whenever SSH_AUTH_SOCK is empty. So: the link unless it is
-  # forwarded, else systemd's socket path, as dev-sync and the herdr launcher hand on. A local
+  # forwarded, else systemd's socket path, as host-sync and the herdr launcher hand on. A local
   # agent that was only slow answers later; an absent one means ssh uses the key files.
   if ! { _ssh_shared_host && _ssh_sock_forwarded "$HOME/.ssh/ssh_auth_sock"; } &&
      _ssh_agent_is_valid "$HOME/.ssh/ssh_auth_sock" allow-empty; then

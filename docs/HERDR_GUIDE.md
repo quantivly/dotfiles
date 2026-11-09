@@ -1109,7 +1109,7 @@ outage.
   through the same 0600 hand-off as `LINEAR_API_KEY`, since its `env -i` would drop a unit
   `EnvironmentFile=`); rabota's remote lanes (`-p EnvironmentFile=-…`, so a host without the file
   runs on its own login, if it has one; dev has had none since 11-03 12:36Z, so a lane there
-  without the file fails "not logged in"); and dev-sync's own `claude` calls. To store or renew
+  without the file fails "not logged in"); and host-sync's own `claude` calls. To store or renew
   it, a person runs this in a plain terminal, never a pane an agent reads and never `!` in a
   Claude session:
   ```bash
@@ -1120,7 +1120,7 @@ outage.
   bill it unseen. Paste the token at the hidden prompt and press
   Enter twice: input ends at an empty line, so a token the terminal wrapped is joined back
   together, and the store sends one request with it before writing anything. Then clear that
-  terminal's scrollback. `dev-sync --check` reports the method (which shows the token is in use, not that it works:
+  terminal's scrollback. `host-sync --host dev --check` reports the method (which shows the token is in use, not that it works:
   `claude auth status` does not test it), the file's mode, its age (⚠ from day 335) and how
   many running Claude processes still lack it. What it costs, and
   what is left:
@@ -1129,7 +1129,7 @@ outage.
   - **Plugin MCP OAuth can still race.** `mcpOAuth` sits in the same unlocked
     `.credentials.json`, so two sessions refreshing or signing in together can blank Slack's or
     Notion's entry ([CLAUDE_ACCOUNTS.md](CLAUDE_ACCOUNTS.md)). The symptom is one server needing
-    a sign-in again (dev-sync's `mcp` ⚠), not a logout.
+    a sign-in again (host-sync's `mcp` ⚠), not a logout.
   - **Fail with "not logged in"** since 11-03 12:36Z, when the shared `/login` (`claudeAiOauth`)
     was removed from dev's `.credentials.json` (`mcpOAuth` stays):
     - a nested `claude` in a session's own shell, whose token Claude Code scrubs;
@@ -1138,12 +1138,12 @@ outage.
 
     Never `/login` on dev: it puts the race back. A session started before the token still holds
     the old login, and its next refresh writes `claudeAiOauth` back, as any `/login` does.
-    `dev-sync --check` then shows ⚠ "the shared /login is back on dev" (a `jq -e` test of the key's
+    `host-sync --host dev --check` then shows ⚠ "the shared /login is back on this host" (a `jq -e` test of the key's
     presence that reads nothing else), next to the row counting processes without the token, which
     names the likely writer: restart those, then remove the key again. (`--bare` reads neither
     credential, only `ANTHROPIC_API_KEY` or `apiKeyHelper`, so it cannot race.)
   - **Ready for seats, not using them yet.** `token.env` may be a link to `seats/<seat>.env`
-    (`<seat>` like `quantivly-5`, a fixed rule). Every loader reads through it, dev-sync reports the
+    (`<seat>` like `quantivly-5`, a fixed rule). Every loader reads through it, host-sync reports the
     seat file's mode and `seats/<seat>.created` date and ⚠s a dangling link or a target outside
     `seats/`, and `claude-oauth-store` renews the seat the link names, keeping the link. dev's
     `token.env` is still a file.
@@ -1180,10 +1180,10 @@ outage.
   every process, to the laptop's agent. While any ssh to dev stayed open, each new pane's
   `ssh-add -l` went back to Bitwarden and hung (5 s, 2026-10-14), and anything on the box could
   use the laptop's keys. Nothing on dev needs it: signing reads `~/.ssh/signing_key.pub` and
-  git is HTTPS (next bullet). As defence in depth, a host with `~/.config/dev-sync` (the marker
-  dev-sync's timer keeps) never publishes a forwarded agent (sshd's or VSCode's) through the
+  git is HTTPS (next bullet). As defence in depth, a host with `~/.config/host-sync` (the marker
+  host-sync's timer keeps) never publishes a forwarded agent (sshd's or VSCode's) through the
   link, relinks it to dev's own agent, and bounds every `ssh-add` probe at shell start to 1 s.
-  The laptop has no marker, so nothing changes there. `dev-sync --check`'s `agent` rows report
+  The laptop has no marker, so nothing changes there. `host-sync --host dev --check`'s `agent` rows report
   where the link goes and how fast `ssh-add -l` answers. They never probe a forwarded agent.
 - **Git is HTTPS-only.** `~/.gitconfig.local` rewrites both `git@github.com:` and
   `ssh://git@github.com/` to HTTPS so gh's credential helper (`!gh auth git-credential`, from the
@@ -1240,7 +1240,7 @@ outage.
   still ~10× the highest agent memory ever measured there (whole-slice peak 323 MiB). Raising
   dev's slice was rejected *then*, with 13 GiB of 61 available. It was raised to 16G on
   2026-10-13, for full-time work sessions, after stopping 24 abandoned login-session scopes that
-  had held about 38 GB freed dev to ~50 GiB available (see `scripts/dev-sync`'s `sessions` row).
+  had held about 38 GB freed dev to ~50 GiB available (see `scripts/host-sync`'s `sessions` row).
   **Whichever number you change, change it knowing `budget` still does not read the slice** — it
   admits on the host's load, memory and swap, and `doctor` is the only thing comparing the two.
 - **Read `FragmentPath`, never `MemoryMax` alone.** `systemctl --user show agents.slice -p
@@ -1261,13 +1261,20 @@ outage.
   ```bash
   ssh dev 'cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/agents.slice/memory.peak'
   ```
-- **Keep dev level with `scripts/dev-sync`, run from the laptop.** `--check` (the default)
+- **Keep dev level with `scripts/host-sync --host dev`, run from the laptop.** `--host <alias>`
+  is required (`--here` is the host's own form). `--check` (the default)
   reports drift and writes nothing on dev: dotfiles vs `origin/main`, Claude Code and herdr vs
   the laptop's versions, herdr-draft vs its `main`, the work tenant's plugins, missing and stale
   `~/quantivly` clones, the long-lived Claude token, the effective `agents.slice` cap, and this user's abandoned
   login-session scopes over 200 MB. `--apply` fixes the ✗ rows inside a capped transient scope
-  in `agents.slice`, and arms `dev-sync.timer` on dev, a daily run of the same thing that needs
-  no laptop and no `aws login`. A herdr upgrade installs the laptop's exact release asset,
+  in `agents.slice`, and arms `host-sync.timer` on dev, a daily run of the same thing that needs
+  no laptop and no `aws login`. On a host it has not armed, the `timer` row is a `·` "not armed
+  on this host": information, not drift. `scripts/dev-sync` stays one release as a wrapper for
+  `host-sync --host dev`, and a host armed before the rename is moved by its first `--apply`
+  (the laptop's, or the host's own `dev-sync.timer` tick): `~/.local/state/dev-sync/` moves to
+  `~/.local/state/host-sync/` under the lock, `host-sync.timer` is enabled and read back enabled
+  and active, and only then does the marker move to `~/.config/host-sync/` and `dev-sync.timer`
+  stop and lose its `.wants` link (an `rm`, never `disable`). A herdr upgrade installs the laptop's exact release asset,
   verified against the laptop binary's sha256, and only while no agent runs and **every pane
   is idle at its shell prompt**, because the restart closes every pane; until then it is a ⚠
   naming what is busy. "No pane at all" is not a usable test: while a client is attached, herdr
@@ -1276,22 +1283,23 @@ outage.
   value and never runs sudo;
   those come back as ⚠ rows for a person.
 - **One `--apply` at a time, and no child keeps the lock.** `--apply` holds
-  `~/.local/state/dev-sync/lock` and runs every row with its fd closed, so a child that daemonizes
+  `~/.local/state/host-sync/lock` and runs every row with its fd closed, so a child that daemonizes
   cannot carry the lock past the run. Before that fix, from 10-17 to 11-03, an `ssh-agent` started
   under one run kept it, and every later run on dev exited 2 with "another run holds …". If that
-  message comes back while no dev-sync runs, some process still has the file open:
-  `grep -c ":$(stat -c %i ~/.local/state/dev-sync/lock) " /proc/locks` is 1 while it does. The pid
+  message comes back while no host-sync runs, some process still has the file open:
+  `grep -c ":$(stat -c %i ~/.local/state/host-sync/lock) " /proc/locks` is 1 while it does. The pid
   that line names is the run that took the lock, which may be long gone.
-- **Disarming dev-sync's timer is sticky, and takes three steps on dev.** Deleting the `armed`
+- **Disarming host-sync's timer is sticky, and takes three steps on dev.** Deleting the `armed`
   marker alone leaves an enabled timer whose runs are skipped, which
   [timer health](TIMER_HEALTH.md) rightly reports as broken, and the next laptop `--apply` would
-  re-arm it. Never `systemctl --user disable`: it deletes the dotbot link that is the unit.
+  re-arm it. Never `systemctl --user disable`: it deletes the dotbot link that is the unit. On a
+  host its first `--apply` has moved (the marker is in `~/.config/host-sync/`):
   ```bash
-  touch ~/.config/dev-sync/disarmed && rm -f ~/.config/dev-sync/armed
-  systemctl --user stop dev-sync.timer
-  rm ~/.config/systemd/user/default.target.wants/dev-sync.timer && systemctl --user daemon-reload
+  touch ~/.config/host-sync/disarmed && rm -f ~/.config/host-sync/armed
+  systemctl --user stop host-sync.timer
+  rm ~/.config/systemd/user/default.target.wants/host-sync.timer && systemctl --user daemon-reload
   ```
-  Re-arm by deleting `disarmed` and running `scripts/dev-sync --apply` from the laptop.
+  Re-arm by deleting `disarmed` and running `scripts/host-sync --host dev --apply` from the laptop.
 - **Disconnects leave dev's agents running.** The health-check timeouts in the log are this
   laptop's own suspends, not dev going away; reconnect and the panes are still there.
 - **Close what you spawn, and only that** — `herdr pane close <id>` over ssh, as above.

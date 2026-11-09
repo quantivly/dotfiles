@@ -669,7 +669,7 @@ here_auth() {
     if [[ -z "$logged" ]]; then
         row oper auth "claude auth status gave no answer, so the login state on this host is unknown"
     elif [[ "$logged" != true ]]; then
-        row oper auth "Claude is not logged in on this host ($method); store a long-lived token, HERDR_GUIDE.md \"Working on this host\""
+        row oper auth "Claude is not logged in on this host ($method); store a long-lived token, HERDR_GUIDE.md \"Working on dev\""
     elif [[ "$method" == oauth_token ]]; then
         # auth status does not test the token (any value reads as logged in), so this says
         # it is in use, not that it works.
@@ -677,7 +677,7 @@ here_auth() {
     elif (( TOKEN_LOADED )); then
         row oper auth "a token is stored, but claude reports $method: it is not being used"
     else
-        row oper auth "only the shared /login ($method): sessions that start together can log every session out at once; store a long-lived token, HERDR_GUIDE.md \"Working on this host\""
+        row oper auth "only the shared /login ($method): sessions that start together can log every session out at once; store a long-lived token, HERDR_GUIDE.md \"Working on dev\""
     fi
     if [[ -n "$TOKEN_LINK_BAD" ]]; then
         row oper auth "token.env links to $TOKEN_LINK_BAD, which is not a seat (seats/<name>.env, <name> like quantivly-5): host-sync reads nothing through it; point it at a seat, or make it a file again"
