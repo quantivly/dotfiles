@@ -482,6 +482,86 @@ check "genable_extension: an absent org.gnome.shell schema warns" "$(grep -c -F 
 check "genable_extension: an absent schema writes nothing" "$(stub_value enabled-extensions)" "@as []"
 check "genable_extension: the apply script still exits 0 without the schema" "$APPLY_EXIT" 0
 
+printf '\nresource-pulse-module-closure.sh (which modules each side runs: ruling R23)\n'
+# The two stale-code checks (gnome-status's ⚠ lines and the refresh step's
+# try-restart) follow each side's static import closure: the shell side is
+# extension.js and what it imports, the service side service/main.js and what
+# it imports. The helper is pure bash; these rows run it on the real tree and on
+# fixtures, and a shape it does not understand must be exit 2 with nothing on
+# stdout, never a partial closure that would skip a check.
+CLOSURE_SCRIPT="$DOTFILES/scripts/resource-pulse-module-closure.sh"
+# sorted_closure <extension dir> <entry module>: the closure, sorted, on one line,
+# then "exit=<n>".
+sorted_closure() {
+  local closure_output closure_exit
+  closure_output="$(bash "$CLOSURE_SCRIPT" "$1" "$2" 2>/dev/null)"
+  closure_exit=$?
+  printf '%sexit=%s' "$(LC_ALL=C sort <<<"$closure_output" | tr '\n' ' ')" "$closure_exit"
+}
+# Read from the import lines of today's tree, by hand: the shell side's sixteen
+# modules and the service side's fifteen, six of them (constants, errorLog,
+# history, pressure, protocol, teardown) on both.
+EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
+EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/main.js service/sampler.js '
+check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
+  "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
+  "shell=[${EXPECTED_SHELL_CLOSURE}exit=0] service=[${EXPECTED_SERVICE_CLOSURE}exit=0]"
+
+# A fixture of every shape it follows, and of what it must not: a JSDoc type
+# and a comment naming import('./x.js') are no imports; a multi-line import
+# (with a comment inside), a side-effect import, a re-export, and a dynamic
+# import of a string literal are; import.meta is not; gi:// and resource:///
+# name no file of the extension.
+CLOSURE_FIXTURE_DIR="$WIRING_TMP/closure-fixture"
+mkdir -p "$CLOSURE_FIXTURE_DIR/lib" || fatal "cannot create $CLOSURE_FIXTURE_DIR"
+printf '%s\n' \
+  "// A comment naming import('./commented.js') is no import." \
+  '/**' \
+  " * @param {import('./jsdoc-only.js').Thing} thing - A JSDoc type, no import." \
+  ' */' \
+  "import Gio from 'gi://Gio';" \
+  "import * as Main from 'resource:///org/gnome/shell/ui/main.js';" \
+  'import {' \
+  '    first,' \
+  '    // A comment inside the list.' \
+  '    second,' \
+  "} from './lib/multi-line.js';" \
+  "import './side-effect.js';" \
+  'export {third} from "./re-exported.js";' \
+  "const lazyModule = await import('./lazy.js');" \
+  'const moduleUrl = import.meta.url;' >"$CLOSURE_FIXTURE_DIR/entry.js"
+printf '%s\n' "import {shared} from '../shared.js';" >"$CLOSURE_FIXTURE_DIR/lib/multi-line.js"
+printf '%s\n' "import {shared} from './shared.js';" >"$CLOSURE_FIXTURE_DIR/re-exported.js"
+for closure_fixture_module in side-effect.js lazy.js shared.js jsdoc-only.js commented.js; do
+  : >"$CLOSURE_FIXTURE_DIR/$closure_fixture_module"
+done
+check "closure: follows multi-line, side-effect, re-exported and literal dynamic imports; never a JSDoc type, a comment, import.meta or gi://" \
+  "$(sorted_closure "$CLOSURE_FIXTURE_DIR" entry.js)" \
+  "entry.js lazy.js lib/multi-line.js re-exported.js shared.js side-effect.js exit=0"
+
+# Each shape it cannot follow: exit 2, nothing on stdout, and a line on stderr
+# naming the module and its line.
+# closure_refusal <module source>: "<exit>/<stdout lines>/<stderr names entry.js:line>".
+closure_refusal() {
+  local refusal_dir="$WIRING_TMP/closure-refusal" refusal_stdout refusal_stderr_path refusal_exit
+  rm -rf "$refusal_dir"
+  mkdir -p "$refusal_dir" || fatal "cannot create $refusal_dir"
+  printf '%s\n' "$1" >"$refusal_dir/entry.js"
+  : >"$refusal_dir/present.js"
+  refusal_stderr_path="$refusal_dir/stderr"
+  refusal_stdout="$(bash "$CLOSURE_SCRIPT" "$refusal_dir" entry.js 2>"$refusal_stderr_path")"
+  refusal_exit=$?
+  printf '%s/%s/%s' "$refusal_exit" "$(grep -c . <<<"$refusal_stdout")" \
+    "$(grep -c -E '^resource-pulse-module-closure: entry\.js:[0-9]+: ' "$refusal_stderr_path")"
+}
+closure_refusals="dynamic=$(closure_refusal 'const loaded = await import(modulePath);')"
+closure_refusals+=" unterminated=$(closure_refusal "import {present} from './present.js'")"
+closure_refusals+=" indented=$(closure_refusal "    import {present} from './present.js';")"
+closure_refusals+=" missing=$(closure_refusal "import {missing} from './missing.js';")"
+closure_refusals+=" outside=$(closure_refusal "import {outside} from '../outside.js';")"
+check "closure: a dynamic import of a computed specifier, an import with no ;, one not starting its line, and one naming no file in the extension are each exit 2 with nothing on stdout" \
+  "$closure_refusals" "dynamic=2/0/1 unterminated=2/0/1 indented=2/0/1 missing=2/0/1 outside=2/0/1"
+
 printf '\ngnome-status (zsh, with gsettings, gnome-extensions and gnome-shell stubs)\n'
 # gnome-status (zsh/functions/system.sh) reads gsettings and asks the shell,
 # through gnome-extensions, for the extension's State. With the user extension
@@ -615,19 +695,30 @@ mkdir -p "$GNOME_STATUS_LINKED_HOME/.local/share/gnome-shell/extensions" \
 ln -s "$STATUS_EXTENSION_DIR" "$GNOME_STATUS_LINKED_HOME/.local/share/gnome-shell/extensions/$EXTENSION_UUID" \
   || fatal "cannot link gnome-status's fixture extension"
 # reset_status_extension <card.js mtime> <lib/format.js mtime> <service/main.js mtime>
-# [<stylesheet.css mtime>] (epoch seconds); extension.js and metadata.json are
-# always older than the shell, and the stylesheet is too unless given.
+# [<stylesheet.css mtime>] (epoch seconds); extension.js, metadata.json and the
+# other lib/ modules are always older than the shell, and the stylesheet is too
+# unless given. The modules import one another as the real ones do, in small:
+# extension.js imports card.js (which imports lib/format.js), lib/visibility.js
+# and lib/protocol.js; service/main.js imports lib/protocol.js and lib/cadence.js.
+# So lib/format.js and lib/visibility.js are the shell's alone, lib/cadence.js the
+# service's alone, and lib/protocol.js both sides'.
 reset_status_extension() {
   local stylesheet_mtime="${4:-$BEFORE_SHELL_START_EPOCH}"
   rm -rf "$STATUS_EXTENSION_DIR"
   mkdir -p "$STATUS_EXTENSION_DIR/lib" "$STATUS_EXTENSION_DIR/service" || fatal "cannot create $STATUS_EXTENSION_DIR"
-  : >"$STATUS_EXTENSION_DIR/extension.js"
+  printf '%s\n' "import {PulseCard} from './card.js';" "import {isCardCovered} from './lib/visibility.js';" \
+    "import {PROTOCOL_VERSION} from './lib/protocol.js';" >"$STATUS_EXTENSION_DIR/extension.js"
   : >"$STATUS_EXTENSION_DIR/metadata.json"
-  : >"$STATUS_EXTENSION_DIR/card.js"
+  printf '%s\n' "import {cardText} from './lib/format.js';" >"$STATUS_EXTENSION_DIR/card.js"
   : >"$STATUS_EXTENSION_DIR/stylesheet.css"
   : >"$STATUS_EXTENSION_DIR/lib/format.js"
-  : >"$STATUS_EXTENSION_DIR/service/main.js"
+  : >"$STATUS_EXTENSION_DIR/lib/visibility.js"
+  : >"$STATUS_EXTENSION_DIR/lib/protocol.js"
+  : >"$STATUS_EXTENSION_DIR/lib/cadence.js"
+  printf '%s\n' "import {PROTOCOL_VERSION} from '../lib/protocol.js';" "import {decideAppScan} from '../lib/cadence.js';" \
+    >"$STATUS_EXTENSION_DIR/service/main.js"
   touch -d "@$BEFORE_SHELL_START_EPOCH" "$STATUS_EXTENSION_DIR/extension.js" "$STATUS_EXTENSION_DIR/metadata.json" \
+    "$STATUS_EXTENSION_DIR/lib/visibility.js" "$STATUS_EXTENSION_DIR/lib/protocol.js" "$STATUS_EXTENSION_DIR/lib/cadence.js" \
     || fatal "touch -d failed"
   touch -d "@$1" "$STATUS_EXTENSION_DIR/card.js" || fatal "touch -d @$1 failed"
   touch -d "@$2" "$STATUS_EXTENSION_DIR/lib/format.js" || fatal "touch -d @$2 failed"
@@ -635,6 +726,12 @@ reset_status_extension() {
   touch -d "@$stylesheet_mtime" "$STATUS_EXTENSION_DIR/stylesheet.css" || fatal "touch -d @$stylesheet_mtime failed"
 }
 reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+# status_extension_with_change <module>: the fixture with every file older than
+# the shell but that one module, which is newer.
+status_extension_with_change() {
+  reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+  touch -d "@$AFTER_SHELL_START_EPOCH" "$STATUS_EXTENSION_DIR/$1" || fatal "touch -d @$AFTER_SHELL_START_EPOCH failed"
+}
 
 # A fixed now, and GetState answers whose latest sample is some seconds before it.
 # Each carries a decoy of the same key inside the snapshot, after the top-level
@@ -663,7 +760,8 @@ state_json_sampled() {
     *) state_json_usec_before "$(( $1 * STATUS_USEC_PER_SECOND ))" ;;
   esac
 }
-GNOME_STATUS_STUB_DEFAULTS=(GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
+# DOTFILES_ROOT is this checkout, where gnome-status finds the closure helper.
+GNOME_STATUS_STUB_DEFAULTS=("DOTFILES_ROOT=$DOTFILES" GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
   GNOME_STATUS_GDBUS_MODE=answer "GNOME_STATUS_STATE_JSON=$(state_json_sampled 3)"
   "GNOME_STATUS_NOW_NSEC=$STATUS_NOW_NSEC" "GNOME_STATUS_SERVICE_STARTED_AT=@$SERVICE_STARTED_LONG_AFTER_EPOCH"
   "GNOME_STATUS_SHELL_PID=$$")
@@ -824,22 +922,23 @@ disabled_summary+=" unknown-to-shell=[$(status_enabled_field)]/hint=$(grep -c -F
 check "gnome-status: an extension also in disabled-extensions gets a load hint, and the service is not blamed" \
   "$disabled_summary" "known=[yes]/hint=1/warnings=0 unknown-to-shell=[yes]/hint=1/warnings=0"
 
+# The service side is service/main.js and what it imports (ruling R23): the
+# shared lib/protocol.js and the service's own lib/cadence.js count, the shell's
+# own lib/visibility.js and lib/format.js and the drawing code do not. Each
+# changed module is counted by a needle naming it, so a ⚠ naming another fails.
 older_code_summary=""
 STATUS_SERVICE_STARTED_AT="GNOME_STATUS_SERVICE_STARTED_AT=@$SUITE_STARTED_AT_EPOCH"
-reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$AFTER_SHELL_START_EPOCH"
-gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
-older_code_summary+="service=$(status_warnings_naming 'runs older code: service/main.js changed after it started')"
-reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$AFTER_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
-gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
-older_code_summary+=" lib=$(status_warnings_naming 'runs older code: lib/format.js changed after it started')"
-reset_status_extension "$AFTER_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
-gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
-older_code_summary+=" drawing-only=$(status_warnings_naming 'runs older code')"
+for changed_module in service/main.js lib/cadence.js lib/protocol.js lib/visibility.js lib/format.js card.js; do
+  status_extension_with_change "$changed_module"
+  gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
+  older_code_summary+="$changed_module=$(status_warnings_naming "runs older code: $changed_module changed after it started")/$(status_warnings_naming 'runs older code') "
+done
 reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
 gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
-older_code_summary+=" unchanged=$(status_warnings_naming 'runs older code')"
-check "gnome-status: a file under service/ or lib/ changed after the service started is a ⚠ that it runs older code; a drawing change is not" \
-  "$older_code_summary" "service=1 lib=1 drawing-only=0 unchanged=0"
+older_code_summary+="unchanged=$(status_warnings_naming 'runs older code')"
+check "gnome-status: a module service/main.js runs (itself, lib/cadence.js, or the shared lib/protocol.js) changed after the service started is a ⚠ that it runs older code; a shell-only module or drawing code is not" \
+  "$older_code_summary" \
+  "service/main.js=1/1 lib/cadence.js=1/1 lib/protocol.js=1/1 lib/visibility.js=0/0 lib/format.js=0/0 card.js=0/0 unchanged=0"
 
 older_copy_summary=""
 OLDER_COPY_NEEDLE='the desktop runs an older copy; takes effect at next login'
@@ -868,6 +967,34 @@ older_copy_summary+=" pgrep=[$(grep '^pgrep ' "$GNOME_STATUS_CALLS")]"
 check "gnome-status: drawing code (*.js, lib/) newer than the desktop's gnome-shell says the desktop runs an older copy, and only then" \
   "$older_copy_summary" \
   "card=1 no-shell=0 unknown-to-shell=0 lib=1 service-only=0 css-only=0 unchanged=0 pgrep=[pgrep -o -x -u $(id -u) gnome-shell]"
+# The shell side is extension.js and what it imports (ruling R23): a module only
+# the service runs never makes the desktop's copy older.
+older_copy_by_side_summary=""
+for changed_module in lib/cadence.js lib/visibility.js lib/protocol.js; do
+  status_extension_with_change "$changed_module"
+  gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME"
+  older_copy_by_side_summary+="$changed_module=$(status_warnings_naming "$OLDER_COPY_NEEDLE ($changed_module changed")/$(status_warnings_naming "$OLDER_COPY_NEEDLE") "
+done
+check "gnome-status: the older copy follows extension.js's imports: a service-only module (lib/cadence.js) is none, a shell-only (lib/visibility.js) or shared one (lib/protocol.js) is one" \
+  "$older_copy_by_side_summary" "lib/cadence.js=0/0 lib/visibility.js=1/1 lib/protocol.js=1/1 "
+# A closure it cannot work out (a shape the helper refuses, or no helper at all)
+# must say so on each side: silence would read as "the code is current".
+CANNOT_TELL_COPY_NEEDLE='cannot tell whether the desktop runs an older copy'
+CANNOT_TELL_CODE_NEEDLE='cannot tell whether resource-pulse.service runs older code'
+cannot_tell_summary=""
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+printf '%s\n' 'const loaded = await import(modulePath);' >"$STATUS_EXTENSION_DIR/extension.js"
+printf '%s\n' 'const loaded = await import(modulePath);' >"$STATUS_EXTENSION_DIR/service/main.js"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
+cannot_tell_summary+="refused=$(status_warnings_naming "$CANNOT_TELL_COPY_NEEDLE")/$(status_warnings_naming "$CANNOT_TELL_CODE_NEEDLE")"
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT" \
+  "DOTFILES_ROOT=$WIRING_TMP/no-such-checkout"
+cannot_tell_summary+=" no-helper=$(status_warnings_naming "$CANNOT_TELL_COPY_NEEDLE")/$(status_warnings_naming "$CANNOT_TELL_CODE_NEEDLE")"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
+cannot_tell_summary+=" working=$(status_warnings_naming 'cannot tell')"
+check "gnome-status: an import closure it cannot work out (the helper refuses a shape, or there is none) is a ⚠ on each side that it cannot tell, never silence" \
+  "$cannot_tell_summary" "refused=1/1 no-helper=1/1 working=0"
 
 # Spelled by pieces so this row's own source is not what it finds.
 GNOME_STATUS_FORBIDDEN_PATTERN="cmd""line|env""iron\\b|\\bps -|pgre""p -[a-z]*[al]\\b"
@@ -1264,26 +1391,40 @@ case "$*" in
   "--user try-restart resource-pulse.service") exit "$REFRESH_STUB_RESTART_EXIT" ;;
   *) printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64 ;;
 esac'
-# reset_refresh_extension <service/ mtime> <lib/ mtime> <outside mtime>: a
-# fixture extension directory whose files under service/, under lib/ and outside
-# both carry those epoch mtimes ('' leaves that part out).
+# reset_refresh_extension <service/main.js mtime> <lib/protocol.js mtime> <outside mtime>:
+# a fixture extension directory whose service/main.js, lib/protocol.js, and files
+# outside service/ and lib/ carry those epoch mtimes ('' leaves that file out).
+# Its modules import one another as the real ones do, in small: service/main.js
+# imports lib/protocol.js and lib/cadence.js, extension.js imports lib/protocol.js
+# and lib/visibility.js; those two lib/ modules are older than the start.
 reset_refresh_extension() {
   rm -rf "$REFRESH_EXTENSION_DIR"
-  mkdir -p "$REFRESH_EXTENSION_DIR" || fatal "cannot create $REFRESH_EXTENSION_DIR"
+  mkdir -p "$REFRESH_EXTENSION_DIR/lib" || fatal "cannot create $REFRESH_EXTENSION_DIR"
   if [[ -n "$1" ]]; then
     mkdir -p "$REFRESH_EXTENSION_DIR/service"
-    : >"$REFRESH_EXTENSION_DIR/service/main.js"
+    printf '%s\n' "import {PROTOCOL_VERSION} from '../lib/protocol.js';" \
+      "import {decideAppScan} from '../lib/cadence.js';" >"$REFRESH_EXTENSION_DIR/service/main.js"
     touch -d "@$1" "$REFRESH_EXTENSION_DIR/service/main.js" || fatal "touch -d @$1 failed"
   fi
   if [[ -n "$2" ]]; then
-    mkdir -p "$REFRESH_EXTENSION_DIR/lib"
     : >"$REFRESH_EXTENSION_DIR/lib/protocol.js"
     touch -d "@$2" "$REFRESH_EXTENSION_DIR/lib/protocol.js" || fatal "touch -d @$2 failed"
   fi
-  : >"$REFRESH_EXTENSION_DIR/extension.js"
+  : >"$REFRESH_EXTENSION_DIR/lib/cadence.js"
+  : >"$REFRESH_EXTENSION_DIR/lib/visibility.js"
+  touch -d "@$BEFORE_START_EPOCH" "$REFRESH_EXTENSION_DIR/lib/cadence.js" "$REFRESH_EXTENSION_DIR/lib/visibility.js" \
+    || fatal "touch -d @$BEFORE_START_EPOCH failed"
+  printf '%s\n' "import {PROTOCOL_VERSION} from './lib/protocol.js';" \
+    "import {isCardCovered} from './lib/visibility.js';" >"$REFRESH_EXTENSION_DIR/extension.js"
   : >"$REFRESH_EXTENSION_DIR/stylesheet.css"
   touch -d "@$3" "$REFRESH_EXTENSION_DIR/extension.js" "$REFRESH_EXTENSION_DIR/stylesheet.css" \
     || fatal "touch -d @$3 failed"
+}
+# refresh_extension_with_change <module>: the fixture with every file older than
+# the unit's start but that one module, which is newer.
+refresh_extension_with_change() {
+  reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+  touch -d "@$AFTER_START_EPOCH" "$REFRESH_EXTENSION_DIR/$1" || fatal "touch -d @$AFTER_START_EPOCH failed"
 }
 # run_refresh <manager exit> <reload exit> <ActiveState> <ActiveEnterTimestamp> <try-restart exit> [stub bin]
 # prints "exit=<n> calls=[<call>;...] output=[<stdout+stderr>]".
@@ -1333,6 +1474,17 @@ check "refresh: a file under service/ or lib/ newer than the unit's start try-re
 reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$AFTER_START_EPOCH"
 check "refresh: a change outside service/ and lib/ (the drawing side) never restarts it, so the histories survive" \
   "$(run_refresh 0 0 active "$STARTED_AT" 0)" "exit=0 calls=[$CALLS_UP_TO_START_TIME] output=[]"
+# Only the modules the service runs count (ruling R23): service/main.js and what
+# it imports, whether the service alone imports a module or both sides do.
+refresh_by_side_summary=""
+for changed_module in lib/cadence.js lib/visibility.js lib/protocol.js; do
+  refresh_extension_with_change "$changed_module"
+  refresh_side_run="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+  refresh_by_side_summary+="$changed_module:${refresh_side_run%% output=*} "
+done
+check "refresh: a module only the service runs (lib/cadence.js) or a shared one (lib/protocol.js) restarts it; one only the shell runs (lib/visibility.js) does not" \
+  "$refresh_by_side_summary" \
+  "lib/cadence.js:exit=0 calls=[$CALLS_WITH_RESTART] lib/visibility.js:exit=0 calls=[$CALLS_UP_TO_START_TIME] lib/protocol.js:exit=0 calls=[$CALLS_WITH_RESTART] "
 reset_refresh_extension "$UNIT_STARTED_AT_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
 same_second_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
 reset_refresh_extension "$((UNIT_STARTED_AT_EPOCH + 1))" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
@@ -1369,12 +1521,13 @@ restart_failed_summary="$(run_refresh 0 0 active "$STARTED_AT" 1)"
 check "refresh: a failed try-restart warns, naming it, and returns 0" \
   "${restart_failed_summary%% output=*} warned=$(warnings_naming "$restart_failed_summary" try-restart)" \
   "exit=0 calls=[$CALLS_WITH_RESTART] warned=1"
-# service/ missing while lib/ holds a newer file: find lists the newer file AND
-# fails, and a partial answer must never decide a restart.
+# service/main.js missing while lib/ holds a newer module: which modules the
+# service runs cannot be worked out, and a partial answer must never decide a
+# restart.
 reset_refresh_extension '' "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH"
 unlistable_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
-check "refresh: a watched directory that cannot be searched warns, naming it, restarts nothing and returns 0" \
-  "${unlistable_summary%% output=*} warned=$(warnings_naming "$unlistable_summary" 'cannot search')" \
+check "refresh: when it cannot work out which modules the service runs (service/main.js missing, a newer lib/ module beside it), it warns, naming that, restarts nothing and returns 0" \
+  "${unlistable_summary%% output=*} warned=$(warnings_naming "$unlistable_summary" 'cannot work out which modules it runs')" \
   "exit=0 calls=[$CALLS_UP_TO_START_TIME] warned=1"
 # A find that warns on stderr yet succeeds, listing nothing: its warning must
 # reach the terminal, and never be read as a changed file.
@@ -2283,7 +2436,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=466
+EXPECTED_ROWS=472
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

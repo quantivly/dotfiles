@@ -10,11 +10,13 @@
 #
 # Why only then: a restart resets the service's histories (the top-bar graph
 # and the card's), and deploys happen several times a day, most of them leaving
-# the data side alone. So the unit is try-restarted only when a file under the
-# extension's service/ or lib/ (the only code the service runs) has an mtime
-# newer than the unit's ActiveEnterTimestamp. A change to the drawing side
-# (extension.js, card.js, the stylesheet) never restarts it; the shell picks
-# that up at its next login.
+# the data side alone. So the unit is try-restarted only when a module the
+# service runs has an mtime newer than the unit's ActiveEnterTimestamp: its
+# entry, service/main.js, and every module that imports, directly or not, as
+# scripts/resource-pulse-module-closure.sh lists them (ruling R23). A change to
+# the drawing side (extension.js, card.js, a lib/ module only the shell
+# imports, the stylesheet) never restarts it; the shell picks that up at its
+# next login. A lib/ module both sides import counts for both.
 #
 # What it does, in order, and what it says:
 #   - no systemctl, or no reachable user manager (a server, a container, CI):
@@ -24,12 +26,12 @@
 #     which systemd reports as inactive):
 #     nothing more, silently, exit 0. A stopped service stays stopped: only the
 #     extension starts it;
-#   - active, nothing under service/ or lib/ newer than its start: silent, exit 0;
-#   - active, something newer: `systemctl --user try-restart`, one ✓ line.
-# A failure (the reload, a state or start time it cannot read, a directory it
-# cannot search, the restart) prints a ⚠ line on stderr naming the step and what
-# to run, restarts nothing it could not decide about (a partial answer never
-# decides a restart), and still exits 0. It never fails the install: under
+#   - active, no module it runs newer than its start: silent, exit 0;
+#   - active, one newer: `systemctl --user try-restart`, one ✓ line.
+# A failure (the reload, a state or start time it cannot read, modules it
+# cannot work out or search, the restart) prints a ⚠ line on stderr naming the
+# step and what to run, restarts nothing it could not decide about (a partial
+# answer never decides a restart), and still exits 0. It never fails the install: under
 # `set -e` an exit 1 here would abort the rest of ./install for every desktop
 # user, for a service that at worst keeps running its previous code, which is
 # what reconcile-systemd-units.sh decides for its own failures too.
@@ -49,8 +51,9 @@
 set -uo pipefail
 
 SERVICE_UNIT="resource-pulse.service"
-# Only the code the service runs: the drawing side is the shell's, read at login.
-WATCHED_SUBDIRECTORIES=(service lib)
+# Only the code the service runs, this module and what it imports (the closure
+# helper below): the drawing side is the shell's, read at login.
+SERVICE_ENTRY_MODULE="service/main.js"
 ACTIVE_STATE="active"
 START_TIME_PATTERN='^@([0-9]+)$'
 # Pure bash, no dirname: the script must run with no tool on PATH at all, as in a
@@ -63,6 +66,7 @@ else
 fi
 DEFAULT_EXTENSION_DIR="$SCRIPT_DIRECTORY/../gnome-shell/extensions/resource-pulse@dotfiles"
 EXTENSION_DIR="${RESOURCE_PULSE_EXTENSION_DIR:-$DEFAULT_EXTENSION_DIR}"
+MODULE_CLOSURE_SCRIPT="$SCRIPT_DIRECTORY/resource-pulse-module-closure.sh"
 
 # warn <message>: one ⚠ line on stderr.
 warn() { printf '  ⚠ %s: %s\n' "$SERVICE_UNIT" "$*" >&2; }
@@ -86,22 +90,32 @@ unit_started_at_epoch() {
   printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
-# first_file_changed_since <epoch>: prints the first file under the watched
-# subdirectories modified after that second began, or nothing; fails when any
-# of them cannot be searched, whatever it found in the others. find's stderr
-# goes straight to this script's stderr, never into the list, so a warning
-# from find can never pass for a changed file.
-first_file_changed_since() {
-  local started_at_epoch="$1" watched_paths=() subdirectory changed_files
-  for subdirectory in "${WATCHED_SUBDIRECTORIES[@]}"; do
-    watched_paths+=("$EXTENSION_DIR/$subdirectory")
-  done
-  changed_files="$(find "${watched_paths[@]}" -type f -newermt "@$started_at_epoch")" || return 1
-  printf '%s\n' "${changed_files%%$'\n'*}"
+# service_module_list: the modules the service runs, one per line, relative to
+# EXTENSION_DIR: service/main.js and what it imports, from the closure helper
+# (run by this same bash). Fails, with nothing on stdout, when the helper cannot
+# say; its reason goes straight to this script's stderr.
+service_module_list() {
+  "$BASH" "$MODULE_CLOSURE_SCRIPT" "$EXTENSION_DIR" "$SERVICE_ENTRY_MODULE"
+}
+
+# first_module_changed_since <epoch> <module list>: prints the first of those
+# modules modified after that second began, relative to EXTENSION_DIR, or
+# nothing; fails when any of them cannot be searched, whatever it found in the
+# others. find's stderr goes straight to this script's stderr, never into the
+# list, so a warning from find can never pass for a changed file.
+first_module_changed_since() {
+  local started_at_epoch="$1" module_list="$2" module_path changed_files first_changed_path
+  local -a module_paths=()
+  while IFS= read -r module_path; do
+    module_paths+=("$EXTENSION_DIR/$module_path")
+  done <<<"$module_list"
+  changed_files="$(find "${module_paths[@]}" -maxdepth 0 -type f -newermt "@$started_at_epoch")" || return 1
+  first_changed_path="${changed_files%%$'\n'*}"
+  printf '%s\n' "${first_changed_path#"$EXTENSION_DIR"/}"
 }
 
 main() {
-  local active_state started_at_epoch changed_file
+  local active_state started_at_epoch module_list changed_file
   local manual_restart_hint="if its code changed, run: systemctl --user try-restart $SERVICE_UNIT"
 
   # A server, a container and a CI runner legitimately have none.
@@ -123,8 +137,12 @@ main() {
     warn "cannot parse when it started (ActiveEnterTimestamp), so it was not restarted — $manual_restart_hint"
     return 0
   fi
-  if ! changed_file="$(first_file_changed_since "$started_at_epoch")"; then
-    warn "cannot search $EXTENSION_DIR's ${WATCHED_SUBDIRECTORIES[*]}, so it was not restarted — $manual_restart_hint"
+  if ! module_list="$(service_module_list)"; then
+    warn "cannot work out which modules it runs ($SERVICE_ENTRY_MODULE and what it imports, under $EXTENSION_DIR), so it was not restarted — $manual_restart_hint"
+    return 0
+  fi
+  if ! changed_file="$(first_module_changed_since "$started_at_epoch" "$module_list")"; then
+    warn "cannot search the modules it runs under $EXTENSION_DIR, so it was not restarted — $manual_restart_hint"
     return 0
   fi
   [[ -n "$changed_file" ]] || return 0
@@ -134,7 +152,7 @@ main() {
     return 0
   fi
   printf '  ✓ %s restarted: %s changed since it started (its histories start again)\n' \
-    "$SERVICE_UNIT" "${changed_file#"$EXTENSION_DIR"/}"
+    "$SERVICE_UNIT" "$changed_file"
 }
 
 main "$@"

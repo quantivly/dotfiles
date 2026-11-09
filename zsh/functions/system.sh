@@ -2384,6 +2384,11 @@ gnome-status() {
     rp_bus_name="io.github.quantivly.dotfiles.ResourcePulse1"
     rp_object_path="/io/github/quantivly/dotfiles/ResourcePulse1"
     rp_get_state_method="$rp_bus_name.GetState"
+    # Each side of the extension runs its entry module and every module that
+    # imports, as this checkout's closure helper lists them (ruling R23).
+    rp_module_closure_script="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/resource-pulse-module-closure.sh"
+    rp_shell_entry_module="extension.js"
+    rp_service_entry_module="service/main.js"
     # gdbus's own reply timeout, and the hard bound `timeout` puts on every call
     # to systemctl or gdbus, so gnome-status never hangs on a wedged manager or bus.
     rp_reply_timeout_seconds=2
@@ -2468,6 +2473,23 @@ gnome-status() {
         text="${text//\\\'/\'}"
       fi
       print -r -- "${text//\\\\/\\}"
+    }
+
+    # rp_first_module_changed_since <entry module> <epoch seconds>: prints the
+    # first module of that entry's import closure (relative to the extension
+    # dir) modified after that second began, or nothing. Fails when the closure
+    # cannot be worked out or its modules cannot be searched: a partial answer
+    # would read as "nothing changed".
+    rp_first_module_changed_since() {
+      local module_list changed_paths
+      local -a module_paths
+      module_list="$(bash "$rp_module_closure_script" "$rp_extension_dir" "$1" 2>/dev/null)" || return 1
+      module_paths=("${(@f)module_list}")
+      (( ${#module_paths} > 0 )) || return 1
+      changed_paths="$(find -H "$rp_extension_dir/"${^module_paths} -maxdepth 0 -type f -newermt "@$2" \
+        -print 2>/dev/null)" || return 1
+      [ -n "$changed_paths" ] || return 0
+      print -r -- "${${changed_paths%%$'\n'*}#"$rp_extension_dir"/}"
     }
 
     # rp_describe_running_service: asks the active service for GetState and sets
@@ -2606,36 +2628,35 @@ gnome-status() {
       esac
     fi
     echo "  service: $rp_service_line"
-    # Data side: a file under service/ or lib/ changed after the service started
-    # means it runs older code than the checkout.
+    # Data side: a module the service runs (service/main.js and what it imports,
+    # ruling R23) changed after the service started means it runs older code
+    # than the checkout. A lib/ module only the shell imports does not count.
     if [ "$rp_service_state" = "active" ] && [ "$rp_linked" = "yes" ]; then
       rp_service_started_at="$("${rp_call_limit[@]}" systemctl --user show -p ActiveEnterTimestamp --value \
         --timestamp=unix "$rp_service_unit" 2>/dev/null)"
-      if [[ "$rp_service_started_at" == @<-> ]] &&
-        rp_changed_files="$(find -H "$rp_extension_dir/service" "$rp_extension_dir/lib" -type f \
-          -newermt "$rp_service_started_at" -print 2>/dev/null)" && [ -n "$rp_changed_files" ]; then
-        rp_changed_file="${rp_changed_files%%$'\n'*}"
-        rp_warnings+=("$rp_service_unit runs older code: ${rp_changed_file#"$rp_extension_dir"/} changed after it started — systemctl --user try-restart $rp_service_unit (its histories start again)")
+      if [[ "$rp_service_started_at" == @<-> ]]; then
+        if ! rp_changed_file="$(rp_first_module_changed_since "$rp_service_entry_module" "${rp_service_started_at#@}")"; then
+          rp_warnings+=("cannot tell whether $rp_service_unit runs older code: what $rp_service_entry_module imports could not be worked out or searched — bash $rp_module_closure_script $rp_extension_dir $rp_service_entry_module")
+        elif [ -n "$rp_changed_file" ]; then
+          rp_warnings+=("$rp_service_unit runs older code: $rp_changed_file changed after it started — systemctl --user try-restart $rp_service_unit (its histories start again)")
+        fi
       fi
     fi
-    # Drawing side: the shell loads the extension's JS once per login, so drawing
-    # code (the *.js beside extension.js, and lib/) changed after the desktop's
-    # gnome-shell started is not what runs. The stylesheet does not count: GNOME
+    # Drawing side: the shell loads the extension's JS once per login, so a
+    # module it runs (extension.js and what it imports, ruling R23) changed after
+    # the desktop's gnome-shell started is not what runs. A lib/ module only the
+    # service imports does not count, and neither does the stylesheet: GNOME
     # re-reads it at every enable (ruling R20). The oldest gnome-shell of this
     # user is the desktop's (a nested test shell is younger); pgrep prints pids
     # only. Whole seconds: a change within the second the shell started also warns.
     if [ "$rp_linked" = "yes" ] && [ "$rp_extension_runs_it" = "yes" ] && [ "$rp_shell_knows_it" = "yes" ] &&
       has_command pgrep; then
       rp_shell_pid="$(pgrep -o -x -u "$UID" gnome-shell 2>/dev/null)"
-      if rp_shell_started_at="$(rp_started_at_epoch "$rp_shell_pid")" &&
-        rp_changed_files="$(find -H "$rp_extension_dir" -maxdepth 1 -type f -name '*.js' \
-          -newermt "@$rp_shell_started_at" -print 2>/dev/null)" &&
-        rp_changed_lib_files="$(find -H "$rp_extension_dir/lib" -type f \
-          -newermt "@$rp_shell_started_at" -print 2>/dev/null)"; then
-        rp_changed_file="${rp_changed_files%%$'\n'*}"
-        [ -n "$rp_changed_file" ] || rp_changed_file="${rp_changed_lib_files%%$'\n'*}"
-        if [ -n "$rp_changed_file" ]; then
-          rp_warnings+=("the desktop runs an older copy; takes effect at next login (${rp_changed_file#"$rp_extension_dir"/} changed after this login)")
+      if rp_shell_started_at="$(rp_started_at_epoch "$rp_shell_pid")"; then
+        if ! rp_changed_file="$(rp_first_module_changed_since "$rp_shell_entry_module" "$rp_shell_started_at")"; then
+          rp_warnings+=("cannot tell whether the desktop runs an older copy: what $rp_shell_entry_module imports could not be worked out or searched — bash $rp_module_closure_script $rp_extension_dir $rp_shell_entry_module")
+        elif [ -n "$rp_changed_file" ]; then
+          rp_warnings+=("the desktop runs an older copy; takes effect at next login ($rp_changed_file changed after this login)")
         fi
       fi
     fi

@@ -93,16 +93,20 @@ only once the service owns its bus name, within 15 s; until then the extension r
 logout, and `systemctl --user stop resource-pulse.service` stops it at once.
 
 **Deploys.** `./install` links the unit, runs `systemctl --user daemon-reload`, and restarts the
-service only when a file under `service/` or `lib/` changed after it started
+service only when a module it runs changed after it started
 (`scripts/resource-pulse-service-refresh.sh`, which warns on a failure and never fails the install).
-So:
+Each side runs its entry and every module that imports, directly or not, as
+`scripts/resource-pulse-module-closure.sh` lists them: the service `service/main.js`, the shell
+`extension.js`. So:
 
-- a **data-side** change (`service/`, `lib/`) is live within seconds, with no logout. The extension
-  sees the service come back and reads its state again; the restart starts both histories over;
-- a **drawing** change (`extension.js`, `card.js`, `indicator.js`, `graph.js`, `pulseClient.js`) waits
-  for the next login, because the shell loads an extension's JS once per login. `lib/` is both: the
-  service runs it at once, the shell at the next login. `gnome-status` says when the desktop runs an
-  older copy of that code;
+- a **data-side** change (`service/`, or a `lib/` module the service imports, such as
+  `lib/cadence.js`) is live within seconds, with no logout. The extension sees the service come back
+  and reads its state again; the restart starts both histories over;
+- a **drawing** change (`extension.js`, `card.js`, `indicator.js`, `graph.js`, `pulseClient.js`, or a
+  `lib/` module only the shell imports, such as `lib/visibility.js`) waits for the next login, because
+  the shell loads an extension's JS once per login, and never restarts the service. A `lib/` module both
+  import (`lib/protocol.js`) is both: the service runs it at once, the shell at the next login.
+  `gnome-status` says when the desktop runs an older copy of that code;
 - a **stylesheet** change is live at the next enable (the next lock or blank), since GNOME re-reads
   the stylesheet at every enable, while the JS that sets its classes waits for the login. So the rule
   this repo follows is that a stylesheet change only adds classes, and never renames or removes one
@@ -209,12 +213,14 @@ Resource Pulse: linked=yes enabled=yes state=ACTIVE
     **starting**;
   - it does **not answer**, or it has **not sampled for more than 6 s**, compared to the
     microsecond as the extension does (it shows no data then);
-  - it **runs older code** than the checkout: a file under `service/` or `lib/` changed after it
-    started, as when the deploy's restart failed (`systemctl --user try-restart
+  - it **runs older code** than the checkout: a module it runs (`service/main.js` or one it imports)
+    changed after it started, as when the deploy's restart failed (`systemctl --user try-restart
     resource-pulse.service`);
-  - **the desktop runs an older copy**: drawing code (a `*.js` beside `extension.js`, or a file under
-    `lib/`) changed after this login, and takes effect at the next. A stylesheet change does not count,
-    since GNOME re-reads the stylesheet at every enable.
+  - **the desktop runs an older copy**: a module the shell runs (`extension.js` or one it imports)
+    changed after this login, and takes effect at the next. A module only the service imports does not
+    count, and neither does a stylesheet change, since GNOME re-reads the stylesheet at every enable;
+  - it **cannot tell** either of the two above, because what `extension.js` or `service/main.js`
+    imports could not be worked out (the line names the helper to run, which says why).
 
 The service logs to its unit's journal, `journalctl --user -u resource-pulse.service`; the extension
 logs under `resource-pulse:` in the shell's, `journalctl --user -b -g resource-pulse`. Each distinct
@@ -293,7 +299,7 @@ shorter history. Before the service existed the sampling ran inside gnome-shell,
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (466 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (472 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
 version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the
