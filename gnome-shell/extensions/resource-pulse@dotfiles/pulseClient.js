@@ -281,6 +281,9 @@ export class PulseClient {
      * @param {RateLimitedLogger} [options.errorLog] - Where failures go. The extension passes one that outlives every
      *     client (it makes one per enable: every blank and every lock), so a lasting failure is logged once per
      *     10 minutes, not once per enable.
+     * @param {string|null} [options.lastGoodClockLabel] - 'HH:MM' of the last snapshot with data that an earlier
+     *     client saw. The extension keeps it across enables, so a client made after an unlock with the service down
+     *     says "no data since" that time rather than a bare "no data"; good data moves it on as usual.
      */
     constructor({
         busType = Gio.BusType.SESSION,
@@ -290,6 +293,7 @@ export class PulseClient {
         nowUsec = () => GLib.get_monotonic_time(),
         timeouts = GLIB_TIMEOUTS,
         errorLog = new RateLimitedLogger({nowUsec, write: line => console.warn(line)}),
+        lastGoodClockLabel = null,
     } = {}) {
         this._busType = busType;
         this._connection = connection;
@@ -327,7 +331,7 @@ export class PulseClient {
         // watches leave with it).
         this._isDetailWatchHeld = false;
         this._latestSnapshot = null;
-        this._lastGoodClockLabel = null;
+        this._lastGoodClockLabel = lastGoodClockLabel;
         this._cpuHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
         this._memoryHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
         this._listeners = new Map();

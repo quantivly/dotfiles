@@ -286,6 +286,26 @@ check "extension.js tears down in guarded steps (runEveryStep), destroying the c
 # errors. Each kind has one limiter that outlives every enable.
 check "extension.js hands every client one rate-limited logger that writes warnings and spans enables" \
   "$(grep -c -F 'errorLog: this._clientLog' "$EXTENSION_JS" 2>/dev/null):$(grep -c -E 'this\._clientLog = new RateLimitedLogger\(\{nowUsec, write: line => console\.warn\(line\)\}\)' "$EXTENSION_JS" 2>/dev/null)" "1:1"
+# A client lives for one enable (every unlock and blank makes a new one), so the
+# last good clock label is kept in the extension, as the loggers are: set once,
+# saved from the client before teardown destroys it and never reset there, and
+# seeded into each new client. After an unlock with the service down the
+# surfaces then say "no data since HH:MM", not a bare "no data". The bodies are
+# read from each method's declaration line to the closing brace at its indent.
+method_body_lines() { sed -n "/^    $1 {\$/,/^    }\$/p" "$EXTENSION_JS" 2>/dev/null | sed 's/^[[:space:]]*//'; }
+LAST_GOOD_LABEL_SAVE_STATEMENT='this._lastGoodClockLabel = client?.lastGoodClockLabel ?? this._lastGoodClockLabel;'
+CLIENT_DESTROY_STEP="{name: 'destroy the client', run: () => client?.destroy()},"
+teardown_lines="$(method_body_lines '_tearDown()')"
+label_save_line_number="$(grep -n -x -F "$LAST_GOOD_LABEL_SAVE_STATEMENT" <<<"$teardown_lines" | head -n 1 | cut -d: -f1)"
+client_destroy_line_number="$(grep -n -x -F "$CLIENT_DESTROY_STEP" <<<"$teardown_lines" | head -n 1 | cut -d: -f1)"
+label_saved_before_destroy="no"
+if [[ -n "$label_save_line_number" && -n "$client_destroy_line_number" ]] \
+  && (( label_save_line_number < client_destroy_line_number )); then
+  label_saved_before_destroy="yes"
+fi
+check "extension.js keeps the last good clock label across enables: set once, saved from the client before teardown destroys it, never reset there, and seeded into each new client" \
+  "set=$(method_body_lines 'constructor(metadata)' | grep -c -x -F 'this._lastGoodClockLabel = null;') saved-before-destroy=$label_saved_before_destroy reset-in-teardown=$(grep -c -E '^this\._lastGoodClockLabel = null;' <<<"$teardown_lines") seeded=$(method_body_lines 'enable()' | grep -c -F 'lastGoodClockLabel: this._lastGoodClockLabel')" \
+  "set=1 saved-before-destroy=yes reset-in-teardown=0 seeded=1"
 check "indicator.js re-places a shown hover label when its width or the display scale changes" \
   "$(grep -c -E "'notify::(width|scale-factor)'" "$EXT_DIR/indicator.js" 2>/dev/null)" 2
 # notify::width is emitted during allocation, and moving an actor then makes
@@ -2263,7 +2283,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=453
+EXPECTED_ROWS=455
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

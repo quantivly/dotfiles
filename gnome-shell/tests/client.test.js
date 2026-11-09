@@ -38,6 +38,8 @@ const SAMPLE_SIGNAL = 'Sample';
 const NAME_OWNER_NOTIFY_SIGNAL = 'notify::g-name-owner';
 const PROXY_SIGNAL = 'g-signal';
 const NO_DATA_TEXT = 'no data';
+/** The last good time a previous client saw, before a lock or a blank: earlier than any snapshot here. */
+const SEEDED_CLOCK_LABEL = '13:58';
 /** Array.at's index of the last element. */
 const LATEST_ATTEMPT_INDEX = -1;
 const FIRST_ATTEMPT_INDEX = 0;
@@ -353,9 +355,10 @@ class FakeServiceStarter {
  * @param {object} [options] - The fixture's shape.
  * @param {string|null} [options.nameOwner] - The service's owner when the proxy arrives; null for none.
  * @param {boolean} [options.isProxyDelivered] - False to leave the proxy still being created.
+ * @param {string|null} [options.lastGoodClockLabel] - The label the extension seeds the client with; none by default.
  * @returns {object} {client, clock, timeouts, serviceStarter, proxyFactory, proxy, notifications, logged}.
  */
-function makeClientFixture({nameOwner = OWNER, isProxyDelivered = true} = {}) {
+function makeClientFixture({nameOwner = OWNER, isProxyDelivered = true, lastGoodClockLabel = undefined} = {}) {
     const clock = {nowUsec: START_USEC};
     const timeouts = new FakeTimeouts();
     const serviceStarter = new FakeServiceStarter();
@@ -368,6 +371,7 @@ function makeClientFixture({nameOwner = OWNER, isProxyDelivered = true} = {}) {
         nowUsec: () => clock.nowUsec,
         timeouts,
         errorLog: new RateLimitedLogger({nowUsec: () => clock.nowUsec, write: line => logged.push(line)}),
+        lastGoodClockLabel,
     });
     const notifications = [];
     client.addListener(snapshot => notifications.push(snapshot));
@@ -908,6 +912,19 @@ test('client: "no data since" moves only with a snapshot that has numbers and a 
         labelAfterServiceNoData, labelAfterUnlabelled: fixture.client.lastGoodClockLabel,
         latestCpuBusyPercent: fixture.client.latestSnapshot.cpuBusyPercent,
     }, {labelAfterServiceNoData: '14:02', labelAfterUnlabelled: '14:02', latestCpuBusyPercent: 50});
+});
+
+test('client: seeded with the previous client\'s last good clock label (the extension keeps it across enables), a ' +
+    'new client says "no data since" that time before any data, and good data moves it on', () => {
+    const fixture = makeClientFixture({lastGoodClockLabel: SEEDED_CLOCK_LABEL});
+    const labelBeforeData = fixture.client.lastGoodClockLabel;
+    const cpuTextBeforeData = cardText(fixture.client.latestSnapshot, fixture.client.lastGoodClockLabel).cpuValue;
+    fixture.serviceStarter.succeed();
+    answerState(fixture.proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    assertEqual({labelBeforeData, cpuTextBeforeData, labelAfterData: fixture.client.lastGoodClockLabel}, {
+        labelBeforeData: SEEDED_CLOCK_LABEL, cpuTextBeforeData: `${NO_DATA_TEXT} since ${SEEDED_CLOCK_LABEL}`,
+        labelAfterData: STATE_SNAPSHOT.takenAtClockLabel,
+    });
 });
 
 test('client: a GetState answer from an owner that has since left is dropped; the new owner\'s state is drawn', () => {

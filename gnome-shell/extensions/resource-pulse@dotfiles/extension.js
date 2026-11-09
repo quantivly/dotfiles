@@ -97,6 +97,10 @@ export default class ResourcePulseExtension extends Extension {
         const nowUsec = () => GLib.get_monotonic_time();
         this._errorLog = new RateLimitedLogger({nowUsec, write: line => console.error(line)});
         this._clientLog = new RateLimitedLogger({nowUsec, write: line => console.warn(line)});
+        // Kept across enable() and disable() as well, the same way: 'HH:MM' of the last snapshot with data, saved from
+        // each client as teardown destroys it and seeded into the next. A client lives for one enable, so without it
+        // the surfaces would say a bare "no data" after an unlock with the service down, rather than "no data since".
+        this._lastGoodClockLabel = null;
     }
 
     /**
@@ -111,7 +115,7 @@ export default class ResourcePulseExtension extends Extension {
         // GNOME never enables twice without disabling in between; if it ever did, replace rather than duplicate.
         this._tearDown();
         try {
-            this._client = new PulseClient({errorLog: this._clientLog});
+            this._client = new PulseClient({errorLog: this._clientLog, lastGoodClockLabel: this._lastGoodClockLabel});
             this._followOverviewWithDetailWatch();
             this._indicator = new PulseIndicator(this._client);
             Main.panel.addToStatusArea(this.uuid, this._indicator, systemMenuPanelIndex(), PANEL_BOX);
@@ -461,7 +465,8 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Undoes enable(), whatever it got to, and never throws: clears every field; then disconnects from the overview,
+     * Undoes enable(), whatever it got to, and never throws: keeps the client's last good clock label for the next
+     * enable (a getter's read, before anything is destroyed); clears every field; then disconnects from the overview,
      * the layout manager, the display, the window manager, the workspace manager, the card and the dropdown menu, removes the covered
      * check's client listener, its pending check and its re-check timer, and a pending card placement; then destroys
      * the card (which also takes it out of the background group), the indicator and the client. Each step runs under
@@ -475,6 +480,7 @@ export default class ResourcePulseExtension extends Extension {
         const client = this._client;
         const cardCoverListenerId = this._cardCoverListenerId;
         const dropdownMenu = this._dropdownMenu;
+        this._lastGoodClockLabel = client?.lastGoodClockLabel ?? this._lastGoodClockLabel;
         // Cleared first: whatever a step below throws, no later enable() or disable() finds a half-destroyed part.
         this._card = null;
         this._indicator = null;
