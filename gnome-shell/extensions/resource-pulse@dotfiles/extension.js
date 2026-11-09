@@ -59,8 +59,6 @@ const IS_CARD_VISIBLE_BEFORE_COVER_CHECK = true;
  * whole screen, a dock or a popup.
  */
 const COVERING_WINDOW_TYPES = new Set([Meta.WindowType.NORMAL, Meta.WindowType.DIALOG]);
-/** The dropdown counts as closed until the indicator has one. */
-const IS_DROPDOWN_OPEN_UNTIL_DROPDOWN_EXISTS = false;
 
 /**
  * The index in its panel box of the system menu (quick settings), so an indicator inserted there sits just left
@@ -90,6 +88,8 @@ export default class ResourcePulseExtension extends Extension {
         this._coverRecheckSourceId = null;
         this._isOverviewVisible = false;
         this._isCardVisible = IS_CARD_VISIBLE_BEFORE_COVER_CHECK;
+        this._dropdownMenu = null;
+        this._isDropdownOpen = false;
         // Both limiters are kept across enable() and disable(), so a failure that repeats on every enable (every
         // unlock and blank) is still logged at most once per 10 minutes. The extension's own failures (a teardown
         // step that threw) leave it broken: errors. The client's (StartUnit refused, a call timed out, a payload it
@@ -115,6 +115,7 @@ export default class ResourcePulseExtension extends Extension {
             this._followOverviewWithDetailWatch();
             this._indicator = new PulseIndicator(this._client);
             Main.panel.addToStatusArea(this.uuid, this._indicator, systemMenuPanelIndex(), PANEL_BOX);
+            this._followDropdown();
             this._addCard();
             this._followCardCover();
             this._client.start();
@@ -152,6 +153,30 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
+     * Follows the indicator's menu opening and closing: the dropdown shows the apps line like the desktop card, so
+     * it wants the detail watch while open. Disconnected in _tearDown.
+     *
+     * @returns {void}
+     */
+    _followDropdown() {
+        this._dropdownMenu = this._indicator.menu;
+        this._dropdownMenu.connectObject(
+            'open-state-changed', (_menu, isOpen) => this._onDropdownOpenStateChanged(isOpen),
+            this);
+    }
+
+    /**
+     * Records whether the dropdown is open, and updates the detail watch.
+     *
+     * @param {boolean} isOpen - True once the menu is open, false once it is closed.
+     * @returns {void}
+     */
+    _onDropdownOpenStateChanged(isOpen) {
+        this._isDropdownOpen = isOpen;
+        this._syncDetailWatch();
+    }
+
+    /**
      * Once the overview has closed, records it and checks the cover again: windows may have been closed, moved or
      * minimized from the overview.
      *
@@ -175,14 +200,14 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Tells the client whether a detail watch is wanted (lib/wiring.js isDetailWatchWanted), from whether the card is
-     * covered and whether the overview is showing, if there is a client. The client sends only a change.
+     * covered, whether the overview is showing and whether the dropdown is open, if there is a client. The client sends only a change.
      *
      * @returns {void}
      */
     _syncDetailWatch() {
         const isWanted = isDetailWatchWanted({
             isCardVisible: this._isCardVisible,
-            isDropdownOpen: IS_DROPDOWN_OPEN_UNTIL_DROPDOWN_EXISTS,
+            isDropdownOpen: this._isDropdownOpen,
             isOverviewVisible: this._isOverviewVisible,
         });
         this._client?.setDetailWatchWanted(isWanted);
@@ -437,7 +462,7 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Undoes enable(), whatever it got to, and never throws: clears every field; then disconnects from the overview,
-     * the layout manager, the display, the window manager, the workspace manager and the card, removes the covered
+     * the layout manager, the display, the window manager, the workspace manager, the card and the dropdown menu, removes the covered
      * check's client listener, its pending check and its re-check timer, and a pending card placement; then destroys
      * the card (which also takes it out of the background group), the indicator and the client. Each step runs under
      * its own guard (lib/teardown.js runEveryStep): one that throws is logged, rate-limited, and the rest still run.
@@ -449,11 +474,14 @@ export default class ResourcePulseExtension extends Extension {
         const indicator = this._indicator;
         const client = this._client;
         const cardCoverListenerId = this._cardCoverListenerId;
+        const dropdownMenu = this._dropdownMenu;
         // Cleared first: whatever a step below throws, no later enable() or disable() finds a half-destroyed part.
         this._card = null;
         this._indicator = null;
         this._client = null;
         this._cardCoverListenerId = null;
+        this._dropdownMenu = null;
+        this._isDropdownOpen = false;
         this._isOverviewVisible = false;
         this._isCardVisible = IS_CARD_VISIBLE_BEFORE_COVER_CHECK;
         runEveryStep([
@@ -463,6 +491,7 @@ export default class ResourcePulseExtension extends Extension {
             {name: 'disconnect from the window manager', run: () => global.window_manager.disconnectObject(this)},
             {name: 'disconnect from the workspace manager', run: () => global.workspace_manager.disconnectObject(this)},
             {name: 'disconnect from the card', run: () => card?.disconnectObject(this)},
+            {name: 'disconnect from the dropdown menu', run: () => dropdownMenu?.disconnectObject(this)},
             {name: 'remove the covered check\'s client listener', run: () => {
                 if (cardCoverListenerId !== null)
                     client?.removeListener(cardCoverListenerId);

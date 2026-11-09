@@ -6,6 +6,12 @@
   spacing: 4px;
 }
 
+/* The dropdown's card item (a non-reactive popup item): the card inside has its own surface, so the item only pads
+   it, and the menu's own hover and focus colours stay off it. */
+.resource-pulse-menu-card-item {
+  padding: 4px 6px;
+}
+
 /* The hover label under the indicator, styled after the dock's labels: Yaru's .dash-label (gnome-shell.css,
    the same in the light and dark themes), copied rather than reused, so a theme change cannot leave the label
    unstyled. Tabular numerals keep the digits from jittering as they update. */

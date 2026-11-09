@@ -609,6 +609,7 @@ test('extension.js checks the cover on a restack, a fullscreen change, a minimiz
             'global.window_manager unminimize',
             'global.workspace_manager showing-desktop-changed',
             'this._card notify::width',
+            'this._dropdownMenu open-state-changed',
         ],
         receiversNeverDisconnected: [],
         clientListenersAdded: 1,
@@ -722,4 +723,127 @@ test('extension.js: when the overview has closed, the cover is checked again', (
         hiddenChecksTheCover: statementCount(declarationBody(extensionSource, '_onOverviewHidden() {'),
             'this._syncCardCover();'),
     }, {hiddenHandler: ['Main.overview hidden: () => this._onOverviewHidden()'], hiddenChecksTheCover: 1});
+});
+
+// The top-bar dropdown: indicator.js is a PanelMenu.Button whose menu holds a second card and "Open Resources".
+const INDICATOR_SOURCE_FILE = 'indicator.js';
+
+test('indicator.js is a PanelMenu.Button with a menu of its own, and the click that launched Resources directly is ' +
+    'gone', () => {
+    const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
+    assertEqual({
+        extendsPanelMenuButton: indicatorSource.includes('class PulseIndicator extends PanelMenu.Button {'),
+        createsItsMenu: statementCount(declarationBody(indicatorSource, '_init(client) {'),
+            'super._init(MENU_ALIGNMENT, ACCESSIBLE_NAME);'),
+        suppressesItsMenu: indicatorSource.includes('DONT_CREATE_MENU'),
+        hasItsOwnClickGesture: indicatorSource.includes('ClickGesture'),
+        launchesOnClick: indicatorSource.includes('_openSystemMonitor') || indicatorSource.includes('\'recognize\''),
+    }, {
+        extendsPanelMenuButton: true, createsItsMenu: 1, suppressesItsMenu: false, hasItsOwnClickGesture: false,
+        launchesOnClick: false,
+    });
+});
+
+test('indicator.js: the menu holds a non-reactive item with the second card, and an "Open Resources" item that ' +
+    'launches the first installed id in RESOURCES_APP_IDS and is hidden when none is installed', () => {
+    const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
+    const buildBody = declarationBody(indicatorSource, '_buildDropdown() {');
+    const findBody = declarationBody(indicatorSource, '_findResourcesApp() {');
+    const openBody = declarationBody(indicatorSource, '_openResources() {');
+    const visibilityBody = declarationBody(indicatorSource, '_syncOpenResourcesVisibility() {');
+    assertEqual({
+        cardItemIsInert: buildBody.includes('new PopupMenu.PopupBaseMenuItem(CARD_ITEM_PROPERTIES)') &&
+            indicatorSource.includes('const CARD_ITEM_PROPERTIES = {reactive: false, can_focus: false, style_class:'),
+        secondCardIsBuilt: statementCount(buildBody, 'this._dropdownCard = new PulseCard(this._client);'),
+        cardIsInTheItem: statementCount(buildBody, 'cardItem.add_child(this._dropdownCard);'),
+        cardIsNeverPlaced: indicatorSource.includes('placeOnPrimaryMonitor'),
+        openItemLabel: statementCount(buildBody,
+            'this._openResourcesItem = new PopupMenu.PopupMenuItem(OPEN_RESOURCES_LABEL);'),
+        labelIsTheSpecifiedOne: indicatorSource.includes('const OPEN_RESOURCES_LABEL = \'Open Resources\';'),
+        activationLaunches: buildBody.includes('this._openResourcesItem.connect(\'activate\', () => this._openResources());'),
+        lookupUsesTheSharedIds: findBody.includes('RESOURCES_APP_IDS') && findBody.includes('.find(app => app !== null)'),
+        launchActivates: statementCount(openBody, 'resourcesApp.activate();'),
+        launchLeavesTheOverview: statementCount(openBody, 'Main.overview.hide();'),
+        hiddenWhenNoneInstalled: statementCount(visibilityBody,
+            'this._openResourcesItem.visible = this._findResourcesApp() !== undefined;'),
+    }, {
+        cardItemIsInert: true, secondCardIsBuilt: 1, cardIsInTheItem: 1, cardIsNeverPlaced: false, openItemLabel: 1,
+        labelIsTheSpecifiedOne: true, activationLaunches: true, lookupUsesTheSharedIds: true, launchActivates: 1,
+        launchLeavesTheOverview: 1, hiddenWhenNoneInstalled: 1,
+    });
+});
+
+test('indicator.js: the dropdown card is never frozen while the menu is open: closing freezes it, opening unfreezes ' +
+    'it (a repaint at once), and opening re-checks whether Resources is installed', () => {
+    const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
+    const openStateBody = declarationBody(indicatorSource, '_onMenuOpenStateChanged(isOpen) {');
+    const initBody = declarationBody(indicatorSource, '_init(client) {');
+    assertEqual({
+        freezesExactlyWhileClosed: statementCount(openStateBody, 'this._dropdownCard.setFrozen(!isOpen);'),
+        recheckedOnEveryChange: statementCount(openStateBody, 'this._syncOpenResourcesVisibility();'),
+        startsFrozen: statementCount(initBody, 'this._dropdownCard.setFrozen(true);'),
+        listensToTheMenu: statementCount(initBody,
+            'this.menu.connect(\'open-state-changed\', (_menu, isOpen) => this._onMenuOpenStateChanged(isOpen));'),
+    }, {freezesExactlyWhileClosed: 1, recheckedOnEveryChange: 1, startsFrozen: 1, listensToTheMenu: 1});
+});
+
+test('indicator.js: the hover label is suppressed while the menu is open, and opening it hides one that is up', () => {
+    const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
+    const syncBody = declarationBody(indicatorSource, '_syncHoverLabel() {');
+    const openStateBody = declarationBody(indicatorSource, '_onMenuOpenStateChanged(isOpen) {');
+    assertEqual({
+        showsOnlyWhenHoveredMappedAndMenuClosed: statementCount(syncBody,
+            'if (this.hover && this.mapped && !this.menu.isOpen) {'),
+        reSyncsOnOpenStateChange: statementCount(openStateBody, 'this._syncHoverLabel();'),
+    }, {showsOnlyWhenHoveredMappedAndMenuClosed: 1, reSyncsOnOpenStateChange: 1});
+});
+
+test('indicator.js: destroying the indicator destroys the dropdown card and its fade and timeouts, and nothing is ' +
+    'connected outside the indicator, its menu or its label', () => {
+    const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
+    const onDestroyBody = declarationBody(indicatorSource, '_onDestroy() {');
+    assertEqual({
+        destroysTheDropdownCard: statementCount(onDestroyBody, 'this._dropdownCard?.destroy();'),
+        clearsTheDropdownCard: statementCount(onDestroyBody, 'this._dropdownCard = null;'),
+        cancelsTheShowTimeout: statementCount(onDestroyBody, 'this._cancelHoverLabelTimeout();'),
+        destroysTheLabel: statementCount(onDestroyBody, 'this._hoverLabel?.destroy();'),
+        outsideConnectionsDisconnected: statementCount(onDestroyBody,
+            'St.ThemeContext.get_for_stage(global.stage).disconnectObject(this);'),
+        outsideConnections: (indicatorSource.match(/St\.ThemeContext\.get_for_stage\(global\.stage\)\.connectObject\(/g) ?? [])
+            .length,
+    }, {
+        destroysTheDropdownCard: 1, clearsTheDropdownCard: 1, cancelsTheShowTimeout: 1, destroysTheLabel: 1,
+        outsideConnectionsDisconnected: 1, outsideConnections: 1,
+    });
+});
+
+test('extension.js: the menu\'s open-state-changed drives the dropdown flag of isDetailWatchWanted, and teardown ' +
+    'disconnects it', () => {
+    const extensionSource = readExtensionFile('extension.js');
+    const followBody = declarationBody(extensionSource, '_followDropdown() {');
+    const syncBody = declarationBody(extensionSource, '_syncDetailWatch() {');
+    const tearDownBody = declarationBody(extensionSource, '_tearDown() {');
+    assertEqual({
+        receiver: [...followBody.matchAll(CONNECT_OBJECT_PATTERN)].map(([, receiver]) => receiver),
+        handler: statementCount(followBody,
+            '\'open-state-changed\', (_menu, isOpen) => this._onDropdownOpenStateChanged(isOpen),'),
+        recordsTheState: statementCount(declarationBody(extensionSource, '_onDropdownOpenStateChanged(isOpen) {'),
+            'this._isDropdownOpen = isOpen;'),
+        resyncsTheWatch: statementCount(declarationBody(extensionSource, '_onDropdownOpenStateChanged(isOpen) {'),
+            'this._syncDetailWatch();'),
+        watchReadsTheFlag: statementCount(syncBody, 'isDropdownOpen: this._isDropdownOpen,'),
+        placeholderGone: extensionSource.includes('IS_DROPDOWN_OPEN_UNTIL_DROPDOWN_EXISTS'),
+        teardownDisconnects: statementCount(tearDownBody,
+            '{name: \'disconnect from the dropdown menu\', run: () => dropdownMenu?.disconnectObject(this)},'),
+        teardownClearsTheFlag: statementCount(tearDownBody, 'this._isDropdownOpen = false;'),
+    }, {
+        receiver: ['this._dropdownMenu'], handler: 1, recordsTheState: 1, resyncsTheWatch: 1, watchReadsTheFlag: 1, placeholderGone: false,
+        teardownDisconnects: 1, teardownClearsTheFlag: 1,
+    });
+});
+
+test('stylesheet.css styles the dropdown with classes of its own, added beside the old ones', () => {
+    const selectedClassNames = new Set(stylesheetRules(readExtensionFile('stylesheet.css'))
+        .flatMap(rule => rule.classNames));
+    assertEqual(['resource-pulse-menu-card-item'].filter(className => !selectedClassNames.has(className)), []);
 });
