@@ -45,7 +45,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # The profile marker's override (the settings renderer's name) and the overlay's: a row sets what
 # it means to, so a caller's own (a real ~/.config/claude-host-profile, a real remote) never reaches one.
-unset CLAUDE_SETTINGS_RENDER_MARKER HOST_SYNC_DOTFILES_LOCAL_REPO HOST_SYNC_DOTFILES_LOCAL_REMOTE
+unset CLAUDE_SETTINGS_RENDER_MARKER HOST_SYNC_DOTFILES_LOCAL_REPO HOST_SYNC_DOTFILES_LOCAL_REMOTE PROFILE_MARKER_PATH
 
 V_LAPTOP="2.1.296"
 HV="0.9.1"            # the laptop's herdr
@@ -391,6 +391,8 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
     --dotfiles-sha "$(git --git-dir="$GH/quantivly/dotfiles.git" rev-parse main)" --clone alpha=quantivly/alpha; }
 
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
+# PROFILE_MARKER_PATH, when a row sets it, is where CLAUDE_SETTINGS_RENDER_MARKER points instead of
+# the default path, so a row can tell an honoured override from a hard-coded default.
 run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     # The trace goes to its own fd, as a person debugging with BASH_XTRACEFD would see it: a
     # command's own 2>/dev/null then hides nothing from it.
@@ -398,7 +400,7 @@ run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
     OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
         HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
-        CLAUDE_SETTINGS_RENDER_MARKER="$H/.config/claude-host-profile" \
+        CLAUDE_SETTINGS_RENDER_MARKER="${PROFILE_MARKER_PATH:-$H/.config/claude-host-profile}" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash ${XTRACE:+-x} "$SUT" --here "$@" 2>&1 3>"$C/xtrace")"
     RC=$?
 }
@@ -567,7 +569,7 @@ new_case
 echo ../x >"$H/.config/claude-host-profile"; rm -rf "$H/.dotfiles-local"
 run_level --check
 has   "a marker with an unusable name is a person's step" "$OUT" \
-    "${PROFILE_OPER}the marker holds an unusable profile name (the renderer's rule: letters, digits, dots, dashes)"
+    "${PROFILE_OPER}the marker holds an unusable profile name (the renderer's rule: letters, digits, dots, dashes and underscores)"
 run_level --apply
 check "a marker with an unusable name: no clone attempted in --apply" "$(present "$H/.dotfiles-local")/$(area_rows dotfiles-local)" gone/0
 
@@ -583,6 +585,17 @@ check "a profile file with no .tenants list: the work clones still run" "$(area_
 chmod 000 "$H/.config/claude-host-profile"
 run_level --check
 has   "an unreadable marker is a person's step, named" "$OUT" "${PROFILE_OPER}the marker ~/.config/claude-host-profile is not readable by"
+
+# The marker's override is the renderer's own variable: a marker that exists only there is read, and
+# a path outside $HOME is shown as it is, never with a ~ in front of it.
+new_case
+rm "$H/.config/claude-host-profile"; echo p >"$C/marker-elsewhere"
+PROFILE_MARKER_PATH="$C/marker-elsewhere" run_level --check
+has   "profile: the marker override is honoured" "$OUT" "${PROFILE_INFO}p (tenants: quantivly)"
+rm "$C/marker-elsewhere"
+PROFILE_MARKER_PATH="$C/marker-elsewhere" run_level --check
+has   "profile: the marker override is honoured: a path outside \$HOME is shown absolute" "$OUT" \
+    "${PROFILE_INFO}no host profile marker ($C/marker-elsewhere)"
 
 new_case
 rm -rf "$H/.dotfiles-local"
@@ -609,6 +622,25 @@ clone_at="$(line_of "${OVERLAY_OK}cloned from ZviBaratz/dotfiles-local")"; publi
 check "marker before the overlay: the overlay is cloned before the public ./install: its ✓ row before the dotfiles row" \
     "$(( clone_at > 0 && clone_at < public_at ))" 1
 has   "marker before the overlay: the profile is read after the clone" "$OUT" "${PROFILE_INFO}p (tenants: quantivly)"
+
+# The overlay's origin unreachable: the clone is ✗, and its tenants stay unknown.
+new_case
+rm -rf "$H/.dotfiles-local" "$H/.local/state/host-sync/installed-head-dotfiles-local"
+mv "$GH/ZviBaratz/dotfiles-local.git" "$GH/ZviBaratz/dotfiles-local.unreachable"
+run_level --apply
+has   "overlay: a clone that fails is ✗ and the profile stays unread: the ✗ row" "$OUT" \
+    "${OVERLAY_DRIFT}git clone ZviBaratz/dotfiles-local failed"
+hasnt "overlay: a clone that fails is ✗ and the profile stays unread: no tenants read" "$OUT" "${PROFILE_INFO}p (tenants"
+check "overlay: a clone that fails is ✗ and the profile stays unread: exit 1" "$RC" 1
+
+# The overlay's ./install fails: ✗ with its log, and no stamp, so the next run tries it again.
+new_case
+rm "$H/.local/state/host-sync/installed-head-dotfiles-local"; touch "$H/stub/install-fails-local"
+run_level --apply
+has   "overlay: a failing ./install of dotfiles-local is ✗ and writes no stamp: the ✗ row" "$OUT" \
+    "${OVERLAY_DRIFT}./install failed at $(head_of "$H/.dotfiles-local" | cut -c1-7); log: ~/.local/state/host-sync/install-dotfiles-local.log"
+check "overlay: a failing ./install of dotfiles-local is ✗ and writes no stamp: no stamp" \
+    "$(present "$H/.local/state/host-sync/installed-head-dotfiles-local")" gone
 
 new_case
 echo '{"tenants":["personal"]}' >"$H/.dotfiles-local/hosts/p.json"
@@ -1797,7 +1829,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=430
+EXPECTED_ROWS=437
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

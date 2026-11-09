@@ -238,7 +238,7 @@ read_profile() {
     fi
     IFS= read -r name <"$PROFILE_MARKER"
     if [[ ! "$name" =~ $PROFILE_NAME_RE ]]; then
-        PROFILE_FAULT="the marker holds an unusable profile name (the renderer's rule: letters, digits, dots, dashes)"
+        PROFILE_FAULT="the marker holds an unusable profile name (the renderer's rule: letters, digits, dots, dashes and underscores)"
         return 0
     fi
     PROFILE="$name"
