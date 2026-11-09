@@ -358,7 +358,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `origin/main` as it keeps `~/.dotfiles`, and prints the profile and its tenants; the `~/quantivly`
   clones are skipped only once the tenants are known and leave out the work tenant. Where clauth
   manages the accounts (`~/.clauth`), the long-lived-token rows give way to one information row, and
-  `claude auth status` is not asked. `scripts/test-host-sync.sh` goes from 325 to 437 rows.
+  `claude auth status` is not asked. `scripts/test-host-sync.sh` goes from 325 to 440 rows.
 
 - **The VPN docs and comments stop describing a full tunnel.** The Client VPN endpoint has been a
   split tunnel since 2026-11-08: one `/32` route per allowlisted server plus the VPC range, pushed

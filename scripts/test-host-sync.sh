@@ -1103,6 +1103,20 @@ timer_off dev-sync.timer
 run_level --apply
 check "legacy: a marker left in the old dir moves once host-sync.timer is live: armed by this run" "$(armed_where)" host-sync
 
+# State 4 again, but the enable fails. arm_timer writes the new marker before it enables (the new
+# service's condition must hold before its timer can fire), so ~/.config/host-sync/armed exists
+# either way. The legacy marker is what must stay until the timer reads back armed (H2).
+legacy_case
+timer_off dev-sync.timer; touch "$H/stub/enable-fails"
+run_level --apply
+has   "legacy: a failed arm in state 4 leaves a legacy marker in place: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}arming failed: is-enabled=disabled, is-active=inactive"
+check "legacy: a failed arm in state 4 leaves a legacy marker in place: the legacy marker stays" "$(armed_where)" both
+rm "$H/stub/enable-fails"
+run_level --apply
+check "legacy: a failed arm in state 4 leaves a legacy marker in place: the next --apply moves it" \
+    "$(armed_where)/$(present "$H/.config/dev-sync")" host-sync/gone
+
 legacy_case
 rm "$H/.config/dev-sync/armed"; : >"$H/.config/dev-sync/disarmed"; timer_off dev-sync.timer
 run_level --check
@@ -1829,7 +1843,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=437
+EXPECTED_ROWS=440
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
