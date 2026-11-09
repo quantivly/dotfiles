@@ -175,9 +175,10 @@ case "$1 ${2:-}" in
 esac
 STUB
     # herdr-draft, at the plugin root the herdr stub's `plugin list` reports. `skill` prints the spawn
-    # skill; `skill --check <file>` exits 0 when the file holds exactly that, 1 otherwise (a missing
-    # file included), 2 with a reason on stderr on its cannot-answer flag, and draft-skill-check-rc's
-    # status when that file exists.
+    # skill; `skill --check <file>` exits 0 when the file holds exactly that and 1 when it differs.
+    # On a path that does not exist it exits 2 with the real tool's line (herdr-draft 0.2.0, probed
+    # 2026-11-09); 2 with a reason on its cannot-answer flag; draft-skill-check-rc's status when
+    # that file exists.
     mkdir -p "$1/stub/draft-root/bin"
     cat >"$1/stub/draft-root/bin/herdr-draft" <<'STUB'
 #!/usr/bin/env bash
@@ -191,7 +192,11 @@ case "$1 ${2:-}" in
             exit 2
         fi
         [[ -e "$S/draft-skill-check-rc" ]] && exit "$(cat "$S/draft-skill-check-rc")"
-        [[ -f "$3" ]] && cmp -s <(spawn_skill) "$3" ;;
+        if [[ ! -e "$3" ]]; then
+            echo "herdr-draft skill --check: open $3: no such file or directory" >&2
+            exit 2
+        fi
+        cmp -s <(spawn_skill) "$3" ;;
 esac
 STUB
     chmod +x "$1/stub/draft-root/bin/herdr-draft"
@@ -1222,8 +1227,12 @@ new_case
 rm -rf "$H/.claude/skills/spawn"
 run_level --check
 has   "skill: a missing spawn skill is drift" "$OUT" "${SKILL_DRIFT}no spawn skill at ~/$SPAWN_SKILL_REL"
+# herdr-draft's `skill --check` exits 2 on a path that does not exist (the stub says the same), so
+# a missing skill handed to it would read ⚠, and --apply would never create it.
+hasnt "skill: a missing spawn skill is drift, never ⚠" "$OUT" "$SKILL_OPER"
 run_level --apply
 check "skill: spawn is created where none exists" "$(cat "$H/$SPAWN_SKILL_REL" 2>&1)" "$SPAWN_SKILL_TEXT"
+has   "skill: spawn is created where none exists: ✓, never ⚠" "$OUT" "${SKILL_OK}spawn skill regenerated with herdr-draft skill"
 new_case
 touch "$H/stub/draft-skill-cannot-answer"; echo stale >"$H/$SPAWN_SKILL_REL"
 run_level --apply
@@ -2351,7 +2360,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=538
+EXPECTED_ROWS=540
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

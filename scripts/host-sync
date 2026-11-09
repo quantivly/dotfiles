@@ -1062,27 +1062,32 @@ herdr_skill_verdict() {
         row drift skill "could not write $shown (herdr $version)"
     fi
 }
-# The spawn skill, judged by herdr-draft itself: `skill --check` exits 0 current, 1 stale (a
-# missing file included), 2 when it cannot answer; any other status is a could-not-run.
+# The spawn skill. A missing file is judged here, never by herdr-draft: its `skill --check` exits 2
+# on a path that does not exist ("open …: no such file or directory", 0.2.0 on 2026-11-09), which
+# would make an absent skill a ⚠ that --apply never fixes. An existing file is judged by
+# `skill --check`: 0 current, 1 stale, 2 it cannot answer; any other status is a could-not-run.
 spawn_skill_row() {
     local file="$SPAWN_SKILL_FILE" rc
     find_draft_binary || return
     skill_is_directory_row "$file" && return
-    run_spawn_skill_check "$DRAFT_BINARY" "$file"; rc=$?
-    case "$rc" in
-        0) row ok skill "spawn skill current (from $(tilde_path "$DRAFT_BINARY"))"; return ;;
-        1) ;;
-        *) spawn_check_failed_row "$rc"; return ;;
-    esac
-    if [[ "$MODE" != apply ]]; then
-        if [[ -e "$file" ]]; then
-            row drift skill "spawn skill differs from \`herdr-draft skill\`"
+    if [[ ! -e "$file" ]]; then
+        if [[ "$MODE" == apply ]]; then
+            regenerate_spawn_skill "$file"
         else
             row drift skill "no spawn skill at $(tilde_path "$file")"
         fi
         return
     fi
-    regenerate_spawn_skill "$file"
+    run_spawn_skill_check "$DRAFT_BINARY" "$file"; rc=$?
+    case "$rc" in
+        0) row ok skill "spawn skill current (from $(tilde_path "$DRAFT_BINARY"))" ;;
+        1) if [[ "$MODE" == apply ]]; then
+               regenerate_spawn_skill "$file"
+           else
+               row drift skill "spawn skill differs from \`herdr-draft skill\`"
+           fi ;;
+        *) spawn_check_failed_row "$rc" ;;
+    esac
 }
 # herdr-draft's binary, from the plugin root this host's herdr reports, into DRAFT_BINARY; 1, with
 # the · row that says why, when there is none to generate the spawn skill with.
