@@ -2,8 +2,9 @@
 # =========================
 # Keeps this host's tooling and Claude Code configuration level with git: dotfiles (and, on a
 # host with a profile marker, dotfiles-local) to origin/main, Claude Code to latest, herdr-draft
-# to main, the work tenant's plugins enabled, the ~/quantivly clones fetched. scripts/host-sync
-# holds all of it, including why the timer lives on the host rather than on the laptop.
+# to main, the plugins and marketplaces the rendered settings declare installed (never enabled
+# or disabled: the render owns that), the ~/quantivly clones fetched. scripts/host-sync holds all
+# of it, including why the timer lives on the host rather than on the laptop.
 #
 # ARMED PER HOST. ./install links this unit on every machine, but the condition below makes
 # systemd SKIP it on any machine without the marker. A skipped unit is not a failed one. The

@@ -4,7 +4,7 @@
 # ================
 #
 # Keep dev's tooling level with the laptop's: dotfiles, Claude Code, herdr and
-# herdr-draft, the work tenant's Claude plugins, and the ~/quantivly clones.
+# herdr-draft, the Claude plugins its settings declare, and the ~/quantivly clones.
 #
 # WHY. dev (the team EC2) sat unused from 2026-09-28, partly because nothing kept
 # it current: on 2026-10-12 it was 73 dotfiles commits and 24 Claude Code
@@ -66,6 +66,9 @@
 #     effective values are shown as information.
 #   - add a source a checkout's install.conf.yaml declares but does not carry.
 #     Every other link out of place is drift that repo's ./install fixes.
+#   - enable or disable a Claude plugin, or install one whose marketplace no settings
+#     fragment declares. settings.json declares the plugins (H4) and the render owns
+#     enablement; host-sync installs what it sets true, and nothing else.
 #
 # THE HOST PROFILE (shared-configuration design, H1). ~/.config/claude-host-profile, the
 # settings renderer's marker, names this host's profile, and the private overlay's
@@ -110,35 +113,14 @@ DRAFT_REPO="ZviBaratz/herdr-draft"
 DOTFILES_LOCAL_REPO="${HOST_SYNC_DOTFILES_LOCAL_REPO:-ZviBaratz/dotfiles-local}"
 DRAFT_ID="zvibaratz.draft"
 
-# `claude plugin marketplace add` sources, by marketplace name. The dotfiles one is the
-# checkout's own directory marketplace (docs/CLAUDE_SETUP.md, "Linear: one API key").
-MARKETPLACES=(
-    "claude-plugins-official=anthropics/claude-plugins-official"
-    "quantivly=quantivly/claude-plugins"
-    "dotfiles=@DOTFILES@/claude/plugins"
-)
-# Enabled on the laptop for work, and wanted on dev.
-PLUGINS_ON=(
-    quantivly-conventions@quantivly
-    slack@claude-plugins-official
-    notion@claude-plugins-official
-    linear-key@dotfiles
-)
-# Gone from their marketplaces, which replaced them with plugins in PLUGINS_ON:
-# quantivly-conventions superseded the first two, and the official marketplace
-# renamed Notion to notion. A stale enabled entry keeps loading the cached copy,
-# which means outdated conventions skills in every session. They are set to false
-# in settings.json directly, because the CLI cannot address a plugin that its
-# marketplace no longer lists.
-PLUGINS_SUPERSEDED=(
-    quantivly-linear@quantivly
-    quantivly-pr-conventions@quantivly
-    Notion@claude-plugins-official
-)
-# Must be OFF once linear-key is on: two plugins at one URL are deduplicated, and the
-# first one in enabledPlugins wins, so the official plugin would shadow linear-key
-# (docs/CLAUDE_SETUP.md). Disabled only after linear-key is enabled, never before.
-LINEAR_OFFICIAL="linear@claude-plugins-official"
+# The plugin declaration is the live settings.json (shared-configuration design, H4), rendered
+# from the fragments on a host with a profile: its enabledPlugins entries that are true, and its
+# extraKnownMarketplaces, with the official marketplace implicit (name=`marketplace add` source).
+# The render owns enablement, so host-sync adds and refreshes marketplaces and installs plugins,
+# and never enables or disables one.
+OFFICIAL_MARKETPLACE="claude-plugins-official=anthropics/claude-plugins-official"
+# The one plugin host-sync updates: the checkout's own directory marketplace carries its version
+# (docs/CLAUDE_SETUP.md, "Linear: one API key").
 LINEAR_KEY="linear-key@dotfiles"
 
 GITHUB_BASE="${HOST_SYNC_GITHUB_BASE:-https://github.com}"
@@ -1224,7 +1206,47 @@ plugin_enabled() {
 # installed in, and those neither load everywhere nor share the user entry's version.
 plugin_installed() { jq -e --arg p "$1" 'any((.plugins[$p] // [])[]; .scope == "user")' "$INSTALLED" >/dev/null 2>&1; }
 plugin_version() { jq -r --arg p "$1" 'first((.plugins[$p] // [])[] | select(.scope == "user")) | .version // empty' "$INSTALLED" 2>/dev/null; }
-claude_plugin() { (cd "$HOME" && "$CLAUDE" plugin "$@" >>"$STATE/plugins.log" 2>&1 </dev/null); }
+# Every `claude plugin` call runs with CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 (H4): an owner/repo
+# source tries SSH first, and a host's GitHub auth may be gh over HTTPS alone (dev, sol-build).
+claude_plugin() {
+    (cd "$HOME" && CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 "$CLAUDE" plugin "$@" >>"$STATE/plugins.log" 2>&1 </dev/null)
+}
+
+# The declaration's shape, read before it is indexed: settings.json is an object, and its
+# enabledPlugins and extraKnownMarketplaces are objects wherever they are present.
+settings_shape_ok() {
+    jq -e 'type == "object"
+        and ((.enabledPlugins // {}) | type == "object")
+        and ((.extraKnownMarketplaces // {}) | type == "object")' "$SETTINGS" >/dev/null 2>&1
+}
+# The declared plugins, one name@marketplace per line: the enabledPlugins entries that are
+# exactly true, so a false entry is never read as declared (nor, through jq's //, as missing).
+declared_plugins() {
+    jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "$SETTINGS" 2>/dev/null
+}
+# The declared marketplaces, one name=source per line, as `marketplace add` takes the source:
+# the official one, then each extraKnownMarketplaces entry's directory path, or its repo or url.
+# An entry that names none of them is printed with an empty source, for its row to report.
+declared_marketplaces() {
+    local entry
+    printf '%s\n' "$OFFICIAL_MARKETPLACE"
+    jq -r '.extraKnownMarketplaces // {} | to_entries[]
+        | "\(.key)=\((try (.value.source | if .source == "directory" then .path else (.repo // .url) end)) // "")"' \
+        "$SETTINGS" 2>/dev/null |
+        while IFS= read -r entry; do
+            # The renderer substitutes $HOME in these paths already; this guards a hand-edited
+            # settings.json, whose literal $HOME, ${HOME} or ~ would read as a cloned source (and
+            # go stale) and reach `marketplace add` as text.
+            printf '%s=%s\n' "${entry%%=*}" "$(expand_home_path "${entry#*=}")"
+        done
+}
+marketplace_declared() {   # $1 = a marketplace name
+    local entry
+    while IFS= read -r entry; do
+        [[ "${entry%%=*}" == "$1" ]] && return 0
+    done < <(declared_marketplaces)
+    return 1
+}
 
 # Why marketplace $1 (source $2) needs a refresh, or nothing if it does not. Asked again after
 # the add or update, so a failed one is a ✗ rather than a ✓ on every run.
@@ -1234,11 +1256,12 @@ market_why() {
         echo "not added"; return
     fi
     loc="$(jq -r --arg m "$name" '.[$m].installLocation // empty' "$KNOWN")"
-    for p in "${PLUGINS_ON[@]}"; do
-        [[ "${p#*@}" == "$name" ]] || continue
+    # Every plugin the settings declare from this marketplace must be one it lists.
+    while IFS= read -r p; do
+        [[ "${p##*@}" == "$name" ]] || continue
         jq -e --arg n "${p%@*}" 'any(.plugins[]; .name == $n)' "$loc/.claude-plugin/marketplace.json" \
             >/dev/null 2>&1 || { echo "does not list ${p%@*}"; return; }
-    done
+    done < <(declared_plugins)
     # A directory marketplace is the checkout itself; only a cloned one goes stale. An update
     # moves lastUpdated even when upstream has not changed (measured 2026-10-14).
     [[ "$src" == /* ]] && return
@@ -1249,8 +1272,12 @@ market_why() {
 
 here_marketplaces() {
     local entry name src why after
-    for entry in "${MARKETPLACES[@]}"; do
-        name="${entry%%=*}"; src="${entry#*=}"; src="${src//@DOTFILES@/$DOTFILES}"
+    while IFS= read -r entry; do
+        name="${entry%%=*}"; src="${entry#*=}"
+        if [[ -z "$src" ]]; then
+            row oper marketplace "$name: its extraKnownMarketplaces entry names no repo, url or path; not added"
+            continue
+        fi
         why="$(market_why "$name" "$src")"
         if [[ -z "$why" ]]; then
             row ok marketplace "$name"
@@ -1271,93 +1298,73 @@ here_marketplaces() {
         else
             row drift marketplace "$name: still $after after --apply (log: ~/.local/state/host-sync/plugins.log)"
         fi
-    done
+    done < <(declared_marketplaces)
 }
 
+# A directory-marketplace install is a COPY; an edit reaches it only through a version bump plus
+# `plugin update` (docs/CLAUDE_SETUP.md, "Changing the plugin"). True when linear-key's installed
+# copy has the checkout's version, or --apply has brought it there; otherwise its ✗ row is printed.
+linear_key_current() {
+    local have want
+    have="$(plugin_version "$LINEAR_KEY")"
+    want="$(json_get "$DOTFILES/claude/plugins/${LINEAR_KEY%@*}/.claude-plugin/plugin.json" '.version // empty')"
+    [[ -z "$want" || "$have" == "$want" ]] && return 0
+    if [[ "$MODE" != apply ]]; then
+        row drift plugin "$LINEAR_KEY $have installed, checkout has $want"
+        return 1
+    fi
+    claude_plugin marketplace update "${LINEAR_KEY##*@}"
+    claude_plugin update "$LINEAR_KEY" --scope user
+    have="$(plugin_version "$LINEAR_KEY")"
+    [[ "$have" == "$want" ]] && return 0
+    row drift plugin "$LINEAR_KEY update to $want failed"
+    return 1
+}
+
+# One declared plugin's row: a person's step when no settings fragment declares its marketplace;
+# ✓ when it is installed at user scope (and, for linear-key, current); else drift --apply installs.
+here_plugin() {   # $1 = name@marketplace
+    local plugin="$1" marketplace="${1##*@}" undeclared
+    if ! marketplace_declared "$marketplace"; then
+        undeclared="$plugin: marketplace $marketplace is declared by no settings fragment"
+        if plugin_installed "$plugin"; then
+            row oper plugin "$undeclared; installed, but its marketplace is not refreshed"
+        else
+            row oper plugin "$undeclared; not installed"
+        fi
+        return
+    fi
+    if plugin_installed "$plugin"; then
+        if [[ "$plugin" != "$LINEAR_KEY" ]] || linear_key_current; then row ok plugin "$plugin"; fi
+        return
+    fi
+    if [[ "$MODE" != apply ]]; then
+        row drift plugin "$plugin not installed"
+        return
+    fi
+    claude_plugin install "$plugin" --scope user
+    if plugin_installed "$plugin"; then
+        row ok plugin "$plugin (installed)"
+    else
+        row drift plugin "$plugin: install failed (log: ~/.local/state/host-sync/plugins.log)"
+    fi
+}
+
+# Marketplaces first, so a plugin's install finds its marketplace added and current.
 here_plugins() {
-    local p st have want tmp
+    local plugin
     if [[ ! -r "$SETTINGS" ]]; then
         row oper plugins "no ~/.claude/settings.json; log in to Claude Code on this machine first"
         return
     fi
-    here_marketplaces
-
-    for p in "${PLUGINS_SUPERSEDED[@]}"; do
-        [[ "$(plugin_enabled "$p")" == true ]] || continue
-        if [[ "$MODE" != apply ]]; then
-            row drift plugin "$p is enabled but superseded"
-            continue
-        fi
-        if [[ -L "$SETTINGS" ]]; then
-            row oper plugin "$p is enabled but superseded; settings.json is a symlink, so it is not rewritten"
-            continue
-        fi
-        cp -p "$SETTINGS" "$STATE/settings.json.before-host-sync"
-        tmp="$(mktemp "$SETTINGS.host-sync.XXXXXX")" &&
-            jq --arg p "$p" '.enabledPlugins[$p] = false' "$SETTINGS" >"$tmp" &&
-            chmod --reference="$SETTINGS" "$tmp" && mv "$tmp" "$SETTINGS"
-        rm -f "$tmp"
-        if [[ "$(plugin_enabled "$p")" == false ]]; then
-            row ok plugin "$p disabled (superseded)"
-        else
-            row drift plugin "$p: could not disable"
-        fi
-    done
-
-    for p in "${PLUGINS_ON[@]}"; do
-        st="$(plugin_enabled "$p")"
-        if plugin_installed "$p" && [[ "$st" == true ]]; then
-            # A directory-marketplace install is a COPY; an edit reaches it only through a
-            # version bump plus `plugin update` (docs/CLAUDE_SETUP.md, "Changing the plugin").
-            if [[ "$p" == "$LINEAR_KEY" ]]; then
-                have="$(plugin_version "$p")"
-                want="$(json_get "$DOTFILES/claude/plugins/linear-key/.claude-plugin/plugin.json" '.version // empty')"
-                if [[ -n "$want" && "$have" != "$want" ]]; then
-                    if [[ "$MODE" != apply ]]; then
-                        row drift plugin "$p $have installed, checkout has $want"
-                        continue
-                    fi
-                    claude_plugin marketplace update dotfiles
-                    claude_plugin update "$p" --scope user
-                    have="$(plugin_version "$p")"
-                    [[ "$have" == "$want" ]] || { row drift plugin "$p update to $want failed"; continue; }
-                fi
-            fi
-            row ok plugin "$p"
-            continue
-        fi
-        if [[ "$MODE" != apply ]]; then
-            if plugin_installed "$p"; then row drift plugin "$p installed, not enabled"
-            else row drift plugin "$p not installed"; fi
-            continue
-        fi
-        if plugin_installed "$p"; then
-            claude_plugin enable "$p" --scope user
-        else
-            claude_plugin install "$p" --scope user
-        fi
-        if plugin_installed "$p" && [[ "$(plugin_enabled "$p")" == true ]]; then
-            row ok plugin "$p (enabled)"
-        else
-            row drift plugin "$p: install/enable failed (log: ~/.local/state/host-sync/plugins.log)"
-        fi
-    done
-
-    st="$(plugin_enabled "$LINEAR_OFFICIAL")"
-    if [[ "$st" == true ]]; then
-        if [[ "$MODE" != apply ]]; then
-            row drift plugin "$LINEAR_OFFICIAL enabled; it would shadow $LINEAR_KEY"
-        elif [[ "$(plugin_enabled "$LINEAR_KEY")" != true ]]; then
-            row drift plugin "$LINEAR_OFFICIAL left on: $LINEAR_KEY is not enabled, and Linear must not end up with neither"
-        else
-            claude_plugin disable "$LINEAR_OFFICIAL" --scope user
-            if [[ "$(plugin_enabled "$LINEAR_OFFICIAL")" != true ]]; then
-                row ok plugin "$LINEAR_OFFICIAL disabled (superseded by $LINEAR_KEY)"
-            else
-                row drift plugin "$LINEAR_OFFICIAL: could not disable"
-            fi
-        fi
+    if ! settings_shape_ok; then
+        row oper plugins "the live ~/.claude/settings.json is not an object with object enabledPlugins and extraKnownMarketplaces; plugins are not judged"
+        return
     fi
+    here_marketplaces
+    while IFS= read -r plugin; do
+        here_plugin "$plugin"
+    done < <(declared_plugins)
 }
 
 here_mcp() {
@@ -1592,9 +1599,10 @@ here_rows() {
     # Order matters. The overlay is cloned first: dotfiles' ./install renders settings from it, and
     # the renderer refuses (exit 2) a host with a profile marker and no overlay; the profile is
     # read again after that clone. dotfiles' ./install links the timer's units and the dotfiles
-    # marketplace's plugin, so the checkouts go before both; linear-key is enabled before linear
-    # is disabled. settings and links come after both checkouts have fast-forwarded and installed,
-    # so the render reads the overlay's current fragments and the links its current manifest.
+    # marketplace's plugin, so the checkouts go before both. settings and links come after both
+    # checkouts have fast-forwarded and installed, so the render reads the overlay's current
+    # fragments and the links its current manifest; plugins come after settings, since what the
+    # plugin rows install is what the render declares (H4).
     read_profile
     clone_overlay
     here_dotfiles

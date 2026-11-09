@@ -46,6 +46,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # The profile marker's override (the settings renderer's name) and the overlay's: a row sets what
 # it means to, so a caller's own (a real ~/.config/claude-host-profile, a real remote) never reaches one.
 unset CLAUDE_SETTINGS_RENDER_MARKER HOST_SYNC_DOTFILES_LOCAL_REPO HOST_SYNC_DOTFILES_LOCAL_REMOTE PROFILE_MARKER_PATH
+# A host profile may export it (dev, sol-build), and the HTTPS row must see only what host-sync sets.
+unset CLAUDE_CODE_PLUGIN_PREFER_HTTPS
 
 V_LAPTOP="2.1.296"
 HV="0.9.1"            # the laptop's herdr
@@ -101,10 +103,22 @@ case "$1" in
             echo '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}'
         else echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'; fi ;;
     plugin)
+        # Whether this call ran with CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1, by name only.
+        if [[ "${CLAUDE_CODE_PLUGIN_PREFER_HTTPS:-}" == 1 ]]; then echo plugin-https=1; else echo plugin-https=0; fi >>"$S/plugin-https"
         shift
         case "$1 $2" in
+            # Named as the source's own manifest names it: a directory's marketplace.json; for a
+            # repo, its basename, except quantivly/claude-plugins, which calls itself quantivly.
             "marketplace add")
-                jqi "$KM" --arg l "$3" '.dotfiles={source:{source:"directory",path:$l},installLocation:$l,lastUpdated:(now|todate)}' ;;
+                if [[ "$3" == /* ]]; then
+                    name="$(jq -r .name "$3/.claude-plugin/marketplace.json")"; loc="$3"
+                    source_json="$(jq -nc --arg p "$3" '{source:"directory",path:$p}')"
+                else
+                    name="${3##*/}"; [[ "$3" == quantivly/claude-plugins ]] && name=quantivly; loc="$P/marketplaces/$name"
+                    source_json="$(jq -nc --arg r "$3" '{source:"github",repo:$r}')"
+                fi
+                jqi "$KM" --arg n "$name" --arg l "$loc" --argjson s "$source_json" \
+                    '.[$n]={source:$s,installLocation:$l,lastUpdated:(now|todate)}' ;;
             "marketplace update")
                 [[ -e "$S/market-update-fails" ]] && exit 1
                 jqi "$KM" --arg n "$3" '.[$n].lastUpdated=(now|todate)'
@@ -346,10 +360,15 @@ new_case() {
         "notion@claude-plugins-official": [{scope: "user", version: "1"}],
         "linear-key@dotfiles": [{scope: "user", version: "1.0.0"}],
         "linear@claude-plugins-official": [{scope: "user", version: "1"}]}}' >"$H/.claude/plugins/installed_plugins.json"
-    jq -n '{theme: "dark", enabledPlugins: {
+    # The declaration (H4): enabledPlugins' true entries and extraKnownMarketplaces, the official
+    # marketplace implicit. linear is false and installed, so a level host has one plugin to leave alone.
+    jq -n --arg h "$H" '{theme: "dark", enabledPlugins: {
         "quantivly-conventions@quantivly": true, "slack@claude-plugins-official": true,
         "notion@claude-plugins-official": true, "linear-key@dotfiles": true,
-        "linear@claude-plugins-official": false}}' >"$H/.claude/settings.json"
+        "linear@claude-plugins-official": false},
+        extraKnownMarketplaces: {
+            "quantivly": {source: {source: "github", repo: "quantivly/claude-plugins"}},
+            "dotfiles": {source: {source: "directory", path: ($h + "/.dotfiles/claude/plugins")}}}}' >"$H/.claude/settings.json"
     printf 'plugin:slack:slack: https://x (HTTP) - ✔ Connected\nplugin:Notion:notion: https://y (HTTP) - ✔ Connected\n' >"$H/stub/mcp-list"
     printf 'export LINEAR_API_KEY=%s\n' "$FAKE_KEY" >"$H/.zshrc.local"
 
@@ -1121,19 +1140,7 @@ jq 'del(.dotfiles)' "$H/.claude/plugins/known_marketplaces.json" >"$C/k" && mv "
 run_level --apply
 has   "missing dotfiles marketplace: added from the checkout path" "$(calls)" "claude plugin marketplace add $H/.dotfiles/claude/plugins --scope user"
 new_case
-jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
-run_level --check
-has   "superseded plugin enabled: ✗" "$OUT" "quantivly-pr-conventions@quantivly is enabled but superseded"
-run_level --apply
-has   "superseded plugin: ✓ disabled, read back as false (jq // treats false as missing)" "$OUT" "✓ plugin         quantivly-pr-conventions@quantivly disabled (superseded)"
-check "superseded plugin: --apply exits 0" "$RC" 0
-check "superseded plugin: set false in settings.json" "$(jq -r '.enabledPlugins["quantivly-pr-conventions@quantivly"]' "$H/.claude/settings.json")" false
-check "superseded plugin: the rest of settings.json survives" "$(jq -r .theme "$H/.claude/settings.json")" dark
-check "superseded plugin: a backup is kept" "$([[ -e "$H/.local/state/host-sync/settings.json.before-host-sync" ]] && echo yes || echo no)" yes
-hasnt "superseded plugin: no CLI call names it" "$(calls)" "quantivly-pr-conventions"
-new_case
 jq 'del(.plugins["slack@claude-plugins-official"])' "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
-jq 'del(.enabledPlugins["slack@claude-plugins-official"])' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
 run_level --check
 has   "missing plugin: ✗ not installed" "$OUT" "slack@claude-plugins-official not installed"
 run_level --apply
@@ -1148,25 +1155,98 @@ jq '.plugins["linear-key@dotfiles"] = [{scope: "project", projectPath: "/x", ver
     "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
 run_level --check
 hasnt "a project entry listed first: the USER entry's version is read" "$OUT" "0.1.0 installed"
+
+# The declaration is the live settings.json (H4): its true enabledPlugins entries and its
+# extraKnownMarketplaces. host-sync installs and refreshes; it never enables or disables.
+PLUGIN_OK="$(printf '✓ %-14s ' plugin)"; PLUGIN_DRIFT="$(printf '✗ %-14s ' plugin)"; PLUGIN_OPER="$(printf '⚠ %-14s ' plugin)"
+PLUGINS_OPER="$(printf '⚠ %-14s ' plugins)"
+MARKET_OK="$(printf '✓ %-14s ' marketplace)"; MARKET_DRIFT="$(printf '✗ %-14s ' marketplace)"
+MARKET_OPER="$(printf '⚠ %-14s ' marketplace)"
+SETTINGS_JSON_REL=".claude/settings.json"; INSTALLED_JSON_REL=".claude/plugins/installed_plugins.json"
+KNOWN_JSON_REL=".claude/plugins/known_marketplaces.json"
+QUANTIVLY_MANIFEST_REL=".claude/plugins/marketplaces/quantivly/.claude-plugin/marketplace.json"
+edit_json() {   # rewrite the case's $HOME/$1 through the jq filter $2; a failed edit stops the table
+    if ! { jq "$2" "$H/$1" >"$H/$1.edit" && mv "$H/$1.edit" "$H/$1"; }; then fatal "could not edit ~/$1 with: $2"; fi
+}
 new_case
-jq '.enabledPlugins["notion@claude-plugins-official"] = false' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["extra@quantivly"] = true'
+edit_json "$QUANTIVLY_MANIFEST_REL" '.plugins += [{name: "extra"}]'
+run_level --check
+has   "plugins: the declaration is settings.json: a true entry not installed is ✗" "$OUT" "${PLUGIN_DRIFT}extra@quantivly not installed"
 run_level --apply
-has   "disabled plugin: enabled, not reinstalled" "$(calls)" "claude plugin enable notion@claude-plugins-official --scope user"
+has   "plugins: the declaration is settings.json: --apply installs it at user scope" "$(calls)" "claude plugin install extra@quantivly --scope user"
+has   "plugins: the declaration is settings.json: ✓ once installed" "$OUT" "${PLUGIN_OK}extra@quantivly (installed)"
 new_case
-jq '.enabledPlugins["linear@claude-plugins-official"] = true | del(.enabledPlugins["linear-key@dotfiles"])' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
-jq 'del(.plugins["linear-key@dotfiles"])' "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["extra@quantivly"] = true'
+edit_json "$QUANTIVLY_MANIFEST_REL" '.plugins += [{name: "extra"}]'
+touch "$H/stub/install-fails-extra@quantivly"
 run_level --apply
-check "official linear: disabled once linear-key is on" "$(jq -r '.enabledPlugins["linear@claude-plugins-official"]' "$H/.claude/settings.json")" false
-check "official linear: disabled AFTER linear-key was installed" \
-    "$(grep -nE 'install linear-key|disable linear@' "$H/stub/calls" | cut -d: -f2- | tr '\n' '|')" \
-    "claude plugin install linear-key@dotfiles --scope user|claude plugin disable linear@claude-plugins-official --scope user|"
+has   "a plugin install that fails: ✗ with the log, never ✓" "$OUT" \
+    "${PLUGIN_DRIFT}extra@quantivly: install failed (log: ~/.local/state/host-sync/plugins.log)"
+# notion was on the fixed list the script used to carry, which turned an installed, false entry back on.
 new_case
-jq '.enabledPlugins["linear@claude-plugins-official"] = true | del(.enabledPlugins["linear-key@dotfiles"])' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
-jq 'del(.plugins["linear-key@dotfiles"])' "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
-touch "$H/stub/install-fails-linear-key@dotfiles"
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["old@quantivly"] = false | .enabledPlugins["notion@claude-plugins-official"] = false'
+edit_json "$INSTALLED_JSON_REL" '.plugins["old@quantivly"] = [{scope: "user", version: "1"}]'
+plugin_files_before="$(cat "$H/$INSTALLED_JSON_REL" "$H/$SETTINGS_JSON_REL")"
 run_level --apply
-check "linear-key install failing: official linear is LEFT ON" "$(jq -r '.enabledPlugins["linear@claude-plugins-official"]' "$H/.claude/settings.json")" true
-has   "linear-key install failing: ✗ says why" "$OUT" "must not end up with neither"
+declared_false_named=no
+[[ "$OUT" == *"old@quantivly"* || "$OUT" == *"notion@claude-plugins-official"* ]] && declared_false_named=yes
+check "a declared-false plugin is left alone: no row names it" "$declared_false_named" no
+check "a declared-false plugin is left alone: installed_plugins.json and settings.json unchanged" \
+    "$(cat "$H/$INSTALLED_JSON_REL" "$H/$SETTINGS_JSON_REL")" "$plugin_files_before"
+# Drifted on every path the fixed lists took: a superseded entry on, official linear on beside
+# linear-key, notion off, slack not installed, one marketplace stale and one not added.
+new_case
+edit_json "$KNOWN_JSON_REL" '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z" | del(.dotfiles)'
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true
+    | .enabledPlugins["linear@claude-plugins-official"] = true | .enabledPlugins["notion@claude-plugins-official"] = false'
+edit_json "$INSTALLED_JSON_REL" 'del(.plugins["slack@claude-plugins-official"])'
+run_level --apply
+check "host-sync never calls plugin enable or disable" "$(grep -cE '^claude plugin (enable|disable) ' "$H/stub/calls")" 0
+plugin_calls="$(grep -c '^claude plugin ' "$H/stub/calls")"
+(( plugin_calls > 0 )) || plugin_calls=none   # with no call to judge, the row must not pass
+check "every claude plugin call carries CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1" \
+    "$(grep -c '^plugin-https=1$' "$H/stub/plugin-https" 2>/dev/null) of $plugin_calls" "$plugin_calls of $plugin_calls"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["x@unknown"] = true'
+run_level --check
+has   "a plugin whose marketplace no fragment declares is a person's step" "$OUT" \
+    "${PLUGIN_OPER}x@unknown: marketplace unknown is declared by no settings fragment; not installed"
+run_level --apply
+hasnt "a plugin whose marketplace no fragment declares: --apply does not install it" "$(calls)" "install x@unknown"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["x@unknown"] = true'
+edit_json "$INSTALLED_JSON_REL" '.plugins["x@unknown"] = [{scope: "user", version: "1"}]'
+run_level --check
+has   "a plugin whose marketplace no fragment declares, installed: the ⚠ says installed" "$OUT" \
+    "${PLUGIN_OPER}x@unknown: marketplace unknown is declared by no settings fragment; installed, but its marketplace is not refreshed"
+new_case
+edit_json "$KNOWN_JSON_REL" 'del(.quantivly)'
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.team = {source: {source: "github", repo: "example/team"}}'
+run_level --check
+has   "marketplaces come from extraKnownMarketplaces: a declared one not added is ✗" "$OUT" "${MARKET_DRIFT}quantivly: not added"
+has   "marketplaces come from extraKnownMarketplaces: one only settings declares has its row" "$OUT" "${MARKET_DRIFT}team: not added"
+run_level --apply
+has   "marketplaces come from extraKnownMarketplaces: --apply adds it from the declared source" "$(calls)" \
+    "claude plugin marketplace add quantivly/claude-plugins --scope user"
+# The renderer substitutes $HOME; a hand-edited settings.json may still hold it literally, and an
+# unexpanded path reads as a cloned source, whose 2020 lastUpdated in the fixture is a ✗.
+new_case
+# shellcheck disable=SC2016  # the literal $HOME, deliberately
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.dotfiles.source.path = "$HOME/.dotfiles/claude/plugins"'
+run_level --check
+has   "a hand-written directory marketplace path with \$HOME is expanded before it is compared: ✓ against the known location" \
+    "$OUT" "${MARKET_OK}dotfiles"$'\n'
+new_case
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.team = {source: {source: "github"}}'
+run_level --check
+has   "a marketplace entry that names no repo, url or path: ⚠, never added" "$OUT" \
+    "${MARKET_OPER}team: its extraKnownMarketplaces entry names no repo, url or path; not added"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins = ["slack@claude-plugins-official"]'
+run_level --check
+has   "a settings.json whose enabledPlugins is not an object: ⚠, no plugin judged" "$OUT" \
+    "${PLUGINS_OPER}the live ~/.claude/settings.json is not an object with object enabledPlugins and extraKnownMarketplaces; plugins are not judged"
 new_case
 echo '{"name":"linear-key","version":"1.1.0"}' >"$H/.dotfiles/claude/plugins/linear-key/.claude-plugin/plugin.json"
 run_level --check
@@ -2121,7 +2201,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=500
+EXPECTED_ROWS=505
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
