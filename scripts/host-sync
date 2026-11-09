@@ -141,6 +141,16 @@ PROC="${HOST_SYNC_PROC:-/proc}"
 # The directory the armed / disarmed markers live in. The daily timer's marker is what makes
 # --apply allowed on a machine (a laptop is never armed).
 MARKER_DIR="$HOME/.config/host-sync"
+STATE_DIR="$HOME/.local/state/host-sync"
+# Before the rename (shared-configuration design, D8 / H2) the marker, the state and the timer
+# were dev-sync's. A host on that release is still armed by its marker, and its first --apply
+# moves all three (here_main, here_timer).
+LEGACY_MARKER_DIR="$HOME/.config/dev-sync"
+LEGACY_STATE_DIR="$HOME/.local/state/dev-sync"
+TIMER_UNIT="host-sync.timer"
+LEGACY_TIMER_UNIT="dev-sync.timer"
+USER_UNIT_DIR="$HOME/.config/systemd/user"
+WANTS_DIR="$USER_UNIT_DIR/default.target.wants"
 SAFE_DIR_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 HOST_ALIAS_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'   # an ssh alias, never an option or a path
 SAFE_REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
@@ -272,41 +282,145 @@ here_dotfiles() {
     fi
 }
 
-# Disarming is sticky: ~/.config/host-sync/disarmed outranks the laptop's --arm, so a later
-# laptop --apply still syncs dev but does not re-arm its timer. HERDR_GUIDE.md has the steps.
+# Arming is a per-host decision, like the memory timer's: "not armed" is information, and drift is
+# an armed marker without a live host-sync.timer, or dev-sync.timer still carrying the arming
+# (D8, H3). Disarming is sticky: a `disarmed` file outranks the laptop's --arm, so a later laptop
+# --apply still syncs the host but does not re-arm its timer. HERDR_GUIDE.md has the steps.
+#
+# THE MOVE FROM dev-sync.timer. dev-sync.service runs only while ~/.config/dev-sync/armed exists
+# (its ConditionPathExists), so the marker files move only once host-sync.timer reads back enabled
+# and active, and dev-sync.timer is stopped and its .wants link pruned only after that: every
+# intermediate state has at least one timer whose condition holds. On any failure dev-sync.timer,
+# its .wants link and its marker are left exactly as found. Never `disable` or `reenable` either
+# unit: each is a dotbot symlink into the checkout, and the disable half deletes it.
+#
+# The states, tested in this order so that a half-migrated host is finished rather than passed:
+#   1. disarmed, in either marker dir   ·, and --apply moves the file to the new dir
+#   2. dev-sync.timer enabled           ✗ in --check; --apply moves the arming
+#   3. host-sync.timer live, and armed  ✓, and --apply moves a marker left in the old dir
+#   4. --apply, armed or --arm          arm host-sync.timer
+#   5. --check, armed                   ✗: a marker without a live timer
+#   6. otherwise                        ·: not armed
 here_timer() {
-    local marker="$MARKER_DIR/armed" en ac next
-    if [[ -e "$MARKER_DIR/disarmed" ]]; then
-        row info timer "disarmed by hand (~/.config/host-sync/disarmed); --apply does not re-arm it"
+    local legacy_enabled next note=""
+    if is_disarmed; then
+        [[ "$MODE" == apply ]] && move_marker_files
+        row info timer "disarmed by hand ($(disarmed_marker_shown)); --apply does not re-arm it"
         return
     fi
-    en="$(systemctl --user is-enabled host-sync.timer 2>/dev/null)"
-    ac="$(systemctl --user is-active host-sync.timer 2>/dev/null)"
-    if [[ -e "$marker" && "$en" == enabled && "$ac" == active ]]; then
-        next="$(systemctl --user show host-sync.timer -p NextElapseUSecRealtime --value 2>/dev/null)"
-        row ok timer "host-sync.timer armed${next:+, next run $next}"
+    legacy_enabled="$(systemctl --user is-enabled "$LEGACY_TIMER_UNIT" 2>/dev/null)"
+    read_timer_state
+    if [[ "$legacy_enabled" == enabled ]]; then
+        move_arming_from_legacy_timer
         return
     fi
-    if [[ "$MODE" == apply && "$ARM" == 1 ]]; then
-        if [[ ! -e "$HOME/.config/systemd/user/host-sync.timer" ]]; then
-            row drift timer "host-sync.timer is not linked; ./install has not run for a commit that has it"
+    if timer_is_live && is_armed; then
+        [[ "$MODE" == apply ]] && move_marker_files
+        next="$(systemctl --user show "$TIMER_UNIT" -p NextElapseUSecRealtime --value 2>/dev/null)"
+        row ok timer "$TIMER_UNIT armed${next:+, next run $next}"
+        return
+    fi
+    if [[ "$MODE" == apply ]] && { is_armed || [[ "$ARM" == 1 ]]; }; then
+        if ! timer_unit_linked; then
+            timer_not_linked_row ""
+        elif arm_timer; then
+            move_marker_files
+            row ok timer "$TIMER_UNIT armed (daily)"
+        else
+            row drift timer "arming failed: is-enabled=${TIMER_ENABLED:-?}, is-active=${TIMER_ACTIVE:-?}"
+        fi
+        return
+    fi
+    if is_armed; then   # --check only: an armed --apply was handled by state 4
+        row drift timer "armed (marker present) but $TIMER_UNIT is-enabled=${TIMER_ENABLED:-?}, is-active=${TIMER_ACTIVE:-?}"
+        return
+    fi
+    timer_may_fire &&
+        note=" (is-enabled=${TIMER_ENABLED:-?}, is-active=${TIMER_ACTIVE:-?}: a timer that fires into a skipped unit)"
+    row info timer "not armed on this host (no ~/.config/host-sync/armed); host-sync --host <alias> --apply from the laptop arms it$note"
+}
+
+# State 2. --check names the move; --apply arms host-sync.timer unless it is already live, reads it
+# back, and only then moves the marker files and stops and prunes dev-sync.timer.
+move_arming_from_legacy_timer() {
+    local left_armed="; $LEGACY_TIMER_UNIT left armed"
+    if [[ "$MODE" != apply ]]; then
+        row drift timer "$LEGACY_TIMER_UNIT is armed; --apply moves the arming to $TIMER_UNIT"
+        return
+    fi
+    if ! timer_is_live; then
+        if ! timer_unit_linked; then
+            timer_not_linked_row "$left_armed"
             return
         fi
-        mkdir -p "$(dirname "$marker")" && : >"$marker"
-        # enable, never reenable: the unit is a dotbot symlink into the checkout, and
-        # `disable` (half of reenable) deletes it (scripts/reconcile-systemd-units.sh).
-        systemctl --user daemon-reload >/dev/null 2>&1
-        systemctl --user enable --now host-sync.timer >/dev/null 2>&1
-        en="$(systemctl --user is-enabled host-sync.timer 2>/dev/null)"
-        ac="$(systemctl --user is-active host-sync.timer 2>/dev/null)"
-        if [[ "$en" == enabled && "$ac" == active ]]; then
-            row ok timer "host-sync.timer armed (daily)"
-        else
-            row drift timer "arming failed: is-enabled=${en:-?} is-active=${ac:-?}"
-        fi
+        arm_timer
+    fi
+    if ! timer_is_live; then
+        row drift timer "$TIMER_UNIT could not be armed (is-enabled=${TIMER_ENABLED:-?}, is-active=${TIMER_ACTIVE:-?})$left_armed"
         return
     fi
-    row drift timer "host-sync.timer not armed (marker $([[ -e "$marker" ]] && echo present || echo absent), is-enabled=${en:-?}, is-active=${ac:-?})"
+    # host-sync.service needs its own marker before dev-sync.service loses its: a marker that
+    # could not be moved or written keeps dev-sync.timer armed.
+    move_marker_files
+    if [[ ! -e "$MARKER_DIR/armed" ]] && ! write_armed_marker; then
+        row drift timer "$(tilde_path "$MARKER_DIR/armed") could not be written$left_armed"
+        return
+    fi
+    systemctl --user stop "$LEGACY_TIMER_UNIT" >/dev/null 2>&1
+    rm -f "$WANTS_DIR/$LEGACY_TIMER_UNIT"
+    systemctl --user daemon-reload >/dev/null 2>&1
+    row ok timer "arming moved from $LEGACY_TIMER_UNIT to $TIMER_UNIT"
+}
+
+# Write the marker, enable host-sync.timer and read it back. enable, never reenable: the unit is a
+# dotbot symlink into the checkout, and `disable` (half of reenable) deletes it
+# (scripts/reconcile-systemd-units.sh). Succeeds when the timer reads back enabled and active.
+arm_timer() {
+    write_armed_marker
+    systemctl --user daemon-reload >/dev/null 2>&1
+    systemctl --user enable --now "$TIMER_UNIT" >/dev/null 2>&1
+    read_timer_state
+    timer_is_live
+}
+write_armed_marker() { { mkdir -p "$MARKER_DIR" && : >"$MARKER_DIR/armed"; } 2>/dev/null; }
+
+# File by file, never the directory: a host-sync dir that already exists must not strand the
+# legacy marker inside a nested dev-sync/. The legacy dir goes once it is empty.
+move_marker_files() {
+    local name
+    for name in armed disarmed; do
+        [[ -e "$LEGACY_MARKER_DIR/$name" ]] && mkdir -p "$MARKER_DIR" && mv "$LEGACY_MARKER_DIR/$name" "$MARKER_DIR/$name"
+    done
+    rmdir "$LEGACY_MARKER_DIR" 2>/dev/null || true
+}
+
+is_armed() { [[ -e "$MARKER_DIR/armed" || -e "$LEGACY_MARKER_DIR/armed" ]]; }
+is_disarmed() { [[ -e "$MARKER_DIR/disarmed" || -e "$LEGACY_MARKER_DIR/disarmed" ]]; }
+disarmed_marker_shown() {
+    if [[ -e "$MARKER_DIR/disarmed" ]]; then tilde_path "$MARKER_DIR/disarmed"
+    else tilde_path "$LEGACY_MARKER_DIR/disarmed"; fi
+}
+tilde_path() { printf '~%s' "${1#"$HOME"}"; }
+
+# host-sync.timer's is-enabled and is-active, into TIMER_ENABLED and TIMER_ACTIVE.
+read_timer_state() {
+    TIMER_ENABLED="$(systemctl --user is-enabled "$TIMER_UNIT" 2>/dev/null)"
+    TIMER_ACTIVE="$(systemctl --user is-active "$TIMER_UNIT" 2>/dev/null)"
+}
+timer_is_live() { [[ "$TIMER_ENABLED" == enabled && "$TIMER_ACTIVE" == active ]]; }
+timer_unit_linked() { [[ -e "$USER_UNIT_DIR/$TIMER_UNIT" ]]; }
+timer_not_linked_row() {   # $1 = what is appended
+    row drift timer "$TIMER_UNIT is not linked (./install has not run for a commit that has it)$1"
+}
+# Whether an unarmed host's timer still fires (into a unit its condition skips). A dotbot-linked
+# unit with no .wants link reads `linked`, not `disabled`; one with no unit file reads `not-found`
+# (both measured on systemd 259); an empty answer is a user manager that did not reply.
+timer_may_fire() {
+    case "$TIMER_ENABLED" in
+        disabled | linked | not-found | "") ;;
+        *) return 0 ;;
+    esac
+    [[ -n "$TIMER_ACTIVE" && "$TIMER_ACTIVE" != inactive ]]
 }
 
 here_claude() {
@@ -994,9 +1108,25 @@ here_clones() {
     fi
 }
 
+# The state dir moved with the rename. --check reads whichever exists, the new one first, so a
+# legacy host's install stamp is found where it is, and moves nothing.
+pick_state_dir() {
+    if [[ -d "$STATE_DIR" ]]; then STATE="$STATE_DIR"
+    elif [[ -d "$LEGACY_STATE_DIR" ]]; then STATE="$LEGACY_STATE_DIR"
+    else STATE="$STATE_DIR"; fi
+}
+
+# --apply, under the lock: its fd stays valid across the rename, and a run that opens the new
+# path's lock afterwards finds the same inode held. When both dirs exist the new one wins and the
+# legacy one is left as it is (an earlier partial run; one ./install at worst re-derives the stamp).
+move_legacy_state_dir() {
+    [[ -d "$LEGACY_STATE_DIR" && ! -e "$STATE_DIR" ]] || return 0
+    mv "$LEGACY_STATE_DIR" "$STATE_DIR" && STATE="$STATE_DIR"
+}
+
 here_main() {
     DOTFILES="$HOME/.dotfiles"
-    STATE="$HOME/.local/state/host-sync"
+    pick_state_dir
     CLAUDE="$HOME/.local/bin/claude"
     HERDR="$HOME/.local/bin/herdr"
     SETTINGS="$HOME/.claude/settings.json"
@@ -1030,16 +1160,19 @@ here_main() {
         command -v "$tool" >/dev/null 2>&1 || { echo "host-sync: $tool is required on $(hostname)" >&2; return 2; }
     done
     if [[ "$MODE" == apply ]]; then
-        if [[ "$ARM" != 1 && ! -e "$MARKER_DIR/armed" ]]; then
+        if [[ "$ARM" != 1 ]] && ! is_armed; then
             echo "host-sync: refusing --apply: this machine is not armed (no ~/.config/host-sync/armed)." >&2
             echo "          Arm it from the laptop: ~/.dotfiles/scripts/host-sync --host <alias> --apply" >&2
             return 2
         fi
         # --check writes nothing, so only --apply takes the lock (the timer and a laptop
-        # run can otherwise overlap).
-        mkdir -p "$STATE" || return 2
-        exec 9>"$STATE/lock"
+        # run can otherwise overlap). The lock comes first, in the dir pick_state_dir chose, and
+        # the legacy dir moves only under it. Only the new dir is ever created: a legacy dir that
+        # a concurrent run renamed away must fail the open below, not come back empty and unlocked.
+        if [[ "$STATE" == "$STATE_DIR" ]]; then mkdir -p "$STATE" || return 2; fi
+        exec 9>"$STATE/lock" || { echo "host-sync: cannot open $STATE/lock" >&2; return 2; }
         flock -n 9 || { echo "host-sync: another run holds $STATE/lock" >&2; return 2; }
+        move_legacy_state_dir
     fi
 
     # Every row runs with fd 9 closed, so no exec'd child can inherit the lock. A child that

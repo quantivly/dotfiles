@@ -50,7 +50,7 @@ ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
 # Built at runtime so no token-shaped literal sits in the repo for a scanner to flag.
 FAKE_TOK="sk-ant-""oat01-FIXTUREtokenNOTREAL0123456789abcdef"
-MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|daemon-reload|^sudo '
+MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo '
 
 # ---------------------------------------------------------------------------------------------
 # Stubs. Each logs "<tool> <args>" to $HOME/stub/calls.
@@ -161,13 +161,24 @@ STUB
     cat >"$b/systemctl" <<'STUB'
 #!/usr/bin/env bash
 S="$HOME/stub"; echo "systemctl $*" >>"$S/calls"
+# State is per unit: is-enabled reads $S/enabled-<unit>, is-active $S/active-<unit>. A unit enabled
+# through WantedBy= stays enabled only while its .wants link exists, as with systemd, which reads the
+# links at query time: once the link is gone a dotbot-linked unit reads `linked`, whatever the file
+# says. Without that, a pruned dev-sync.timer would read enabled forever.
+WANTS="$HOME/.config/systemd/user/default.target.wants"
 [[ "$1" == --user ]] && shift
 case "$1" in
-    is-enabled) cat "$S/timer-enabled" 2>/dev/null || { echo disabled; exit 1; } ;;
-    is-active) cat "$S/timer-active" 2>/dev/null || { echo inactive; exit 3; } ;;
+    is-enabled)
+        state="$(cat "$S/enabled-$2" 2>/dev/null)" || { echo disabled; exit 1; }
+        [[ "$state" == enabled && ! -L "$WANTS/$2" ]] && state=linked
+        echo "$state"; [[ "$state" == enabled ]] ;;
+    is-active) cat "$S/active-$2" 2>/dev/null || { echo inactive; exit 3; } ;;
     daemon-reload) ;;
     restart) [[ -e "$S/restart-fails" ]] && exit 1; "$HOME/.local/bin/herdr" --version | awk '{print $2}' >"$S/server-version" ;;
-    enable) [[ -e "$S/enable-fails" ]] && exit 1; echo enabled >"$S/timer-enabled"; echo active >"$S/timer-active" ;;
+    enable)   # enable --now <unit>: the unit is named last
+        [[ -e "$S/enable-fails" ]] && exit 1
+        unit="${!#}"; echo enabled >"$S/enabled-$unit"; echo active >"$S/active-$unit"; ln -sfn "../$unit" "$WANTS/$unit" ;;
+    stop) echo inactive >"$S/active-$2" ;;
     list-units) cat "$S/units" 2>/dev/null ;;
     show)
         case "$2:$4" in
@@ -224,9 +235,12 @@ new_case() {
     mkdir -p "$H/.local/state/host-sync"
     git -C "$H/.dotfiles" rev-parse HEAD >"$H/.local/state/host-sync/installed-head"
 
-    # timer armed
-    : >"$H/.config/host-sync/armed"; : >"$H/.config/systemd/user/host-sync.timer"
-    echo enabled >"$H/stub/timer-enabled"; echo active >"$H/stub/timer-active"
+    # timer armed. ./install links both units on every host (plain files stand in for the links);
+    # only host-sync.timer is enabled, which puts its link in the .wants directory.
+    WANTS="$H/.config/systemd/user/default.target.wants"; mkdir -p "$WANTS"
+    : >"$H/.config/host-sync/armed"
+    : >"$H/.config/systemd/user/host-sync.timer"; : >"$H/.config/systemd/user/dev-sync.timer"
+    stub_timer_live host-sync.timer
 
     # herdr-draft at the target commit
     bare ZviBaratz/herdr-draft
@@ -269,6 +283,52 @@ new_case() {
     git -C "$H/quantivly/alpha" fetch -q origin
     git -C "$H/quantivly/alpha" worktree add -q "$H/quantivly/alpha-wt" -b wt 2>/dev/null
     bare quantivly/beta   # exists on "GitHub", not on dev
+}
+
+# A timer enabled and active, as `systemctl --user enable --now` leaves it: both stub files, and
+# the .wants link the stub's is-enabled requires. timer_off undoes all three.
+stub_timer_live() {   # $1 = unit
+    echo enabled >"$H/stub/enabled-$1"; echo active >"$H/stub/active-$1"; ln -sfn "../$1" "$WANTS/$1"
+}
+timer_off() { rm -f "$H/stub/enabled-$1" "$H/stub/active-$1" "$WANTS/$1"; }
+
+# A host on the release before the rename: dev-sync's marker, its state dir (install stamp
+# included) and its timer, armed and live; host-sync.timer linked by ./install, never enabled.
+legacy_case() {
+    new_case
+    mv "$H/.config/host-sync" "$H/.config/dev-sync"
+    mv "$H/.local/state/host-sync" "$H/.local/state/dev-sync"
+    timer_off host-sync.timer
+    stub_timer_live dev-sync.timer
+}
+# Which marker dirs hold an `armed` file: host-sync, dev-sync, both or none.
+armed_where() {
+    local new="$H/.config/host-sync/armed" legacy="$H/.config/dev-sync/armed"
+    if [[ -e "$new" && -e "$legacy" ]]; then echo both
+    elif [[ -e "$new" ]]; then echo host-sync
+    elif [[ -e "$legacy" ]]; then echo dev-sync
+    else echo none; fi
+}
+present() { if [[ -e "$1" || -L "$1" ]]; then echo present; else echo gone; fi; }
+# From the stub log, by line: the enable of host-sync.timer, the first is-enabled read-back after
+# it, and the stop of dev-sync.timer must come in that order.
+arming_order() {
+    awk '
+        !enable_at && $0 == "systemctl --user enable --now host-sync.timer" { enable_at = NR }
+        enable_at && !readback_at && NR > enable_at && $0 == "systemctl --user is-enabled host-sync.timer" { readback_at = NR }
+        !stop_at && $0 == "systemctl --user stop dev-sync.timer" { stop_at = NR }
+        END {
+            if (enable_at && readback_at && stop_at && enable_at < readback_at && readback_at < stop_at) print "enable, read back, then stop"
+            else print "out of order: enable at " enable_at ", read-back at " readback_at ", stop at " stop_at
+        }' "$H/stub/calls"
+}
+# The .wants link is removed between the stop and the reload, so a reload after the stop is one
+# after the removal.
+reload_after_stop() {
+    awk '
+        $0 == "systemctl --user stop dev-sync.timer" { stop_at = NR }
+        $0 == "systemctl --user daemon-reload" { reload_at = NR }
+        END { if (stop_at && reload_at > stop_at) print "after"; else print "not after" }' "$H/stub/calls"
 }
 
 store_token() {   # $1 = the created date; writes what claude-oauth-store writes
@@ -385,7 +445,12 @@ jq '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z" | del(.dotfiles)' "$H/.c
 jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true | .enabledPlugins["linear@claude-plugins-official"] = true' \
     "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
 rm -rf "$H/.local/state/host-sync" "$H/.config/host-sync/armed"; touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
-snapshot() { find "$H" -path "$H/stub" -prune -o -printf '%p %s %m %T@\n' | sort; }
+# Every path under $HOME with its size, mode and mtime, less the stub log and any path given.
+snapshot() {   # $@ = further paths to leave out
+    local leave_out=(-path "$H/stub") path
+    for path in "$@"; do leave_out+=(-o -path "$path"); done
+    find "$H" \( "${leave_out[@]}" \) -prune -o -printf '%p %s %m %T@\n' | sort
+}
 before="$(snapshot)"
 run_level --check --clone beta=quantivly/beta
 check "a fully drifted --check exits 1" "$RC" 1
@@ -707,25 +772,174 @@ run --check --clone 'x;rm=quantivly/x'
 check "an unsafe --clone dir is refused (64)" "$RC" 64
 
 echo "== timer"
+# The timer row's glyph and area, as row() prints them, so a needle also pins ✓ against ✗ and ·.
+TIMER_OK="$(printf '✓ %-14s ' timer)"; TIMER_DRIFT="$(printf '✗ %-14s ' timer)"; TIMER_INFO="$(printf '· %-14s ' timer)"
+# What follows "arms it" on the information row; the whole line when nothing does.
+info_suffix() {
+    local line
+    while IFS= read -r line; do
+        [[ "$line" == *"${TIMER_INFO}not armed on this host"* ]] && printf '%s' "${line#*from the laptop arms it }"
+    done <<<"$OUT"
+}
 new_case
-rm "$H/.config/host-sync/armed" "$H/stub/timer-enabled" "$H/stub/timer-active"
+rm "$H/.config/host-sync/armed"; timer_off host-sync.timer
 reset_calls; run_level --apply
 check "unarmed dev, --apply without --arm: refused (2)" "$RC" 2
 check "unarmed dev: nothing mutating was called" "$(mutations)" 0
 has   "unarmed: the refusal names the command that arms it, with --host" "$OUT" "scripts/host-sync --host <alias> --apply"
 run_level --check
-has   "unarmed dev: --check shows the ✗" "$OUT" "host-sync.timer not armed"
+has   "unarmed host: --check is information" "$OUT" \
+    "${TIMER_INFO}not armed on this host (no ~/.config/host-sync/armed); host-sync --host <alias> --apply from the laptop arms it"
+check "unarmed host: --check is information, exit 0" "$RC" 0
+hasnt "unarmed host, timer not enabled: no skipped-unit note" "$OUT" "fires into a skipped unit"
 run_level --apply --arm
 check "--arm: the marker is written" "$([[ -e "$H/.config/host-sync/armed" ]] && echo yes || echo no)" yes
 has   "--arm: enable, never reenable" "$(calls)" "systemctl --user enable --now host-sync.timer"
-hasnt "--arm: no reenable or disable" "$(grep -E '(re|dis)able' "$H/stub/calls")" "host-sync.timer"
+hasnt "--arm: no reenable or disable" "$(grep -E 'reenable|disable' "$H/stub/calls")" "host-sync.timer"
 new_case
-rm "$H/.config/host-sync/armed" "$H/stub/timer-enabled" "$H/stub/timer-active"; : >"$H/.config/host-sync/disarmed"
+rm "$H/.config/host-sync/armed"
+run_level --check
+check "unarmed host with an enabled timer: the information row names it" "$(info_suffix)" \
+    "(is-enabled=enabled, is-active=active: a timer that fires into a skipped unit)"
+new_case
+echo inactive >"$H/stub/active-host-sync.timer"
+run_level --check
+has   "armed marker, timer inactive: ✗ in --check" "$OUT" \
+    "${TIMER_DRIFT}armed (marker present) but host-sync.timer is-enabled=enabled, is-active=inactive"
+reset_calls; run_level --apply
+has   "armed marker, timer inactive: --apply without --arm re-arms" "$(calls)" "systemctl --user enable --now host-sync.timer"
+check "armed marker, timer inactive: --apply without --arm re-arms, exit 0" "$RC" 0
+new_case
+rm "$H/.config/host-sync/armed"; timer_off host-sync.timer; : >"$H/.config/host-sync/disarmed"
 reset_calls; run_level --apply --arm
 check "disarmed by hand: --arm does not write the marker" "$([[ -e "$H/.config/host-sync/armed" ]] && echo yes || echo no)" no
 hasnt "disarmed by hand: the timer is not enabled" "$(calls)" "enable --now host-sync.timer"
 has   "disarmed by hand: · says so, and it is not drift" "$OUT" "· timer          disarmed by hand"
 check "disarmed by hand: the rest still syncs, and exits 0" "$RC" 0
+
+echo "== timer: the arming moves from dev-sync.timer to host-sync.timer"
+# The first --apply after the rename. dev-sync.service runs only while ~/.config/dev-sync/armed
+# exists, so that marker moves only once host-sync.timer reads back enabled and active, and every
+# failure leaves dev-sync.timer, its .wants link and its marker exactly as found.
+legacy_case
+before="$(snapshot)"
+run_level --check
+check "legacy: --check names the move and changes nothing: exit 1" "$RC" 1
+has   "legacy: --check names the move and changes nothing: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}dev-sync.timer is armed; --apply moves the arming to host-sync.timer"
+hasnt "legacy: --check names the move and changes nothing: the install stamp is read where it is" "$OUT" "./install has not run"
+check "legacy: --check names the move and changes nothing: no file changes" "$(diff <(echo "$before") <(snapshot) | head -n 5)" ""
+reset_calls; run_level --apply
+check "legacy: --apply without --arm is not refused" "$RC" 0
+check "legacy: the state dir is moved under the lock and the install stamp carried: the stamp" \
+    "$(cat "$H/.local/state/host-sync/installed-head" 2>/dev/null)" "$(head_of "$H/.dotfiles")"
+check "legacy: the state dir is moved under the lock and the install stamp carried: the old dir is gone" \
+    "$(present "$H/.local/state/dev-sync")" gone
+check "legacy: the state dir is moved under the lock and the install stamp carried: ./install is not re-run" \
+    "$(present "$H/stub/install-ran")" gone
+has   "legacy: host-sync.timer is enabled with enable --now, never reenable" "$(calls)" "systemctl --user enable --now host-sync.timer"
+hasnt "legacy: host-sync.timer is enabled with enable --now, never reenable: no reenable or disable of any timer" \
+    "$(grep -E 'reenable|disable' "$H/stub/calls")" ".timer"
+check "legacy: the marker moves only after the new timer reads back armed: the calls' order" "$(arming_order)" "enable, read back, then stop"
+check "legacy: the marker moves only after the new timer reads back armed: ~/.config/host-sync/armed" "$(armed_where)" host-sync
+check "legacy: the marker moves only after the new timer reads back armed: ~/.config/dev-sync is removed" \
+    "$(present "$H/.config/dev-sync")" gone
+has   "legacy: dev-sync.timer is stopped and its .wants link removed: the stop" "$(calls)" "systemctl --user stop dev-sync.timer"
+check "legacy: dev-sync.timer is stopped and its .wants link removed: the link" "$(present "$WANTS/dev-sync.timer")" gone
+check "legacy: dev-sync.timer is stopped and its .wants link removed: daemon-reload after it" "$(reload_after_stop)" after
+check "legacy: the unit link of dev-sync.timer is left" "$(present "$H/.config/systemd/user/dev-sync.timer")" present
+has   "legacy: ✓ says the arming moved" "$OUT" "${TIMER_OK}arming moved from dev-sync.timer to host-sync.timer"
+# Left out besides the state dir: every --apply fetches origin main into the checkout, and git's
+# own bookkeeping for that (FETCH_HEAD, the objects dir's mtime) is not a change to the host.
+SECOND_APPLY_LEAVE_OUT=("$H/.local/state/host-sync" "$H/.dotfiles/.git/FETCH_HEAD" "$H/.dotfiles/.git/objects")
+reset_calls; before="$(snapshot "${SECOND_APPLY_LEAVE_OUT[@]}")"
+run_level --apply
+check "legacy: a second --apply calls nothing mutating" "$(mutations)" 0
+check "legacy: a second --apply changes no file" "$(diff <(echo "$before") <(snapshot "${SECOND_APPLY_LEAVE_OUT[@]}") | head -n 5)" ""
+
+# The lock is taken in the legacy dir, before the move: a rename keeps the inode, so the host's own
+# tick holding it there refuses this run, and nothing has moved when it does.
+legacy_case
+LEGACY_LOCK="$H/.local/state/dev-sync/lock"
+exec 8>"$LEGACY_LOCK"; flock -n 8 || fatal "could not take $LEGACY_LOCK for the legacy lock row"
+reset_calls; run_level --apply
+exec 8>&-
+check "legacy: a run that cannot take the lock moves nothing: exit 2" "$RC" 2
+has   "legacy: a run that cannot take the lock moves nothing: refused by the lock" "$OUT" "another run holds"
+check "legacy: a run that cannot take the lock moves nothing: the marker" "$(armed_where)" dev-sync
+check "legacy: a run that cannot take the lock moves nothing: the state dir" "$(present "$H/.local/state/dev-sync")" present
+hasnt "legacy: a run that cannot take the lock moves nothing: no enable" "$(calls)" "systemctl --user enable"
+
+legacy_case
+rm "$H/.config/systemd/user/host-sync.timer"
+reset_calls; run_level --apply
+has   "legacy: when the new timer cannot be armed the old one is left armed: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}host-sync.timer is not linked (./install has not run for a commit that has it); dev-sync.timer left armed"
+hasnt "legacy: when the new timer cannot be armed the old one is left armed: no stop" "$(calls)" "stop dev-sync.timer"
+check "legacy: when the new timer cannot be armed the old one is left armed: the .wants link" "$(present "$WANTS/dev-sync.timer")" present
+check "legacy: when the new timer cannot be armed the old one is left armed: the marker" "$(present "$H/.config/dev-sync/armed")" present
+
+legacy_case
+touch "$H/stub/enable-fails"
+reset_calls; run_level --apply
+has   "legacy: an enable that fails leaves the old timer and the marker in place: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}host-sync.timer could not be armed (is-enabled=disabled, is-active=inactive); dev-sync.timer left armed"
+hasnt "legacy: an enable that fails leaves the old timer and the marker in place: no stop" "$(calls)" "stop dev-sync.timer"
+check "legacy: an enable that fails leaves the old timer and the marker in place: the .wants link" "$(present "$WANTS/dev-sync.timer")" present
+check "legacy: an enable that fails leaves the old timer and the marker in place: the marker" "$(present "$H/.config/dev-sync/armed")" present
+
+# host-sync.timer is already live, but the new marker dir cannot be written: the marker cannot
+# move, so dev-sync.timer keeps its own and is not stopped.
+legacy_case
+stub_timer_live host-sync.timer
+mkdir "$H/.config/host-sync"; chmod 555 "$H/.config/host-sync"
+reset_calls; run_level --apply
+chmod 755 "$H/.config/host-sync"
+has   "legacy: a marker that cannot move leaves dev-sync.timer armed: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}~/.config/host-sync/armed could not be written; dev-sync.timer left armed"
+hasnt "legacy: a marker that cannot move leaves dev-sync.timer armed: no stop" "$(calls)" "stop dev-sync.timer"
+check "legacy: a marker that cannot move leaves dev-sync.timer armed: its marker and .wants link" \
+    "$(armed_where)/$(present "$WANTS/dev-sync.timer")" dev-sync/present
+
+# An earlier run armed host-sync.timer and died before it stopped dev-sync.timer.
+legacy_case
+stub_timer_live host-sync.timer
+reset_calls; run_level --apply
+has   "legacy: both timers enabled (half migrated): --apply finishes the move: the stop" "$(calls)" "systemctl --user stop dev-sync.timer"
+check "legacy: both timers enabled (half migrated): --apply finishes the move: the .wants link" "$(present "$WANTS/dev-sync.timer")" gone
+check "legacy: both timers enabled (half migrated): --apply finishes the move: the marker" "$(armed_where)" host-sync
+hasnt "legacy: both timers enabled (half migrated): --apply finishes the move: no second enable" "$(calls)" "enable --now"
+
+# dev-sync.timer already pruned, its marker left behind: the marker moves once host-sync.timer is
+# live, whether it already was (state 3) or this run armed it (state 4).
+legacy_case
+timer_off dev-sync.timer; stub_timer_live host-sync.timer
+run_level --apply
+check "legacy: a marker left in the old dir moves once host-sync.timer is live: already live" "$(armed_where)" host-sync
+legacy_case
+timer_off dev-sync.timer
+run_level --apply
+check "legacy: a marker left in the old dir moves once host-sync.timer is live: armed by this run" "$(armed_where)" host-sync
+
+legacy_case
+rm "$H/.config/dev-sync/armed"; : >"$H/.config/dev-sync/disarmed"; timer_off dev-sync.timer
+run_level --check
+has   "legacy: a disarmed legacy host reads disarmed in --check" "$OUT" "${TIMER_INFO}disarmed by hand"
+hasnt "legacy: a disarmed legacy host reads disarmed in --check: not the not-armed text" "$OUT" "not armed on this host"
+check "legacy: a disarmed legacy host reads disarmed in --check: exit 0" "$RC" 0
+reset_calls; run_level --apply --arm
+check "legacy: --apply --arm on a disarmed legacy host writes no marker and moves the disarmed file: moved" \
+    "$(present "$H/.config/host-sync/disarmed")/$(present "$H/.config/dev-sync")" present/gone
+check "legacy: --apply --arm on a disarmed legacy host writes no marker and moves the disarmed file: no marker" "$(armed_where)" none
+hasnt "legacy: --apply --arm on a disarmed legacy host writes no marker and moves the disarmed file: no enable" "$(calls)" "enable --now"
+
+legacy_case
+mkdir "$H/.config/host-sync"
+run_level --apply
+check "legacy: an existing host-sync dir does not strand the legacy marker: dev-sync/ is gone" "$(present "$H/.config/dev-sync")" gone
+# Its exact contents: a directory mv would nest dev-sync/ inside it.
+check "legacy: an existing host-sync dir does not strand the legacy marker: host-sync/ holds armed alone" \
+    "$(find "$H/.config/host-sync" -mindepth 1 -printf '%P ')" "armed "
 
 echo "== hygiene: abandoned sessions, slice"
 new_case
@@ -1400,7 +1614,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=336
+EXPECTED_ROWS=392
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
