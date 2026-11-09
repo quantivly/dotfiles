@@ -558,7 +558,9 @@ closure_refusals="dynamic=$(closure_refusal 'const loaded = await import(moduleP
 closure_refusals+=" unterminated=$(closure_refusal "import {present} from './present.js'")"
 closure_refusals+=" indented=$(closure_refusal "    import {present} from './present.js';")"
 closure_refusals+=" missing=$(closure_refusal "import {missing} from './missing.js';")"
-closure_refusals+=" outside=$(closure_refusal "import {outside} from '../outside.js';")"
+# '../present.js' climbs out of the extension directory, though present.js exists
+# inside it: a resolver that let .. pass the top would find it and say exit 0.
+closure_refusals+=" outside=$(closure_refusal "import {present} from '../present.js';")"
 check "closure: a dynamic import of a computed specifier, an import with no ;, one not starting its line, and one naming no file in the extension are each exit 2 with nothing on stdout" \
   "$closure_refusals" "dynamic=2/0/1 unterminated=2/0/1 indented=2/0/1 missing=2/0/1 outside=2/0/1"
 
