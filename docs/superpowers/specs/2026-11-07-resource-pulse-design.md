@@ -10,6 +10,8 @@
 
 **Amended 2026-11-08 (final review):** swap is read from /proc/swaps — zram used = Σ Used of /dev/zram* entries, on disk = Σ Used of the others; zram orig_data_size under-counts zram's swap share (same_pages, slot use), so the original formula reported phantom disk swap.
 
+**Amended 2026-11-08 (v2 architecture):** sampling moves out of gnome-shell into a systemd user service, and the extension only draws; "kernel & other" splits into "kernel" and "short jobs"; histories survive lock and blank. [2026-11-08-resource-pulse-service-design.md](2026-11-08-resource-pulse-service-design.md) wins wherever it disagrees with this document.
+
 ## Context
 
 The user wants live CPU and memory state on this laptop: a **minimal** indicator in the top bar and a

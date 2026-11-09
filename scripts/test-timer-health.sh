@@ -186,6 +186,16 @@ link_unit() {
     ln -sf "$CHECKOUT/systemd/$unit" "$SUDIR/$unit"
 }
 
+# link_on_demand_unit <unit>: a unit with NO [Install] section, which nothing can
+# enable: something else starts it (resource-pulse.service is started by its
+# GNOME extension). Measured on systemd 259: is-enabled answers "linked" for such
+# a symlinked unit exactly as for one that has an [Install] section, so only the
+# unit file can tell them apart. The stub's default answer is that "linked".
+link_on_demand_unit() {
+    printf '[Unit]\nDescription=%s\n[Service]\nExecStart=/bin/true\n' "$1" > "$CHECKOUT/systemd/$1"
+    ln -sf "$CHECKOUT/systemd/$1" "$SUDIR/$1"
+}
+
 set_enabled() { printf '%s\n' "$2" > "$STATE/enabled/$1"; }
 
 # props <unit> <LoadState> <ActiveState> <Result> <ExecMainStatus> <ConditionResult> <ConditionTimestamp> <ActiveEnterTimestamp> [NRestarts]
@@ -626,6 +636,31 @@ OUT="$(run)"; RC=$?
 check "the activated oneshot is not judged as a daemon: exit 0" "$RC" 0
 grep_none "$OUT" 'precompute.service: linked, not enabled' "activated service: not re-reported standalone"
 
+printf '\non-demand units (no [Install]): never enabled by design\n'
+
+healthy
+link_on_demand_unit pulse.service
+link_unit armable.service
+OUT="$(run)"; RC=$?
+check "an on-demand service (no [Install]) that is not enabled: exit 0" "$RC" 0
+grep_ok "$OUT" '· pulse.service: started on demand (no \[Install\])' "on demand: reported as such"
+grep_none "$OUT" 'pulse.service: linked, not enabled' "on demand: not reported as an arming decision"
+check "on demand: its properties are never read" "$(asked 'show .*pulse.service')" 0
+grep_ok "$OUT" '· armable.service: linked, not enabled' "a service WITH [Install], not enabled: still an arming decision"
+
+healthy
+link_on_demand_unit pulse.service
+set_enabled pulse.service enabled
+props pulse.service loaded active success 0 yes "@$((NOW-9000))" "@$((NOW-9000))"
+OUT="$(run)"; RC=$?
+check "an on-demand unit that IS enabled (a hand-made link) is checked: exit 0" "$RC" 0
+grep_ok "$OUT" '✓ pulse.service: active' "an enabled on-demand unit: checked like any daemon"
+
+healthy
+link_on_demand_unit pulse.timer
+OUT="$(run)"; RC=$?
+grep_ok "$OUT" '· pulse.timer: started on demand (no \[Install\])' "an on-demand timer (no [Install]): reported as such"
+
 printf '\nforeign units are not this repos business\n'
 
 healthy
@@ -832,7 +867,7 @@ check "no timer sets Persistent=true without OnCalendar= (it wedges on a late bo
 # ---------------------------------------------------------------------------
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=134
+EXPECTED_ROWS=142
 
 # --- the count this suite is documented as running ---------------------------
 # docs_claim pins the number the prose quotes to EXPECTED_ROWS above: it greps

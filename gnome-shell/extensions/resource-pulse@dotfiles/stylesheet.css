@@ -6,6 +6,12 @@
   spacing: 4px;
 }
 
+/* The dropdown's card item: the card inside has its own surface, so the item only pads it. That the menu's hover
+   and focus colours stay off it is the item's doing (reactive: false, can_focus: false in indicator.js), not this rule. */
+.resource-pulse-menu-card-item {
+  padding: 4px 6px;
+}
+
 /* The hover label under the indicator, styled after the dock's labels: Yaru's .dash-label (gnome-shell.css,
    the same in the light and dark themes), copied rather than reused, so a theme change cannot leave the label
    unstyled. Tabular numerals keep the digits from jittering as they update. */
@@ -79,4 +85,31 @@
 
 .resource-pulse-card-pressure-group {
   spacing: 4px;
+}
+
+/* Added in the service release. Every class above stays as it was: GNOME re-reads this file on every enable but the
+   code only at login, so the previous release's code may meet this stylesheet until the next login. */
+
+/* The card's fixed width, so its left edge never moves: its widest rows plus a small margin, measured with Pango in
+   this font (gnome-shell/tests/visibility.test.js). The widest is "no data since HH:MM" in the CPU row, about 25.8em
+   with the graph; a 100+ GiB memory line comes next. Only the "heaviest" names give way to it (they ellipsize); no
+   number is ever cut. It overrides .resource-pulse-card's min-width, which stays for the previous release's code. */
+.rp-card-fixed {
+  min-width: 26.5em;
+  width: 26.5em;
+  max-width: 26.5em;
+}
+
+/* The "heaviest" line's names, values and separator, about a word apart, as one line of text would be. */
+.rp-card-heaviest-parts {
+  spacing: 4px;
+}
+
+/* Added in the review fixes (ruling R21). The desktop card while frozen: card.js sets the frozen pseudo-class while a
+   window covers it, so a card misjudged as covered reads as stale, never as live. Its value labels, which take their
+   colour from the card, dim; the muted labels keep their own. The graphs dim by -rp-graph-opacity, which card.js reads
+   from here and applies to every graph colour. */
+.resource-pulse-card:frozen {
+  color: rgba(255, 255, 255, 0.45);
+  -rp-graph-opacity: 0.4;
 }

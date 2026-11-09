@@ -35,6 +35,11 @@
     ~/.config/herdr/config.toml: config/herdr/config.toml
     # Resource Pulse: inert until ~/.gnome-settings.local says genable_extension resource-pulse@dotfiles.
     ~/.local/share/gnome-shell/extensions/resource-pulse@dotfiles: gnome-shell/extensions/resource-pulse@dotfiles
+    # Its sampler service. Linked, NEVER enabled: it has no [Install] section, and
+    # the extension starts it on demand (StartUnit), so for anyone who has not
+    # opted in it is inert. The shell step after the reconcile below reloads
+    # systemd and restarts it only when its code changed.
+    ~/.config/systemd/user/resource-pulse.service: systemd/resource-pulse.service
     # Sound files config.toml names by RELATIVE path, which herdr resolves against
     # the directory of the config.toml symlink, not the repo. Without this link
     # done_path is missing and herdr's per-turn beep silently comes back.
@@ -304,6 +309,21 @@
       # whole install rather than skipping one step.
       if [ -f scripts/reconcile-systemd-units.sh ]; then
         bash scripts/reconcile-systemd-units.sh
+      fi
+    - |
+      # Resource Pulse's sampler service (linked above, never enabled): reload
+      # systemd, then try-restart the service only when a module it runs
+      # (service/main.js and what it imports) or its unit file changed after it
+      # started, because a restart resets its histories and most deploys leave
+      # the data side alone. Silent and successful with no user manager (a
+      # server) or with the service not running. A failure (the reload, reading
+      # its start time, working out or searching what it runs, the restart)
+      # prints a ⚠ line naming the step and what to run, and still exits 0,
+      # like the reconcile step above: an exit 1 would abort the rest of this
+      # install for every desktop user, for a service that at worst keeps its
+      # previous code. Relative path, for the reason the reconcile step gives.
+      if [ -f scripts/resource-pulse-service-refresh.sh ]; then
+        bash scripts/resource-pulse-service-refresh.sh
       fi
     - |
       # ENABLE AND START tmpdir-clean.timer — the one unattended deleter this file

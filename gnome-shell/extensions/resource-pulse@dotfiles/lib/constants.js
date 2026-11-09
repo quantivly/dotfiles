@@ -3,29 +3,42 @@
 /** Seconds between CPU, memory and pressure samples. */
 export const SAMPLE_INTERVAL_SECONDS = 2;
 /**
- * Sample intervals a sample may stay in flight. On the timer tick after that it counts as stalled: both surfaces
- * go to no data (once per stall) and its late result is dropped, while no second sample is queued behind it.
+ * Sample intervals the extension's client waits for a Sample. A Sample older than that is stale (lib/wiring.js
+ * isSampleStale): both surfaces go to no data, once, rather than show its numbers as live.
  */
 export const SAMPLE_STALL_TICKS = 3;
 /**
- * Seconds between per-app scans: SAMPLE_INTERVAL_SECONDS × APP_SCAN_EVERY_N_TICKS, which a test row enforces.
- * 10 rather than the spec's first 6, to keep the scan inside the < 0.5%-of-one-core idle budget.
+ * Seconds the client waits after a failed StartUnit before asking systemd again: the first delay after the first
+ * failure, the second after the second, and the last one for every failure after that. A success, or the service
+ * appearing on the bus, ends the retries.
  */
-export const APP_SCAN_INTERVAL_SECONDS = 10;
-/** Sample ticks between per-app scans. */
-export const APP_SCAN_EVERY_N_TICKS = 5;
+export const START_RETRY_DELAYS_SECONDS = [5, 30, 300];
 /**
- * Sample ticks an app scan may stay in flight: one whole scan interval, by when the next scan is overdue. On the
- * timer tick after that the scan counts as stalled (once per stall): the ranking is dropped, so "heaviest" shows
- * no data, and the scan's late result is discarded.
+ * Seconds an accepted StartUnit waits for the service to appear on the bus before it counts as failed. systemd answers
+ * StartUnit with a job before it checks Restart= and the start limit, so a unit at its StartLimitBurst is "started"
+ * and then never runs; without this wait that answer would end the retries.
  */
-export const APP_SCAN_STALL_TICKS = APP_SCAN_EVERY_N_TICKS;
+export const START_CONFIRMATION_TIMEOUT_SECONDS = 15;
+/** Milliseconds the client waits for any D-Bus reply: GetState, WatchDetail, UnwatchDetail and StartUnit. */
+export const DBUS_CALL_TIMEOUT_MS = 2000;
 /**
- * The tick that scans once more than the cadence would, after every baseline reset (enable, resume, the scan turned
- * back on), which restarts the tick count at 0. Tick 0's scan is only a baseline, so without this the CPU half of
- * "heaviest" would wait for tick APP_SCAN_EVERY_N_TICKS (about 12 s); with it, tick 2's snapshot has it (about 4 s).
+ * Seconds between per-app scans while a detail watch is held: a whole number of SAMPLE_INTERVAL_SECONDS, since scans
+ * run on fast ticks. 20 (the service design's cadence) to keep the scan inside the idle cost budget.
  */
-export const APP_SCAN_WARM_UP_TICK = 1;
+export const APP_SCAN_INTERVAL_SECONDS = 20;
+/** Seconds between per-app scans with no detail watch held: a baseline, so a reveal never starts from nothing. */
+export const APP_SCAN_UNWATCHED_INTERVAL_SECONDS = 60;
+/** Percentage points CPU busy must rise above its value at the last scan to set off a burst scan. */
+export const BURST_CPU_RISE_POINTS = 15;
+/** Ticks after a watch-start or burst scan during which no burst scan may start. */
+export const BURST_COOLDOWN_TICKS = 2;
+/** Ticks after a watch-start or burst scan during which a watch starting does not scan at once. */
+export const REVEAL_SCAN_COOLDOWN_TICKS = 2;
+/**
+ * Shortest window, in seconds, a CPU ranking may cover. Over less, a scan ranks noise: a watch start that soon after
+ * the last scan does not scan (the client already has that ranking), and a warm-up due that soon waits a tick.
+ */
+export const MIN_CPU_RANKING_WINDOW_SECONDS = 1;
 /**
  * Cgroup leaves with these suffixes are left out of the app scan. Such units (mounts, sockets, swap, automounts,
  * paths, timers, devices) never host an app process, and skipping them is the scan's main cost lever: on the
@@ -39,16 +52,6 @@ export const APP_SCAN_SKIPPED_UNIT_SUFFIXES = [
  * A leaf at or under it ranks by memory.current as it is: too small to top the ranking, so not worth a third read.
  */
 export const APP_MEMORY_STAT_MIN_BYTES = 64 * 1024 ** 2;
-/** Directory entries fetched per step of an asynchronous directory listing. */
-export const DIRECTORY_LISTING_BATCH_ENTRIES = 64;
-/**
- * Cgroup leaves whose files an app scan reads at once. The next batch starts only when this one has settled, so a
- * scan never has more than this many leaves' reads waiting to complete on the shell's main loop (about 200 leaves,
- * 500 files and 2,000 completions in all on the reference laptop), where they would compete with redraws.
- */
-export const APP_SCAN_READ_BATCH_LEAVES = 16;
-/** Bytes asked for per read of a /proc, /sys or cgroup file: they report size 0, so each is read until EOF. */
-export const FILE_READ_CHUNK_BYTES = 8192;
 /** Samples kept for the top-bar sparkline. */
 export const TOPBAR_HISTORY_SAMPLES = 30;
 /** Samples kept for the desktop card graphs. */
@@ -59,10 +62,14 @@ export const PRESSURE_BAND_THRESHOLDS_PERCENT = [10, 25, 50];
 export const PERFORMANCE_CAPACITY_RATIO = 0.9;
 /** Microseconds before the same error message may be logged again (10 minutes). */
 export const ERROR_LOG_REPEAT_INTERVAL_USEC = 600_000_000;
-/** Longest app name shown before truncation, in characters. */
-export const APP_NAME_MAX_CHARS = 18;
 /** Distance of the desktop card from the screen edge, in pixels. */
 export const CARD_MARGIN_PX = 24;
+/**
+ * Seconds between repaints of the desktop card while it counts as covered (frozen). The cover re-check timer repaints
+ * it, dimmed, from the client's latest state this often, so a card misjudged as covered shows numbers at most this
+ * old, dimmed, rather than stale ones that read as live (ruling R21).
+ */
+export const FROZEN_REPAINT_INTERVAL_SECONDS = 30;
 /** Desktop IDs of the system monitors a click may open, in order of preference. */
 export const RESOURCES_APP_IDS = ['net.nokyan.Resources.desktop', 'org.gnome.SystemMonitor.desktop'];
 /** Milliseconds the pointer rests on a top-bar item before its label shows. */
@@ -98,8 +105,14 @@ export const BASELINE_RGBA = [1, 1, 1, 0.25];
 export const USED_BAR_TRACK_RGBA = [1, 1, 1, 0.15];
 /** Prefix of every journal line this extension writes. */
 export const LOG_PREFIX = 'resource-pulse:';
-/** Name of the computed pseudo-app that takes the CPU and memory no scanned cgroup accounts for. */
-export const KERNEL_AND_OTHER_LABEL = 'kernel & other';
+/** Name of the CPU-only pseudo-entry for the root cgroup's CPU no scanned parent slice accounts for. */
+export const KERNEL_LABEL = 'kernel';
+/** Name of the CPU-only pseudo-entry for units that started and ended between two scans. */
+export const SHORT_JOBS_LABEL = 'short jobs';
+/** What the CPU half of "heaviest" reads when even the top entry is below CPU_IDLE_THRESHOLD_PERCENT. */
+export const CPU_IDLE_LABEL = 'idle';
+/** Below this share of the whole machine, the top CPU entry is not worth naming: the machine is idle. */
+export const CPU_IDLE_THRESHOLD_PERCENT = 1;
 /** Display names for service units whose own name reads badly, keyed by unit name without suffix. */
 export const UNIT_DISPLAY_ALIASES = {'herdr-server': 'herdr agents', 'org.gnome.Shell': 'GNOME Shell'};
 /** Bytes in one gibibyte (the memory unit shown everywhere). */
