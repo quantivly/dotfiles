@@ -614,9 +614,8 @@ test('client: a Sample from another version (an unknown field, swap missing) not
     });
 });
 
-test('client: WatchDetail and UnwatchDetail go out only when the wanted flag changes, with an owner; the watch is ' +
-    'asserted again to each new owner, and leaves with an old one; every call is asynchronous with ' +
-    'DBUS_CALL_TIMEOUT_MS', () => {
+test('client: WatchDetail and UnwatchDetail go out only when the wanted flag changes, with an owner, and the watch ' +
+    'is asserted again to each new owner; every call is asynchronous with DBUS_CALL_TIMEOUT_MS', () => {
     const {client, proxyFactory, proxy} = makeClientFixture({isProxyDelivered: false});
     client.setDetailWatchWanted(true);
     proxyFactory.deliver(proxy);
@@ -626,22 +625,32 @@ test('client: WatchDetail and UnwatchDetail go out only when the wanted flag cha
     client.setDetailWatchWanted(true);
     proxy.setNameOwner(null);
     proxy.setNameOwner(NEXT_OWNER);
-    // NEXT_OWNER holds the watch now; leaving takes it along, so nothing is left for destroy() to release.
     proxy.setNameOwner(null);
     client.setDetailWatchWanted(false);
     client.setDetailWatchWanted(true);
     client.setDetailWatchWanted(false);
     proxy.setNameOwner(OWNER);
-    // An UnwatchDetail releases the watch for good: destroy() right after it sends no second one.
-    client.setDetailWatchWanted(true);
-    client.setDetailWatchWanted(false);
-    client.destroy();
     const callShapes = new Set(proxy.calls.map(call => `${call.timeoutMs}/${typeof call.callback}`));
     assertEqual({calledMethodNames: proxy.calledMethodNames, callShapes: [...callShapes]}, {
-        calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL, GET_STATE,
-            WATCH_DETAIL, UNWATCH_DETAIL],
+        calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL, GET_STATE],
         callShapes: [`${constantsModule.DBUS_CALL_TIMEOUT_MS}/function`],
     });
+});
+
+test('client: destroy() releases only a watch still held: none after an UnwatchDetail, none after the owner that ' +
+    'held it left', () => {
+    const unwatched = makeClientFixture();
+    unwatched.client.setDetailWatchWanted(true);
+    unwatched.client.setDetailWatchWanted(false);
+    unwatched.client.destroy();
+    const ownerLeft = makeClientFixture();
+    ownerLeft.client.setDetailWatchWanted(true);
+    ownerLeft.proxy.setNameOwner(null);
+    ownerLeft.client.setDetailWatchWanted(false);
+    ownerLeft.proxy.setNameOwner(NEXT_OWNER);
+    ownerLeft.client.destroy();
+    assertEqual({unwatched: unwatched.proxy.calledMethodNames, ownerLeft: ownerLeft.proxy.calledMethodNames},
+        {unwatched: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL], ownerLeft: [GET_STATE, WATCH_DETAIL, GET_STATE]});
 });
 
 test('client: destroy() unwatches (uncancellable), cancels the pending GetState, disconnects from the proxy, removes ' +
@@ -770,9 +779,10 @@ test('client: a GetState answer from an owner that has since left is dropped; th
     const fixture = makeClientFixture();
     const {proxy, notifications} = fixture;
     proxy.setNameOwner(null);
-    proxy.setNameOwner(NEXT_OWNER);
+    // Answered while no owner is on the bus, before the next one has asked for anything.
     answerState(proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     const notificationsAfterOldAnswer = [...notifications];
+    proxy.setNameOwner(NEXT_OWNER);
     answerState(proxy, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 1});
     assertEqual({notificationsAfterOldAnswer, notifications, histories: historiesOf(fixture)},
         {notificationsAfterOldAnswer: [], notifications: [RESTARTED_SNAPSHOT], histories: RESTARTED_HISTORIES});
