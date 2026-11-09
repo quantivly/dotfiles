@@ -33,9 +33,10 @@
 # A shared host also never starts an `ssh-agent -s` of its own (Try 3, below).
 # The laptop is not a shared host, so nothing below changes there.
 
-# Helper: Is this a shared agent host? Marked by the directory dev-sync's timer
-# keeps there (~/.config/dev-sync), so no hostname is hard-coded.
-_ssh_shared_host() { [[ -d "$HOME/.config/dev-sync" ]]; }
+# Helper: Is this a shared agent host? Marked by the directory host-sync's timer keeps
+# there (~/.config/host-sync; ~/.config/dev-sync on a host armed by the release before the
+# rename), so no hostname is hard-coded.
+_ssh_shared_host() { [[ -d "$HOME/.config/host-sync" || -d "$HOME/.config/dev-sync" ]]; }
 
 # Helper: Is the live socket $1 a FORWARDED agent? VSCode's, or sshd's
 # (/tmp/ssh-*/agent.<pid of sshd>). A local `ssh-agent -s` makes the same shape,
@@ -148,11 +149,11 @@ _setup_ssh_agent() {
   # or down the probes above fail, the shell used to start `ssh-agent -s`. That agent
   # outlives the shell: on 2026-11-03 dev had one orphan under pid 1 per dev-sync run, the
   # slow probe being the likely shape under that run's load. With no agent here, ssh uses the
-  # key files and dev-sync's agent row says what the link is; a person restarts the agent.
+  # key files and host-sync's agent row says what the link is; a person restarts the agent.
   #
   # It still exports a path. zshrc sources ~/.zshrc.local next, and the workstation template's
   # block there starts `ssh-agent -s` whenever SSH_AUTH_SOCK is empty. So: the link unless it is
-  # forwarded, else systemd's socket path, as dev-sync and the herdr launcher hand on. A local
+  # forwarded, else systemd's socket path, as host-sync and the herdr launcher hand on. A local
   # agent that was only slow answers later; an absent one means ssh uses the key files.
   if ! { _ssh_shared_host && _ssh_sock_forwarded "$HOME/.ssh/ssh_auth_sock"; } &&
      _ssh_agent_is_valid "$HOME/.ssh/ssh_auth_sock" allow-empty; then

@@ -1,0 +1,52 @@
+# systemd/host-sync.service
+# =========================
+# Keeps this host's tooling and Claude Code configuration level with git: dotfiles (and, on a
+# host with a profile marker, dotfiles-local) to origin/main, Claude Code to latest, herdr-draft
+# to main, the work tenant's plugins enabled, the ~/quantivly clones fetched. scripts/host-sync
+# holds all of it, including why the timer lives on the host rather than on the laptop.
+#
+# ARMED PER HOST. ./install links this unit on every machine, but the condition below makes
+# systemd SKIP it on any machine without the marker. A skipped unit is not a failed one. The
+# marker is written by the first `scripts/host-sync --host <alias> --apply` run FROM THE LAPTOP,
+# which also enables the timer. A host armed by the release before the rename (dev-sync.timer and
+# ~/.config/dev-sync/armed) is moved over by its first --apply, new timer first (shared-configuration
+# design, D8 / H2): host-sync.timer is enabled and read back enabled and active, and only then is
+# the marker moved here and dev-sync.timer stopped and its .wants link pruned. If host-sync.timer
+# cannot be armed, dev-sync.timer is left armed and the run says so. To disarm, follow
+# docs/HERDR_GUIDE.md ("Disarming host-sync's timer"): a `disarmed` file, so the laptop cannot
+# re-arm it, and the timer's .wants link pruned by hand. Never `systemctl --user disable` or
+# `reenable` it: the disable half deletes the dotbot symlink that IS the unit (see
+# systemd/herdr-server.service's [Install]).
+#
+# A HOST MAY BE SHARED (dev runs the team's platform stack), so the run is capped: it goes in
+# agents.slice beside every agent, at nice 10 and idle IO, with its own MemoryMax and CPUQuota.
+# A host with no agents.slice unit file still gets one: systemd synthesises a slice it has no
+# file for (probed 2026-11-09). The heaviest step is herdr-draft's `go build`, and that runs only
+# when herdr-draft's main has moved.
+#
+# Watch it:  journalctl --user -u host-sync.service -e
+# Logs:      ~/.local/state/host-sync/ (install, install-dotfiles-local, claude-install,
+#            herdr-draft-install, plugins)
+
+[Unit]
+Description=Keep this host's tooling and Claude Code configuration level with git (host-sync)
+Documentation=file://%h/.dotfiles/scripts/host-sync
+ConditionPathExists=%h/.config/host-sync/armed
+
+[Service]
+Type=oneshot
+# A user unit has systemd's PATH, without ~/.local/bin. The script prepends that itself;
+# this is for the tools it calls by name.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# --no-mcp: the MCP sign-in rows are for a person reading --check, and an unattended run
+# has none. The marker above is what --apply checks before it changes anything.
+ExecStart=%h/.dotfiles/scripts/host-sync --here --apply --no-mcp
+Slice=agents.slice
+MemoryMax=3G
+CPUQuota=200%
+Nice=10
+IOSchedulingClass=idle
+# Dominated by network calls (fetches, a Claude Code download, a Go module download). A cap
+# keeps a hung call from blocking every later run, since a oneshot has no start timeout by
+# default and the timer does not fire while the last run is still active.
+TimeoutStartSec=30min

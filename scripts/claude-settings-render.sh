@@ -7,7 +7,7 @@
 # that this host's profile names, so every agent host carries the same settings.
 #
 # WHY. Four writers touch settings.json today (the dotfiles installer, clauth on every profile
-# switch, dev-sync, and Claude Code itself), the file holds `/home/zvi` paths that are wrong
+# switch, host-sync, and Claude Code itself), the file holds `/home/zvi` paths that are wrong
 # on any other account, and dev's copy was made by hand and has drifted from the laptop's.
 # One renderer, fed by fragments in version control, makes the file a function of the host's
 # profile instead of its history. Design: docs/superpowers/specs/2026-11-04-shared-claude-config-design.md

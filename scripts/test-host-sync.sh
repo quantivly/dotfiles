@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# scripts/test-dev-sync.sh
+# scripts/test-host-sync.sh
 # ========================
 #
-# State table for scripts/dev-sync: keeping dev's tooling level with the laptop's.
+# State table for scripts/host-sync: keeping dev's tooling level with the laptop's.
 #
 # dev is shared with the team's platform stack, so the rows are about two
 # questions. Does --check report exactly the drift there is, and change nothing?
@@ -14,7 +14,7 @@
 #
 # HERMETIC. Every case builds a fresh fake $HOME that is LEVEL, then breaks one
 # thing. claude, herdr, mise and systemctl are stubs in $HOME/.local/bin (which
-# dev-sync puts first on PATH itself), each recording its calls. git is real,
+# host-sync puts first on PATH itself), each recording its calls. git is real,
 # against bare repos served over file://. The npm registry is a file:// JSON. No
 # network, no real ~/.claude, nothing outside mktemp -d.
 # Requires: bash, zsh, git, jq, curl, flock.
@@ -22,7 +22,8 @@
 set -uo pipefail
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SUT="$DOTFILES/scripts/dev-sync"
+SUT="$DOTFILES/scripts/host-sync"
+WRAPPER="$DOTFILES/scripts/dev-sync"
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
 
@@ -42,6 +43,9 @@ fi
 
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# The profile marker's override (the settings renderer's name) and the overlay's: a row sets what
+# it means to, so a caller's own (a real ~/.config/claude-host-profile, a real remote) never reaches one.
+unset CLAUDE_SETTINGS_RENDER_MARKER HOST_SYNC_DOTFILES_LOCAL_REPO HOST_SYNC_DOTFILES_LOCAL_REMOTE PROFILE_MARKER_PATH
 
 V_LAPTOP="2.1.296"
 HV="0.9.1"            # the laptop's herdr
@@ -49,7 +53,7 @@ ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
 # Built at runtime so no token-shaped literal sits in the repo for a scanner to flag.
 FAKE_TOK="sk-ant-""oat01-FIXTUREtokenNOTREAL0123456789abcdef"
-MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|daemon-reload|^sudo '
+MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo '
 
 # ---------------------------------------------------------------------------------------------
 # Stubs. Each logs "<tool> <args>" to $HOME/stub/calls.
@@ -65,7 +69,7 @@ S="$HOME/stub"; echo "claude $*" >>"$S/calls"
 # The lock case: whether --apply's lock is held while this child runs (a fresh open, so the
 # descriptor this child may have inherited does not count) ...
 if [[ -e "$S/daemonize" ]]; then
-    { flock -n "$HOME/.local/state/dev-sync/lock" true && echo free || echo held; } >>"$S/lock-during"
+    { flock -n "$HOME/.local/state/host-sync/lock" true && echo free || echo held; } >>"$S/lock-during"
 fi
 # ... and a child that daemonizes, as an ssh-agent started under a `claude` call does: it closes
 # 0-2 and keeps every other descriptor it inherited. It stops on its stop file, or once the
@@ -160,13 +164,24 @@ STUB
     cat >"$b/systemctl" <<'STUB'
 #!/usr/bin/env bash
 S="$HOME/stub"; echo "systemctl $*" >>"$S/calls"
+# State is per unit: is-enabled reads $S/enabled-<unit>, is-active $S/active-<unit>. A unit enabled
+# through WantedBy= stays enabled only while its .wants link exists, as with systemd, which reads the
+# links at query time: once the link is gone a dotbot-linked unit reads `linked`, whatever the file
+# says. Without that, a pruned dev-sync.timer would read enabled forever.
+WANTS="$HOME/.config/systemd/user/default.target.wants"
 [[ "$1" == --user ]] && shift
 case "$1" in
-    is-enabled) cat "$S/timer-enabled" 2>/dev/null || { echo disabled; exit 1; } ;;
-    is-active) cat "$S/timer-active" 2>/dev/null || { echo inactive; exit 3; } ;;
+    is-enabled)
+        state="$(cat "$S/enabled-$2" 2>/dev/null)" || { echo disabled; exit 1; }
+        [[ "$state" == enabled && ! -L "$WANTS/$2" ]] && state=linked
+        echo "$state"; [[ "$state" == enabled ]] ;;
+    is-active) cat "$S/active-$2" 2>/dev/null || { echo inactive; exit 3; } ;;
     daemon-reload) ;;
     restart) [[ -e "$S/restart-fails" ]] && exit 1; "$HOME/.local/bin/herdr" --version | awk '{print $2}' >"$S/server-version" ;;
-    enable) [[ -e "$S/enable-fails" ]] && exit 1; echo enabled >"$S/timer-enabled"; echo active >"$S/timer-active" ;;
+    enable)   # enable --now <unit>: the unit is named last
+        [[ -e "$S/enable-fails" ]] && exit 1
+        unit="${!#}"; echo enabled >"$S/enabled-$unit"; echo active >"$S/active-$unit"; ln -sfn "../$unit" "$WANTS/$unit" ;;
+    stop) echo inactive >"$S/active-$2" ;;
     list-units) cat "$S/units" 2>/dev/null ;;
     show)
         case "$2:$4" in
@@ -174,13 +189,13 @@ case "$1" in
             agents.slice:MemoryHigh) echo 12884901888 ;;
             agents.slice:MemoryMax) echo 17179869184 ;;
             agents.slice:DropInPaths) echo "/x/50-MemoryHigh.conf /x/50-MemoryMax.conf" ;;
-            dev-sync.timer:*) echo "Wed 2026-10-14 05:12:00 EDT" ;;
+            host-sync.timer:*) echo "Wed 2026-10-14 05:12:00 EDT" ;;
             session-*:MemoryCurrent) cat "$S/mem-$2" 2>/dev/null ;;
             session-*:Slice) cat "$S/slice-$2" 2>/dev/null || echo "user-$(id -u).slice" ;;
         esac ;;
 esac
 STUB
-    # dev-sync must never run sudo; a logging stub makes a call visible to the rows.
+    # host-sync must never run sudo; a logging stub makes a call visible to the rows.
     # shellcheck disable=SC2016  # expanded by the stub, deliberately
     printf '#!/bin/sh\necho "sudo $*" >>"$HOME/stub/calls"\nexit 1\n' >"$b/sudo"
     chmod +x "$b"/* "$1/stub/go/bin/go"
@@ -199,7 +214,7 @@ bare() {   # $1 = owner/repo -> a bare repo with one commit, under $GH
 
 new_case() {
     CASE=$((CASE + 1)); C="$TMPROOT/c$CASE"; H="$C/home"; GH="$C/gh"
-    mkdir -p "$H/stub" "$GH" "$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/dev-sync" "$H/quantivly"
+    mkdir -p "$H/stub" "$GH" "$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/host-sync" "$H/quantivly"
     write_stubs "$H"
     echo "$V_LAPTOP" >"$H/stub/claude-version"; echo "$HV" >"$H/stub/herdr-version"; echo "$HV" >"$H/stub/server-version"
     # herdr's "release": the stub with its version pinned, served over file://
@@ -212,20 +227,40 @@ new_case() {
     local w="$C/seed-dotfiles"
     git init -q -b main "$w"
     mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin"
+    # install-order is shared with dotfiles-local's stub, so a row can read which ran first.
     # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
-    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails" ]] && exit 1\necho ran >>"$HOME/stub/install-ran"\n' >"$w/install"
+    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails" ]] && exit 1\necho public >>"$HOME/stub/install-order"\necho ran >>"$HOME/stub/install-ran"\n' >"$w/install"
     echo '{"name":"linear-key","version":"1.0.0"}' >"$w/claude/plugins/linear-key/.claude-plugin/plugin.json"
     echo '{"name":"dotfiles","plugins":[{"name":"linear-key"}]}' >"$w/claude/plugins/.claude-plugin/marketplace.json"
     echo one >"$w/a.txt"
     git -C "$w" add -A; git -C "$w" commit -q -m init
     mkdir -p "$GH/quantivly"; git clone -q --bare "$w" "$GH/quantivly/dotfiles.git"; rm -rf "$w"
     git clone -q "$GH/quantivly/dotfiles.git" "$H/.dotfiles"
-    mkdir -p "$H/.local/state/dev-sync"
-    git -C "$H/.dotfiles" rev-parse HEAD >"$H/.local/state/dev-sync/installed-head"
+    mkdir -p "$H/.local/state/host-sync"
+    git -C "$H/.dotfiles" rev-parse HEAD >"$H/.local/state/host-sync/installed-head"
 
-    # timer armed
-    : >"$H/.config/dev-sync/armed"; : >"$H/.config/systemd/user/dev-sync.timer"
-    echo enabled >"$H/stub/timer-enabled"; echo active >"$H/stub/timer-active"
+    # dotfiles-local, the private overlay, with the host profile `p` marked: an install stub of the
+    # same shape, a manifest declaring two links (Task 6's rows use them) and the profile itself;
+    # cloned and installed, as a level host has it.
+    w="$C/seed-dotfiles-local"
+    git init -q -b main "$w"; mkdir -p "$w/hosts" "$w/claude" "$w/config"
+    # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
+    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails-local" ]] && exit 1\necho local >>"$HOME/stub/install-order"\necho ran >>"$HOME/stub/local-install-ran"\n' >"$w/install"
+    printf -- '- link:\n    ~/.claude/CLAUDE.md: claude/CLAUDE.md\n    ~/.config/overlay/note.txt: config/note.txt\n' >"$w/install.conf.yaml"
+    echo '# the overlay instructions' >"$w/claude/CLAUDE.md"; echo note >"$w/config/note.txt"
+    echo '{"tenants":["quantivly"]}' >"$w/hosts/p.json"
+    git -C "$w" add -A; git -C "$w" commit -q -m init
+    mkdir -p "$GH/ZviBaratz"; git clone -q --bare "$w" "$GH/ZviBaratz/dotfiles-local.git"; rm -rf "$w"
+    git clone -q "$GH/ZviBaratz/dotfiles-local.git" "$H/.dotfiles-local"
+    git -C "$H/.dotfiles-local" rev-parse HEAD >"$H/.local/state/host-sync/installed-head-dotfiles-local"
+    echo p >"$H/.config/claude-host-profile"
+
+    # timer armed. ./install links both units on every host (plain files stand in for the links);
+    # only host-sync.timer is enabled, which puts its link in the .wants directory.
+    WANTS="$H/.config/systemd/user/default.target.wants"; mkdir -p "$WANTS"
+    : >"$H/.config/host-sync/armed"
+    : >"$H/.config/systemd/user/host-sync.timer"; : >"$H/.config/systemd/user/dev-sync.timer"
+    stub_timer_live host-sync.timer
 
     # herdr-draft at the target commit
     bare ZviBaratz/herdr-draft
@@ -270,6 +305,52 @@ new_case() {
     bare quantivly/beta   # exists on "GitHub", not on dev
 }
 
+# A timer enabled and active, as `systemctl --user enable --now` leaves it: both stub files, and
+# the .wants link the stub's is-enabled requires. timer_off undoes all three.
+stub_timer_live() {   # $1 = unit
+    echo enabled >"$H/stub/enabled-$1"; echo active >"$H/stub/active-$1"; ln -sfn "../$1" "$WANTS/$1"
+}
+timer_off() { rm -f "$H/stub/enabled-$1" "$H/stub/active-$1" "$WANTS/$1"; }
+
+# A host on the release before the rename: dev-sync's marker, its state dir (install stamp
+# included) and its timer, armed and live; host-sync.timer linked by ./install, never enabled.
+legacy_case() {
+    new_case
+    mv "$H/.config/host-sync" "$H/.config/dev-sync"
+    mv "$H/.local/state/host-sync" "$H/.local/state/dev-sync"
+    timer_off host-sync.timer
+    stub_timer_live dev-sync.timer
+}
+# Which marker dirs hold an `armed` file: host-sync, dev-sync, both or none.
+armed_where() {
+    local new="$H/.config/host-sync/armed" legacy="$H/.config/dev-sync/armed"
+    if [[ -e "$new" && -e "$legacy" ]]; then echo both
+    elif [[ -e "$new" ]]; then echo host-sync
+    elif [[ -e "$legacy" ]]; then echo dev-sync
+    else echo none; fi
+}
+present() { if [[ -e "$1" || -L "$1" ]]; then echo present; else echo gone; fi; }
+# From the stub log, by line: the enable of host-sync.timer, the first is-enabled read-back after
+# it, and the stop of dev-sync.timer must come in that order.
+arming_order() {
+    awk '
+        !enable_at && $0 == "systemctl --user enable --now host-sync.timer" { enable_at = NR }
+        enable_at && !readback_at && NR > enable_at && $0 == "systemctl --user is-enabled host-sync.timer" { readback_at = NR }
+        !stop_at && $0 == "systemctl --user stop dev-sync.timer" { stop_at = NR }
+        END {
+            if (enable_at && readback_at && stop_at && enable_at < readback_at && readback_at < stop_at) print "enable, read back, then stop"
+            else print "out of order: enable at " enable_at ", read-back at " readback_at ", stop at " stop_at
+        }' "$H/stub/calls"
+}
+# The .wants link is removed between the stop and the reload, so a reload after the stop is one
+# after the removal.
+reload_after_stop() {
+    awk '
+        $0 == "systemctl --user stop dev-sync.timer" { stop_at = NR }
+        $0 == "systemctl --user daemon-reload" { reload_at = NR }
+        END { if (stop_at && reload_at > stop_at) print "after"; else print "not after" }' "$H/stub/calls"
+}
+
 store_token() {   # $1 = the created date; writes what claude-oauth-store writes
     mkdir -p "$H/.config/claude-oauth"; chmod 700 "$H/.config/claude-oauth"
     printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$FAKE_TOK" >"$H/.config/claude-oauth/token.env"
@@ -288,7 +369,7 @@ link_token() {   # $1 = seat name
 }
 # A credentials file holding a fake /login, or not: only the key's presence may ever be read.
 FAKE_LOGIN="FIXTURErefreshNOTREAL0123456789"
-# A row's glyph and area, as dev-sync's row() prints them, so a needle also pins ✓ against ⚠.
+# A row's glyph and area, as host-sync's row() prints them, so a needle also pins ✓ against ⚠.
 AUTH_OK="$(printf '✓ %-14s ' auth)"; AUTH_OPER="$(printf '⚠ %-14s ' auth)"
 creds() {   # $1 = login | none | garbage
     case "$1" in
@@ -310,13 +391,16 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
     --dotfiles-sha "$(git --git-dir="$GH/quantivly/dotfiles.git" rev-parse main)" --clone alpha=quantivly/alpha; }
 
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
-run() {   # $@ = dev-sync args after --here; XTRACE=1 traces it to $C/xtrace
+# PROFILE_MARKER_PATH, when a row sets it, is where CLAUDE_SETTINGS_RENDER_MARKER points instead of
+# the default path, so a row can tell an honoured override from a hard-coded default.
+run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     # The trace goes to its own fd, as a person debugging with BASH_XTRACEFD would see it: a
     # command's own 2>/dev/null then hides nothing from it.
     local xt=(); [[ -n "${XTRACE:-}" ]] && xt=(BASH_XTRACEFD=3)
     # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
-    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" DEV_SYNC_GITHUB_BASE="file://$GH" DEV_SYNC_NPM_URL="file://$C/npm.json" \
-        DEV_SYNC_HERDR_RELEASES="file://$C/releases" DEV_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
+    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
+        HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
+        CLAUDE_SETTINGS_RENDER_MARKER="${PROFILE_MARKER_PATH:-$H/.config/claude-host-profile}" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash ${XTRACE:+-x} "$SUT" --here "$@" 2>&1 3>"$C/xtrace")"
     RC=$?
 }
@@ -325,9 +409,28 @@ calls() { cat "$H/stub/calls"; }
 mutations() { grep -cE "$MUTATING" "$H/stub/calls"; }
 reset_calls() { : >"$H/stub/calls"; }
 head_of() { git -C "$1" rev-parse HEAD; }
-push_origin() {   # add a commit to dotfiles' origin: $1 = file, $2 = content
-    local w="$C/push"; rm -rf "$w"; git clone -q "$GH/quantivly/dotfiles.git" "$w"
-    echo "$2" >"$w/$1"; git -C "$w" add -A; git -C "$w" commit -q -m "$1"; git -C "$w" push -q origin main
+push_to() {   # add a commit to a fixture origin: $1 = owner/repo, $2 = file, $3 = content
+    local w="$C/push"; rm -rf "$w"; git clone -q "$GH/$1.git" "$w"
+    echo "$3" >"$w/$2"; git -C "$w" add -A; git -C "$w" commit -q -m "$2"; git -C "$w" push -q origin main
+}
+push_origin() { push_to quantivly/dotfiles "$@"; }   # add a commit to dotfiles' origin: $1 = file, $2 = content
+overlay_main() { git --git-dir="$GH/ZviBaratz/dotfiles-local.git" rev-parse main; }
+# How many rows of $OUT are in area $1, whatever their glyph: row() pads the area to 14.
+area_rows() {
+    local line glyph prefix n=0 prefixes=()
+    for glyph in ✓ ✗ ⚠ ·; do prefixes+=("$(printf '  %s %-14s ' "$glyph" "$1")"); done
+    while IFS= read -r line; do
+        for prefix in "${prefixes[@]}"; do [[ "$line" == "$prefix"* ]] && n=$((n + 1)); done
+    done <<<"$OUT"
+    echo "$n"
+}
+line_of() {   # the number of the first line of $OUT that holds $1; 0 when none does
+    local line n=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        [[ "$line" == *"$1"* ]] && { echo "$n"; return; }
+    done <<<"$OUT"
+    echo 0
 }
 
 CASE=0
@@ -339,7 +442,7 @@ check "level --check exits 0" "$RC" 0
 has   "level --check says Level." "$OUT" "Level."
 hasnt "level --check has no ✗ row" "$OUT" "✗"
 check "level --check calls nothing mutating" "$(mutations)" 0
-hasnt "--check takes no lock" "$(ls "$H/.local/state/dev-sync")" "lock"
+hasnt "--check takes no lock" "$(ls "$H/.local/state/host-sync")" "lock"
 hasnt "the LINEAR_API_KEY value is never printed" "$OUT" "$FAKE_KEY"
 has   "the key is reported present, by name" "$OUT" "LINEAR_API_KEY is set"
 has   "the slice row reads the effective cap" "$OUT" "MemoryHigh=12.0G MemoryMax=16.0G (2 drop-in(s))"
@@ -354,7 +457,7 @@ echo "== the lock: one --apply at a time, and no child keeps it"
 # dev, 10-17 to 11-03: an ssh-agent started under one --apply inherited the lock's fd 9, kept it for
 # its whole life, and every later run was refused. Here the stub claude leaves such a daemon behind.
 new_case
-LOCK="$H/.local/state/dev-sync/lock"
+LOCK="$H/.local/state/host-sync/lock"
 exec 8>"$LOCK"; flock -n 8 || fatal "could not take $LOCK for the refusal row"
 run_level --apply
 exec 8>&-
@@ -383,8 +486,13 @@ jq '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z" | del(.dotfiles)' "$H/.c
     mv "$C/k" "$H/.claude/plugins/known_marketplaces.json"
 jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true | .enabledPlugins["linear@claude-plugins-official"] = true' \
     "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
-rm -rf "$H/.local/state/dev-sync" "$H/.config/dev-sync/armed"; touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
-snapshot() { find "$H" -path "$H/stub" -prune -o -printf '%p %s %m %T@\n' | sort; }
+rm -rf "$H/.local/state/host-sync" "$H/.config/host-sync/armed"; touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
+# Every path under $HOME with its size, mode and mtime, less the stub log and any path given.
+snapshot() {   # $@ = further paths to leave out
+    local leave_out=(-path "$H/stub") path
+    for path in "$@"; do leave_out+=(-o -path "$path"); done
+    find "$H" \( "${leave_out[@]}" \) -prune -o -printf '%p %s %m %T@\n' | sort
+}
 before="$(snapshot)"
 run_level --check --clone beta=quantivly/beta
 check "a fully drifted --check exits 1" "$RC" 1
@@ -401,7 +509,7 @@ run_level --apply
 check "behind: --apply exits 0" "$RC" 0
 check "behind: --apply fast-forwards to origin/main" "$(head_of "$H/.dotfiles")" "$(git --git-dir="$GH/quantivly/dotfiles.git" rev-parse main)"
 check "behind: --apply runs ./install exactly once" "$(wc -l <"$H/stub/install-ran")" 1
-check "behind: the stamp records the new HEAD" "$(cat "$H/.local/state/dev-sync/installed-head")" "$(head_of "$H/.dotfiles")"
+check "behind: the stamp records the new HEAD" "$(cat "$H/.local/state/host-sync/installed-head")" "$(head_of "$H/.dotfiles")"
 run_level --apply
 check "second --apply does not re-run ./install" "$(wc -l <"$H/stub/install-ran")" 1
 hasnt "second --apply has no ✗ row" "$OUT" "✗"
@@ -431,14 +539,153 @@ check "off main: still on the branch" "$(git -C "$H/.dotfiles" symbolic-ref --sh
 new_case
 echo extra >"$H/.dotfiles/c.txt"; git -C "$H/.dotfiles" add c.txt; git -C "$H/.dotfiles" commit -q -m local
 run_level --apply
-has   "unpushed commits on dev: ⚠ AHEAD, not touched" "$OUT" "is AHEAD of origin/main"
+has   "unpushed commits on this host: ⚠ AHEAD, not touched" "$OUT" "is AHEAD of origin/main"
 
 new_case
-rm "$H/.local/state/dev-sync/installed-head"; touch "$H/stub/install-fails"
+rm "$H/.local/state/host-sync/installed-head"; touch "$H/stub/install-fails"
 run_level --apply
 check "./install failing: exit 1" "$RC" 1
 has   "./install failing: ✗ names the log" "$OUT" "./install failed"
-check "./install failing: no stamp is written" "$([[ -e "$H/.local/state/dev-sync/installed-head" ]] && echo yes || echo no)" no
+check "./install failing: no stamp is written" "$([[ -e "$H/.local/state/host-sync/installed-head" ]] && echo yes || echo no)" no
+
+echo "== the host profile and the private overlay (dotfiles-local)"
+# The rows' glyph and area, as row() prints them, so a needle also pins the glyph.
+PROFILE_INFO="$(printf '· %-14s ' profile)"; PROFILE_OPER="$(printf '⚠ %-14s ' profile)"
+OVERLAY_OK="$(printf '✓ %-14s ' dotfiles-local)"; OVERLAY_DRIFT="$(printf '✗ %-14s ' dotfiles-local)"
+OVERLAY_OPER="$(printf '⚠ %-14s ' dotfiles-local)"
+new_case
+run_level --check
+has   "level: the profile row names the profile and its tenants" "$OUT" "${PROFILE_INFO}p (tenants: quantivly)"
+
+new_case
+rm "$H/.config/claude-host-profile"
+run_level --check
+has   "no marker: the overlay rows are skipped" "$OUT" \
+    "${PROFILE_INFO}no host profile marker (~/.config/claude-host-profile); dotfiles-local, settings, memory stores and retire are not managed here"
+check "no marker: the overlay rows are skipped: no dotfiles-local row, exit 0" "$(area_rows dotfiles-local)/$RC" 0/0
+check "no profile: the work clones row still runs" "$(area_rows clones)" 1
+
+new_case
+echo ../x >"$H/.config/claude-host-profile"; rm -rf "$H/.dotfiles-local"
+run_level --check
+has   "a marker with an unusable name is a person's step" "$OUT" \
+    "${PROFILE_OPER}the marker holds an unusable profile name (the renderer's rule: letters, digits, dots, dashes and underscores)"
+run_level --apply
+check "a marker with an unusable name: no clone attempted in --apply" "$(present "$H/.dotfiles-local")/$(area_rows dotfiles-local)" gone/0
+
+new_case
+rm "$H/.dotfiles-local/hosts/p.json"
+run_level --check
+has   "marker names a profile dotfiles-local lacks" "$OUT" "${PROFILE_OPER}no hosts/p.json in ~/.dotfiles-local"
+echo '{"tenant":"quantivly"}' >"$H/.dotfiles-local/hosts/p.json"
+run_level --check
+has   "a profile file with no .tenants list is a person's step" \
+    "$OUT" "${PROFILE_OPER}hosts/p.json in ~/.dotfiles-local cannot be read, or has no .tenants list of names"
+check "a profile file with no .tenants list: the work clones still run" "$(area_rows clones)" 1
+chmod 000 "$H/.config/claude-host-profile"
+run_level --check
+has   "an unreadable marker is a person's step, named" "$OUT" "${PROFILE_OPER}the marker ~/.config/claude-host-profile is not readable by"
+
+# The marker's override is the renderer's own variable: a marker that exists only there is read, and
+# a path outside $HOME is shown as it is, never with a ~ in front of it.
+new_case
+rm "$H/.config/claude-host-profile"; echo p >"$C/marker-elsewhere"
+PROFILE_MARKER_PATH="$C/marker-elsewhere" run_level --check
+has   "profile: the marker override is honoured" "$OUT" "${PROFILE_INFO}p (tenants: quantivly)"
+rm "$C/marker-elsewhere"
+PROFILE_MARKER_PATH="$C/marker-elsewhere" run_level --check
+has   "profile: the marker override is honoured: a path outside \$HOME is shown absolute" "$OUT" \
+    "${PROFILE_INFO}no host profile marker ($C/marker-elsewhere)"
+
+new_case
+rm -rf "$H/.dotfiles-local"
+run_level --check
+has   "dotfiles-local absent: --check ✗, nothing cloned" "$OUT" "${OVERLAY_DRIFT}not cloned (origin would be ZviBaratz/dotfiles-local)"
+check "dotfiles-local absent: --check ✗, nothing cloned: exit 1, still absent" "$RC/$(present "$H/.dotfiles-local")" 1/gone
+has   "dotfiles-local absent: the profile row says its tenants are unknown" "$OUT" \
+    "${PROFILE_INFO}p: ~/.dotfiles-local is not cloned yet, so its tenants are unknown until --apply clones it"
+check "profile named but overlay missing: the work clones row still runs" "$(area_rows clones)" 1
+
+# Step 7's first minute: a marker written by hand on a host with no overlay yet. The public
+# ./install renders settings, and the renderer refuses a marker with no overlay, so the overlay
+# must be cloned before that install runs, and its profile read in the same run.
+new_case
+# A host that never had the overlay has no stamp for it, and a stale public one.
+rm -rf "$H/.dotfiles-local" "$H/.local/state/host-sync/installed-head-dotfiles-local"
+printf '%040d\n' 0 >"$H/.local/state/host-sync/installed-head"
+run_level --apply
+check "marker before the overlay: the overlay is cloned before the public ./install: a clone on main" \
+    "$(git -C "$H/.dotfiles-local" symbolic-ref --short HEAD 2>/dev/null)" main
+check "marker before the overlay: the overlay is cloned before the public ./install: public, then local" \
+    "$(paste -sd' ' "$H/stub/install-order" 2>/dev/null)" "public local"
+clone_at="$(line_of "${OVERLAY_OK}cloned from ZviBaratz/dotfiles-local")"; public_at="$(line_of "$(printf '✓ %-14s ' dotfiles)")"
+check "marker before the overlay: the overlay is cloned before the public ./install: its ✓ row before the dotfiles row" \
+    "$(( clone_at > 0 && clone_at < public_at ))" 1
+has   "marker before the overlay: the profile is read after the clone" "$OUT" "${PROFILE_INFO}p (tenants: quantivly)"
+
+# The overlay's origin unreachable: the clone is ✗, and its tenants stay unknown.
+new_case
+rm -rf "$H/.dotfiles-local" "$H/.local/state/host-sync/installed-head-dotfiles-local"
+mv "$GH/ZviBaratz/dotfiles-local.git" "$GH/ZviBaratz/dotfiles-local.unreachable"
+run_level --apply
+has   "overlay: a clone that fails is ✗ and the profile stays unread: the ✗ row" "$OUT" \
+    "${OVERLAY_DRIFT}git clone ZviBaratz/dotfiles-local failed"
+hasnt "overlay: a clone that fails is ✗ and the profile stays unread: no tenants read" "$OUT" "${PROFILE_INFO}p (tenants"
+check "overlay: a clone that fails is ✗ and the profile stays unread: exit 1" "$RC" 1
+
+# The overlay's ./install fails: ✗ with its log, and no stamp, so the next run tries it again.
+new_case
+rm "$H/.local/state/host-sync/installed-head-dotfiles-local"; touch "$H/stub/install-fails-local"
+run_level --apply
+has   "overlay: a failing ./install of dotfiles-local is ✗ and writes no stamp: the ✗ row" "$OUT" \
+    "${OVERLAY_DRIFT}./install failed at $(head_of "$H/.dotfiles-local" | cut -c1-7); log: ~/.local/state/host-sync/install-dotfiles-local.log"
+check "overlay: a failing ./install of dotfiles-local is ✗ and writes no stamp: no stamp" \
+    "$(present "$H/.local/state/host-sync/installed-head-dotfiles-local")" gone
+
+new_case
+echo '{"tenants":["personal"]}' >"$H/.dotfiles-local/hosts/p.json"
+run_level --check
+check "profile without quantivly: the work clones row is skipped" "$(( $(area_rows clone) + $(area_rows clones) ))" 0
+rm -rf "$H/quantivly"
+run_level --apply
+check "profile without quantivly: --apply does not create ~/quantivly" "$(present "$H/quantivly")" gone
+
+# The laptop's facts carry dotfiles-local's main and how far behind it the host is, like dotfiles'.
+new_case
+push_to ZviBaratz/dotfiles-local c.txt two
+run_level --check --dotfiles-local-sha "$(overlay_main)" --dotfiles-local-behind 1
+has   "dotfiles-local behind: --check ✗ with the laptop's count" "$OUT" "${OVERLAY_DRIFT}1 commits behind origin/main"
+run_level --apply
+check "dotfiles-local behind: --apply fast-forwards to its origin's main" "$(head_of "$H/.dotfiles-local")" "$(overlay_main)"
+check "dotfiles-local behind: --apply runs its ./install once, and only its own" \
+    "$(paste -sd' ' "$H/stub/install-order" 2>/dev/null)/$( { wc -l <"$H/stub/local-install-ran"; } 2>/dev/null)" local/1
+check "dotfiles-local behind: the stamp records the new HEAD" \
+    "$(cat "$H/.local/state/host-sync/installed-head-dotfiles-local")" "$(head_of "$H/.dotfiles-local")"
+
+new_case
+git -C "$H/.dotfiles-local" checkout -q -b feature; push_to ZviBaratz/dotfiles-local c.txt x
+run_level --apply
+has   "dotfiles-local off main: not touched" "$OUT" "${OVERLAY_OPER}on 'feature', not main"
+check "dotfiles-local off main: not touched: still on the branch" "$(git -C "$H/.dotfiles-local" symbolic-ref --short HEAD)" feature
+
+new_case
+push_to ZviBaratz/dotfiles-local claude/CLAUDE.md upstream; echo local >"$H/.dotfiles-local/claude/CLAUDE.md"
+before="$(head_of "$H/.dotfiles-local")"
+run_level --apply
+has   "dotfiles-local with an overlapping local edit: not merged" "$OUT" \
+    "${OVERLAY_OPER}local edits to claude/CLAUDE.md that origin/main also changes; not merged"
+check "dotfiles-local with an overlapping local edit: not merged: HEAD is not moved" "$(head_of "$H/.dotfiles-local")" "$before"
+
+# Validated before any of it reaches a command, and a good value still passes.
+new_case
+run --check --dotfiles-local-sha "$(printf 'g%.0s' {1..40})"; bad_rc="$RC"
+run_level --check --dotfiles-local-sha "$(overlay_main)"
+check "a bad --dotfiles-local-sha over the wire is refused (64); a good one is not" "$bad_rc/$RC" 64/0
+run --check --dotfiles-local-behind '1;x'; bad_rc="$RC"
+run_level --check --dotfiles-local-sha "$(overlay_main)" --dotfiles-local-behind 0
+check "a bad --dotfiles-local-behind over the wire is refused (64); a count is not" "$bad_rc/$RC" 64/0
+run --check --dotfiles-behind '1;x'
+check "a bad --dotfiles-behind over the wire is refused (64)" "$RC" 64
 
 echo "== claude"
 new_case
@@ -495,7 +742,7 @@ check "older herdr: --apply installs the laptop's exact version" "$(HOME="$H" "$
 has   "older herdr, no panes: the server is restarted through the unit" "$(calls)" "systemctl --user restart herdr-server.service"
 has   "older herdr, no panes: ✓ restarted" "$OUT" "server restarted on $HV (0 idle pane(s) closed)"
 check "older herdr: the agent skill is regenerated" "$(cat "$H/.claude/skills/herdr/SKILL.md")" "skill for $HV"
-check "older herdr: the previous binary is kept" "$([[ -e "$H/.local/state/dev-sync/herdr-0.9.0" ]] && echo yes || echo no)" yes
+check "older herdr: the previous binary is kept" "$([[ -e "$H/.local/state/host-sync/herdr-0.9.0" ]] && echo yes || echo no)" yes
 reset_calls; run_level --apply
 check "second --apply after a herdr upgrade calls nothing mutating" "$(mutations)" 0
 new_case
@@ -510,7 +757,7 @@ echo '{"result":{"process_info":{"shell_pid":10,"foreground_process_group_id":22
 run_level --apply
 check "a pane running something, but NO agent: the binary is not swapped" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
 hasnt "a busy pane: the server is NOT restarted" "$(calls)" "systemctl --user restart"
-has   "a busy pane: ⚠ says the upgrade waits, and why" "$OUT" "0.9.0 → $HV waits: 0 agent(s), 1 of 2 pane(s) busy on dev's herdr"
+has   "a busy pane: ⚠ says the upgrade waits, and why" "$OUT" "0.9.0 → $HV waits: 0 agent(s), 1 of 2 pane(s) busy on this host's herdr"
 check "a busy pane: the upgrade waiting is a person's step, not a failure" "$RC" 0
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; echo '{"pane_id":"w1:p1"}' >"$H/stub/panes"
@@ -530,7 +777,7 @@ new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
 mv "$H/.local/bin/herdr" "$C/herdr-bin"; ln -s "$C/herdr-bin" "$H/.local/bin/herdr"
 run_level --apply
-has   "herdr is a symlink: ⚠, never replaced" "$OUT" "is a symlink; dev-sync does not replace a link"
+has   "herdr is a symlink: ⚠, never replaced" "$OUT" "is a symlink; host-sync does not replace a link"
 check "herdr is a symlink: still a symlink" "$([[ -L "$H/.local/bin/herdr" ]] && echo link || echo file)" link
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; touch "$H/stub/skill-empty"
@@ -538,15 +785,15 @@ run_level --apply
 check "an empty --skill output never replaces the agent skill" "$(cat "$H/.claude/skills/herdr/SKILL.md")" old
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
-: >"$H/.local/state/dev-sync/lock"; chmod 555 "$H/.local/state/dev-sync"   # the backup copy cannot be written
+: >"$H/.local/state/host-sync/lock"; chmod 555 "$H/.local/state/host-sync"   # the backup copy cannot be written
 run_level --apply
-chmod 755 "$H/.local/state/dev-sync"
+chmod 755 "$H/.local/state/host-sync"
 has   "no backup of the old binary: ✗, not installed" "$OUT" "could not keep a copy of the 0.9.0 binary; not installed"
 check "no backup of the old binary: still the old binary" "$(HOME="$H" "$H/.local/bin/herdr" --version)" "herdr 0.9.0"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; touch "$H/stub/restart-fails"
 run_level --apply
-has   "server not back after the restart: ✗ prints the rollback" "$OUT" "to roll back: mv ~/.local/state/dev-sync/herdr-0.9.0 ~/.local/bin/herdr"
+has   "server not back after the restart: ✗ prints the rollback" "$OUT" "to roll back: mv ~/.local/state/host-sync/herdr-0.9.0 ~/.local/bin/herdr"
 check "server not back: exit 1" "$RC" 1
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
@@ -562,7 +809,7 @@ has   "laptop on another architecture: ⚠, never an unverified binary" "$OUT" "
 new_case
 echo 0.9.4 >"$H/stub/herdr-version"; echo 0.9.4 >"$H/stub/server-version"
 run_level --apply
-has   "newer herdr on dev: never downgraded" "$OUT" "0.9.4, ahead of laptop $HV"
+has   "newer herdr on this host: never downgraded" "$OUT" "0.9.4, ahead of laptop $HV"
 new_case
 echo 0.9.0 >"$H/stub/server-version"
 run_level --check
@@ -607,7 +854,7 @@ has   "superseded plugin: ✓ disabled, read back as false (jq // treats false a
 check "superseded plugin: --apply exits 0" "$RC" 0
 check "superseded plugin: set false in settings.json" "$(jq -r '.enabledPlugins["quantivly-pr-conventions@quantivly"]' "$H/.claude/settings.json")" false
 check "superseded plugin: the rest of settings.json survives" "$(jq -r .theme "$H/.claude/settings.json")" dark
-check "superseded plugin: a backup is kept" "$([[ -e "$H/.local/state/dev-sync/settings.json.before-dev-sync" ]] && echo yes || echo no)" yes
+check "superseded plugin: a backup is kept" "$([[ -e "$H/.local/state/host-sync/settings.json.before-host-sync" ]] && echo yes || echo no)" yes
 hasnt "superseded plugin: no CLI call names it" "$(calls)" "quantivly-pr-conventions"
 new_case
 jq 'del(.plugins["slack@claude-plugins-official"])' "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
@@ -656,7 +903,7 @@ echo "== MCP sign-ins and LINEAR_API_KEY"
 new_case
 printf 'plugin:slack:slack: https://x (HTTP) - ! Needs authentication\nplugin:Notion:notion: https://y (HTTP) - ✔ Connected\n' >"$H/stub/mcp-list"
 run_level --check
-has   "slack needs a sign-in: ⚠ with the /mcp step" "$OUT" "⚠ mcp            slack needs a sign-in on dev"
+has   "slack needs a sign-in: ⚠ with the /mcp step" "$OUT" "⚠ mcp            slack needs a sign-in on this host"
 has   "a sign-in step is counted as a person's step" "$OUT" "1 step(s) need a person"
 check "a sign-in step alone does not fail --check" "$RC" 0
 reset_calls; run_level --check --no-mcp
@@ -664,10 +911,10 @@ hasnt "--no-mcp: claude mcp list is not run" "$(calls)" "claude mcp list"
 new_case
 : >"$H/.zshrc.local"
 run_level --check
-has   "no LINEAR_API_KEY on dev: ⚠" "$OUT" "LINEAR_API_KEY is not in dev's ~/.zshrc.local"
+has   "no LINEAR_API_KEY on this host: ⚠" "$OUT" "LINEAR_API_KEY is not in this host's ~/.zshrc.local"
 mapfile -t F < <(facts)
 OUT="$(LINEAR_API_KEY=inherited HOME="$H" PATH="/usr/local/bin:/usr/bin:/bin" bash "$SUT" --here --check "${F[@]}" 2>&1)"
-has   "a key in the CALLER's environment does not read as in the file" "$OUT" "LINEAR_API_KEY is not in dev's ~/.zshrc.local"
+has   "a key in the CALLER's environment does not read as in the file" "$OUT" "LINEAR_API_KEY is not in this host's ~/.zshrc.local"
 
 echo "== clones"
 new_case
@@ -704,26 +951,194 @@ check "no ~/quantivly: --check does not create it" "$([[ -e "$H/quantivly" ]] &&
 new_case
 run --check --clone 'x;rm=quantivly/x'
 check "an unsafe --clone dir is refused (64)" "$RC" 64
+new_case
+HOST_SYNC_DOTFILES_LOCAL_REPO='x;rm -rf /' run --check
+check "an unsafe HOST_SYNC_DOTFILES_LOCAL_REPO is refused (64)" "$RC" 64
 
 echo "== timer"
+# The timer row's glyph and area, as row() prints them, so a needle also pins ✓ against ✗ and ·.
+TIMER_OK="$(printf '✓ %-14s ' timer)"; TIMER_DRIFT="$(printf '✗ %-14s ' timer)"; TIMER_INFO="$(printf '· %-14s ' timer)"
+# What follows "arms it" on the information row; the whole line when nothing does.
+info_suffix() {
+    local line
+    while IFS= read -r line; do
+        [[ "$line" == *"${TIMER_INFO}not armed on this host"* ]] && printf '%s' "${line#*from the laptop arms it }"
+    done <<<"$OUT"
+}
 new_case
-rm "$H/.config/dev-sync/armed" "$H/stub/timer-enabled" "$H/stub/timer-active"
+rm "$H/.config/host-sync/armed"; timer_off host-sync.timer
 reset_calls; run_level --apply
 check "unarmed dev, --apply without --arm: refused (2)" "$RC" 2
 check "unarmed dev: nothing mutating was called" "$(mutations)" 0
+has   "unarmed: the refusal names the command that arms it, with --host" "$OUT" "scripts/host-sync --host <alias> --apply"
 run_level --check
-has   "unarmed dev: --check shows the ✗" "$OUT" "dev-sync.timer not armed"
+has   "unarmed host: --check is information" "$OUT" \
+    "${TIMER_INFO}not armed on this host (no ~/.config/host-sync/armed); host-sync --host <alias> --apply from the laptop arms it"
+check "unarmed host: --check is information, exit 0" "$RC" 0
+hasnt "unarmed host, timer not enabled: no skipped-unit note" "$OUT" "fires into a skipped unit"
 run_level --apply --arm
-check "--arm: the marker is written" "$([[ -e "$H/.config/dev-sync/armed" ]] && echo yes || echo no)" yes
-has   "--arm: enable, never reenable" "$(calls)" "systemctl --user enable --now dev-sync.timer"
-hasnt "--arm: no reenable or disable" "$(grep -E '(re|dis)able' "$H/stub/calls")" "dev-sync.timer"
+check "--arm: the marker is written" "$([[ -e "$H/.config/host-sync/armed" ]] && echo yes || echo no)" yes
+has   "--arm: enable, never reenable" "$(calls)" "systemctl --user enable --now host-sync.timer"
+hasnt "--arm: no reenable or disable" "$(grep -E 'reenable|disable' "$H/stub/calls")" "host-sync.timer"
 new_case
-rm "$H/.config/dev-sync/armed" "$H/stub/timer-enabled" "$H/stub/timer-active"; : >"$H/.config/dev-sync/disarmed"
+rm "$H/.config/host-sync/armed"
+run_level --check
+check "unarmed host with an enabled timer: the information row names it" "$(info_suffix)" \
+    "(is-enabled=enabled, is-active=active: a timer that fires into a skipped unit)"
+new_case
+echo inactive >"$H/stub/active-host-sync.timer"
+run_level --check
+has   "armed marker, timer inactive: ✗ in --check" "$OUT" \
+    "${TIMER_DRIFT}armed (marker present) but host-sync.timer is-enabled=enabled, is-active=inactive"
+reset_calls; run_level --apply
+has   "armed marker, timer inactive: --apply without --arm re-arms" "$(calls)" "systemctl --user enable --now host-sync.timer"
+check "armed marker, timer inactive: --apply without --arm re-arms, exit 0" "$RC" 0
+new_case
+rm "$H/.config/host-sync/armed"; timer_off host-sync.timer; : >"$H/.config/host-sync/disarmed"
 reset_calls; run_level --apply --arm
-check "disarmed by hand: --arm does not write the marker" "$([[ -e "$H/.config/dev-sync/armed" ]] && echo yes || echo no)" no
-hasnt "disarmed by hand: the timer is not enabled" "$(calls)" "enable --now dev-sync.timer"
+check "disarmed by hand: --arm does not write the marker" "$([[ -e "$H/.config/host-sync/armed" ]] && echo yes || echo no)" no
+hasnt "disarmed by hand: the timer is not enabled" "$(calls)" "enable --now host-sync.timer"
 has   "disarmed by hand: · says so, and it is not drift" "$OUT" "· timer          disarmed by hand"
 check "disarmed by hand: the rest still syncs, and exits 0" "$RC" 0
+
+echo "== timer: the arming moves from dev-sync.timer to host-sync.timer"
+# The first --apply after the rename. dev-sync.service runs only while ~/.config/dev-sync/armed
+# exists, so that marker moves only once host-sync.timer reads back enabled and active, and every
+# failure leaves dev-sync.timer, its .wants link and its marker exactly as found.
+legacy_case
+before="$(snapshot)"
+run_level --check
+check "legacy: --check names the move and changes nothing: exit 1" "$RC" 1
+has   "legacy: --check names the move and changes nothing: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}dev-sync.timer is armed; --apply moves the arming to host-sync.timer"
+hasnt "legacy: --check names the move and changes nothing: the install stamp is read where it is" "$OUT" "./install has not run"
+check "legacy: --check names the move and changes nothing: no file changes" "$(diff <(echo "$before") <(snapshot) | head -n 5)" ""
+reset_calls; run_level --apply
+check "legacy: --apply without --arm is not refused" "$RC" 0
+check "legacy: the state dir is moved under the lock and the install stamp carried: the stamp" \
+    "$(cat "$H/.local/state/host-sync/installed-head" 2>/dev/null)" "$(head_of "$H/.dotfiles")"
+check "legacy: the state dir is moved under the lock and the install stamp carried: the old dir is gone" \
+    "$(present "$H/.local/state/dev-sync")" gone
+check "legacy: the state dir is moved under the lock and the install stamp carried: ./install is not re-run" \
+    "$(present "$H/stub/install-ran")" gone
+has   "legacy: host-sync.timer is enabled with enable --now, never reenable" "$(calls)" "systemctl --user enable --now host-sync.timer"
+hasnt "legacy: host-sync.timer is enabled with enable --now, never reenable: no reenable or disable of any timer" \
+    "$(grep -E 'reenable|disable' "$H/stub/calls")" ".timer"
+check "legacy: enable, read back, then stop, in that order" "$(arming_order)" "enable, read back, then stop"
+check "legacy: the marker moves only after the new timer reads back armed: ~/.config/host-sync/armed" "$(armed_where)" host-sync
+check "legacy: the marker moves only after the new timer reads back armed: ~/.config/dev-sync is removed" \
+    "$(present "$H/.config/dev-sync")" gone
+has   "legacy: dev-sync.timer is stopped and its .wants link removed: the stop" "$(calls)" "systemctl --user stop dev-sync.timer"
+check "legacy: dev-sync.timer is stopped and its .wants link removed: the link" "$(present "$WANTS/dev-sync.timer")" gone
+check "legacy: dev-sync.timer is stopped and its .wants link removed: daemon-reload after it" "$(reload_after_stop)" after
+check "legacy: the unit link of dev-sync.timer is left" "$(present "$H/.config/systemd/user/dev-sync.timer")" present
+has   "legacy: ✓ says the arming moved" "$OUT" "${TIMER_OK}arming moved from dev-sync.timer to host-sync.timer"
+# Left out besides the state dir: every --apply fetches origin main into both checkouts, and git's
+# own bookkeeping for that (FETCH_HEAD, the objects dir's mtime) is not a change to the host.
+SECOND_APPLY_LEAVE_OUT=("$H/.local/state/host-sync" "$H/.dotfiles/.git/FETCH_HEAD" "$H/.dotfiles/.git/objects"
+    "$H/.dotfiles-local/.git/FETCH_HEAD" "$H/.dotfiles-local/.git/objects")
+reset_calls; before="$(snapshot "${SECOND_APPLY_LEAVE_OUT[@]}")"
+run_level --apply
+check "legacy: a second --apply calls nothing mutating" "$(mutations)" 0
+check "legacy: a second --apply changes no file" "$(diff <(echo "$before") <(snapshot "${SECOND_APPLY_LEAVE_OUT[@]}") | head -n 5)" ""
+
+# The lock is taken in the legacy dir, before the move: a rename keeps the inode, so the host's own
+# tick holding it there refuses this run, and nothing has moved when it does.
+legacy_case
+LEGACY_LOCK="$H/.local/state/dev-sync/lock"
+exec 8>"$LEGACY_LOCK"; flock -n 8 || fatal "could not take $LEGACY_LOCK for the legacy lock row"
+reset_calls; run_level --apply
+exec 8>&-
+check "legacy: a run that cannot take the lock moves nothing: exit 2" "$RC" 2
+has   "legacy: a run that cannot take the lock moves nothing: refused by the lock" "$OUT" "another run holds"
+check "legacy: a run that cannot take the lock moves nothing: the marker" "$(armed_where)" dev-sync
+check "legacy: a run that cannot take the lock moves nothing: the state dir" "$(present "$H/.local/state/dev-sync")" present
+hasnt "legacy: a run that cannot take the lock moves nothing: no enable" "$(calls)" "systemctl --user enable"
+
+legacy_case
+rm "$H/.config/systemd/user/host-sync.timer"
+reset_calls; run_level --apply
+has   "legacy: when the new timer cannot be armed the old one is left armed: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}host-sync.timer is not linked (./install has not run for a commit that has it); dev-sync.timer left armed"
+hasnt "legacy: when the new timer cannot be armed the old one is left armed: no stop" "$(calls)" "stop dev-sync.timer"
+check "legacy: when the new timer cannot be armed the old one is left armed: the .wants link" "$(present "$WANTS/dev-sync.timer")" present
+check "legacy: when the new timer cannot be armed the old one is left armed: the marker" "$(present "$H/.config/dev-sync/armed")" present
+
+legacy_case
+touch "$H/stub/enable-fails"
+reset_calls; run_level --apply
+has   "legacy: an enable that fails leaves the old timer and the marker in place: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}host-sync.timer could not be armed (is-enabled=disabled, is-active=inactive); dev-sync.timer left armed"
+hasnt "legacy: an enable that fails leaves the old timer and the marker in place: no stop" "$(calls)" "stop dev-sync.timer"
+check "legacy: an enable that fails leaves the old timer and the marker in place: the .wants link" "$(present "$WANTS/dev-sync.timer")" present
+check "legacy: an enable that fails leaves the old timer and the marker in place: the marker" "$(present "$H/.config/dev-sync/armed")" present
+
+# host-sync.timer is already live, but the new marker dir cannot be written: the marker cannot
+# move, so dev-sync.timer keeps its own and is not stopped.
+legacy_case
+stub_timer_live host-sync.timer
+mkdir "$H/.config/host-sync"; chmod 555 "$H/.config/host-sync"
+reset_calls; run_level --apply
+chmod 755 "$H/.config/host-sync"
+has   "legacy: a marker that cannot move leaves dev-sync.timer armed: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}~/.config/host-sync/armed could not be written; dev-sync.timer left armed"
+hasnt "legacy: a marker that cannot move leaves dev-sync.timer armed: no stop" "$(calls)" "stop dev-sync.timer"
+check "legacy: a marker that cannot move leaves dev-sync.timer armed: its marker and .wants link" \
+    "$(armed_where)/$(present "$WANTS/dev-sync.timer")" dev-sync/present
+
+# An earlier run armed host-sync.timer and died before it stopped dev-sync.timer.
+legacy_case
+stub_timer_live host-sync.timer
+reset_calls; run_level --apply
+has   "legacy: both timers enabled (half migrated): --apply finishes the move: the stop" "$(calls)" "systemctl --user stop dev-sync.timer"
+check "legacy: both timers enabled (half migrated): --apply finishes the move: the .wants link" "$(present "$WANTS/dev-sync.timer")" gone
+check "legacy: both timers enabled (half migrated): --apply finishes the move: the marker" "$(armed_where)" host-sync
+hasnt "legacy: both timers enabled (half migrated): --apply finishes the move: no second enable" "$(calls)" "enable --now"
+
+# dev-sync.timer already pruned, its marker left behind: the marker moves once host-sync.timer is
+# live, whether it already was (state 3) or this run armed it (state 4).
+legacy_case
+timer_off dev-sync.timer; stub_timer_live host-sync.timer
+run_level --apply
+check "legacy: a marker left in the old dir moves once host-sync.timer is live: already live" "$(armed_where)" host-sync
+legacy_case
+timer_off dev-sync.timer
+run_level --apply
+check "legacy: a marker left in the old dir moves once host-sync.timer is live: armed by this run" "$(armed_where)" host-sync
+
+# State 4 again, but the enable fails. arm_timer writes the new marker before it enables (the new
+# service's condition must hold before its timer can fire), so ~/.config/host-sync/armed exists
+# either way. The legacy marker is what must stay until the timer reads back armed (H2).
+legacy_case
+timer_off dev-sync.timer; touch "$H/stub/enable-fails"
+run_level --apply
+has   "legacy: a failed arm in state 4 leaves a legacy marker in place: the ✗ row" "$OUT" \
+    "${TIMER_DRIFT}arming failed: is-enabled=disabled, is-active=inactive"
+check "legacy: a failed arm in state 4 leaves a legacy marker in place: the legacy marker stays" "$(armed_where)" both
+rm "$H/stub/enable-fails"
+run_level --apply
+check "legacy: a failed arm in state 4 leaves a legacy marker in place: the next --apply moves it" \
+    "$(armed_where)/$(present "$H/.config/dev-sync")" host-sync/gone
+
+legacy_case
+rm "$H/.config/dev-sync/armed"; : >"$H/.config/dev-sync/disarmed"; timer_off dev-sync.timer
+run_level --check
+has   "legacy: a disarmed legacy host reads disarmed in --check" "$OUT" "${TIMER_INFO}disarmed by hand"
+hasnt "legacy: a disarmed legacy host reads disarmed in --check: not the not-armed text" "$OUT" "not armed on this host"
+check "legacy: a disarmed legacy host reads disarmed in --check: exit 0" "$RC" 0
+reset_calls; run_level --apply --arm
+check "legacy: --apply --arm on a disarmed legacy host writes no marker and moves the disarmed file: moved" \
+    "$(present "$H/.config/host-sync/disarmed")/$(present "$H/.config/dev-sync")" present/gone
+check "legacy: --apply --arm on a disarmed legacy host writes no marker and moves the disarmed file: no marker" "$(armed_where)" none
+hasnt "legacy: --apply --arm on a disarmed legacy host writes no marker and moves the disarmed file: no enable" "$(calls)" "enable --now"
+
+legacy_case
+mkdir "$H/.config/host-sync"
+run_level --apply
+check "legacy: an existing host-sync dir does not strand the legacy marker: dev-sync/ is gone" "$(present "$H/.config/dev-sync")" gone
+# Its exact contents: a directory mv would nest dev-sync/ inside it.
+check "legacy: an existing host-sync dir does not strand the legacy marker: host-sync/ holds armed alone" \
+    "$(find "$H/.config/host-sync" -mindepth 1 -printf '%P ')" "armed "
 
 echo "== hygiene: abandoned sessions, slice"
 new_case
@@ -758,8 +1173,8 @@ mkdir -p "$L/quantivly/plain"
 git init -q "$L/quantivly/.hidden"; git -C "$L/quantivly/.hidden" remote add origin https://github.com/quantivly/hidden.git
 git -C "$L/quantivly/alpha" commit -q --allow-empty -m init
 git -C "$L/quantivly/alpha" worktree add -q "$L/quantivly/alpha-wt" -b wt   # a REAL worktree: .git is a file, origin resolves
-FACTS_OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" \
-    DEV_SYNC_GITHUB_BASE="file://$GH" bash "$SUT" --print-facts 2>&1)"
+FACTS_OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" \
+    HOST_SYNC_GITHUB_BASE="file://$GH" bash "$SUT" --host dev --print-facts 2>&1)"
 has   "facts: the laptop's Claude version" "$FACTS_OUT" "--claude-version $V_LAPTOP"
 hasnt "facts: no herdr-draft commit (laptop and timer both target main)" "$FACTS_OUT" "--draft-sha"
 has   "facts: the laptop herdr binary's sha256, for dev to verify against" "$FACTS_OUT" "--herdr-sha256 $(sha256sum "$L/.local/bin/herdr" | cut -c1-64)"
@@ -774,15 +1189,15 @@ check "facts: exactly the two work clones (no other owner, dotfiles, gitlab, wor
 # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
 printf '#!/usr/bin/env bash\nshift\nexec env HOME="%s" zsh -f -c "$1"\n' "$H" >"$C/fakessh"; chmod +x "$C/fakessh"
 echo 2.1.272 >"$H/stub/claude-version"
-E2E="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_SSH="$C/fakessh" DEV_SYNC_NO_SCOPE=1 \
-    DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" DEV_SYNC_GITHUB_BASE="file://$GH" \
-    DEV_SYNC_NPM_URL="file://$C/npm.json" bash "$SUT" --check 2>&1)"; E2E_RC=$?
+E2E="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_SSH="$C/fakessh" HOST_SYNC_NO_SCOPE=1 \
+    HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH" \
+    HOST_SYNC_NPM_URL="file://$C/npm.json" bash "$SUT" --host dev --check 2>&1)"; E2E_RC=$?
 check "end to end --check: exit 1 on drift" "$E2E_RC" 1
 has   "end to end --check: the laptop's version reached dev" "$E2E" "2.1.272, laptop has $V_LAPTOP"
 has   "end to end --check: a laptop-only clone reads as missing" "$E2E" "Gamma missing (laptop: quantivly/gamma)"
-E2E="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_SSH="$C/fakessh" DEV_SYNC_NO_SCOPE=1 \
-    DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" DEV_SYNC_GITHUB_BASE="file://$GH" \
-    DEV_SYNC_NPM_URL="file://$C/npm.json" bash "$SUT" --apply 2>&1)"; E2E_RC=$?
+E2E="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_SSH="$C/fakessh" HOST_SYNC_NO_SCOPE=1 \
+    HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH" \
+    HOST_SYNC_NPM_URL="file://$C/npm.json" bash "$SUT" --host dev --apply 2>&1)"; E2E_RC=$?
 has   "end to end --apply: claude raised to the laptop's" "$(cat "$H/stub/claude-version")" "$V_LAPTOP"
 has   "end to end --apply: the clone failure is reported, not hidden" "$E2E" "Gamma: git clone quantivly/gamma failed"
 check "end to end --apply: so it exits 1" "$E2E_RC" 1
@@ -790,20 +1205,77 @@ check "end to end --apply: so it exits 1" "$E2E_RC" 1
 # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
 printf '#!/usr/bin/env bash\n[[ "$*" == *"bash -s"* ]] && { cat >/dev/null; exit 137; }\nexec "%s" "$@"\n' "$C/fakessh" >"$C/oomssh"
 chmod +x "$C/oomssh"
-OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" DEV_SYNC_SSH="$C/oomssh" DEV_SYNC_NO_SCOPE=1 \
-    DEV_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" DEV_SYNC_GITHUB_BASE="file://$GH" \
-    bash "$SUT" --check 2>&1)"; RC=$?
+OUT="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_SSH="$C/oomssh" HOST_SYNC_NO_SCOPE=1 \
+    HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH" \
+    bash "$SUT" --host dev --check 2>&1)"; RC=$?
 check "the remote run killed (137): exit 2, never read as drift" "$RC" 2
-# dev-sync's own ssh never forwards the laptop's agent, whatever ssh_config says: a forwarded
+# host-sync's own ssh never forwards the laptop's agent, whatever ssh_config says: a forwarded
 # agent's socket on dev is usable by any process there while the run is open (review 3, S2). The
 # default ssh command, through a stub that logs its argv and answers as an unreachable host.
 mkdir -p "$C/sshbin"; printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexit 255\n' "$C/ssh-argv" >"$C/sshbin/ssh"
 chmod +x "$C/sshbin/ssh"
-env -u DEV_SYNC_SSH HOME="$L" PATH="$C/sshbin:/usr/local/bin:/usr/bin:/bin" DEV_SYNC_NO_SCOPE=1 \
-    bash "$SUT" --check >/dev/null 2>&1 </dev/null
-check "dev-sync's ssh never forwards an agent (-o ForwardAgent=no)" \
+env -u HOST_SYNC_SSH HOME="$L" PATH="$C/sshbin:/usr/local/bin:/usr/bin:/bin" HOST_SYNC_NO_SCOPE=1 \
+    HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH" \
+    bash "$SUT" --host dev --check >/dev/null 2>&1 </dev/null
+check "host-sync's ssh never forwards an agent (-o ForwardAgent=no)" \
     "$(grep -c -e '-o ForwardAgent=no' "$C/ssh-argv" 2>/dev/null | awk '{print ($1 > 0)}')" 1
 has   "the remote run killed: says so" "$OUT" "ended with status 137"
+# dotfiles-local on the laptop: its main's sha is a fact, and how far the host is behind it is
+# counted from the laptop's own objects, off the second line of the one ssh probe for both heads.
+push_to ZviBaratz/dotfiles-local c.txt laptop
+git clone -q "$GH/ZviBaratz/dotfiles-local.git" "$L/.dotfiles-local"
+overlay_facts() {   # what the laptop would send, as --print-facts prints it
+    HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" \
+        HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_DOTFILES_LOCAL_REMOTE="file://$GH/ZviBaratz/dotfiles-local.git" \
+        bash "$SUT" --host dev --print-facts 2>&1
+}
+has   "facts: the laptop sends dotfiles-local's main sha when it has the checkout" "$(overlay_facts)" \
+    "--dotfiles-local-sha $(overlay_main)"
+E2E="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_SSH="$C/fakessh" HOST_SYNC_NO_SCOPE=1 \
+    HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH" \
+    HOST_SYNC_DOTFILES_LOCAL_REMOTE="file://$GH/ZviBaratz/dotfiles-local.git" \
+    HOST_SYNC_NPM_URL="file://$C/npm.json" bash "$SUT" --host dev --check 2>&1)"
+has   "end to end --check: the laptop counts how far dotfiles-local is behind" "$E2E" \
+    "$(printf '✗ %-14s ' dotfiles-local)1 commits behind origin/main"
+rm -rf "$L/.dotfiles-local"
+hasnt "facts: the laptop sends dotfiles-local's main sha when it has the checkout: without it, none" "$(overlay_facts)" \
+    "--dotfiles-local-sha"
+
+echo "== --host is required, and the dev-sync wrapper"
+# Every row runs under the fixture HOME with the local remotes, so none reaches the network or an agent.
+WRAPPER_ENV=(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_NO_SCOPE=1
+    HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH"
+    HOST_SYNC_NPM_URL="file://$C/npm.json")
+# A stub ssh that records its first argument (the host alias) and answers as an unreachable host.
+# shellcheck disable=SC2016  # expanded by the stub itself, deliberately
+printf '#!/bin/sh\nprintf "%%s\\n" "$1" >>"%s"\nexit 255\n' "$C/wrapper-ssh-hosts" >"$C/wrapper-ssh"
+chmod +x "$C/wrapper-ssh"
+# Without --host or --here nothing may reach ssh at all: the stub and no agent make a regression visible.
+: >"$C/wrapper-ssh-hosts"
+OUT="$(env -u SSH_AUTH_SOCK "${WRAPPER_ENV[@]}" HOST_SYNC_SSH="$C/wrapper-ssh" bash "$SUT" --check 2>&1 </dev/null)"; RC=$?
+check "host-sync with neither --host nor --here: usage (64)" "$RC" 64
+has   "host-sync with neither --host nor --here: says --host is required" "$OUT" "--host <ssh alias> is required"
+check "host-sync with neither --host nor --here: ssh is never run" "$(cat "$C/wrapper-ssh-hosts")" ""
+# An alias that ssh would read as an option: refused before any ssh call.
+: >"$C/wrapper-ssh-hosts"
+env -u SSH_AUTH_SOCK "${WRAPPER_ENV[@]}" HOST_SYNC_SSH="$C/wrapper-ssh" bash "$SUT" --host -oProxyCommand=x --check \
+    >/dev/null 2>&1 </dev/null; RC=$?
+check "an unsafe --host alias is refused (64) without an ssh call" "$RC/$(cat "$C/wrapper-ssh-hosts")" "64/"
+OUT="$(env -u SSH_AUTH_SOCK "${WRAPPER_ENV[@]}" bash "$SUT" --help 2>&1 </dev/null)"; RC=$?
+check "host-sync --help: exit 0" "$RC" 0
+has   "host-sync --help: prints the usage" "$OUT" "--print-facts"
+wrapper_hosts_after() {   # $@ = the wrapper's arguments; prints the aliases the stub ssh saw
+    : >"$C/wrapper-ssh-hosts"
+    env "${WRAPPER_ENV[@]}" HOST_SYNC_SSH="$C/wrapper-ssh" bash "$WRAPPER" "$@" >/dev/null 2>&1 </dev/null
+    cat "$C/wrapper-ssh-hosts"
+}
+has "the dev-sync wrapper runs host-sync against dev" "$(wrapper_hosts_after --check)" "dev"
+OUT="$(env -u SSH_AUTH_SOCK HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
+    HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
+    PATH="/usr/local/bin:/usr/bin:/bin" bash "$WRAPPER" --here --check 2>&1 </dev/null)"
+has "the wrapper passes --here through unchanged" "$OUT" "host-sync check on"
+has "the wrapper honours an explicit --host" "$(wrapper_hosts_after --host other --check)" "other"
+has "the wrapper honours an explicit --host=" "$(wrapper_hosts_after --host=other --check)" "other"
 
 echo "== the long-lived Claude token"
 new_case
@@ -813,7 +1285,7 @@ has   "token level: logged in by the token, said so" "$OUT" "claude uses the lon
 has   "token level: its date and age are reported" "$OUT" "token stored $(date -d '10 days ago' +%F), 10 day(s) old"
 has   "token level: the running Claude process carries it" "$OUT" "all 1 Claude process(es) carry the token"
 hasnt "token level: the token value is never printed" "$OUT" "$FAKE_TOK"
-check "token level: every claude call dev-sync makes carries the token" \
+check "token level: every claude call host-sync makes carries the token" \
     "$(wc -l <"$H/stub/calls-with-token")" "$(grep -c '^claude ' "$H/stub/calls")"
 has   "token level: auth status is among them" "$(cat "$H/stub/calls-with-token")" "claude auth status --json"
 
@@ -829,7 +1301,7 @@ hasnt "no token file: no age row" "$OUT" "token stored"
 new_case
 rm -rf "$H/.config/claude-oauth"; touch "$H/stub/no-login"
 run_level --check
-has   "not logged in: said so" "$OUT" "Claude is not logged in on dev (none)"
+has   "not logged in: said so" "$OUT" "Claude is not logged in on this host (none)"
 
 new_case
 touch "$H/stub/auth-fails"
@@ -894,6 +1366,14 @@ rm -rf "$C/proc"
 run_level --check
 has   "no Claude process: information only" "$OUT" "no Claude process running"
 
+new_case
+mkdir "$H/.clauth"
+run_level --check
+has   "clauth host: the auth rows do not apply" "$OUT" \
+    "$(printf '· %-14s ' auth)accounts are managed by clauth on this host; the long-lived-token rows do not apply"
+hasnt "clauth host: the auth rows do not apply: no claude auth call" "$(calls)" "claude auth"
+check "clauth host: the auth rows do not apply: no other auth row" "$(area_rows auth)" 1
+
 echo "== token.env as a link to a seat (the layout PR B adopts; dev's token.env is still a file)"
 new_case
 link_token quantivly-5
@@ -930,25 +1410,25 @@ for t in ../outside.env seats/../outside.env ABSOLUTE seats/other-5.env seats/Qu
     ln -sfn "$t" "$d/token.env"
     CLAUDE_OAUTH_SEAT_PREFIX='../' run_level --check
     has   "a link to ${t#"$H/"}: ⚠, not a seat" "$OUT" "which is not a seat"
-    check "a link to ${t#"$H/"}: dev-sync loads nothing through it" "$(ntok)" 0
+    check "a link to ${t#"$H/"}: host-sync loads nothing through it" "$(ntok)" 0
 done
 STORE="$DOTFILES/scripts/claude-oauth-store"
-check "the seat-name rule: one constant, spelt the same in the store and in dev-sync" \
+check "the seat-name rule: one constant, spelt the same in the store and in host-sync" \
     "$(grep -h '^SEAT_RE=' "$SUT" "$STORE" | uniq -c | sed 's/^ *//')" "2 SEAT_RE='^quantivly-[a-z0-9][a-z0-9-]{0,30}\$'"
 
 echo "== the shared /login coming back (claudeAiOauth)"
 new_case
 run_level --check
-has   "no credentials file: ✓, no shared /login" "$OUT" "${AUTH_OK}no shared /login on dev (claudeAiOauth absent)"
+has   "no credentials file: ✓, no shared /login" "$OUT" "${AUTH_OK}no shared /login on this host (claudeAiOauth absent)"
 new_case
 creds none
 run_level --check
-has   "credentials without claudeAiOauth: ✓" "$OUT" "${AUTH_OK}no shared /login on dev (claudeAiOauth absent)"
+has   "credentials without claudeAiOauth: ✓" "$OUT" "${AUTH_OK}no shared /login on this host (claudeAiOauth absent)"
 hasnt "credentials without claudeAiOauth: nothing of the file is printed" "$OUT" "$FAKE_LOGIN"
 new_case
 creds login
 run_level --check
-has   "claudeAiOauth back: ⚠, said so" "$OUT" "${AUTH_OPER}the shared /login is back on dev"
+has   "claudeAiOauth back: ⚠, said so" "$OUT" "${AUTH_OPER}the shared /login is back on this host"
 check "claudeAiOauth back: a person's step, not drift" "$RC" 0
 hasnt "claudeAiOauth back: nothing of the file is printed" "$OUT" "$FAKE_LOGIN"
 new_case
@@ -959,7 +1439,7 @@ hasnt "unparseable credentials: nothing of it is printed, jq's error included" "
 new_case
 rm -rf "$H/.config/claude-oauth"; creds login
 run_level --check
-hasnt "no token stored: the /login is the only login, so no write-back row" "$OUT" "is back on dev"
+hasnt "no token stored: the /login is the only login, so no write-back row" "$OUT" "is back on this host"
 
 echo "== claude_procs reads no environment into bash (F11)"
 new_case
@@ -994,7 +1474,7 @@ check "store: directory mode 700" "$(stat -c %a "$H/.config/claude-oauth")" 700
 check "store: dated today" "$(cat "$H/.config/claude-oauth/created")" "$(date +%F)"
 hasnt "store: never prints the token" "$(cat "$SO" "$SE")" "$FAKE_TOK"
 run_level --check
-has   "store: what it writes is what dev-sync accepts" "$OUT" "claude uses the long-lived token (oauth_token)"
+has   "store: what it writes is what host-sync accepts" "$OUT" "claude uses the long-lived token (oauth_token)"
 
 new_case
 rm -rf "$H/.config/claude-oauth"
@@ -1068,7 +1548,7 @@ has   "store over a link: reports the seat file's mode, not the link's" "$(cat "
 hasnt "store over a link: never prints the token" "$(cat "$SO" "$SE")" "$FAKE_TOK3"
 check "store: the probe child runs before the lock is taken" "$(sort -u "$H/stub/store-lock-during" 2>/dev/null)" free
 run_level --check
-has   "store over a link: dev-sync reads the renewed seat's date" "$OUT" "token stored $(date +%F), 0 day(s) old"
+has   "store over a link: host-sync reads the renewed seat's date" "$OUT" "token stored $(date +%F), 0 day(s) old"
 new_case
 D="$H/.config/claude-oauth"; link_token quantivly-5; rm "$D/seats/quantivly-5.env"
 store "$FAKE_TOK3"
@@ -1091,7 +1571,7 @@ check "store while another run holds its lock: refused, nothing written" \
 has   "store while another run holds its lock: says so" "$(cat "$SE")" "another claude-oauth-store run holds"
 
 echo "== dev never publishes a forwarded ssh agent"
-rowtxt() { printf '%s %-14s %s' "$1" "$2" "$3"; }   # a row as dev-sync prints it
+rowtxt() { printf '%s %-14s %s' "$1" "$2" "$3"; }   # a row as host-sync prints it
 mksock() { mkdir -p "$(dirname "$1")"; python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
 # A forwarded agent: sshd's /…/ssh-*/agent.<pid>, with a process really named sshd behind the pid
 # (the shell reads the real /proc). A script run by its #! line takes the script's name as its
@@ -1132,7 +1612,7 @@ zagent() {   # $1 = SSH_AUTH_SOCK the shell starts with ("" = unset). Sets ZS (i
     ZL="${ZL/#$LOCAL/local}"; ZL="${ZL/#$FWD/fwd}"; ZL="${ZL/#$OWN/own}"
 }
 fwd_asked() { grep -c "ssh-Fwd123" "$H/stub/ssh-add-calls" 2>/dev/null || true; }
-# An `ssh-agent -s` the shell starts outlives it: on dev, one per dev-sync run sat orphaned under
+# An `ssh-agent -s` the shell starts outlives it: on dev, one per host-sync run sat orphaned under
 # pid 1 (2026-11-03). The stub logs the call and starts nothing.
 agents_started() { grep -c '^ssh-agent' "$H/stub/calls" 2>/dev/null || true; }
 
@@ -1168,7 +1648,7 @@ rm "$H/stub/ssh-add-hangs"
 # socket that hangs.
 check "dev, an agent that never answers: shell start bounded (two 1 s probes, not two 10 s ones), and not adopted" \
     "$(( ZMS < 5000 ))/$ZS" "1/$H/.ssh/ssh_auth_sock"
-# A slow agent is the likely shape under a dev-sync run's load: the probes time out, and the
+# A slow agent is the likely shape under a host-sync run's load: the probes time out, and the
 # last resort used to start a stray agent there.
 check "dev, an agent that never answers: no ssh-agent of its own is started" "$(agents_started)" 0
 # An interactive shell then sources ~/.zshrc.local, whose workstation template block starts an
@@ -1190,25 +1670,30 @@ zagent ""
 rm "$R/vscode-ssh-auth-sock-1" "$H/stub/ssh-add-rc"
 check "dev, a VSCode-forwarded socket is never adopted" "$ZS/$ZL" "local/local"
 
-mv "$H/.config/dev-sync" "$H/.config/dev-sync.off"
+mv "$H/.config/host-sync" "$H/.config/host-sync.off"
 ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
 zagent "$FWD"
-check "laptop (no dev-sync marker): unchanged, the login's agent is published as before" "$ZS/$ZL" "fwd/fwd"
+check "laptop (no host-sync marker): unchanged, the login's agent is published as before" "$ZS/$ZL" "fwd/fwd"
 # The last resort stands off a shared host: with no agent anywhere, the shell starts one.
 mv "$R/ssh-agent.socket" "$R/off.socket"; ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
 reset_calls; zagent ""
 check "laptop, no agent anywhere: the shell still starts one" "$(agents_started)" 1
 check "laptop, no agent anywhere: no fallback path is exported (the shared-host branch only)" "$ZS" ""
 mv "$R/off.socket" "$R/ssh-agent.socket"
-mv "$H/.config/dev-sync.off" "$H/.config/dev-sync"
+# The marker of the release before the rename still marks a shared host.
+mv "$H/.config/host-sync.off" "$H/.config/dev-sync"
+ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
+zagent "$FWD"
+check "a host with only the old dev-sync marker is still a shared host: never publishes the forwarded agent" "$ZS/$ZL" "fwd/local"
+mv "$H/.config/dev-sync" "$H/.config/host-sync"
 agent_done
 
-echo "== dev-sync reports the agent link"
+echo "== host-sync reports the agent link"
 new_case
 agent_fixture
 ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
 run_level --check
-# shellcheck disable=SC2088  # a label as dev-sync prints it
+# shellcheck disable=SC2088  # a label as host-sync prints it
 has   "agent: a local agent is named" "$OUT" "~/.ssh/ssh_auth_sock → $LOCAL, a local agent"
 has   "agent: with a bounded ssh-add timing" "$OUT" "ssh-add -l answered in"
 echo 0 >"$H/stub/ssh-add-rc"; run_level --check
@@ -1218,7 +1703,7 @@ has   "agent: an agent that does not answer in 1 s: a person's step" "$OUT" "$(r
 ln -sfn "$FWD" "$H/.ssh/ssh_auth_sock"
 fake_proc "$SSHD_PID" sshd 0
 : >"$H/stub/ssh-add-calls"; run_level --check
-# shellcheck disable=SC2088  # a label as dev-sync prints it
+# shellcheck disable=SC2088  # a label as host-sync prints it
 has   "agent: a link on a forwarded agent: a person's step" "$OUT" "$(rowtxt ⚠ agent "~/.ssh/ssh_auth_sock → an agent FORWARDED from the laptop")"
 check "agent: the forwarded agent is never probed" "$(fwd_asked)" 0
 check "agent: report-only, no drift from it" "$RC" 0
@@ -1227,15 +1712,15 @@ run_level --check
 has   "agent: the same socket shape from a local agent is local" "$OUT" "$FWD, a local agent"
 ln -sfn "$C/gone/agent.1" "$H/.ssh/ssh_auth_sock"
 run_level --check
-# shellcheck disable=SC2088  # a label as dev-sync prints it
+# shellcheck disable=SC2088  # a label as host-sync prints it
 has   "agent: a dangling link is information" "$OUT" "$(rowtxt · agent "~/.ssh/ssh_auth_sock dangles")"
 rm "$H/.ssh/ssh_auth_sock"
 run_level --check
-# shellcheck disable=SC2088  # a label as dev-sync prints it
+# shellcheck disable=SC2088  # a label as host-sync prints it
 has   "agent: no link is information" "$OUT" "$(rowtxt · agent "no ~/.ssh/ssh_auth_sock link")"
 agent_done
 
-echo "== dev-sync hands its children dev's own agent link"
+echo "== host-sync hands its children dev's own agent link"
 new_case
 agent_fixture
 # The workstation template's block, which dev's ~/.zshrc.local holds (counted, not read, 11-03), and
@@ -1250,7 +1735,7 @@ ZL
 ln -sfn "$LOCAL" "$H/.ssh/ssh_auth_sock"
 reset_calls; run_level --check
 has   "children: the mcp row sourced ~/.zshrc.local (else the next rows prove nothing)" "$OUT" "LINEAR_API_KEY is set in ~/.zshrc.local"
-check "children: a shell dev-sync starts is handed the stable link" "$(cat "$H/stub/zl-sock" 2>/dev/null)" "$H/.ssh/ssh_auth_sock"
+check "children: a shell host-sync starts is handed the stable link" "$(cat "$H/stub/zl-sock" 2>/dev/null)" "$H/.ssh/ssh_auth_sock"
 check "children: so the template's block starts no agent" "$(agents_started)" 0
 # Without a link to hand on, systemd's socket path: never forwarded, and non-empty even when it is
 # absent, so the block still starts nothing and ssh falls back to the key files (review 3, S1).
@@ -1361,7 +1846,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=325
+EXPECTED_ROWS=441
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

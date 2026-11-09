@@ -304,7 +304,7 @@ identity rather than by path:
 
 ```
 ~/.local/share/claude-memory/<store>/
-  repos/<owner>/<repo>/   a checkout with an origin (lowercased, by the rule of repo_of_url in scripts/dev-sync)
+  repos/<owner>/<repo>/   a checkout with an origin (lowercased, by the rule of repo_of_url in scripts/host-sync)
   dirs/<slug>/            a directory with no .git, or a repo with no origin
 ```
 
