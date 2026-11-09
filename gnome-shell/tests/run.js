@@ -8,6 +8,7 @@ import './parsers.test.js';
 import './math.test.js';
 import './apps.test.js';
 import './format.test.js';
+import './cadence.test.js';
 import './sampler.test.js';
 import './graph.test.js';
 import './lifecycle.test.js';

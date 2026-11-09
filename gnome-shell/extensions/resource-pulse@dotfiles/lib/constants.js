@@ -8,12 +8,20 @@ export const SAMPLE_INTERVAL_SECONDS = 2;
  */
 export const SAMPLE_STALL_TICKS = 3;
 /**
- * Seconds between per-app scans: SAMPLE_INTERVAL_SECONDS × APP_SCAN_EVERY_N_TICKS, which a test row enforces.
- * 10 rather than the spec's first 6, to keep the scan inside the < 0.5%-of-one-core idle budget.
+ * Seconds between per-app scans while a detail watch is held: SAMPLE_INTERVAL_SECONDS × APP_SCAN_EVERY_N_TICKS,
+ * which a test row enforces. 20 (the service design's cadence) to keep the scan inside the idle cost budget.
  */
-export const APP_SCAN_INTERVAL_SECONDS = 10;
+export const APP_SCAN_INTERVAL_SECONDS = 20;
+/** Seconds between per-app scans with no detail watch held: a baseline, so a reveal never starts from nothing. */
+export const APP_SCAN_UNWATCHED_INTERVAL_SECONDS = 60;
+/** Percentage points CPU busy must rise above its value at the last scan to set off a burst scan. */
+export const BURST_CPU_RISE_POINTS = 15;
+/** Ticks after a watch-start or burst scan during which no burst scan may start. */
+export const BURST_COOLDOWN_TICKS = 2;
+/** Ticks after a watch-start or burst scan during which a watch starting does not scan at once. */
+export const REVEAL_SCAN_COOLDOWN_TICKS = 2;
 /** Sample ticks between per-app scans. */
-export const APP_SCAN_EVERY_N_TICKS = 5;
+export const APP_SCAN_EVERY_N_TICKS = APP_SCAN_INTERVAL_SECONDS / SAMPLE_INTERVAL_SECONDS;
 /**
  * Sample ticks an app scan may stay in flight: one whole scan interval, by when the next scan is overdue. On the
  * timer tick after that the scan counts as stalled (once per stall): the ranking is dropped, so "heaviest" shows
