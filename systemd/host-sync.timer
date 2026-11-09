@@ -15,7 +15,9 @@
 # NOT fire at once on a timer enabled with `enable --now` from inside a running dev-sync.service
 # (the arming move, D8 / H2): systemd records that activation as the last trigger and schedules
 # the next calendar elapse, so the host's first migrating run is not raced by this timer (probed
-# for the plan review, 2026-11-09).
+# for the plan review, 2026-11-09). That holds while the timer has no stamp yet: one enabled before,
+# disarmed by the guide's recipe and re-armed fires the missed elapse at once, meets the held lock
+# and exits 2 (one failed instance, no damage; the next elapse runs normally).
 
 [Unit]
 Description=Daily host-sync: keep this host's tooling and Claude Code configuration level with git

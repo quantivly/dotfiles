@@ -198,7 +198,9 @@
     # laptop, which also writes the marker the service's ConditionPathExists needs,
     # so on any other machine the unit is SKIPPED, which is not a failure. On a host
     # armed by dev-sync.timer that first --apply moves the arming here, new timer
-    # first; it never disables or reenables either unit.
+    # first; it never disables or reenables either unit. On a host already armed by
+    # dev-sync.timer, that timer's own next tick (through the dev-sync wrapper) enables
+    # host-sync.timer too, moving the arming over.
     ~/.config/systemd/user/host-sync.service: systemd/host-sync.service
     ~/.config/systemd/user/host-sync.timer: systemd/host-sync.timer
     # claude-memory-sync (DO-892): every 10 min, link Claude Code memory into its

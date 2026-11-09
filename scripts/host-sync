@@ -1528,6 +1528,7 @@ main() {
         shift
     done
     # Validate everything that arrives over the wire before any of it reaches a command.
+    [[ "$DOTFILES_LOCAL_REPO" =~ $SAFE_REPO_RE ]] || { echo "host-sync: bad HOST_SYNC_DOTFILES_LOCAL_REPO (want owner/repo)" >&2; return 64; }
     [[ -z "$ARG_CLAUDE" || "$ARG_CLAUDE" =~ $VER_RE ]] || { echo "host-sync: bad --claude-version" >&2; return 64; }
     [[ -z "$ARG_DOTFILES_SHA" || "$ARG_DOTFILES_SHA" =~ $SHA_RE ]] || { echo "host-sync: bad --dotfiles-sha" >&2; return 64; }
     [[ -z "$ARG_DOTFILES_BEHIND" || "$ARG_DOTFILES_BEHIND" =~ $COUNT_RE ]] || { echo "host-sync: bad --dotfiles-behind" >&2; return 64; }

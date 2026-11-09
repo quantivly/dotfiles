@@ -951,6 +951,9 @@ check "no ~/quantivly: --check does not create it" "$([[ -e "$H/quantivly" ]] &&
 new_case
 run --check --clone 'x;rm=quantivly/x'
 check "an unsafe --clone dir is refused (64)" "$RC" 64
+new_case
+HOST_SYNC_DOTFILES_LOCAL_REPO='x;rm -rf /' run --check
+check "an unsafe HOST_SYNC_DOTFILES_LOCAL_REPO is refused (64)" "$RC" 64
 
 echo "== timer"
 # The timer row's glyph and area, as row() prints them, so a needle also pins ✓ against ✗ and ·.
@@ -1021,7 +1024,7 @@ check "legacy: the state dir is moved under the lock and the install stamp carri
 has   "legacy: host-sync.timer is enabled with enable --now, never reenable" "$(calls)" "systemctl --user enable --now host-sync.timer"
 hasnt "legacy: host-sync.timer is enabled with enable --now, never reenable: no reenable or disable of any timer" \
     "$(grep -E 'reenable|disable' "$H/stub/calls")" ".timer"
-check "legacy: the marker moves only after the new timer reads back armed: the calls' order" "$(arming_order)" "enable, read back, then stop"
+check "legacy: enable, read back, then stop, in that order" "$(arming_order)" "enable, read back, then stop"
 check "legacy: the marker moves only after the new timer reads back armed: ~/.config/host-sync/armed" "$(armed_where)" host-sync
 check "legacy: the marker moves only after the new timer reads back armed: ~/.config/dev-sync is removed" \
     "$(present "$H/.config/dev-sync")" gone
@@ -1843,7 +1846,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=440
+EXPECTED_ROWS=441
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
