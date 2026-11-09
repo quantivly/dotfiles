@@ -1,6 +1,6 @@
 # Desktop cockpit on Resource Pulse v2: design
 
-**Status:** approved by Zvi 2026-11-09 (brainstorm with mockups, builder check and his answers recorded below). Implementation plan: not yet written; each stage gets its own. **Builds on**
+**Status:** approved by Zvi 2026-11-09 (brainstorm with mockups, builder check and his answers recorded below). Implementation plan: the data side is in [2026-11-09-desktop-cockpit-data-side.md](../plans/2026-11-09-desktop-cockpit-data-side.md); the drawing side gets its own plan after it lands. **Builds on**
 [2026-11-08-resource-pulse-service-design.md](2026-11-08-resource-pulse-service-design.md) (v2) and
 [2026-11-07-resource-pulse-design.md](2026-11-07-resource-pulse-design.md) (v1). Where this document
 reopens a v1 or v2 decision it says so; everything it does not mention stands.
