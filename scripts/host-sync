@@ -1032,7 +1032,7 @@ here_main() {
     if [[ "$MODE" == apply ]]; then
         if [[ "$ARM" != 1 && ! -e "$MARKER_DIR/armed" ]]; then
             echo "host-sync: refusing --apply: this machine is not armed (no ~/.config/host-sync/armed)." >&2
-            echo "          Arm it from the laptop: ~/.dotfiles/scripts/host-sync --apply" >&2
+            echo "          Arm it from the laptop: ~/.dotfiles/scripts/host-sync --host <alias> --apply" >&2
             return 2
         fi
         # --check writes nothing, so only --apply takes the lock (the timer and a laptop

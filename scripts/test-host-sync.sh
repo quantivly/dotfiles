@@ -712,6 +712,7 @@ rm "$H/.config/host-sync/armed" "$H/stub/timer-enabled" "$H/stub/timer-active"
 reset_calls; run_level --apply
 check "unarmed dev, --apply without --arm: refused (2)" "$RC" 2
 check "unarmed dev: nothing mutating was called" "$(mutations)" 0
+has   "unarmed: the refusal names the command that arms it, with --host" "$OUT" "scripts/host-sync --host <alias> --apply"
 run_level --check
 has   "unarmed dev: --check shows the ✗" "$OUT" "host-sync.timer not armed"
 run_level --apply --arm
@@ -1391,7 +1392,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=331
+EXPECTED_ROWS=332
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
