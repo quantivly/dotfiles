@@ -1458,7 +1458,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=395
+EXPECTED_ROWS=397
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

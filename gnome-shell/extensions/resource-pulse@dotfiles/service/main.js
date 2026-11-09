@@ -5,7 +5,8 @@
 // - The object is exported when the bus connection is up, before the name is requested, so a client that sees the
 //   name can call it at once; systemd counts the unit started at the same moment. Sampling starts once the name is
 //   owned.
-// - The name is requested without queueing: a second copy that finds it taken exits 1 at once rather than waiting.
+// - A second copy never owns the name: GLib reports a name it cannot own at once as lost, so that copy exits 1.
+//   DO_NOT_QUEUE also keeps it out of the bus's queue behind the first in the moment before it exits.
 // - Every shutdown destroys the sampler, never only stops it: a stopped sampler still scans on a watch start.
 // - Exit status: 0 for a signal, or for losing the name once owned (the bus connection closed: the session ended);
 //   1 when the name was never owned, or the object could not be exported.
@@ -26,6 +27,12 @@ const SIGTERM_NUMBER = 15;
 const SHUTDOWN_SIGNAL_NAMES_BY_NUMBER = new Map([[SIGTERM_NUMBER, 'SIGTERM'], [SIGINT_NUMBER, 'SIGINT']]);
 const EXIT_STATUS_SUCCESS = 0;
 const EXIT_STATUS_FAILURE = 1;
+/**
+ * Adds a Unix signal source: GLibUnix.signal_add on a current GLib. An older GLibUnix typelib names it
+ * signal_add_full (gjs 1.88 keeps that name only as a deprecated alias, which warns), and CI may run such a GLib.
+ * signal_add is taken first, so a current gjs never touches the alias.
+ */
+const addUnixSignalSource = GLibUnix.signal_add ?? GLibUnix.signal_add_full;
 
 /** One run of the service: the sampler, its D-Bus face, the bus name and the main loop, and their shutdown. */
 class ResourcePulseServiceProcess {
@@ -50,7 +57,7 @@ class ResourcePulseServiceProcess {
         this._sampler = new ServiceSampler();
         this._sampler.initialize();
         for (const [signalNumber, signalName] of SHUTDOWN_SIGNAL_NAMES_BY_NUMBER) {
-            this._signalSourceIds.push(GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signalNumber, () => {
+            this._signalSourceIds.push(addUnixSignalSource(GLib.PRIORITY_DEFAULT, signalNumber, () => {
                 this._shutDown(`received ${signalName}`, EXIT_STATUS_SUCCESS);
                 return GLib.SOURCE_CONTINUE;
             }));

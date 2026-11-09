@@ -226,6 +226,33 @@ test('protocol skew: a mistyped field is null for that field only (a history val
     });
 });
 
+test('protocol skew: an app entry without a groupKey is null, so two such entries never read as one app', () => {
+    // lib/format.js shows the two halves of "heaviest" as one app when their groupKeys are equal, and two keys made
+    // null would be equal.
+    const payloadWithoutGroupKeys = editedPayload(fullSamplePayload(), payloadObject => {
+        delete payloadObject.snapshot.apps.topCpu.groupKey;
+        delete payloadObject.snapshot.apps.topMemory.groupKey;
+    });
+    assertEqual(parseSamplePayload(payloadWithoutGroupKeys).snapshot.apps, {topCpu: null, topMemory: null});
+});
+
+test('protocol skew: a sequence or protocol that is not a whole number of zero or more is null', () => {
+    // The client takes a lower sequence for a service restart, so a negative or fractional one must not pass.
+    const notWholeCounts = [-3, 2.5, '7', null];
+    const parsedCounts = notWholeCounts.map(count => {
+        const statePayload = editedPayload(fullStatePayload(), payloadObject => {
+            payloadObject.sequence = count;
+            payloadObject.protocol = count;
+        });
+        const samplePayload = editedPayload(fullSamplePayload(), payloadObject => {
+            payloadObject.sequence = count;
+        });
+        const state = parseStatePayload(statePayload);
+        return [state.sequence, state.protocol, parseSamplePayload(samplePayload).sequence];
+    });
+    assertEqual(parsedCounts, notWholeCounts.map(() => [null, null, null]));
+});
+
 test('protocol skew: a missing snapshot, histories or appendedHistory gives null, never a throw', () => {
     const stateWithoutParts = editedPayload(fullStatePayload(), payloadObject => {
         delete payloadObject.snapshot;
