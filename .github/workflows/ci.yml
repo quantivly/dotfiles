@@ -569,11 +569,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # zsh runs gnome-status (zsh/functions/system.sh) against stubs.
-      - name: Install gjs and zsh
+      # zsh runs gnome-status (zsh/functions/system.sh) against stubs, and once
+      # with the real gdbus (libglib2.0-bin) against the real service on a
+      # private bus. dbus-daemon ships /usr/bin/dbus-run-session (on 24.04 and 26.04 alike):
+      # the sampler service's D-Bus rows and its main.js run on a private bus of
+      # their own, never on a session bus the runner may have. systemd-analyze,
+      # which verifies the service unit, ships with systemd on ubuntu-latest.
+      # The card-width row measures the card's text with Pango (gjs does not
+      # pull its typelibs in) in the card's own font, Ubuntu Sans.
+      - name: Install gjs, zsh, dbus-daemon, gdbus, Pango's typelibs and Ubuntu Sans
         uses: ./.github/actions/apt-install
         with:
-          packages: gjs zsh
+          packages: gjs zsh dbus-daemon libglib2.0-bin gir1.2-pango-1.0 fonts-ubuntu
 
       - name: Run the Resource Pulse state table
         run: ./scripts/test-resource-pulse.sh

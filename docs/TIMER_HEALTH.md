@@ -39,7 +39,11 @@ Each can be false while the other two look fine, which is why all three are aske
 
 1. **Enabled.** Already answered by `reconcile-systemd-units.sh --check`. Not duplicated. A unit that
    is *linked but not enabled* is a **decision**, not drift — `wt-gc-sweep` ships that way on purpose
-   — so it is reported as "not checked" and never as a pass.
+   — so it is reported as "not checked" and never as a pass. A unit with **no `[Install]` section**
+   cannot be enabled at all: something else starts it on demand (`resource-pulse.service`, started by
+   its GNOME extension). It is reported as "started on demand", not as an arming decision. Only the
+   unit file tells them apart: `is-enabled` answers `linked` for a symlinked unit either way
+   (measured, systemd 259). An enabled unit is checked whichever it is.
 2. **Succeeded.** `LoadState`, `ActiveState`, `Result`, `ExecMainStatus` of the last run.
 3. **Still running.** The timer is firing at all, on its own schedule.
 
@@ -212,7 +216,7 @@ unit and a "now" of zero passes every one of them. Both are exit 2. Mutant **M14
 
 ## The state table
 
-`scripts/test-timer-health.sh` (134 checks, hermetic, run in CI, job
+`scripts/test-timer-health.sh` (142 checks, hermetic, run in CI, job
 "Repo-Owned Timer Health State Table").
 
 **Hermetic means a recording `systemctl` stub at the front of `PATH`**, never "systemctl happens to
