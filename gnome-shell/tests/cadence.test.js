@@ -86,6 +86,13 @@ test('cadence: a pending warm-up scans when unwatched too', () =>
 test('cadence: watch-start beats warm-up', () =>
     assertEqual(reasonFor({watchStartedThisTick: true, warmUpPending: true}), 'watch-start'));
 
+test('cadence: a watch starting inside the reveal cooldown with a warm-up pending falls through to warm-up', () =>
+    assertEqual(
+        reasonFor({
+            watchStartedThisTick: true, warmUpPending: true,
+            ticksSinceTriggeredScan: REVEAL_SCAN_COOLDOWN_TICKS - 1,
+        }), 'warm-up'));
+
 test('cadence: warm-up beats burst', () =>
     assertEqual(reasonFor({warmUpPending: true, cpuBusyPercentNow: 90}), 'warm-up'));
 
@@ -101,8 +108,10 @@ test('cadence: CPU 40 to 54 does not burst', () =>
 test('cadence: unwatched never bursts on CPU', () =>
     assertEqual(reasonFor({isWatched: false, cpuBusyPercentAtLastScan: 0, cpuBusyPercentNow: 100}), null));
 
+// The last-scan value is one that null would read as a huge rise (null - -100 is 100), so the row fails without
+// the guard.
 test('cadence: a null CPU value now never bursts', () =>
-    assertEqual(reasonFor({cpuBusyPercentNow: null}), null));
+    assertEqual(reasonFor({cpuBusyPercentNow: null, cpuBusyPercentAtLastScan: -100}), null));
 
 test('cadence: a null CPU value at the last scan never bursts', () =>
     assertEqual(reasonFor({cpuBusyPercentAtLastScan: null, cpuBusyPercentNow: 100}), null));
@@ -116,8 +125,9 @@ test('cadence: a pressure band falling does not burst', () =>
 test('cadence: a pressure band staying does not burst', () =>
     assertEqual(reasonFor({pressureBandsAtLastScan: [1, 1, 1], pressureBandsNow: [1, 1, 1]}), null));
 
+// Band -1 at the last scan: null > -1 is true, so the row fails without the guard.
 test('cadence: a null pressure band now never bursts', () =>
-    assertEqual(reasonFor({pressureBandsAtLastScan: [0, 0, 0], pressureBandsNow: [null, 0, 0]}), null));
+    assertEqual(reasonFor({pressureBandsAtLastScan: [-1, 0, 0], pressureBandsNow: [null, 0, 0]}), null));
 
 test('cadence: a null pressure band at the last scan never bursts', () =>
     assertEqual(reasonFor({pressureBandsAtLastScan: [null, 0, 0], pressureBandsNow: [3, 0, 0]}), null));
