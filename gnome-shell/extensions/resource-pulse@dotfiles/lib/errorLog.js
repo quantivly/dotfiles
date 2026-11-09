@@ -1,6 +1,6 @@
-// Journal lines for failures, shared by the sampler and the extension: each distinct message at most once per
-// ERROR_LOG_REPEAT_INTERVAL_USEC, with the journal prefix. Pure: the clock and the writer are injected, so it runs
-// under plain gjs.
+// Journal lines for failures, shared by the samplers and the extension: each message at most once per
+// ERROR_LOG_REPEAT_INTERVAL_USEC for its template key (its own text unless a caller names one), with the journal
+// prefix. Pure: the clock and the writer are injected, so it runs under plain gjs.
 import {ERROR_LOG_REPEAT_INTERVAL_USEC, LOG_PREFIX} from './constants.js';
 
 /**
@@ -24,7 +24,10 @@ export function describeErrorWithStack(error) {
     return `${describeError(error)}${stackText}`;
 }
 
-/** Writes each distinct message at most once per ERROR_LOG_REPEAT_INTERVAL_USEC, prefixed with LOG_PREFIX. */
+/**
+ * Writes each message at most once per ERROR_LOG_REPEAT_INTERVAL_USEC for its template key, prefixed with
+ * LOG_PREFIX. The key defaults to the message itself, so a caller that names none is limited per distinct text.
+ */
 export class RateLimitedLogger {
     /**
      * @param {object} options - The clock and the writer.
@@ -34,27 +37,29 @@ export class RateLimitedLogger {
     constructor({nowUsec, write}) {
         this._nowUsec = nowUsec;
         this._write = write;
-        this._lastLoggedUsecByMessage = new Map();
+        this._lastLoggedUsecByTemplateKey = new Map();
     }
 
     /**
-     * Writes a message with the journal prefix, unless the same message was written less than
+     * Writes a message with the journal prefix, unless a message with the same template key was written less than
      * ERROR_LOG_REPEAT_INTERVAL_USEC ago. Entries old enough to write again are forgotten, so the table stays
      * small.
      *
      * @param {string} message - The message, without the prefix.
+     * @param {string} [templateKey] - What the limit is kept by: a stable name for a message whose text varies (a
+     *     count, a path, an error), so that every variant shares one limit. Defaults to the message itself.
      * @returns {void}
      */
-    log(message) {
+    log(message, templateKey = message) {
         const nowUsec = this._nowUsec();
-        const lastLoggedUsec = this._lastLoggedUsecByMessage.get(message);
+        const lastLoggedUsec = this._lastLoggedUsecByTemplateKey.get(templateKey);
         if (lastLoggedUsec !== undefined && nowUsec - lastLoggedUsec < ERROR_LOG_REPEAT_INTERVAL_USEC)
             return;
-        for (const [loggedMessage, loggedAtUsec] of this._lastLoggedUsecByMessage) {
+        for (const [loggedTemplateKey, loggedAtUsec] of this._lastLoggedUsecByTemplateKey) {
             if (nowUsec - loggedAtUsec >= ERROR_LOG_REPEAT_INTERVAL_USEC)
-                this._lastLoggedUsecByMessage.delete(loggedMessage);
+                this._lastLoggedUsecByTemplateKey.delete(loggedTemplateKey);
         }
-        this._lastLoggedUsecByMessage.set(message, nowUsec);
+        this._lastLoggedUsecByTemplateKey.set(templateKey, nowUsec);
         this._write(`${LOG_PREFIX} ${message}`);
     }
 }

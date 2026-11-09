@@ -123,10 +123,14 @@ else
   fi
 fi
 
-# The extension runs on the compositor's main loop: no subprocess and no
-# synchronous file IO, anywhere in it. Each Gio call is matched with its "(" so
-# its _async form (enumerate_children_async( and so on) does not match.
-BLOCKING_CALL_PATTERN='Gio.Subprocess|GLib.spawn|Util.spawn|load_contents\(|file_get_contents|enumerate_children\(|query_info\(|read_bytes\(|load_bytes\(|replace_contents\('
+# The shell side runs on the compositor's main loop: no subprocess and no
+# synchronous file IO, anywhere in it. service/ is the sampler service, its own
+# process outside the shell, so it may read files synchronously; it still starts
+# no subprocess. Each Gio call is matched with its "(" so its _async form
+# (enumerate_children_async( and so on) does not match.
+SUBPROCESS_CALL_PATTERN='Gio.Subprocess|GLib.spawn|Util.spawn'
+BLOCKING_CALL_PATTERN="$SUBPROCESS_CALL_PATTERN"'|load_contents\(|file_get_contents|enumerate_children\(|query_info\(|read_bytes\(|load_bytes\(|replace_contents\('
+SERVICE_DIRECTORY="$EXT_DIR/service"
 # The pattern itself: every forbidden call (a subprocess, synchronous IO) must match, and no _async IO call.
 FORBIDDEN_CALLS=('Gio.Subprocess.new(' 'GLib.spawn_command_line_async(' 'Util.spawn([' 'file.load_contents(null)'
   'GLib.file_get_contents(path)' 'file.enumerate_children(attributes, flags, null)' 'file.query_info(attributes, flags, null)'
@@ -145,13 +149,15 @@ done
 check "the blocking-call pattern matches every forbidden call (subprocess, synchronous IO) and no _async IO call" \
   "missed=[${unmatched_forbidden_calls[*]}] async-matched=[${matched_asynchronous_calls[*]}]" "missed=[] async-matched=[]"
 mapfile -d '' EXTENSION_FILE_PATHS < <(find "$EXT_DIR" -type f -print0 2>/dev/null)
-row_name="no file in the extension spawns a process or does synchronous file IO"
+row_name="no file in the extension spawns a process, and none outside service/ does synchronous file IO"
 if (( ${#EXTENSION_FILE_PATHS[@]} == 0 )); then
   bad "$row_name — found no files under $EXT_DIR"
 else
   blocking_calls=()
   for extension_file_path in "${EXTENSION_FILE_PATHS[@]}"; do
-    if [[ "$(<"$extension_file_path")" =~ $BLOCKING_CALL_PATTERN ]]; then
+    forbidden_call_pattern="$BLOCKING_CALL_PATTERN"
+    [[ "$extension_file_path" == "$SERVICE_DIRECTORY"/* ]] && forbidden_call_pattern="$SUBPROCESS_CALL_PATTERN"
+    if [[ "$(<"$extension_file_path")" =~ $forbidden_call_pattern ]]; then
       blocking_calls+=("${extension_file_path#"$EXT_DIR"/}: ${BASH_REMATCH[0]}")
     fi
   done
@@ -1033,7 +1039,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=302
+EXPECTED_ROWS=344
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

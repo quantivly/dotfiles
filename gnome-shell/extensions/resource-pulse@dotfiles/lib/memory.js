@@ -2,6 +2,19 @@
 const ZRAM_SWAP_AREA_PATTERN = /^\/dev\/(zram\d+)$/;
 
 /**
+ * Names the zram devices that are swap areas, as /sys/block names them.
+ *
+ * @param {Array<{filename: string}>} swapAreas - parseProcSwaps output.
+ * @returns {string[]} For example ['zram0'], in /proc/swaps order; empty without zram swap.
+ */
+export function zramSwapDeviceNames(swapAreas) {
+    return swapAreas
+        .map(({filename}) => ZRAM_SWAP_AREA_PATTERN.exec(filename))
+        .filter(zramMatch => zramMatch !== null)
+        .map(zramMatch => zramMatch[1]);
+}
+
+/**
  * Memory in use, as the kernel's own estimate: MemTotal - MemAvailable.
  *
  * @param {Map<string, number>} meminfo - parseMeminfo output, in bytes.

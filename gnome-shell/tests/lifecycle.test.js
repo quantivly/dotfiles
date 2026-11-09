@@ -73,3 +73,19 @@ test('RateLimitedLogger: each message is written once per 10 minutes, prefixed; 
         `${LOG_PREFIX} teardown could not destroy the card`,
     ]);
 });
+
+test('RateLimitedLogger: messages sharing a template key are written once per 10 minutes, whatever their text', () => {
+    const clock = {nowUsec: 0};
+    const written = [];
+    const errorLog = new RateLimitedLogger({nowUsec: () => clock.nowUsec, write: line => written.push(line)});
+    const templateKey = 'cannot read cgroups';
+    errorLog.log('cannot read 3 cgroups, first: a.scope: Permission denied', templateKey);
+    clock.nowUsec += ONE_SECOND_USEC;
+    errorLog.log('cannot read 5 cgroups, first: b.scope: Permission denied', templateKey);
+    clock.nowUsec = ERROR_LOG_REPEAT_INTERVAL_USEC;
+    errorLog.log('cannot read 7 cgroups, first: c.scope: Permission denied', templateKey);
+    assertEqual(written, [
+        `${LOG_PREFIX} cannot read 3 cgroups, first: a.scope: Permission denied`,
+        `${LOG_PREFIX} cannot read 7 cgroups, first: c.scope: Permission denied`,
+    ]);
+});

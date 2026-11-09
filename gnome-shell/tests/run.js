@@ -10,6 +10,7 @@ import './apps.test.js';
 import './format.test.js';
 import './cadence.test.js';
 import './sampler.test.js';
+import './service-sampler.test.js';
 import './graph.test.js';
 import './lifecycle.test.js';
 import './nestedHarness.test.js';
