@@ -27,6 +27,9 @@
 #   1. ENABLED      — already answered by reconcile-systemd-units.sh --check.
 #                     Not duplicated here; a unit that is linked but not enabled
 #                     is a DECISION (wt-gc-sweep ships that way) and is skipped.
+#                     One with no [Install] section is started on demand and can
+#                     never be enabled (resource-pulse.service); it is skipped
+#                     too, and said to be on demand (has_install_section()).
 #   2. SUCCEEDED    — Result / ExecMainStatus / ActiveState of the last run.
 #   3. STILL RUNNING— the timer is firing at all, on its own schedule.
 #
@@ -308,6 +311,34 @@ fmt_ago() {
 }
 
 is_enabled() { [[ "$(systemctl --user is-enabled "$1" 2>/dev/null)" == "enabled" ]]; }
+
+# A unit with no [Install] section can never be enabled: something else starts it
+# on demand (resource-pulse.service is started by its GNOME extension). Not being
+# enabled is then its design, not a decision to arm it later, and not a timer
+# concern. is-enabled cannot tell the two apart: measured on systemd 259, it
+# answers "linked" for a symlinked unit with or without [Install]. So the unit
+# file is read, falling back to the template for an instance as condition_lines()
+# does. An unreadable file counts as having one, which keeps the older wording.
+has_install_section() {
+    local f="$SYSTEMD_USER_DIR/$1"
+    if [[ ! -r "$f" && "$1" == *@*.* ]]; then
+        f="$SYSTEMD_USER_DIR/${1%%@*}@.${1##*.}"
+    fi
+    [[ -r "$f" ]] || return 0
+    grep -qE '^[[:space:]]*\[Install\][[:space:]]*$' "$f"
+}
+
+# The one line for a managed unit that is not enabled, and so not checked.
+# "linked but not enabled" is a DECISION, not drift: the reconciler says so
+# explicitly and wt-gc-sweep depends on it. Said out loud so the silence is not
+# mistaken for a pass.
+report_not_enabled() {
+    if has_install_section "$1"; then
+        printf '  · %s: linked, not enabled — not checked\n' "$1"
+    else
+        printf '  · %s: started on demand (no [Install]), so never enabled — not a timer concern\n' "$1"
+    fi
+}
 
 # The ConditionPathExists= (or other Condition*) a skipped unit is being held
 # back by, read from the unit file so the message names the actual path rather
@@ -626,10 +657,7 @@ main() {
     local -A activated=()
     for unit in "${managed_timers[@]}"; do
         if ! is_enabled "$unit"; then
-            # "linked but not enabled" is a DECISION, not drift — the reconciler
-            # says so explicitly and wt-gc-sweep depends on it. Not checked, and
-            # said out loud so the silence is not mistaken for a pass.
-            printf '  · %s: linked, not enabled — not checked\n' "$unit"
+            report_not_enabled "$unit"
             continue
         fi
         if [[ -z "${tnext[$unit]:-}" ]]; then
@@ -646,7 +674,7 @@ main() {
     for unit in "${managed_services[@]}"; do
         [[ -n "${activated[$unit]:-}" ]] && continue
         if ! is_enabled "$unit"; then
-            printf '  · %s: linked, not enabled — not checked\n' "$unit"
+            report_not_enabled "$unit"
             continue
         fi
         check_standalone_service "$unit"
