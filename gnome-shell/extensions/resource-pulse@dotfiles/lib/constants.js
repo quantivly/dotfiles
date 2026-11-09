@@ -64,6 +64,12 @@ export const PERFORMANCE_CAPACITY_RATIO = 0.9;
 export const ERROR_LOG_REPEAT_INTERVAL_USEC = 600_000_000;
 /** Distance of the desktop card from the screen edge, in pixels. */
 export const CARD_MARGIN_PX = 24;
+/**
+ * Seconds between repaints of the desktop card while it counts as covered (frozen). The cover re-check timer repaints
+ * it, dimmed, from the client's latest state this often, so a card misjudged as covered shows numbers at most this
+ * old, dimmed, rather than stale ones that read as live (ruling R21).
+ */
+export const FROZEN_REPAINT_INTERVAL_SECONDS = 30;
 /** Desktop IDs of the system monitors a click may open, in order of preference. */
 export const RESOURCES_APP_IDS = ['net.nokyan.Resources.desktop', 'org.gnome.SystemMonitor.desktop'];
 /** Milliseconds the pointer rests on a top-bar item before its label shows. */

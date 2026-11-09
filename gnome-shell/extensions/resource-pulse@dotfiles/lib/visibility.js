@@ -1,10 +1,15 @@
 // The pure decisions behind the desktop card's covered check (extension.js): which windows can cover the card, whether
-// one does, and when a timer must re-check it. The card sits above the wallpaper and below every window, so a window
-// hides it most of the day; while one does, the extension stops repainting the card and releases the detail watch.
+// one does, when a timer must re-check it, and when that timer must repaint the frozen card. The card sits above the
+// wallpaper and below every window, so a window hides it most of the day; while one does, the extension freezes the
+// card (dimmed, repainted only every FROZEN_REPAINT_INTERVAL_SECONDS) and releases the detail watch.
 //
 // Rectangles are {x, y, width, height} in stage (logical) pixels: a window's frame rect and the card's placed position
 // both are, under fractional scaling too, so they are compared directly. Pure: no Shell, St, Clutter or Meta import,
 // so it runs under plain gjs.
+import {FROZEN_REPAINT_INTERVAL_SECONDS} from './constants.js';
+
+const USEC_PER_SECOND = 1_000_000;
+const FROZEN_REPAINT_INTERVAL_USEC = FROZEN_REPAINT_INTERVAL_SECONDS * USEC_PER_SECOND;
 
 /**
  * @typedef {object} Rect
@@ -110,6 +115,20 @@ export function coverRecheckTimerChange({isCovered, isTimerRunning}) {
     if (!isCovered && isTimerRunning)
         return CoverRecheckTimerChange.STOP;
     return CoverRecheckTimerChange.NONE;
+}
+
+/**
+ * Says whether the cover re-check timer must repaint the frozen card now: FROZEN_REPAINT_INTERVAL_SECONDS have passed
+ * since the card was last painted while frozen, by the freeze itself or by the timer's previous repaint. A card
+ * misjudged as covered then shows the client's latest numbers, dimmed, at most that old, never stale ones silently.
+ *
+ * @param {object} times - Monotonic clock readings, in microseconds.
+ * @param {number} times.lastFrozenPaintAtUsec - When the frozen card was last painted.
+ * @param {number} times.nowUsec - Now.
+ * @returns {boolean} True from FROZEN_REPAINT_INTERVAL_SECONDS after that paint on, never before.
+ */
+export function isFrozenRepaintDue({lastFrozenPaintAtUsec, nowUsec}) {
+    return nowUsec - lastFrozenPaintAtUsec >= FROZEN_REPAINT_INTERVAL_USEC;
 }
 
 /**

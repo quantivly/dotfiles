@@ -8,6 +8,8 @@ import {
     areaGraphPolygons, drawAreaGraph, drawPressureMeter, drawUsedBar, padWithLeadingGaps, pressureMeterCellRects,
     usedBarFillWidthPx,
 } from '../extensions/resource-pulse@dotfiles/graph.js';
+// Read through the namespace too, so a missing export fails its row rather than the whole run.
+import * as graphModule from '../extensions/resource-pulse@dotfiles/graph.js';
 import {
     BASELINE_RGBA, CPU_GRAPH_RGBA, GRAPH_BASELINE_THICKNESS_PX, MEMORY_GRAPH_RGBA, PRESSURE_METER_FILL_RGBA,
     PRESSURE_METER_HEIGHT_PX, PRESSURE_METER_TRACK_RGBA, PRESSURE_METER_WIDTH_PX, USED_BAR_TRACK_RGBA,
@@ -22,6 +24,10 @@ const SMALL_HEIGHT_PX = 10;
 const TEST_FILL_RGBA = [1, 0, 0, 1];
 const TEST_TRACK_RGBA = [0, 0, 1, 0.5];
 const RGBA_COMPONENT_COUNT = 4;
+/** A colour with every component distinct, and half its alpha: what withOpacity(…, 0.5) must make of it. */
+const DISTINCT_RGBA = [1, 0.5, 0.25, 0.8];
+const HALF_OPACITY = 0.5;
+const DISTINCT_RGBA_AT_HALF_OPACITY = [1, 0.5, 0.25, 0.4];
 // The card's pressure meter: 22×10, three 6 px cells with 2 px gaps (x 0, 8 and 16), and a 2 px no-data dash
 // across the middle (y 4).
 const METER_CELL_RECTS = [[0, 0, 6, 10], [8, 0, 6, 10], [16, 0, 6, 10]];
@@ -217,6 +223,26 @@ test('drawPressureMeter clamps a band above 3 or below 0, and draws anything not
     assertEqual(pressureMeterCalls(-1), pressureMeterCalls(0), 'below 0');
     for (const notABand of [undefined, NaN, Infinity, '2'])
         assertEqual(pressureMeterCalls(notABand), pressureMeterCalls(null), String(notABand));
+});
+
+test('withOpacity scales only a colour\'s alpha, clamps the opacity to 0–1, and leaves the colour as it is for an ' +
+    'opacity that is not a finite number (the frozen card dims its graphs with it)', () => {
+    const {withOpacity} = graphModule;
+    assertEqual({
+        half: withOpacity(DISTINCT_RGBA, HALF_OPACITY),
+        aboveOne: withOpacity(TEST_FILL_RGBA, 2),
+        belowZero: withOpacity(TEST_FILL_RGBA, -1),
+        notANumber: withOpacity(TEST_TRACK_RGBA, NaN),
+        missing: withOpacity(TEST_TRACK_RGBA, undefined),
+        original: DISTINCT_RGBA,
+    }, {
+        half: DISTINCT_RGBA_AT_HALF_OPACITY,
+        aboveOne: TEST_FILL_RGBA,
+        belowZero: [...TEST_FILL_RGBA.slice(0, 3), 0],
+        notANumber: TEST_TRACK_RGBA,
+        missing: TEST_TRACK_RGBA,
+        original: [1, 0.5, 0.25, 0.8],
+    });
 });
 
 test('graph colour constants are [red, green, blue, alpha], each 0–1', () => {

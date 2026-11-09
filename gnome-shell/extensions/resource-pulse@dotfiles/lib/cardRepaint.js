@@ -1,12 +1,14 @@
 // What the desktop card repaints, decided without the Shell; card.js applies each plan to its labels and drawing areas.
 //
 // - While the card is frozen (a window covers it: extension.js), a new snapshot is only recorded, and nothing is
-//   repainted or relaid out.
-// - Unfreezing renders at once, from the latest snapshot recorded.
+//   repainted or relaid out, except the frozen repaint extension.js asks for every FROZEN_REPAINT_INTERVAL_SECONDS.
+// - A frozen card is dimmed (ruling R21), so one misjudged as covered reads as stale, never as live: freezing renders
+//   once, dimmed (a render nobody sees when the card really is covered), and so does each frozen repaint.
+// - Unfreezing renders at once, undimmed, from the latest snapshot recorded.
 // - Each render sets every label (card.js skips a label whose text is unchanged) and redraws the CPU graph, whose
 //   history moves on with every sample. A "waiting on" meter and the memory bar are redrawn only when what they draw
-//   differs from what they last drew: a meter's band, which changes rarely, and the bar's filled width in whole
-//   pixels, which a memory change of a few MiB leaves alone.
+//   differs from what they last drew: a meter's band, which changes rarely, the bar's filled width in whole pixels,
+//   which a memory change of a few MiB leaves alone, and the dim, which changes their opacity.
 //
 // Pure: no Shell, St, Clutter or Meta import, so it runs under plain gjs.
 import {CARD_MEMORY_BAR_WIDTH_PX} from './constants.js';
@@ -42,11 +44,14 @@ function memoryBarFillPx(memoryFraction) {
  * @property {boolean} isMemoryBarChanged - The memory bar's filled width, in whole pixels, differs from the one it
  *     drew: only then is it redrawn.
  * @property {number|null} memoryFraction - The fraction the memory bar draws when it is redrawn.
+ * @property {boolean} isDimmed - The card is frozen, so the render is dimmed (card.js's frozen pseudo-class).
+ * @property {boolean} isDimChanged - The dim differs from the last render's: card.js adds or removes the pseudo-class
+ *     only then, and every meter and the memory bar are redrawn at the new opacity.
  */
 
 export class CardRepaintPlanner {
     /**
-     * Starts unfrozen, with nothing recorded and nothing drawn.
+     * Starts unfrozen and undimmed, with nothing recorded and nothing drawn.
      */
     constructor() {
         this._isFrozen = false;
@@ -56,6 +61,7 @@ export class CardRepaintPlanner {
         this._drawnMeterBands = NOTHING_DRAWN_YET;
         /** @type {number|null|symbol} */
         this._drawnMemoryBarFillPx = NOTHING_DRAWN_YET;
+        this._isDrawnDimmed = false;
     }
 
     /** @returns {boolean} True while the card is frozen. */
@@ -75,40 +81,61 @@ export class CardRepaintPlanner {
     }
 
     /**
-     * Freezes or unfreezes the card. Unfreezing plans a render of the latest recorded state at once; freezing, and
-     * setting the state the card already has, plan nothing.
+     * Freezes or unfreezes the card, planning a render of the latest recorded state at once either way: freezing
+     * renders it dimmed, unfreezing undimmed. Setting the state the card already has plans nothing, and so does a
+     * change with nothing recorded yet.
      *
      * @param {boolean} isFrozen - True while a window covers the card.
-     * @returns {RepaintPlan|null} The reveal's render, or null.
+     * @returns {RepaintPlan|null} The freeze's or the reveal's render, or null.
      */
     setFrozen(isFrozen) {
         if (isFrozen === this._isFrozen)
             return null;
         this._isFrozen = isFrozen;
-        if (isFrozen || this._latestShownState === null)
+        if (this._latestShownState === null)
             return null;
         return this._planRender();
     }
 
     /**
-     * Plans a render of the latest recorded state, comparing each meter's band and the memory bar's filled width with
-     * what was last drawn, and records the new values as drawn: card.js applies every plan it is given.
+     * Plans the frozen card's periodic repaint (extension.js asks every FROZEN_REPAINT_INTERVAL_SECONDS while the card
+     * counts as covered): the latest recorded state, still dimmed. A card misjudged as covered then shows numbers at
+     * most that old, dimmed, rather than stale ones.
+     *
+     * @returns {RepaintPlan|null} The dimmed render, or null when unfrozen (an unfrozen card renders every snapshot
+     *     already) or with nothing recorded yet.
+     */
+    repaintFrozen() {
+        if (!this._isFrozen || this._latestShownState === null)
+            return null;
+        return this._planRender();
+    }
+
+    /**
+     * Plans a render of the latest recorded state, dimmed while the card is frozen. Each meter's band and the memory
+     * bar's filled width are compared with what was last drawn, and a change of dim redraws them all, since each draws
+     * at the new opacity. The new values are recorded as drawn: card.js applies every plan it is given.
      *
      * @returns {RepaintPlan} The plan.
      */
     _planRender() {
         const {snapshot, lastGoodClockLabel, newestMemoryFraction} = this._latestShownState;
         const text = cardText(snapshot, lastGoodClockLabel);
+        const isDimmed = this._isFrozen;
+        const isDimChanged = isDimmed !== this._isDrawnDimmed;
         const meterBands = text.waitingOnMeters.map(meter => meter.band);
         const haveMetersDrawn = this._drawnMeterBands !== NOTHING_DRAWN_YET;
         const changedMeterIndexes = meterBands.flatMap((band, meterIndex) => {
-            const isUnchanged = haveMetersDrawn && band === this._drawnMeterBands[meterIndex];
+            const isUnchanged = !isDimChanged && haveMetersDrawn && band === this._drawnMeterBands[meterIndex];
             return isUnchanged ? [] : [meterIndex];
         });
         const memoryBarFillPxNow = memoryBarFillPx(newestMemoryFraction);
-        const isMemoryBarChanged = memoryBarFillPxNow !== this._drawnMemoryBarFillPx;
+        const isMemoryBarChanged = isDimChanged || memoryBarFillPxNow !== this._drawnMemoryBarFillPx;
         this._drawnMeterBands = meterBands;
         this._drawnMemoryBarFillPx = memoryBarFillPxNow;
-        return {text, changedMeterIndexes, isMemoryBarChanged, memoryFraction: newestMemoryFraction};
+        this._isDrawnDimmed = isDimmed;
+        return {
+            text, changedMeterIndexes, isMemoryBarChanged, memoryFraction: newestMemoryFraction, isDimmed, isDimChanged,
+        };
     }
 }

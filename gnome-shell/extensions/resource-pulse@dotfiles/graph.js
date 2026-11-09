@@ -11,6 +11,9 @@ import {
     PRESSURE_METER_NO_DATA_DASH_THICKNESS_PX,
 } from './lib/constants.js';
 
+/** The opacity that leaves a colour as it is. */
+const FULL_OPACITY = 1;
+
 /**
  * Clamps a fraction to 0–1, treating anything that is not a finite number as a gap.
  *
@@ -32,6 +35,20 @@ function clampedFractionOrGap(value) {
  */
 function hasDrawableArea(widthPx, heightPx) {
     return Number.isFinite(widthPx) && Number.isFinite(heightPx) && widthPx > 0 && heightPx > 0;
+}
+
+/**
+ * Scales a colour's alpha by an opacity, as the frozen desktop card dims its graphs (card.js reads the opacity from the
+ * stylesheet). An opacity outside 0–1 is clamped to it, and one that is not a finite number leaves the colour as it is,
+ * so no stylesheet value can make a repaint throw or hide a graph.
+ *
+ * @param {number[]} rgba - [red, green, blue, alpha], each 0–1.
+ * @param {number} opacity - 0 (transparent) to 1 (as it is).
+ * @returns {number[]} A new colour: the same red, green and blue, and the alpha scaled.
+ */
+export function withOpacity([red, green, blue, alpha], opacity) {
+    const usableOpacity = clampedFractionOrGap(opacity) ?? FULL_OPACITY;
+    return [red, green, blue, alpha * usableOpacity];
 }
 
 /**

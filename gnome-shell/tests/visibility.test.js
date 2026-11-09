@@ -65,6 +65,13 @@ const CLOCK_LABEL = '14:02';
 const LATER_CLOCK_LABEL = '14:05';
 const ALL_METER_INDEXES = [0, 1, 2];
 const IO_METER_INDEX = 2;
+/** How often a frozen card is repainted, as ruling R21 set it, and the cover re-check timer's tick, in seconds. */
+const FROZEN_REPAINT_SECONDS = 30;
+const RECHECK_TICK_SECONDS = 2;
+/** How long the frozen-repaint row drives the re-check timer: past its second repaint. */
+const FROZEN_RUN_SECONDS = 62;
+const USEC_PER_SECOND = 1_000_000;
+const ONE_USEC = 1;
 
 // The previous release's stylesheet classes (git show f28b216:gnome-shell/extensions/resource-pulse@dotfiles/
 // stylesheet.css). GNOME re-reads the stylesheet on every enable but the code only at login, so until the next login
@@ -77,6 +84,17 @@ const V1_STYLESHEET_CLASS_NAMES = [
 ];
 const CARD_CLASS_NAME = 'resource-pulse-card';
 const FIXED_WIDTH_CLASS_NAME = 'rp-card-fixed';
+// The frozen card's dim (ruling R21): card.js's pseudo-class, the stylesheet property it reads for its graphs'
+// opacity, and the stylesheet selector of the frozen card.
+const FROZEN_PSEUDO_CLASS_NAME = 'frozen';
+const GRAPH_OPACITY_PROPERTY_NAME = '-rp-graph-opacity';
+const FROZEN_CARD_SELECTOR = `.${CARD_CLASS_NAME}:${FROZEN_PSEUDO_CLASS_NAME}`;
+/** The card's value labels, which set no colour of their own and so take the card's. */
+const VALUE_CLASS_NAMES = ['resource-pulse-card-value', 'resource-pulse-card-figure'];
+/** `rgba(r, g, b, a)`: a CSS colour, its alpha captured. */
+const CSS_RGBA_ALPHA_PATTERN = /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([\d.]+)\s*\)$/;
+/** Each graph colour card.js scales by the stylesheet's opacity: the CPU graph's, the bar's and the meters' two each. */
+const DIMMED_GRAPH_COLOUR_COUNT = 6;
 
 // The card's text, as GNOME on Ubuntu draws it: the card's own font family at the shell's 11 pt font-name
 // ("Ubuntu Sans 11"), at 96 dpi with no text scaling, with tabular digits.
@@ -204,7 +222,7 @@ function stylesheetRules(stylesheetText) {
             .map(declaration => CSS_DECLARATION_PATTERN.exec(declaration))
             .filter(declarationMatch => declarationMatch !== null)
             .map(([, propertyName, value]) => [propertyName, value]);
-        return {classNames, declarations: Object.fromEntries(declarationEntries)};
+        return {selectorText: selectorText.trim(), classNames, declarations: Object.fromEntries(declarationEntries)};
     });
 }
 
@@ -231,6 +249,33 @@ function summarizeRepaintPlan(repaintPlan) {
         return null;
     const {text, changedMeterIndexes, isMemoryBarChanged, memoryFraction} = repaintPlan;
     return {cpuValue: text.cpuValue, changedMeterIndexes, isMemoryBarChanged, memoryFraction};
+}
+
+/**
+ * One line for a planner step: what it rendered (its CPU text, whether it is dimmed, and whether it changes the dim),
+ * or nothing.
+ *
+ * @param {[string, object|null]} step - The step's name and the plan it returned.
+ * @returns {string} For example 'freeze: 23% dimmed=true dimChanged=true', or 'freeze again: nothing'.
+ */
+function describeDimStep([stepName, repaintPlan]) {
+    if (repaintPlan === null)
+        return `${stepName}: nothing`;
+    const {text, isDimmed, isDimChanged} = repaintPlan;
+    return `${stepName}: ${text.cpuValue} dimmed=${isDimmed} dimChanged=${isDimChanged}`;
+}
+
+/**
+ * The drawing areas a plan redraws besides the CPU graph (which every plan redraws), or null when there is no plan.
+ *
+ * @param {object|null} repaintPlan - What CardRepaintPlanner returned.
+ * @returns {{changedMeterIndexes: number[], isMemoryBarChanged: boolean}|null} The meters and the bar it redraws.
+ */
+function redrawnGraphics(repaintPlan) {
+    if (repaintPlan === null)
+        return null;
+    const {changedMeterIndexes, isMemoryBarChanged} = repaintPlan;
+    return {changedMeterIndexes, isMemoryBarChanged};
 }
 
 /**
@@ -388,8 +433,8 @@ test('card repaint: while frozen a snapshot is only recorded; unfreezing renders
     'its clock label', () => {
     const planner = new cardRepaintModule.CardRepaintPlanner();
     planner.show(shownState(SNAPSHOT, MEMORY_FRACTION));
+    planner.setFrozen(true);
     const plansWhileFrozen = [
-        planner.setFrozen(true),
         planner.show(shownState(BUSIER_SNAPSHOT, HIGHER_MEMORY_FRACTION)),
         planner.show(shownState(NO_DATA_SNAPSHOT, null, LATER_CLOCK_LABEL)),
     ];
@@ -397,14 +442,14 @@ test('card repaint: while frozen a snapshot is only recorded; unfreezing renders
         plansWhileFrozen: plansWhileFrozen.map(summarizeRepaintPlan),
         reveal: summarizeRepaintPlan(planner.setFrozen(false)),
     }, {
-        plansWhileFrozen: [null, null, null],
+        plansWhileFrozen: [null, null],
         reveal: {cpuValue: 'no data since 14:05', changedMeterIndexes: ALL_METER_INDEXES, isMemoryBarChanged: true,
             memoryFraction: null},
     });
 });
 
-test('card repaint: setFrozen to the state the card already has does nothing: a second freeze or unfreeze renders ' +
-    'nothing', () => {
+test('card repaint: freezing and unfreezing each render once (the freeze dimmed, the reveal at once and undimmed), ' +
+    'and setFrozen to the state the card already has does nothing: a second freeze or unfreeze renders nothing', () => {
     const planner = new cardRepaintModule.CardRepaintPlanner();
     planner.show(shownState(SNAPSHOT, MEMORY_FRACTION));
     const plans = [
@@ -414,18 +459,82 @@ test('card repaint: setFrozen to the state the card already has does nothing: a 
         planner.setFrozen(false),
         planner.setFrozen(false),
     ];
-    assertEqual(plans.map(repaintPlan => repaintPlan !== null), [false, false, false, true, false]);
+    assertEqual(plans.map(repaintPlan => repaintPlan !== null), [false, true, false, true, false]);
 });
 
-test('card repaint: the reveal compares with what is drawn, so a value that changed while frozen and changed back ' +
-    'repaints nothing', () => {
+test('card repaint: a frozen repaint compares with what is drawn, so a value that changed while frozen and changed ' +
+    'back repaints nothing', () => {
     const planner = new cardRepaintModule.CardRepaintPlanner();
     planner.show(shownState(SNAPSHOT, MEMORY_FRACTION));
     planner.setFrozen(true);
     planner.show(shownState(IO_BOUND_SNAPSHOT, HIGHER_MEMORY_FRACTION));
     planner.show(shownState(SNAPSHOT, MEMORY_FRACTION));
-    const reveal = summarizeRepaintPlan(planner.setFrozen(false));
-    assertEqual([reveal?.changedMeterIndexes, reveal?.isMemoryBarChanged], [[], false]);
+    const frozenRepaint = summarizeRepaintPlan(planner.repaintFrozen());
+    assertEqual([frozenRepaint?.changedMeterIndexes, frozenRepaint?.isMemoryBarChanged], [[], false]);
+});
+
+test('card repaint: the dim follows the freeze exactly: freezing renders once, dimmed (card.js adds the frozen ' +
+    'pseudo-class); a frozen repaint renders the latest state, still dimmed; unfreezing renders at once, undimmed ' +
+    '(the pseudo-class removed); nothing else changes the dim', () => {
+    const planner = new cardRepaintModule.CardRepaintPlanner();
+    const steps = [
+        ['live', planner.show(shownState(SNAPSHOT, MEMORY_FRACTION))],
+        ['freeze', planner.setFrozen(true)],
+        ['freeze again', planner.setFrozen(true)],
+        ['sample while frozen', planner.show(shownState(BUSIER_SNAPSHOT, MEMORY_FRACTION))],
+        ['frozen repaint', planner.repaintFrozen()],
+        ['unfreeze', planner.setFrozen(false)],
+        ['unfreeze again', planner.setFrozen(false)],
+        ['frozen repaint while live', planner.repaintFrozen()],
+        ['live again', planner.show(shownState(SNAPSHOT, MEMORY_FRACTION))],
+    ];
+    assertEqual(steps.map(describeDimStep), [
+        'live: 23% dimmed=false dimChanged=false',
+        'freeze: 23% dimmed=true dimChanged=true',
+        'freeze again: nothing',
+        'sample while frozen: nothing',
+        'frozen repaint: 57% dimmed=true dimChanged=false',
+        'unfreeze: 57% dimmed=false dimChanged=true',
+        'unfreeze again: nothing',
+        'frozen repaint while live: nothing',
+        'live again: 23% dimmed=false dimChanged=false',
+    ]);
+});
+
+test('card repaint: a change of dim redraws all three meters and the memory bar, which paint at the new opacity; a ' +
+    'frozen repaint with the dim unchanged redraws only what changed', () => {
+    const planner = new cardRepaintModule.CardRepaintPlanner();
+    planner.show(shownState(SNAPSHOT, MEMORY_FRACTION));
+    const freezePlan = planner.setFrozen(true);
+    planner.show(shownState(IO_BOUND_SNAPSHOT, MEMORY_FRACTION));
+    const frozenRepaintPlan = planner.repaintFrozen();
+    const revealPlan = planner.setFrozen(false);
+    assertEqual([freezePlan, frozenRepaintPlan, revealPlan].map(redrawnGraphics), [
+        {changedMeterIndexes: ALL_METER_INDEXES, isMemoryBarChanged: true},
+        {changedMeterIndexes: [IO_METER_INDEX], isMemoryBarChanged: false},
+        {changedMeterIndexes: ALL_METER_INDEXES, isMemoryBarChanged: true},
+    ]);
+});
+
+test('visibility: a frozen card is due a repaint 30 s after it was last painted, and not before; driven by the 2 s ' +
+    're-check timer from the freeze, it repaints at 30 s and at 60 s', () => {
+    const isDueAfterUsec = elapsedUsec =>
+        visibilityModule.isFrozenRepaintDue({lastFrozenPaintAtUsec: 0, nowUsec: elapsedUsec});
+    const repaintSeconds = [];
+    let lastFrozenPaintAtUsec = 0;
+    for (let elapsedSeconds = RECHECK_TICK_SECONDS; elapsedSeconds <= FROZEN_RUN_SECONDS;
+        elapsedSeconds += RECHECK_TICK_SECONDS) {
+        const nowUsec = elapsedSeconds * USEC_PER_SECOND;
+        if (visibilityModule.isFrozenRepaintDue({lastFrozenPaintAtUsec, nowUsec})) {
+            repaintSeconds.push(elapsedSeconds);
+            lastFrozenPaintAtUsec = nowUsec;
+        }
+    }
+    assertEqual({
+        justBefore: isDueAfterUsec(FROZEN_REPAINT_SECONDS * USEC_PER_SECOND - ONE_USEC),
+        atTheInterval: isDueAfterUsec(FROZEN_REPAINT_SECONDS * USEC_PER_SECOND),
+        repaintSeconds,
+    }, {justBefore: false, atTheInterval: true, repaintSeconds: [FROZEN_REPAINT_SECONDS, 2 * FROZEN_REPAINT_SECONDS]});
 });
 
 test('card.js: only the "heaviest" row\'s two app names ellipsize; every other label is made with ellipsizing off, ' +
@@ -575,6 +684,85 @@ test('card.js puts the fixed-width class on the card', () => {
         cardSource.includes(`const FIXED_WIDTH_STYLE_CLASS = '${FIXED_WIDTH_CLASS_NAME}';`),
         cardSource.includes('style_class: `${CARD_STYLE_CLASS} ${FIXED_WIDTH_STYLE_CLASS}`,'),
     ], [true, true]);
+});
+
+test('card.js: a dim change adds the frozen pseudo-class (dimmed) or removes it (undimmed), and nothing else touches ' +
+    'it; the frozen repaint applies the planner\'s plan; every graph colour is scaled by the opacity the stylesheet ' +
+    'gives', () => {
+    const cardSource = readExtensionFile('card.js');
+    const applyLines = trimmedLines(declarationBody(cardSource, '_applyRepaintPlan(repaintPlan) {'));
+    const showDimmedLines = trimmedLines(declarationBody(cardSource, '_showDimmed(isDimmed) {'));
+    const lineAfter = (lines, line) => (lines.includes(line) ? lines[lines.indexOf(line) + 1] : null);
+    const pseudoClassCalls = cardSource.split('\n').filter(line => !COMMENT_LINE_PATTERN.test(line))
+        .filter(line => line.includes('_style_pseudo_class(')).map(line => line.trim());
+    assertEqual({
+        pseudoClassName: cardSource.includes(`const FROZEN_PSEUDO_CLASS = '${FROZEN_PSEUDO_CLASS_NAME}';`),
+        onADimChange: lineAfter(applyLines, 'if (isDimChanged)'),
+        whenDimmed: lineAfter(showDimmedLines, 'if (isDimmed)'),
+        otherwise: lineAfter(showDimmedLines, 'else'),
+        pseudoClassCalls,
+        repaintFrozenApplies: statementCount(declarationBody(cardSource, 'repaintFrozen() {'),
+            'this._applyRepaintPlan(this._repaintPlanner.repaintFrozen());'),
+        opacityProperty: cardSource.includes(`const GRAPH_OPACITY_PROPERTY = '${GRAPH_OPACITY_PROPERTY_NAME}';`),
+        readsTheProperty: declarationBody(cardSource, '_graphOpacity() {')
+            .includes('this.get_theme_node().lookup_double(GRAPH_OPACITY_PROPERTY, false);'),
+        dimmedGraphColours: (cardSource.match(/withOpacity\([A-Z_]+_RGBA, graphOpacity\)/g) ?? []).length,
+    }, {
+        pseudoClassName: true,
+        onADimChange: 'this._showDimmed(isDimmed);',
+        whenDimmed: 'this.add_style_pseudo_class(FROZEN_PSEUDO_CLASS);',
+        otherwise: 'this.remove_style_pseudo_class(FROZEN_PSEUDO_CLASS);',
+        pseudoClassCalls: [
+            'this.add_style_pseudo_class(FROZEN_PSEUDO_CLASS);',
+            'this.remove_style_pseudo_class(FROZEN_PSEUDO_CLASS);',
+        ],
+        repaintFrozenApplies: 1,
+        opacityProperty: true,
+        readsTheProperty: true,
+        dimmedGraphColours: DIMMED_GRAPH_COLOUR_COUNT,
+    });
+});
+
+test('stylesheet.css dims the frozen card in a rule of its own (.resource-pulse-card:frozen): the colour its value ' +
+    'labels take, and the opacity card.js gives its graphs, each to a fraction', () => {
+    const rules = stylesheetRules(readExtensionFile('stylesheet.css'));
+    const frozenCardStyle = Object.assign({}, ...rules
+        .filter(rule => rule.selectorText === FROZEN_CARD_SELECTOR).map(rule => rule.declarations));
+    const valueColourAlpha = Number(CSS_RGBA_ALPHA_PATTERN.exec(frozenCardStyle.color ?? '')?.[1]);
+    const graphOpacity = Number(frozenCardStyle[GRAPH_OPACITY_PROPERTY_NAME]);
+    const isFraction = value => value > 0 && value < 1;
+    assertEqual({
+        valuesDimmed: isFraction(valueColourAlpha),
+        graphsDimmed: isFraction(graphOpacity),
+        valueLabelsTakeTheCardsColour: VALUE_CLASS_NAMES.filter(className =>
+            declarationsOfClass(rules, className).color !== undefined),
+    }, {valuesDimmed: true, graphsDimmed: true, valueLabelsTakeTheCardsColour: []},
+    `frozen card rule: ${JSON.stringify(frozenCardStyle)}`);
+});
+
+test('extension.js: while the card is frozen the re-check timer also repaints it, dimmed, once isFrozenRepaintDue ' +
+    'says so, timing from the freeze and then from each repaint; a revealed card is left to the reveal', () => {
+    const extensionSource = readExtensionFile('extension.js');
+    const timeoutLines = trimmedLines(declarationBody(extensionSource, '_onCoverRecheckTimeout() {'));
+    const repaintBody = declarationBody(extensionSource, '_repaintFrozenCardIfDue() {');
+    const timerLines = trimmedLines(declarationBody(extensionSource, '_syncCoverRecheckTimer(isCovered) {'));
+    const lineAfter = (lines, line) => (lines.includes(line) ? lines[lines.indexOf(line) + 1] : null);
+    assertEqual({
+        afterTheCheck: lineAfter(timeoutLines, 'this._syncCardCover();'),
+        leavesARevealedCardAlone: statementCount(repaintBody, 'if (this._card === null || this._isCardVisible)'),
+        decides: repaintBody.includes(
+            'isFrozenRepaintDue({lastFrozenPaintAtUsec: this._frozenCardPaintedAtUsec, nowUsec})'),
+        recordsEachRepaint: statementCount(repaintBody, 'this._frozenCardPaintedAtUsec = nowUsec;'),
+        repaints: statementCount(repaintBody, 'this._card.repaintFrozen();'),
+        timesFromTheFreeze: lineAfter(timerLines, 'if (timerChange === CoverRecheckTimerChange.START) {'),
+    }, {
+        afterTheCheck: 'this._repaintFrozenCardIfDue();',
+        leavesARevealedCardAlone: 1,
+        decides: true,
+        recordsEachRepaint: 1,
+        repaints: 1,
+        timesFromTheFreeze: 'this._frozenCardPaintedAtUsec = GLib.get_monotonic_time();',
+    });
 });
 
 test('extension.js checks the cover on a restack, a fullscreen change, a minimize, an unminimize, a size change, ' +

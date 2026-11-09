@@ -4,11 +4,13 @@
 // wallpaper, below every window), at the top right of the primary monitor's work area, and follows that work area as
 // monitors and panels change. Only the card shows apps, so the client asks the service for its detail watch (the faster
 // app scan) only while the card can be seen (lib/wiring.js isDetailWatchWanted): the overview hides it, and so does a
-// window covering it, which is most of the day. While one does, the card is frozen as well: it records each snapshot
-// and repaints nothing until the reveal, which repaints it at once (lib/visibility.js decides what covers it). The
-// window-manager and display signals that trigger that check come in bursts, so they are coalesced into one check
-// before the next frame; every Sample checks at once, and so, while the card is frozen, does a timer, since no Sample
-// may come (the service may be down). Neither of those schedules a frame: the shell's budget is under 0.1% of a core.
+// window covering it, which is most of the day. While one does, the card is frozen as well: it is dimmed, records each
+// snapshot and repaints nothing until the reveal, which repaints it at once (lib/visibility.js decides what covers it),
+// except once every FROZEN_REPAINT_INTERVAL_SECONDS, still dimmed, so a card misjudged as covered never shows stale
+// numbers as live. The window-manager and display signals that trigger that check come in bursts, so they are
+// coalesced into one check before the next frame; every Sample checks at once, and so, while the card is frozen, does a
+// timer, since no Sample may come (the service may be down); that timer also makes the frozen repaint. Neither the
+// Sample's check nor the timer's schedules a frame: the shell's budget is under 0.1% of a core.
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
@@ -45,6 +47,7 @@ import {RateLimitedLogger, describeErrorWithStack} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
 import {
     CoverRecheckTimerChange, canWindowCoverCard, coverRecheckTimerChange, doRectsOverlap, isCardCovered,
+    isFrozenRepaintDue,
 } from './lib/visibility.js';
 import {isDetailWatchWanted} from './lib/wiring.js';
 
@@ -86,6 +89,8 @@ export default class ResourcePulseExtension extends Extension {
         this._cardCoverListenerId = null;
         this._cardCoverCheckLaterId = null;
         this._coverRecheckSourceId = null;
+        // Monotonic µs of the frozen card's last paint: the freeze's own, then each frozen repaint's.
+        this._frozenCardPaintedAtUsec = null;
         this._isOverviewVisible = false;
         this._isCardVisible = IS_CARD_VISIBLE_BEFORE_COVER_CHECK;
         this._dropdownMenu = null;
@@ -326,7 +331,8 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Starts the timer that re-checks a covered card every SAMPLE_INTERVAL_SECONDS, or removes it on the reveal
-     * (lib/visibility.js coverRecheckTimerChange).
+     * (lib/visibility.js coverRecheckTimerChange). It starts as the card freezes, whose one repaint the frozen repaint
+     * then counts from.
      *
      * @param {boolean} isCovered - The card is covered now.
      * @returns {void}
@@ -334,6 +340,7 @@ export default class ResourcePulseExtension extends Extension {
     _syncCoverRecheckTimer(isCovered) {
         const timerChange = coverRecheckTimerChange({isCovered, isTimerRunning: this._coverRecheckSourceId !== null});
         if (timerChange === CoverRecheckTimerChange.START) {
+            this._frozenCardPaintedAtUsec = GLib.get_monotonic_time();
             this._coverRecheckSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAMPLE_INTERVAL_SECONDS,
                 () => this._onCoverRecheckTimeout());
         } else if (timerChange === CoverRecheckTimerChange.STOP) {
@@ -342,21 +349,41 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * The re-check timer: checks the cover at once, with no later, so a covered card schedules no frame. A reveal
-     * removes this very source from inside it (_syncCoverRecheckTimer), which GLib allows; the value returned after
-     * that is ignored. It never throws out of the callback, which would end the source behind the id the extension
-     * keeps; a failure is logged, rate-limited.
+     * The re-check timer: checks the cover at once, with no later, so a covered card schedules no frame, then repaints
+     * a card still covered once its frozen repaint is due (_repaintFrozenCardIfDue). A reveal removes this very source
+     * from inside it (_syncCoverRecheckTimer), which GLib allows; the value returned after that is ignored. It never
+     * throws out of the callback, which would end the source behind the id the extension keeps; a failure is logged,
+     * rate-limited.
      *
      * @returns {boolean} GLib.SOURCE_CONTINUE, always.
      */
     _onCoverRecheckTimeout() {
         try {
             this._syncCardCover();
+            this._repaintFrozenCardIfDue();
         } catch (error) {
             const errorText = describeErrorWithStack(error);
             this._errorLog.log(`could not check the cover: ${errorText}`);
         }
         return GLib.SOURCE_CONTINUE;
+    }
+
+    /**
+     * While the card is still covered, repaints it, dimmed, from the client's latest state once
+     * FROZEN_REPAINT_INTERVAL_SECONDS have passed since it was last painted (lib/visibility.js isFrozenRepaintDue), so
+     * a card misjudged as covered updates, dimmed, rather than showing stale numbers. A revealed card is left alone:
+     * the reveal repainted it at once. Does nothing without a card.
+     *
+     * @returns {void}
+     */
+    _repaintFrozenCardIfDue() {
+        if (this._card === null || this._isCardVisible)
+            return;
+        const nowUsec = GLib.get_monotonic_time();
+        if (!isFrozenRepaintDue({lastFrozenPaintAtUsec: this._frozenCardPaintedAtUsec, nowUsec}))
+            return;
+        this._frozenCardPaintedAtUsec = nowUsec;
+        this._card.repaintFrozen();
     }
 
     /**

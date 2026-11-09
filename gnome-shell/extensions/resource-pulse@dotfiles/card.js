@@ -17,8 +17,10 @@
 //
 // Windows cover it most of the day. While one does, the extension freezes it (setFrozen): a new snapshot is only
 // recorded, and the card queues no relayout and no repaint until the reveal, which repaints it at once from the latest
-// snapshot. Unfrozen, a "waiting on" meter and the memory bar redraw only when the value they draw changes
-// (lib/cardRepaint.js decides what to repaint).
+// snapshot. A frozen card is dimmed (the frozen pseudo-class, which stylesheet.css styles) and repainted, still dimmed,
+// every FROZEN_REPAINT_INTERVAL_SECONDS (repaintFrozen), so a card misjudged as covered reads as stale, never as live;
+// freezing costs one repaint, unseen when the card really is covered. Unfrozen, a "waiting on" meter and the memory
+// bar redraw only when the value they draw changes (lib/cardRepaint.js decides what to repaint).
 //
 // Shell glue only: every string and meter band comes from lib/format.js (cardText, through lib/cardRepaint.js), every
 // shape from graph.js and the position from lib/layout.js (cardPosition). The extension adds it to the layout
@@ -32,7 +34,7 @@ import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-import {drawAreaGraph, drawPressureMeter, drawUsedBar, padWithLeadingGaps} from './graph.js';
+import {drawAreaGraph, drawPressureMeter, drawUsedBar, padWithLeadingGaps, withOpacity} from './graph.js';
 import {
     BASELINE_RGBA, CARD_CPU_GRAPH_HEIGHT_PX, CARD_CPU_GRAPH_WIDTH_PX, CARD_HISTORY_SAMPLES, CARD_MARGIN_PX,
     CARD_MEMORY_BAR_HEIGHT_PX, CARD_MEMORY_BAR_WIDTH_PX, CPU_GRAPH_RGBA, MEMORY_GRAPH_RGBA, PRESSURE_METER_FILL_RGBA,
@@ -67,6 +69,12 @@ const PRESSURE_METERS_STYLE_CLASS = 'resource-pulse-card-pressure-meters';
 const PRESSURE_GROUP_STYLE_CLASS = 'resource-pulse-card-pressure-group';
 /** One meter each for CPU, memory and io, in the order lib/format.js waitingOnMeters lists them. */
 const WAITING_ON_METER_COUNT = 3;
+/** The style pseudo-class the card carries while frozen: stylesheet.css dims its values and graphs under it. */
+const FROZEN_PSEUDO_CLASS = 'frozen';
+/** The stylesheet property, set on the frozen card, that scales the opacity of its graphs, 0–1. */
+const GRAPH_OPACITY_PROPERTY = '-rp-graph-opacity';
+/** The graphs' opacity where the stylesheet sets none: undimmed. */
+const FULL_GRAPH_OPACITY = 1;
 
 // Cells of the meters grid: [column, row], and how many columns a cell spans.
 const LABEL_COLUMN = 0;
@@ -182,8 +190,9 @@ class PulseCard extends St.BoxLayout {
     }
 
     /**
-     * Freezes the card while a window covers it, or unfreezes it on the reveal, which repaints it at once from the
-     * latest snapshot it was given. Setting the state it already has does nothing.
+     * Freezes the card while a window covers it, repainting it once, dimmed; or unfreezes it on the reveal, which
+     * repaints it at once, undimmed, from the latest snapshot it was given. Setting the state it already has does
+     * nothing.
      *
      * @param {boolean} isFrozen - True while covered.
      * @returns {void}
@@ -193,10 +202,21 @@ class PulseCard extends St.BoxLayout {
     }
 
     /**
-     * Renders a repaint plan: every row's text (a label whose text is unchanged is left alone), each "waiting on"
-     * meter and the memory bar only when the value it draws changed, and the CPU graph, whose history moves on with
-     * every sample. A part with no data reads "no data" and draws as a gap (an empty bar, or a meter's no-data dash),
-     * never as the last good number.
+     * Repaints a frozen card, still dimmed, from the latest snapshot it was given: the extension's cover re-check timer
+     * calls it every FROZEN_REPAINT_INTERVAL_SECONDS while the card counts as covered. Unfrozen it does nothing, since
+     * an unfrozen card renders every snapshot already.
+     *
+     * @returns {void}
+     */
+    repaintFrozen() {
+        this._applyRepaintPlan(this._repaintPlanner.repaintFrozen());
+    }
+
+    /**
+     * Renders a repaint plan: the dim first, when it changed (_showDimmed); then every row's text (a label whose text
+     * is unchanged is left alone), each "waiting on" meter and the memory bar only when what it draws changed, and the
+     * CPU graph, whose history moves on with every sample. A part with no data reads "no data" and draws as a gap (an
+     * empty bar, or a meter's no-data dash), never as the last good number.
      *
      * @param {import('./lib/cardRepaint.js').RepaintPlan|null} repaintPlan - What to repaint; null for nothing (the
      *     card is frozen, or already in the state asked for).
@@ -205,7 +225,9 @@ class PulseCard extends St.BoxLayout {
     _applyRepaintPlan(repaintPlan) {
         if (repaintPlan === null)
             return;
-        const {text, changedMeterIndexes, isMemoryBarChanged, memoryFraction} = repaintPlan;
+        const {text, changedMeterIndexes, isMemoryBarChanged, memoryFraction, isDimmed, isDimChanged} = repaintPlan;
+        if (isDimChanged)
+            this._showDimmed(isDimmed);
         this._showRowTexts(text);
         this._showHeaviestRow(text.heaviestRow);
         this._showPressureMeters(text.waitingOnMeters, changedMeterIndexes);
@@ -213,6 +235,32 @@ class PulseCard extends St.BoxLayout {
         if (isMemoryBarChanged)
             this._memoryBar.queue_repaint();
         this._cpuGraph.queue_repaint();
+    }
+
+    /**
+     * Dims the card as it freezes, or undims it as it unfreezes: adds or removes the frozen pseudo-class, under which
+     * stylesheet.css dims the values (the colour they take from the card) and the graphs (GRAPH_OPACITY_PROPERTY, which
+     * every painter reads). The plan that changes the dim also redraws every graph, so each paints at the new opacity.
+     *
+     * @param {boolean} isDimmed - True as the card freezes.
+     * @returns {void}
+     */
+    _showDimmed(isDimmed) {
+        if (isDimmed)
+            this.add_style_pseudo_class(FROZEN_PSEUDO_CLASS);
+        else
+            this.remove_style_pseudo_class(FROZEN_PSEUDO_CLASS);
+    }
+
+    /**
+     * The opacity the stylesheet gives the card's graphs now: GRAPH_OPACITY_PROPERTY on the card's own style, which
+     * stylesheet.css sets only under the frozen pseudo-class, or FULL_GRAPH_OPACITY where it sets none.
+     *
+     * @returns {number} 0–1 (graph.js withOpacity clamps whatever the stylesheet says).
+     */
+    _graphOpacity() {
+        const [isSet, graphOpacity] = this.get_theme_node().lookup_double(GRAPH_OPACITY_PROPERTY, false);
+        return isSet ? graphOpacity : FULL_GRAPH_OPACITY;
     }
 
     /**
@@ -416,52 +464,61 @@ class PulseCard extends St.BoxLayout {
     }
 
     /**
-     * Draws the five-minute CPU history, right-aligned in one slot per sample, and frees the context whatever
-     * happens (as the shell's own drawing areas do).
+     * Draws the five-minute CPU history, right-aligned in one slot per sample, at the graphs' opacity
+     * (_graphOpacity), and frees the context whatever happens (as the shell's own drawing areas do).
      *
      * @param {import('./lib/history.js').RingBuffer} cpuHistory - CPU busy fractions, oldest first.
      * @returns {void}
      */
     _paintCpuGraph(cpuHistory) {
         const slotFractions = padWithLeadingGaps(cpuHistory.values(), CARD_HISTORY_SAMPLES);
+        const graphOpacity = this._graphOpacity();
+        const fillRgba = withOpacity(CPU_GRAPH_RGBA, graphOpacity);
+        const baselineRgba = withOpacity(BASELINE_RGBA, graphOpacity);
         const [widthPx, heightPx] = this._cpuGraph.get_surface_size();
         const cr = this._cpuGraph.get_context();
         try {
-            drawAreaGraph(cr, widthPx, heightPx, slotFractions, CPU_GRAPH_RGBA, BASELINE_RGBA);
+            drawAreaGraph(cr, widthPx, heightPx, slotFractions, fillRgba, baselineRgba);
         } finally {
             cr.$dispose();
         }
     }
 
     /**
-     * Draws the memory bar at the fraction the last render gave it (the newest in the client's history then), and
-     * frees the context whatever happens. With no data (none yet, a failed sample, or no fresh Sample) the bar is all
-     * track.
+     * Draws the memory bar at the fraction the last render gave it (the newest in the client's history then), at the
+     * graphs' opacity (_graphOpacity), and frees the context whatever happens. With no data (none yet, a failed
+     * sample, or no fresh Sample) the bar is all track.
      *
      * @returns {void}
      */
     _paintMemoryBar() {
+        const graphOpacity = this._graphOpacity();
+        const fillRgba = withOpacity(MEMORY_GRAPH_RGBA, graphOpacity);
+        const trackRgba = withOpacity(USED_BAR_TRACK_RGBA, graphOpacity);
         const [widthPx, heightPx] = this._memoryBar.get_surface_size();
         const cr = this._memoryBar.get_context();
         try {
-            drawUsedBar(cr, widthPx, heightPx, this._memoryBarFraction, MEMORY_GRAPH_RGBA, USED_BAR_TRACK_RGBA);
+            drawUsedBar(cr, widthPx, heightPx, this._memoryBarFraction, fillRgba, trackRgba);
         } finally {
             cr.$dispose();
         }
     }
 
     /**
-     * Draws one "waiting on" meter at its band, and frees the context whatever happens.
+     * Draws one "waiting on" meter at its band, at the graphs' opacity (_graphOpacity), and frees the context whatever
+     * happens.
      *
      * @param {{drawingArea: St.DrawingArea, band: 0|1|2|3|null}} pressureMeter - The meter being repainted.
      * @returns {void}
      */
     _paintPressureMeter(pressureMeter) {
+        const graphOpacity = this._graphOpacity();
+        const fillRgba = withOpacity(PRESSURE_METER_FILL_RGBA, graphOpacity);
+        const trackRgba = withOpacity(PRESSURE_METER_TRACK_RGBA, graphOpacity);
         const [widthPx, heightPx] = pressureMeter.drawingArea.get_surface_size();
         const cr = pressureMeter.drawingArea.get_context();
         try {
-            drawPressureMeter(cr, widthPx, heightPx, pressureMeter.band, PRESSURE_METER_FILL_RGBA,
-                PRESSURE_METER_TRACK_RGBA);
+            drawPressureMeter(cr, widthPx, heightPx, pressureMeter.band, fillRgba, trackRgba);
         } finally {
             cr.$dispose();
         }

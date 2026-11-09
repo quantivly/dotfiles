@@ -104,3 +104,12 @@
 .rp-card-heaviest-parts {
   spacing: 4px;
 }
+
+/* Added in the review fixes (ruling R21). The desktop card while frozen: card.js sets the frozen pseudo-class while a
+   window covers it, so a card misjudged as covered reads as stale, never as live. Its value labels, which take their
+   colour from the card, dim; the muted labels keep their own. The graphs dim by -rp-graph-opacity, which card.js reads
+   from here and applies to every graph colour. */
+.resource-pulse-card:frozen {
+  color: rgba(255, 255, 255, 0.45);
+  -rp-graph-opacity: 0.4;
+}

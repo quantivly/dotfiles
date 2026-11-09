@@ -138,8 +138,9 @@ is down shows no data while the extension retries its start.
 **The card** has a fixed width: names ellipsize, numbers are never cut. It counts as covered when one
 normal or dialog window on the primary monitor's active workspace fully contains it, or that monitor
 is fullscreen (ding's desktop window never counts, and partly covered counts as visible). While
-covered it repaints nothing and releases its detail watch; on reveal it repaints at once from the
-latest state and takes the watch again. `Super+D` reveals it without waiting for a sample.
+covered it is **dimmed**, repaints only every 30 s (still dimmed, from the latest state) and releases
+its detail watch, so a card wrongly judged covered reads as stale, never as live; on reveal it repaints
+at once, undimmed, and takes the watch again. `Super+D` reveals it without waiting for a sample.
 
 **The dropdown.** Clicking the top-bar graphs opens a dropdown holding a second card, live while it is
 open, and an **Open Resources** button (Resources, else System Monitor; hidden when neither is
@@ -292,7 +293,7 @@ shorter history. Before the service existed the sampling ran inside gnome-shell,
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (459 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (466 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
 version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the
