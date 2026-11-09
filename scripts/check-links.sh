@@ -77,9 +77,9 @@ while (( $# )); do
   case "$1" in
     --quiet) QUIET=1 ;;
     --tsv)   TSV=1 ;;
-    --root)   [[ $# -ge 2 ]] || { echo "check-links: --root needs a value" >&2; exit "$EXIT_COULD_NOT_RUN"; }
+    --root)   [[ -n "${2:-}" ]] || { echo "check-links: --root needs a non-empty value" >&2; exit "$EXIT_COULD_NOT_RUN"; }
               ROOT_ARG="$2"; shift ;;
-    --config) [[ $# -ge 2 ]] || { echo "check-links: --config needs a value" >&2; exit "$EXIT_COULD_NOT_RUN"; }
+    --config) [[ -n "${2:-}" ]] || { echo "check-links: --config needs a non-empty value" >&2; exit "$EXIT_COULD_NOT_RUN"; }
               CONFIG_ARG="$2"; shift ;;
     *) echo "check-links: unknown argument '$1'" >&2; exit "$EXIT_COULD_NOT_RUN" ;;
   esac

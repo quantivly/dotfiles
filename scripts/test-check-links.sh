@@ -258,7 +258,17 @@ check "--tsv prints nothing but entry lines" "$(awk -F'\t' 'NF != 3 { bad++ } EN
 fixture "$CONDMANIFEST"
 printf 'x\n' > "$R/claude/cond.sh"; mkdir -p "$H/.config"; ln -s "$R/claude/cond.sh" "$H/.config/cond.sh"
 check "--tsv: a conditional entry that is present is checked (ok)" "$(awk -F'\t' '{print $1}' <<<"$(tsv_of "$R" "$H")")" "ok"
-check "--tsv: ok and conditional-absent alone are exit 0" "$(rc_of "$R" "$H")" "0"
+
+# One linked entry plus one ABSENT conditional one, under --tsv: exit 0, both states.
+fixture '- link:
+    ~/.linked: claude/linked
+    ~/.absent-cond:
+      path: claude/absent-cond
+      if: "true"
+'
+printf 'x\n' > "$R/claude/linked"; printf 'y\n' > "$R/claude/absent-cond"; ln -s "$R/claude/linked" "$H/.linked"
+check "--tsv: only ok and conditional-absent is exit 0" "$(REPO_ROOT="$R" HOME="$H" bash "$CHECK" --tsv >/dev/null 2>&1; printf '%s' "$?")" "0"
+check "--tsv: that run shows both states" "$(tsv_of "$R" "$H" | awk -F'\t' '{print $1}' | sort | tr '\n' ' ')" "conditional-absent ok "
 
 echo
 echo "=== --config and --root ==="
@@ -299,6 +309,22 @@ fixture '- link:
 '
 check "a parser that recognises nothing is exit 2 (--tsv)" "$(REPO_ROOT="$R" HOME="$H" bash "$CHECK" --tsv >/dev/null 2>&1; printf '%s' "$?")" "2"
 check "a parser that recognises nothing prints no TSV line" "$(tsv_of "$R" "$H")" ""
+# An empty value must never fall back to the default: that would report another repository's links.
+# The fixture must be a READABLE manifest, or the fallback would also exit 2 and the row prove nothing.
+fixture "$MANIFEST"
+EMPTY_ROOT_OUT="$(REPO_ROOT="$R" HOME="$H" bash "$CHECK" --root "" --tsv 2>/dev/null; printf 'rc=%s' "$?")"
+check '--root "" is could-not-run (2) with empty stdout' "$EMPTY_ROOT_OUT" "rc=2"
+EMPTY_CONFIG_OUT="$(REPO_ROOT="$R" HOME="$H" bash "$CHECK" --config "" --tsv 2>/dev/null; printf 'rc=%s' "$?")"
+check '--config "" is could-not-run (2) with empty stdout' "$EMPTY_CONFIG_OUT" "rc=2"
+
+# The could-not-run message is on stderr, and stdout stays empty, in both quiet modes.
+fixture "$MANIFEST"; rm -f "$R/install.conf.yaml"
+for mode in --tsv --quiet; do
+    stdout_text="$(REPO_ROOT="$R" HOME="$H" bash "$CHECK" "$mode" 2>/dev/null)"
+    stderr_text="$(REPO_ROOT="$R" HOME="$H" bash "$CHECK" "$mode" 2>&1 >/dev/null)"
+    check "$mode: unreadable config leaves stdout empty" "$stdout_text" ""
+    has   "$mode: unreadable config names the fault on stderr" "$stderr_text" "links UNCHECKED"
+done
 check "an unknown flag is exit 2" "$(REPO_ROOT="$R" HOME="$H" bash "$CHECK" --bogus >/dev/null 2>&1; printf '%s' "$?")" "2"
 
 echo
@@ -333,7 +359,7 @@ check "the entry after the nested one is still read (as missing)" "$(state_of "$
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
-EXPECTED_ROWS=62
+EXPECTED_ROWS=69
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
