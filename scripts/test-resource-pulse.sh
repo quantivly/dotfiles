@@ -459,6 +459,23 @@ on_private_bus() {
 }
 
 printf '\nthe service D-Bus layer on a private bus (gnome-shell/tests/run-private-bus.js)\n'
+# The runner's own guard, first: outside its private bus it must refuse (exit 2)
+# before a row runs. Both addresses below are sockets that do not exist, so even
+# a runner without the guard could reach nothing: (a) the barrier's dead bus,
+# outside the private bus directory; (b) the live bus's socket name under
+# XDG_RUNTIME_DIR, with the bus directory set to that runtime dir.
+runner_guard_summary=""
+runner_guard_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" \
+  timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
+runner_guard_summary+="outside=$?/$(grep -c -F 'refusing to run' <<<"$runner_guard_output")"
+runner_guard_summary+="/$(grep -c -F 'JS-TALLY' <<<"$runner_guard_output")"
+runner_guard_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_TEST_BUS_DIR="$LIVE_SETTINGS_BARRIER_RUNTIME_DIR" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$LIVE_SETTINGS_BARRIER_RUNTIME_DIR/bus" \
+  timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
+runner_guard_summary+=" runtime-bus=$?/$(grep -c -F 'refusing to run' <<<"$runner_guard_output")"
+runner_guard_summary+="/$(grep -c -F 'JS-TALLY' <<<"$runner_guard_output")"
+check "the private-bus runner refuses (exit 2, no row run) a bus outside its directory, and the live bus's socket" \
+  "$runner_guard_summary" "outside=2/1/0 runtime-bus=2/1/0"
 PRIVATE_BUS_JS_OUTPUT="$(on_private_bus gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
 PRIVATE_BUS_JS_EXIT=$?
 printf '%s\n' "$PRIVATE_BUS_JS_OUTPUT"
@@ -571,6 +588,12 @@ check "a second service/main.js finds the name taken and exits 1, while the firs
 ENGINE_WARNING_PATTERN='(Gjs|GLib|GLib-GIO|GLib-GObject)-(WARNING|CRITICAL)|JS ERROR|Unhandled promise rejection'
 check "service/main.js logged no gjs or GLib warning, critical or uncaught error" \
   "$(grep -c -E "$ENGINE_WARNING_PATTERN" "$SERVICE_LOG")" 0
+# A stopped sampler still scans on a watch start, so every shutdown must destroy
+# it. That is invisible from outside a process that exits next, so it is read
+# from the source: the shutdown step, and no stop() call anywhere.
+check "service/main.js's shutdown destroys the sampler, and nothing in it only stops it" \
+  "destroy=$(grep -c -F "{name: 'destroy the sampler', run: () => this._sampler?.destroy()}" "$SERVICE_MAIN_PATH") stop=$(grep -c -E '_sampler\??\.stop\(' "$SERVICE_MAIN_PATH")" \
+  "destroy=1 stop=0"
 if [[ "$service_first_summary" != "$SERVICE_FIRST_EXPECTED" ]]; then
   printf '    (driver said: %s)\n' "$SERVICE_DRIVER_OUTPUT"
   sed 's/^/    service log: /' "$SERVICE_LOG"
@@ -1435,7 +1458,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=393
+EXPECTED_ROWS=395
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
