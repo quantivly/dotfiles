@@ -14,7 +14,7 @@
 // Shell glue only: every string and meter band comes from lib/format.js (cardText), every shape from graph.js and
 // the position from lib/layout.js (cardPosition). The extension adds it to the layout manager's background group, above the
 // wallpaper and below every window, which the overview hides. It is display-only: ding's desktop window lies over
-// it and takes every click, so nothing here is reactive. Destroying it removes its sampler listener, the only
+// it and takes every click, so nothing here is reactive. Destroying it removes its client listener, the only
 // thing it adds outside itself.
 import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
@@ -92,30 +92,30 @@ function newCardLabel(styleClass) {
 export const PulseCard = GObject.registerClass(
 class PulseCard extends St.BoxLayout {
     /**
-     * Builds the rows, shows "no data" until the first snapshot, and starts listening to the sampler. The
+     * Builds the rows, shows "no data" until the first snapshot, and starts listening to the client. The
      * listener is added last, after everything that could throw, so a failed construction leaves nothing in the
-     * sampler.
+     * client.
      *
-     * @param {import('./sampler.js').Sampler} sampler - The one sampler; the card draws its CPU and memory
+     * @param {import('./pulseClient.js').PulseClient} client - The one client; the card draws its CPU and memory
      *     histories.
      * @returns {void}
      */
-    _init(sampler) {
+    _init(client) {
         super._init({
             style_class: CARD_STYLE_CLASS,
             orientation: Clutter.Orientation.VERTICAL,
             reactive: false,
         });
         // Every field _onDestroy reads is set before anything below can throw.
-        this._sampler = sampler;
+        this._client = client;
         this._snapshotListenerId = null;
         this.connect('destroy', () => this._onDestroy());
 
-        this._buildMeters(sampler.cpuHistory, sampler.memoryHistory);
+        this._buildMeters(client.cpuHistory, client.memoryHistory);
         this._buildDetails();
-        this.update(sampler.latestSnapshot, sampler.lastGoodClockLabel);
-        this._snapshotListenerId = sampler.addListener(
-            snapshot => this.update(snapshot, this._sampler.lastGoodClockLabel));
+        this.update(client.latestSnapshot, client.lastGoodClockLabel);
+        this._snapshotListenerId = client.addListener(
+            snapshot => this.update(snapshot, this._client.lastGoodClockLabel));
     }
 
     /**
@@ -123,7 +123,7 @@ class PulseCard extends St.BoxLayout {
      * meters. A part with no data reads "no data" and draws as a gap (an empty bar, or a meter's no-data dash),
      * never as the last good number.
      *
-     * @param {import('./sampler.js').Snapshot|null} snapshot - The latest snapshot, or null before the first.
+     * @param {import('./pulseClient.js').Snapshot|null} snapshot - The latest snapshot, or null before the first.
      * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data, for "no data since".
      * @returns {void}
      */
@@ -301,9 +301,9 @@ class PulseCard extends St.BoxLayout {
     }
 
     /**
-     * Draws the memory bar at the newest memory fraction: the sampler pushes it from the same snapshot the memory
-     * line shows, before telling listeners, so the bar and the text agree. With no data (none yet, or a failed
-     * sample) the bar is all track.
+     * Draws the memory bar at the newest memory fraction: the client appends it with the Sample whose snapshot the
+     * memory line shows, before telling listeners, so the bar and the text agree. With no data (none yet, a failed
+     * sample, or no fresh Sample) the bar is all track.
      *
      * @param {import('./lib/history.js').RingBuffer} memoryHistory - Memory used fractions, oldest first.
      * @returns {void}
@@ -337,16 +337,16 @@ class PulseCard extends St.BoxLayout {
     }
 
     /**
-     * Removes the sampler listener, the one thing the card added outside itself. Runs on 'destroy', so it runs
+     * Removes the client listener, the one thing the card added outside itself. Runs on 'destroy', so it runs
      * however the card is destroyed.
      *
      * @returns {void}
      */
     _onDestroy() {
         if (this._snapshotListenerId !== null) {
-            this._sampler.removeListener(this._snapshotListenerId);
+            this._client.removeListener(this._snapshotListenerId);
             this._snapshotListenerId = null;
         }
-        this._sampler = null;
+        this._client = null;
     }
 });

@@ -1,9 +1,9 @@
 // The top-bar indicator: two mini area graphs, CPU then memory, with no text. The numbers appear in a label
 // below it once the pointer has rested on it for HOVER_LABEL_DELAY_MS, and a click opens the system monitor.
 //
-// Shell glue only: every number comes from the sampler, every string from lib/format.js and every shape from
+// Shell glue only: every number comes from the client, every string from lib/format.js and every shape from
 // graph.js. It runs inside gnome-shell, so destroying it removes everything it added outside itself (the hover
-// label, which lives in the layout manager's chrome, its timeout, and its sampler listener), and nothing it
+// label, which lives in the layout manager's chrome, its timeout, and its client listener), and nothing it
 // schedules can outlive it.
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -46,17 +46,17 @@ const STAGE_LEFT_EDGE_PX = 0;
 export const PulseIndicator = GObject.registerClass(
 class PulseIndicator extends PanelMenu.Button {
     /**
-     * Builds the graphs, the click and the hover label, and starts listening to the sampler and to the display
+     * Builds the graphs, the click and the hover label, and starts listening to the client and to the display
      * scale. The hover label is added to the chrome, and the outside signals connected, only after everything
      * that could throw, so a failed construction leaves nothing in the shell.
      *
-     * @param {import('./sampler.js').Sampler} sampler - The one sampler; the indicator draws its histories.
+     * @param {import('./pulseClient.js').PulseClient} client - The one client; the indicator draws its histories.
      * @returns {void}
      */
-    _init(sampler) {
+    _init(client) {
         super._init(MENU_ALIGNMENT, ACCESSIBLE_NAME, DONT_CREATE_MENU);
         // Every field _onDestroy reads is set before anything below can throw.
-        this._sampler = sampler;
+        this._client = client;
         this._hoverLabel = null;
         this._isHoverLabelShown = false;
         this._showHoverLabelTimeoutId = null;
@@ -64,8 +64,8 @@ class PulseIndicator extends PanelMenu.Button {
         this._snapshotListenerId = null;
 
         const graphBox = new St.BoxLayout({style_class: GRAPH_BOX_STYLE_CLASS});
-        this._cpuGraph = this._addGraph(graphBox, sampler.cpuHistory, CPU_GRAPH_RGBA);
-        this._memoryGraph = this._addGraph(graphBox, sampler.memoryHistory, MEMORY_GRAPH_RGBA);
+        this._cpuGraph = this._addGraph(graphBox, client.cpuHistory, CPU_GRAPH_RGBA);
+        this._memoryGraph = this._addGraph(graphBox, client.memoryHistory, MEMORY_GRAPH_RGBA);
         this.add_child(graphBox);
 
         // PanelMenu.Button's own click gesture is disabled when it has no menu, so the click gets one of its own.
@@ -84,7 +84,7 @@ class PulseIndicator extends PanelMenu.Button {
         // and its handlers with it.
         this._hoverLabel.connect('notify::width', () => this._queuePlaceShownHoverLabel());
         Main.layoutManager.addTopChrome(this._hoverLabel);
-        this._snapshotListenerId = sampler.addListener(snapshot => this._onSnapshot(snapshot));
+        this._snapshotListenerId = client.addListener(snapshot => this._onSnapshot(snapshot));
         St.ThemeContext.get_for_stage(global.stage).connectObject(
             'notify::scale-factor', () => this._queuePlaceShownHoverLabel(), this);
     }
@@ -129,7 +129,7 @@ class PulseIndicator extends PanelMenu.Button {
      * Redraws the graphs for a new snapshot, and refreshes the hover label while it is up, so it never shows
      * an older sample than the graphs do.
      *
-     * @param {import('./sampler.js').Snapshot} _snapshot - The new snapshot (the label reads the latest).
+     * @param {import('./pulseClient.js').Snapshot|null} _snapshot - The new snapshot (the label reads the latest).
      * @returns {void}
      */
     _onSnapshot(_snapshot) {
@@ -225,13 +225,13 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
-     * Sets the hover label's text from the sampler's latest snapshot; lib/format.js says "no data since HH:MM"
+     * Sets the hover label's text from the client's latest snapshot; lib/format.js says "no data since HH:MM"
      * rather than show a stale number as live.
      *
      * @returns {void}
      */
     _updateHoverLabelText() {
-        this._hoverLabel.text = hoverLabel(this._sampler.latestSnapshot, this._sampler.lastGoodClockLabel);
+        this._hoverLabel.text = hoverLabel(this._client.latestSnapshot, this._client.lastGoodClockLabel);
     }
 
     /**
@@ -306,7 +306,7 @@ class PulseIndicator extends PanelMenu.Button {
 
     /**
      * Removes everything the indicator added outside itself: the display-scale handler, the hover label's pending
-     * placement and pending show, its sampler listener and the label itself (destroying it also takes it out of the chrome, with its own
+     * placement and pending show, its client listener and the label itself (destroying it also takes it out of the chrome, with its own
      * handlers). Runs on the 'destroy' signal, which PanelMenu.Button connects, so it runs however the indicator
      * is destroyed.
      *
@@ -320,13 +320,13 @@ class PulseIndicator extends PanelMenu.Button {
         }
         this._cancelHoverLabelTimeout();
         if (this._snapshotListenerId !== null) {
-            this._sampler.removeListener(this._snapshotListenerId);
+            this._client.removeListener(this._snapshotListenerId);
             this._snapshotListenerId = null;
         }
         this._hoverLabel?.destroy();
         this._hoverLabel = null;
         this._isHoverLabelShown = false;
-        this._sampler = null;
+        this._client = null;
         super._onDestroy();
     }
 });

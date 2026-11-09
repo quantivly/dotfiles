@@ -3,13 +3,21 @@
 /** Seconds between CPU, memory and pressure samples. */
 export const SAMPLE_INTERVAL_SECONDS = 2;
 /**
- * Sample intervals a sample may stay in flight. On the timer tick after that it counts as stalled: both surfaces
- * go to no data (once per stall) and its late result is dropped, while no second sample is queued behind it.
+ * Sample intervals the extension's client waits for a Sample. A Sample older than that is stale (lib/wiring.js
+ * isSampleStale): both surfaces go to no data, once, rather than show its numbers as live.
  */
 export const SAMPLE_STALL_TICKS = 3;
 /**
- * Seconds between per-app scans while a detail watch is held: SAMPLE_INTERVAL_SECONDS × APP_SCAN_EVERY_N_TICKS,
- * which a test row enforces. 20 (the service design's cadence) to keep the scan inside the idle cost budget.
+ * Seconds the client waits after a failed StartUnit before asking systemd again: the first delay after the first
+ * failure, the second after the second, and the last one for every failure after that. A success, or the service
+ * appearing on the bus, ends the retries.
+ */
+export const START_RETRY_DELAYS_SECONDS = [5, 30, 300];
+/** Milliseconds the client waits for any D-Bus reply: GetState, WatchDetail, UnwatchDetail and StartUnit. */
+export const DBUS_CALL_TIMEOUT_MS = 2000;
+/**
+ * Seconds between per-app scans while a detail watch is held: a whole number of SAMPLE_INTERVAL_SECONDS, since scans
+ * run on fast ticks. 20 (the service design's cadence) to keep the scan inside the idle cost budget.
  */
 export const APP_SCAN_INTERVAL_SECONDS = 20;
 /** Seconds between per-app scans with no detail watch held: a baseline, so a reveal never starts from nothing. */
@@ -25,20 +33,6 @@ export const REVEAL_SCAN_COOLDOWN_TICKS = 2;
  * the last scan does not scan (the client already has that ranking), and a warm-up due that soon waits a tick.
  */
 export const MIN_CPU_RANKING_WINDOW_SECONDS = 1;
-/** Sample ticks between per-app scans. */
-export const APP_SCAN_EVERY_N_TICKS = APP_SCAN_INTERVAL_SECONDS / SAMPLE_INTERVAL_SECONDS;
-/**
- * Sample ticks an app scan may stay in flight: one whole scan interval, by when the next scan is overdue. On the
- * timer tick after that the scan counts as stalled (once per stall): the ranking is dropped, so "heaviest" shows
- * no data, and the scan's late result is discarded.
- */
-export const APP_SCAN_STALL_TICKS = APP_SCAN_EVERY_N_TICKS;
-/**
- * The tick that scans once more than the cadence would, after every baseline reset (enable, resume, the scan turned
- * back on), which restarts the tick count at 0. Tick 0's scan is only a baseline, so without this the CPU half of
- * "heaviest" would wait for tick APP_SCAN_EVERY_N_TICKS (about 12 s); with it, tick 2's snapshot has it (about 4 s).
- */
-export const APP_SCAN_WARM_UP_TICK = 1;
 /**
  * Cgroup leaves with these suffixes are left out of the app scan. Such units (mounts, sockets, swap, automounts,
  * paths, timers, devices) never host an app process, and skipping them is the scan's main cost lever: on the
@@ -52,16 +46,6 @@ export const APP_SCAN_SKIPPED_UNIT_SUFFIXES = [
  * A leaf at or under it ranks by memory.current as it is: too small to top the ranking, so not worth a third read.
  */
 export const APP_MEMORY_STAT_MIN_BYTES = 64 * 1024 ** 2;
-/** Directory entries fetched per step of an asynchronous directory listing. */
-export const DIRECTORY_LISTING_BATCH_ENTRIES = 64;
-/**
- * Cgroup leaves whose files an app scan reads at once. The next batch starts only when this one has settled, so a
- * scan never has more than this many leaves' reads waiting to complete on the shell's main loop (about 200 leaves,
- * 500 files and 2,000 completions in all on the reference laptop), where they would compete with redraws.
- */
-export const APP_SCAN_READ_BATCH_LEAVES = 16;
-/** Bytes asked for per read of a /proc, /sys or cgroup file: they report size 0, so each is read until EOF. */
-export const FILE_READ_CHUNK_BYTES = 8192;
 /** Samples kept for the top-bar sparkline. */
 export const TOPBAR_HISTORY_SAMPLES = 30;
 /** Samples kept for the desktop card graphs. */

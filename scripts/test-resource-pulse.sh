@@ -51,6 +51,9 @@ fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 for required_tool in gjs zsh find timeout dbus-run-session; do
   command -v "$required_tool" >/dev/null || fatal "$required_tool is required"
 done
+# Every fixture this run writes lives here, from the placement rows on; removed on exit.
+WIRING_TMP="$(mktemp -d)" || fatal "mktemp -d failed"
+trap 'rm -rf "$WIRING_TMP"' EXIT
 
 JS_OUTPUT="$(gjs -m "$RUNNER" 2>&1)"
 JS_EXIT=$?
@@ -105,12 +108,12 @@ for glue_file in extension.js indicator.js card.js; do
   fi
 done
 
-# lib/, sampler.js and graph.js run under plain gjs in the JS rows above, which
-# only works while they import nothing from the Shell. A listed file that is
-# missing fails the row: an absent file contains nothing, which is not a pass.
-PURE_MODULE_PATHS=("$EXT_DIR/sampler.js" "$EXT_DIR/graph.js")
+# lib/, pulseClient.js and graph.js run under plain gjs in the JS rows above,
+# which only works while they import nothing from the Shell. A listed file that
+# is missing fails the row: an absent file contains nothing, which is not a pass.
+PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/graph.js")
 mapfile -d '' LIB_MODULE_PATHS < <(find "$EXT_DIR/lib" -type f -name '*.js' -print0 2>/dev/null)
-row_name="lib/, sampler.js and graph.js import nothing from resource:///"
+row_name="lib/, pulseClient.js and graph.js import nothing from resource:///"
 if (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
   bad "$row_name — found no lib/*.js under $EXT_DIR"
 else
@@ -130,65 +133,151 @@ else
 fi
 
 # The shell side runs on the compositor's main loop: no subprocess and no
-# synchronous file IO, anywhere in it. service/ is the sampler service, its own
-# process outside the shell, so it may read files synchronously; it still starts
-# no subprocess. Each Gio call is matched with its "(" so its _async form
-# (enumerate_children_async( and so on) does not match.
-SUBPROCESS_CALL_PATTERN='Gio.Subprocess|GLib.spawn|Util.spawn'
-BLOCKING_CALL_PATTERN="$SUBPROCESS_CALL_PATTERN"'|load_contents\(|file_get_contents|enumerate_children\(|query_info\(|read_bytes\(|load_bytes\(|replace_contents\('
-SERVICE_DIRECTORY="$EXT_DIR/service"
-# The pattern itself: every forbidden call (a subprocess, synchronous IO) must match, and no _async IO call.
+# synchronous IO (file or D-Bus), anywhere in it. service/ is the sampler
+# service, its own process outside the shell, so it may read files
+# synchronously; it still starts no subprocess. Each Gio call is matched with
+# its "(" so its _async form (enumerate_children_async( and so on) does not
+# match, and _sync( catches every synchronous D-Bus call (call_sync, new_sync,
+# bus_get_sync) without catching an _async one.
+SUBPROCESS_CALL_PATTERN='Gio.Subprocess|GLib.spawn|Util.spawn|util_spawn'
+SYNCHRONOUS_IO_CALL_PATTERN='load_contents\(|file_get_contents|enumerate_children\(|query_info\(|read_bytes\(|load_bytes\('
+SYNCHRONOUS_IO_CALL_PATTERN+='|replace_contents\(|next_file\(|next_files\(|query_exists\(|query_file_type\(|GLib\.file_test'
+SYNCHRONOUS_IO_CALL_PATTERN+='|read_all\(|GLib\.Dir\.open|\.read\(null\)|\.close\(null\)|_sync\('
+BLOCKING_CALL_PATTERN="$SUBPROCESS_CALL_PATTERN|$SYNCHRONOUS_IO_CALL_PATTERN"
+# blocking_calls_in <extension dir>: one line, "<path>: <call>", for each file
+# making a call its place forbids: a subprocess anywhere, synchronous IO
+# anywhere but the top-level service/. A tree with no files is a line too.
+blocking_calls_in() {
+  local extension_dir="$1" extension_file_path forbidden_call_pattern
+  local -a extension_file_paths
+  mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -print0 2>/dev/null)
+  if (( ${#extension_file_paths[@]} == 0 )); then
+    printf 'found no files under %s\n' "$extension_dir"
+    return 0
+  fi
+  for extension_file_path in "${extension_file_paths[@]}"; do
+    forbidden_call_pattern="$BLOCKING_CALL_PATTERN"
+    [[ "$extension_file_path" == "$extension_dir/service/"* ]] && forbidden_call_pattern="$SUBPROCESS_CALL_PATTERN"
+    if [[ "$(<"$extension_file_path")" =~ $forbidden_call_pattern ]]; then
+      printf '%s: %s\n' "${extension_file_path#"$extension_dir"/}" "${BASH_REMATCH[0]}"
+    fi
+  done
+  return 0
+}
+# The pattern itself: every forbidden call (a subprocess, synchronous IO) must
+# match, and no asynchronous call, IO or D-Bus, that the shell side makes.
 FORBIDDEN_CALLS=('Gio.Subprocess.new(' 'GLib.spawn_command_line_async(' 'Util.spawn([' 'file.load_contents(null)'
   'GLib.file_get_contents(path)' 'file.enumerate_children(attributes, flags, null)' 'file.query_info(attributes, flags, null)'
-  'stream.read_bytes(4096, null)' 'file.load_bytes(null)' 'file.replace_contents(bytes, null, false, 0, null)')
-ASYNCHRONOUS_IO_CALLS=('file.load_contents_async(null)' 'file.enumerate_children_async(attributes, flags, priority, null)'
+  'stream.read_bytes(4096, null)' 'file.load_bytes(null)' 'file.replace_contents(bytes, null, false, 0, null)'
+  'enumerator.next_file(null)' 'enumerator.next_files(64, null)' 'file.query_exists(null)'
+  'file.query_file_type(flags, null)' 'GLib.file_test(path, GLib.FileTest.EXISTS)' 'stream.read_all(buffer, null)'
+  'GLib.Dir.open(path, 0)' 'file.read(null)' 'stream.close(null)' 'Shell.util_spawn_async(workingDirectory, argv, envp, flags)'
+  'connection.call_sync(busName, objectPath, interfaceName, methodName, null, null, flags, timeoutMs, null)'
+  'Gio.DBusProxy.new_sync(connection, flags, null, busName, objectPath, interfaceName, null)')
+ASYNCHRONOUS_CALLS=('file.load_contents_async(null)' 'file.enumerate_children_async(attributes, flags, priority, null)'
   'file.query_info_async(attributes, flags, priority, null)' 'stream.read_bytes_async(4096, priority, null)'
-  'file.load_bytes_async(null)' 'file.replace_contents_async(bytes, null, false, 0, null)')
+  'file.load_bytes_async(null)' 'file.replace_contents_async(bytes, null, false, 0, null)'
+  'enumerator.next_files_async(64, priority, null)' 'file.read_async(priority, null)' 'stream.close_async(priority, null)'
+  'enumerator.close_async(priority, null)' 'Gio.bus_get(busType, cancellable, callback)' 'Gio.bus_get_finish(result)'
+  'Gio.DBusProxy.new(connection, flags, null, busName, objectPath, interfaceName, cancellable, callback)'
+  'Gio.DBusProxy.new_finish(result)' 'proxy.call(methodName, null, flags, timeoutMs, cancellable, callback)'
+  'proxy.call_finish(result)' 'connection.call(busName, objectPath, interfaceName, methodName, parameters, replyType, flags, timeoutMs, cancellable, callback)'
+  'connection.call_finish(result)')
 unmatched_forbidden_calls=()
 for io_call in "${FORBIDDEN_CALLS[@]}"; do
   [[ "$io_call" =~ $BLOCKING_CALL_PATTERN ]] || unmatched_forbidden_calls+=("$io_call")
 done
 matched_asynchronous_calls=()
-for io_call in "${ASYNCHRONOUS_IO_CALLS[@]}"; do
+for io_call in "${ASYNCHRONOUS_CALLS[@]}"; do
   [[ "$io_call" =~ $BLOCKING_CALL_PATTERN ]] && matched_asynchronous_calls+=("$io_call")
 done
-check "the blocking-call pattern matches every forbidden call (subprocess, synchronous IO) and no _async IO call" \
+check "the blocking-call pattern matches every forbidden call (subprocess, synchronous IO) and no asynchronous IO or D-Bus call" \
   "missed=[${unmatched_forbidden_calls[*]}] async-matched=[${matched_asynchronous_calls[*]}]" "missed=[] async-matched=[]"
-mapfile -d '' EXTENSION_FILE_PATHS < <(find "$EXT_DIR" -type f -print0 2>/dev/null)
-row_name="no file in the extension spawns a process, and none outside service/ does synchronous file IO"
-if (( ${#EXTENSION_FILE_PATHS[@]} == 0 )); then
-  bad "$row_name — found no files under $EXT_DIR"
+row_name="no file in the extension spawns a process, and none outside service/ does synchronous IO (file or D-Bus)"
+# The scan's own exit status is read too: a scan that could not run prints
+# nothing, which is not a pass.
+blocking_calls="$(blocking_calls_in "$EXT_DIR")"
+blocking_scan_status=$?
+if (( blocking_scan_status == 0 )) && [[ -z "$blocking_calls" ]]; then
+  ok "$row_name"
 else
-  blocking_calls=()
-  for extension_file_path in "${EXTENSION_FILE_PATHS[@]}"; do
-    forbidden_call_pattern="$BLOCKING_CALL_PATTERN"
-    [[ "$extension_file_path" == "$SERVICE_DIRECTORY"/* ]] && forbidden_call_pattern="$SUBPROCESS_CALL_PATTERN"
-    if [[ "$(<"$extension_file_path")" =~ $forbidden_call_pattern ]]; then
-      blocking_calls+=("${extension_file_path#"$EXT_DIR"/}: ${BASH_REMATCH[0]}")
+  bad "$row_name — scan exit $blocking_scan_status: $(tr '\n' ' ' <<<"$blocking_calls")"
+fi
+# The scan's scoping, on a fixture tree: service/ (and only the top-level one)
+# may read files synchronously, nothing may spawn, and an asynchronous D-Bus call
+# is fine anywhere.
+PLACEMENT_FIXTURE_DIR="$WIRING_TMP/placement-fixture"
+mkdir -p "$PLACEMENT_FIXTURE_DIR/service" "$PLACEMENT_FIXTURE_DIR/lib/service" \
+  || fatal "cannot create the placement fixture under $PLACEMENT_FIXTURE_DIR"
+printf '%s\n' 'const [, contents] = file.load_contents(null);' >"$PLACEMENT_FIXTURE_DIR/service/reads.js"
+printf '%s\n' 'const process = Gio.Subprocess.new(argv, flags);' >"$PLACEMENT_FIXTURE_DIR/service/spawns.js"
+printf '%s\n' 'const [, contents] = file.load_contents(null);' >"$PLACEMENT_FIXTURE_DIR/lib/service/reads.js"
+printf '%s\n' 'const fileInfo = enumerator.next_file(null);' >"$PLACEMENT_FIXTURE_DIR/lib/lists.js"
+printf '%s\n' 'proxy.call(methodName, null, flags, timeoutMs, cancellable, callback);' >"$PLACEMENT_FIXTURE_DIR/client.js"
+check "the placement scan lets the top-level service/ read files but not spawn, and nothing else read (a fixture tree)" \
+  "$(blocking_calls_in "$PLACEMENT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" \
+  "lib/lists.js: next_file( lib/service/reads.js: load_contents( service/spawns.js: Gio.Subprocess "
+
+# A shell-side module that imports anything from service/ would load the
+# sampler, with its synchronous reads, into gnome-shell. GNOME loads only
+# extension.js and what it imports, so service/ stays out of the shell only
+# while nothing outside service/ imports it, statically or dynamically: a
+# from, import or import( whose quoted specifier starts with service/ or
+# reaches it after a slash. Comments that name service/ files are not imports.
+SERVICE_IMPORT_PATTERN="(from|import)[[:space:]]*[(]?[[:space:]]*['\"]([^'\"]*/)?service/"
+# service_imports_in <extension dir>: one line per .js file outside the
+# top-level service/ that imports from service/. A tree with no JavaScript is a
+# line too.
+service_imports_in() {
+  local extension_dir="$1" extension_file_path
+  local -a extension_file_paths
+  mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -name '*.js' -print0 2>/dev/null)
+  if (( ${#extension_file_paths[@]} == 0 )); then
+    printf 'found no JavaScript under %s\n' "$extension_dir"
+    return 0
+  fi
+  for extension_file_path in "${extension_file_paths[@]}"; do
+    [[ "$extension_file_path" == "$extension_dir/service/"* ]] && continue
+    if [[ "$(<"$extension_file_path")" =~ $SERVICE_IMPORT_PATTERN ]]; then
+      printf '%s\n' "${extension_file_path#"$extension_dir"/}"
     fi
   done
-  if (( ${#blocking_calls[@]} == 0 )); then
-    ok "$row_name"
-  else
-    bad "$row_name — ${blocking_calls[*]}"
-  fi
+  return 0
+}
+row_name="no file outside service/ imports service/, so gnome-shell never loads the sampler"
+service_importers="$(service_imports_in "$EXT_DIR")"
+service_import_scan_status=$?
+if (( service_import_scan_status == 0 )) && [[ -z "$service_importers" ]]; then
+  ok "$row_name"
+else
+  bad "$row_name — scan exit $service_import_scan_status: $(tr '\n' ' ' <<<"$service_importers")"
 fi
+SERVICE_IMPORT_FIXTURE_DIR="$WIRING_TMP/service-import-fixture"
+mkdir -p "$SERVICE_IMPORT_FIXTURE_DIR/service" "$SERVICE_IMPORT_FIXTURE_DIR/lib" \
+  || fatal "cannot create the service-import fixture under $SERVICE_IMPORT_FIXTURE_DIR"
+printf '%s\n' "import {ServiceSampler} from './service/sampler.js';" >"$SERVICE_IMPORT_FIXTURE_DIR/extension.js"
+printf '%s\n' "const serviceModule = await import('../service/main.js');" >"$SERVICE_IMPORT_FIXTURE_DIR/lib/loader.js"
+printf '%s\n' '// The service (service/sampler.js) publishes these.' "import {PROTOCOL_VERSION} from './lib/protocol.js';" \
+  >"$SERVICE_IMPORT_FIXTURE_DIR/card.js"
+printf '%s\n' "import {ServiceSampler} from './sampler.js';" "import {RingBuffer} from '../lib/history.js';" \
+  >"$SERVICE_IMPORT_FIXTURE_DIR/service/main.js"
+check "the service/ import scan finds a static and a dynamic import of service/, and neither a comment nor service/'s own" \
+  "$(service_imports_in "$SERVICE_IMPORT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" "extension.js lib/loader.js "
 
 # extension.js imports the Shell, so its teardown cannot run here. lib/teardown.js
 # (runEveryStep, whose rows are in lifecycle.test.js) guards each step; these
 # rows read extension.js for the order of its destroy steps, the card first
-# because a card left behind would show frozen numbers as live, and for what
-# a failed start says it removed.
+# because a card left behind would show frozen numbers as live.
 EXTENSION_JS="$EXT_DIR/extension.js"
-teardown_destroy_order="$(grep -E "run: \(\) => (card|indicator|sampler)\?\.destroy\(\)" "$EXTENSION_JS" 2>/dev/null \
+teardown_destroy_order="$(grep -E "run: \(\) => (card|indicator|client)\?\.destroy\(\)" "$EXTENSION_JS" 2>/dev/null \
   | sed -E 's/.*=> ([a-z]+)\?\.destroy.*/\1/' | tr '\n' ' ')"
-check "extension.js tears down in guarded steps (runEveryStep), destroying the card, then the indicator, then the sampler" \
-  "$teardown_destroy_order|$(grep -c -F 'runEveryStep([' "$EXTENSION_JS" 2>/dev/null)" "card indicator sampler |1"
-# The sampler's own failures are self-healing, so they stay warnings (as they
-# were before the logger was shared); the extension's start and teardown
-# failures are errors. Each kind has one limiter that outlives every enable.
-check "extension.js hands every sampler one rate-limited logger that writes warnings and spans enables" \
-  "$(grep -c -F 'errorLog: this._samplerLog' "$EXTENSION_JS" 2>/dev/null):$(grep -c -E 'this\._samplerLog = new RateLimitedLogger\(\{nowUsec, write: line => console\.warn\(line\)\}\)' "$EXTENSION_JS" 2>/dev/null)" "1:1"
+check "extension.js tears down in guarded steps (runEveryStep), destroying the card, then the indicator, then the client" \
+  "$teardown_destroy_order|$(grep -c -F 'runEveryStep([' "$EXTENSION_JS" 2>/dev/null)" "card indicator client |1"
+# The client's own failures (a StartUnit refused, a call timed out) heal by
+# themselves, so they stay warnings; the extension's teardown failures are
+# errors. Each kind has one limiter that outlives every enable.
+check "extension.js hands every client one rate-limited logger that writes warnings and spans enables" \
+  "$(grep -c -F 'errorLog: this._clientLog' "$EXTENSION_JS" 2>/dev/null):$(grep -c -E 'this\._clientLog = new RateLimitedLogger\(\{nowUsec, write: line => console\.warn\(line\)\}\)' "$EXTENSION_JS" 2>/dev/null)" "1:1"
 check "indicator.js re-places a shown hover label when its width or the display scale changes" \
   "$(grep -c -E "'notify::(width|scale-factor)'" "$EXT_DIR/indicator.js" 2>/dev/null)" 2
 # notify::width is emitted during allocation, and moving an actor then makes
@@ -209,8 +298,6 @@ on_destroy_removes_later="$(sed -n '/^    _onDestroy() {/,/^    }/p' "$EXT_DIR/i
 check "a width change moves the card and the hover label in a BEFORE_REDRAW later, never during allocation" \
   "$deferred_placement_summary| teardown-step=$teardown_cancels_placement on-destroy=$on_destroy_removes_later" \
   "extension.js:1/1/1 indicator.js:1/1/1 | teardown-step=1 on-destroy=1"
-check "extension.js says a failed start removed Resource Pulse, not just the indicator" \
-  "$(grep -c -E "^const START_FAILURE_MESSAGE = '.*Resource Pulse.*removed" "$EXTENSION_JS" 2>/dev/null)" 1
 
 # metadata.json, parsed as JSON by gjs (never grepped). Each field is printed
 # on its own prefixed line, so an unreadable or malformed file prints none and
@@ -262,8 +349,6 @@ APPLY_SCRIPT="$DOTFILES/scripts/apply-gnome-settings.sh"
 COST_SCRIPT="$DOTFILES/scripts/resource-pulse-cost.sh"
 EXTENSION_UUID="resource-pulse@dotfiles"
 SHELL_SCHEMA="org.gnome.shell"
-WIRING_TMP="$(mktemp -d)" || fatal "mktemp -d failed"
-trap 'rm -rf "$WIRING_TMP"' EXIT
 LIVE_SETTINGS_BARRIER_RUNTIME_DIR="$WIRING_TMP/barrier-runtime"
 LIVE_SETTINGS_BARRIER_BUS="unix:path=$WIRING_TMP/barrier-no-session-bus"
 if ! mkdir -p "$LIVE_SETTINGS_BARRIER_RUNTIME_DIR" || ! chmod 700 "$LIVE_SETTINGS_BARRIER_RUNTIME_DIR"; then
@@ -1522,7 +1607,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=404
+EXPECTED_ROWS=382
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

@@ -257,7 +257,7 @@ function cardCpuValue(cpuPercent, hasNoNumbers, lastGoodClockLabel) {
  * Every string on the desktop card, from one snapshot: a muted label and a value per row, as in the mockup. A
  * missing part says "no data" (or '—', or a meter band of null) rather than showing a stale number as live.
  *
- * @param {import('../sampler.js').Snapshot|null} snapshot - The latest snapshot, or null before the first.
+ * @param {import('../pulseClient.js').Snapshot|null} snapshot - The latest snapshot, or null before the first.
  * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data.
  * @returns {CardText} The card's strings.
  */

@@ -88,7 +88,7 @@ export function requirePrivateBusAddress() {
 }
 
 /** Stands in for ServiceSampler: the surface the D-Bus service uses, plus a publish() the rows drive. */
-class FakeSampler {
+export class FakeSampler {
     constructor() {
         this.latestSnapshot = null;
         this.cpuHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
@@ -155,7 +155,7 @@ class FakeSampler {
  *
  * @returns {Gio.DBusConnection} The connection.
  */
-function openPrivateBusConnection() {
+export function openPrivateBusConnection() {
     return Gio.DBusConnection.new_for_address_sync(requirePrivateBusAddress(), CONNECTION_FLAGS, null, null);
 }
 
@@ -235,7 +235,7 @@ async function fetchState(connection, serviceName) {
  * @param {number} timeoutMs - How long to wait at most.
  * @returns {Promise<boolean>} True when the condition held in time.
  */
-function waitUntil(isDone, timeoutMs) {
+export function waitUntil(isDone, timeoutMs) {
     const deadlineUsec = GLib.get_monotonic_time() + timeoutMs * 1000;
     return new Promise(resolve => {
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, POLL_INTERVAL_MS, () => {

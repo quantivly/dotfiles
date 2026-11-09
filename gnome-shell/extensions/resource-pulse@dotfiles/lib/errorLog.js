@@ -1,4 +1,4 @@
-// Journal lines for failures, shared by the samplers and the extension: each message at most once per
+// Journal lines for failures, shared by the service and the extension: each message at most once per
 // ERROR_LOG_REPEAT_INTERVAL_USEC for its template key (its own text unless a caller names one), with the journal
 // prefix. Pure: the clock and the writer are injected, so it runs under plain gjs.
 import {ERROR_LOG_REPEAT_INTERVAL_USEC, LOG_PREFIX} from './constants.js';

@@ -42,7 +42,7 @@ const FULL_SNAPSHOT = {
     cpuBusyPercent: 23, memory: {usedBytes: 16.4 * GIB, totalBytes: 30.3 * GIB},
 };
 
-// A whole Snapshot as the sampler publishes it (sampler.js), for the desktop card's rows.
+// A whole Snapshot as the sampler publishes it (service/sampler.js), for the desktop card's rows.
 const CARD_SNAPSHOT = {
     takenAtUsec: 1_000_000,
     takenAtClockLabel: '14:02',
@@ -54,7 +54,7 @@ const CARD_SNAPSHOT = {
     apps: {topCpu: {name: 'Chromium', cpuPercent: 31}, topMemory: {name: 'herdr agents', memoryBytes: 15.7 * GIB}},
     isComplete: true,
 };
-// The snapshot a failed tick publishes (sampler.js _publishNoDataSnapshot): every number null.
+// The snapshot a failed tick publishes (service/sampler.js _publishNoDataSnapshot): every number null.
 const FAILED_TICK_SNAPSHOT = {
     takenAtUsec: 3_000_000,
     takenAtClockLabel: '14:04',
