@@ -55,7 +55,9 @@ ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
 # Built at runtime so no token-shaped literal sits in the repo for a scanner to flag.
 FAKE_TOK="sk-ant-""oat01-FIXTUREtokenNOTREAL0123456789abcdef"
-MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo |claude-settings-render.sh --apply'
+MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo |claude-settings-render.sh --apply|herdr-draft skill$'
+# What the herdr-draft stub's `skill` prints with no draft-version file: the spawn skill a level host has.
+SPAWN_SKILL_TEXT="spawn skill for main"
 
 # ---------------------------------------------------------------------------------------------
 # Stubs. Each logs "<tool> <args>" to $HOME/stub/calls.
@@ -166,9 +168,31 @@ case "$1 ${2:-}" in
         echo "$PATH" >"$S/herdr-install-path"
         command -v go >/dev/null || exit 1
         [[ -e "$S/draft-install-fails" ]] && exit 1
-        printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s","requested_ref":"%s"}}]}}\n' "$5" "$5" >"$S/draft.json" ;;
+        printf '{"result":{"plugins":[{"plugin_root":"%s","source":{"kind":"github","resolved_commit":"%s","requested_ref":"%s"}}]}}\n' \
+            "$S/draft-root" "$5" "$5" >"$S/draft.json" ;;
 esac
 STUB
+    # herdr-draft, at the plugin root the herdr stub's `plugin list` reports. `skill` prints the spawn
+    # skill; `skill --check <file>` exits 0 when the file holds exactly that, 1 otherwise (a missing
+    # file included), 2 with a reason on stderr on its cannot-answer flag, and draft-skill-check-rc's
+    # status when that file exists.
+    mkdir -p "$1/stub/draft-root/bin"
+    cat >"$1/stub/draft-root/bin/herdr-draft" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "herdr-draft $*" >>"$S/calls"
+spawn_skill() { printf 'spawn skill for %s\n' "$(cat "$S/draft-version" 2>/dev/null || echo main)"; }
+case "$1 ${2:-}" in
+    "skill ") spawn_skill ;;
+    "skill --check")
+        if [[ -e "$S/draft-skill-cannot-answer" ]]; then
+            echo "herdr-draft: cannot read the plugin manifest" >&2
+            exit 2
+        fi
+        [[ -e "$S/draft-skill-check-rc" ]] && exit "$(cat "$S/draft-skill-check-rc")"
+        [[ -f "$3" ]] && cmp -s <(spawn_skill) "$3" ;;
+esac
+STUB
+    chmod +x "$1/stub/draft-root/bin/herdr-draft"
     cat >"$b/mise" <<'STUB'
 #!/usr/bin/env bash
 echo "mise $*" >>"$HOME/stub/calls"
@@ -286,7 +310,9 @@ new_case() {
     # herdr's "release": the stub with its version pinned, served over file://
     mkdir -p "$C/releases/v$HV"; sed "2i V=$HV" "$H/.local/bin/herdr" >"$C/releases/v$HV/herdr-linux-$ARCH"
     HSHA="$(sha256sum "$C/releases/v$HV/herdr-linux-$ARCH" | cut -c1-64)"
-    mkdir -p "$H/.claude/skills/herdr"; echo old >"$H/.claude/skills/herdr/SKILL.md"
+    # Both generated skills current: what this host's herdr and herdr-draft stubs print.
+    mkdir -p "$H/.claude/skills/herdr" "$H/.claude/skills/spawn"
+    echo "skill for $HV" >"$H/.claude/skills/herdr/SKILL.md"; echo "$SPAWN_SKILL_TEXT" >"$H/.claude/skills/spawn/SKILL.md"
     : >"$H/stub/calls"
 
     # dotfiles: origin with an install script, two declared links, the linear-key plugin, the
@@ -339,8 +365,8 @@ new_case() {
     # herdr-draft at the target commit
     bare ZviBaratz/herdr-draft
     DRAFT="$(git --git-dir="$GH/ZviBaratz/herdr-draft.git" rev-parse HEAD)"
-    printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s","requested_ref":"%s"}}]}}\n' \
-        "$DRAFT" "$DRAFT" >"$H/stub/draft.json"
+    printf '{"result":{"plugins":[{"plugin_root":"%s","source":{"kind":"github","resolved_commit":"%s","requested_ref":"%s"}}]}}\n' \
+        "$H/stub/draft-root" "$DRAFT" "$DRAFT" >"$H/stub/draft.json"
 
     # marketplaces, fresh, listing what is wanted; plugins installed and enabled
     local m
@@ -560,7 +586,9 @@ echo "== --check writes nothing"
 new_case
 push_origin b.txt two
 echo 2.1.272 >"$H/stub/claude-version"; echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
-printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s"}}]}}\n' "$(printf 'a%.0s' {1..40})" >"$H/stub/draft.json"
+printf '{"result":{"plugins":[{"plugin_root":"%s","source":{"kind":"github","resolved_commit":"%s"}}]}}\n' \
+    "$H/stub/draft-root" "$(printf 'a%.0s' {1..40})" >"$H/stub/draft.json"
+echo stale >"$H/.claude/skills/spawn/SKILL.md"   # the herdr skill is stale already: the binary is 0.9.0
 jq '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z" | del(.dotfiles)' "$H/.claude/plugins/known_marketplaces.json" >"$C/k" &&
     mv "$C/k" "$H/.claude/plugins/known_marketplaces.json"
 jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true | .enabledPlugins["linear@claude-plugins-official"] = true' \
@@ -815,6 +843,8 @@ has   "herdr server down: ⚠, not ✓" "$OUT" "did not answer"
 echo "== herdr itself"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
+# The skill a 0.9.0 host has: it is regenerated only if the skill row runs after the swap.
+echo "skill for 0.9.0" >"$H/.claude/skills/herdr/SKILL.md"
 run_level --check
 has   "older herdr: ✗ with both versions and what is busy" "$OUT" "0.9.0, laptop has $HV (server 0.9.0, 0 pane(s), 0 busy; --apply upgrades only when none is)"
 hasnt "older herdr: --check restarts nothing" "$(calls)" "systemctl --user restart"
@@ -861,10 +891,6 @@ mv "$H/.local/bin/herdr" "$C/herdr-bin"; ln -s "$C/herdr-bin" "$H/.local/bin/her
 run_level --apply
 has   "herdr is a symlink: ⚠, never replaced" "$OUT" "is a symlink; host-sync does not replace a link"
 check "herdr is a symlink: still a symlink" "$([[ -L "$H/.local/bin/herdr" ]] && echo link || echo file)" link
-new_case
-echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; touch "$H/stub/skill-empty"
-run_level --apply
-check "an empty --skill output never replaces the agent skill" "$(cat "$H/.claude/skills/herdr/SKILL.md")" old
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
 : >"$H/.local/state/host-sync/lock"; chmod 555 "$H/.local/state/host-sync"   # the backup copy cannot be written
@@ -1118,6 +1144,104 @@ hasnt "links: with no marker the overlay's links are not judged: no dotfiles-loc
 check "links: with no marker the overlay's links are not judged: no ./install of the overlay" "$(ran_count local-install-ran)" 0
 has   "links: with no marker the overlay's links are not judged: the public links row still prints" "$OUT" \
     "${LINKS_OK}dotfiles: 2 declared links in place"
+
+echo "== generated skills (herdr, spawn)"
+# Each is what this host's own binary prints (shared-configuration design, D6), so --apply
+# regenerates it in place, and a binary that cannot say what it should be is a person's step.
+SKILL_OK="$(printf '✓ %-14s ' skill)"; SKILL_DRIFT="$(printf '✗ %-14s ' skill)"
+SKILL_OPER="$(printf '⚠ %-14s ' skill)"; SKILL_INFO="$(printf '· %-14s ' skill)"
+HERDR_SKILL_REL=".claude/skills/herdr/SKILL.md"; SPAWN_SKILL_REL=".claude/skills/spawn/SKILL.md"
+# herdr-draft's regenerating calls: a bare `skill`, never its `skill --check`.
+regenerations() { grep -cx 'herdr-draft skill' "$H/stub/calls"; }
+new_case
+run_level --check
+has   "skill: herdr skill current → ✓" "$OUT" "${SKILL_OK}herdr skill current (herdr $HV)"
+has   "skill: spawn current → ✓" "$OUT" "${SKILL_OK}spawn skill current"
+new_case
+echo stale >"$H/$HERDR_SKILL_REL"
+run_level --check
+has   "skill: a herdr skill that differs is drift; --apply regenerates it: --check's ✗" "$OUT" \
+    "${SKILL_DRIFT}herdr skill differs from \`herdr --skill\` (herdr $HV)"
+check "skill: a herdr skill that differs is drift; --apply regenerates it: --check leaves the file" \
+    "$(cat "$H/$HERDR_SKILL_REL")" stale
+run_level --apply
+check "skill: a herdr skill that differs is drift; --apply regenerates it" "$(cat "$H/$HERDR_SKILL_REL")" "skill for $HV"
+has   "skill: a herdr skill that differs is drift; --apply regenerates it: the ✓ row" "$OUT" \
+    "${SKILL_OK}herdr skill regenerated (herdr $HV)"
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"
+run_level --apply
+check "skill: a second --apply after a herdr skill regeneration changes no file and calls nothing mutating" \
+    "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)|$(mutations)" "|0"
+new_case
+rm -rf "$H/.claude/skills/herdr"
+run_level --apply
+check "skill: a herdr skill is created where none exists" "$(cat "$H/$HERDR_SKILL_REL" 2>&1)" "skill for $HV"
+new_case
+echo old >"$H/$HERDR_SKILL_REL"; touch "$H/stub/skill-empty"
+run_level --apply
+check "skill: an empty herdr --skill never replaces the file" "$(cat "$H/$HERDR_SKILL_REL")" old
+has   "skill: an empty herdr --skill is a person's step" "$OUT" "${SKILL_OPER}\`herdr --skill\` printed nothing (herdr $HV)"
+new_case
+rm "$H/$HERDR_SKILL_REL"; mkdir "$H/$HERDR_SKILL_REL"
+run_level --apply
+has   "skill: a SKILL.md that is a directory is a person's step" "$OUT" \
+    "${SKILL_OPER}~/$HERDR_SKILL_REL is a directory; move it aside, and the next run regenerates it"
+check "skill: a SKILL.md that is a directory: --apply writes nothing into it" "$(ls -A "$H/$HERDR_SKILL_REL")" ""
+new_case
+echo v2 >"$H/stub/draft-version"   # herdr-draft moved on; the file is the previous build's
+run_level --check
+has   "skill: a stale spawn skill is drift; --apply regenerates it with herdr-draft skill: --check's ✗" "$OUT" \
+    "${SKILL_DRIFT}spawn skill differs from \`herdr-draft skill\`"
+check "skill: a stale spawn skill: --check leaves the file and never runs herdr-draft skill" \
+    "$(cat "$H/$SPAWN_SKILL_REL")|$(regenerations)" "$SPAWN_SKILL_TEXT|0"
+run_level --apply
+check "skill: a stale spawn skill is drift; --apply regenerates it with herdr-draft skill" \
+    "$(regenerations)|$(cat "$H/$SPAWN_SKILL_REL")" "1|spawn skill for v2"
+has   "skill: a stale spawn skill: ✓ once herdr-draft re-checks it" "$OUT" "${SKILL_OK}spawn skill regenerated with herdr-draft skill"
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"
+run_level --apply
+check "skill: a second --apply after a spawn skill regeneration changes no file and calls nothing mutating" \
+    "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)|$(mutations)" "|0"
+new_case
+rm -rf "$H/.claude/skills/spawn"
+run_level --check
+has   "skill: a missing spawn skill is drift" "$OUT" "${SKILL_DRIFT}no spawn skill at ~/$SPAWN_SKILL_REL"
+run_level --apply
+check "skill: spawn is created where none exists" "$(cat "$H/$SPAWN_SKILL_REL" 2>&1)" "$SPAWN_SKILL_TEXT"
+new_case
+touch "$H/stub/draft-skill-cannot-answer"; echo stale >"$H/$SPAWN_SKILL_REL"
+run_level --apply
+has   "skill: herdr-draft that cannot answer → ⚠" "$OUT" \
+    "${SKILL_OPER}herdr-draft skill --check could not answer: herdr-draft: cannot read the plugin manifest"
+check "skill: herdr-draft that cannot answer: a person's step, nothing regenerated" \
+    "$RC|$(regenerations)|$(cat "$H/$SPAWN_SKILL_REL")" "0|0|stale"
+new_case
+echo 3 >"$H/stub/draft-skill-check-rc"
+run_level --check
+has   "skill: herdr-draft skill --check exiting otherwise → ⚠ could not run" "$OUT" \
+    "${SKILL_OPER}herdr-draft skill --check could not run (exit 3)"
+new_case
+echo '{"result":{"plugins":[]}}' >"$H/stub/draft.json"
+run_level --check
+has   "skill: no herdr-draft plugin → ·" "$OUT" "${SKILL_INFO}no herdr-draft plugin on this host's herdr; no spawn skill to generate"
+check "skill: no herdr-draft plugin → · and no spawn row" "$(area_rows skill)" 2
+new_case
+chmod -x "$H/stub/draft-root/bin/herdr-draft"
+run_level --check
+has   "skill: a herdr-draft plugin with no executable binary → ·" "$OUT" \
+    "${SKILL_INFO}no executable herdr-draft at ~/stub/draft-root/bin/herdr-draft; no spawn skill to generate"
+new_case
+printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s"}}]}}\n' "$DRAFT" >"$H/stub/draft.json"
+run_level --check
+has   "skill: a plugin list that names no plugin_root → ·, never judged" "$OUT" \
+    "${SKILL_INFO}herdr reports no absolute plugin_root for herdr-draft; spawn skill not judged"
+new_case
+touch "$H/stub/draft-down"
+run_level --check
+has   "skill: herdr not answering plugin list → ·, never ✓" "$OUT" \
+    "${SKILL_INFO}spawn skill not judged: herdr did not answer \`plugin list\`"
 
 echo "== plugins"
 new_case
@@ -2213,7 +2337,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=509
+EXPECTED_ROWS=535
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
