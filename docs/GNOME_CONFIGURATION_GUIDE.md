@@ -68,23 +68,80 @@ everyone and **off until you opt in** — see [Resource Pulse](#resource-pulse).
 ## Resource Pulse
 
 A top-bar CPU and memory indicator, and a desktop card that adds swap, pressure and the heaviest apps
-to answer "why is this machine slow right now". It lives in `gnome-shell/extensions/resource-pulse@dotfiles/` (GNOME Shell 50 only) and
-runs inside the shell without ever blocking it: no subprocess, no synchronous file read, no network.
-It samples every 2 s (`SAMPLE_INTERVAL_SECONDS`) and scans per-app cgroups every 10 s
-(`APP_SCAN_INTERVAL_SECONDS`, every 5th tick), skipping leaves whose unit type never hosts an app
-(`.mount .socket .swap .automount .path .timer .device`). The scan reads at low priority, below the
-shell's redraws, 16 leaves at a time. After it starts, resumes or comes back from the overview, it scans
-once more on the second tick, so "heaviest" has its CPU half within about 4 s rather than 12. The top
-bar keeps 30 samples, the card 150.
-The first sample is *no data*, never 0%, and stale numbers are never drawn as live: a sample whose
-reads hang turns both surfaces to *no data* about 8 s in (`SAMPLE_STALL_TICKS`), and its late result is
-dropped.
+to answer "why is this machine slow right now". It lives in
+`gnome-shell/extensions/resource-pulse@dotfiles/` (GNOME Shell 50 only). The design, and why the
+sampling left the shell: [the service design](superpowers/specs/2026-11-08-resource-pulse-service-design.md).
 
-GNOME 50 turns the extension off on every lock **and on every idle screen blank**: a blank enters the
-lock screen's session mode even when locking is disabled, and an extension without that mode is
-disabled there. So nothing samples while the screen is blanked or locked, and both histories (the top
-bar's 60 s, the card's 5 minutes) start over afterwards. That is by decision: the histories are not
-kept across a blank or a lock.
+### How it runs
+
+It has two parts:
+
+- **The sampler service**, `resource-pulse.service`: `gjs -m service/main.js`, a systemd user unit
+  outside the shell. It does all the sampling, keeps both histories, ranks the apps and serves the
+  result as JSON on the session bus (`io.github.quantivly.dotfiles.ResourcePulse1`). Its reads are
+  synchronous, in its own process, so a slow read delays only its own next sample. It runs in
+  `background.slice` at `Nice=10`, capped at `CPUQuota=10%` and `MemoryMax=128M`; systemd restarts it
+  5 s after a crash, at most 5 times in 5 minutes.
+- **The extension**, which only draws: the top-bar graphs, the desktop card and the dropdown. It
+  reads no file and starts no process, and each of its D-Bus calls is asynchronous with a 2 s timeout,
+  so the shell never waits on the service.
+
+**Started on demand, never enabled.** The unit has no `[Install]` section, so nothing can enable it.
+The extension's `enable()` asks systemd to start it (`StartUnit`, which is idempotent). A start counts
+only once the service owns its bus name, within 15 s; until then the extension retries after 5 s,
+30 s, then every 5 minutes. The extension never stops the service: opting out leaves it running until
+logout, and `systemctl --user stop resource-pulse.service` stops it at once.
+
+**Deploys.** `./install` links the unit, runs `systemctl --user daemon-reload`, and restarts the
+service only when a file under `service/` or `lib/` changed after it started
+(`scripts/resource-pulse-service-refresh.sh`, which warns on a failure and never fails the install).
+So:
+
+- a **data-side** change (`service/`, `lib/`) is live within seconds, with no logout. The extension
+  sees the service come back and reads its state again; the restart starts both histories over;
+- a **drawing** change (`extension.js`, `card.js`, `indicator.js`, `graph.js`, `pulseClient.js`) waits
+  for the next login, because the shell loads an extension's JS once per login. `lib/` is both: the
+  service runs it at once, the shell at the next login. `gnome-status` says when the desktop runs an
+  older copy. The stylesheet is re-read at every enable while the JS is not, so a stylesheet change
+  only ever adds classes;
+- every other deploy leaves the service, and its histories, alone.
+
+**Lock and blank.** GNOME 50 turns the extension off on every lock **and on every idle screen blank**
+(a blank enters the lock screen's session mode even with locking off). The service keeps sampling, and
+the next enable reads both histories back, so **the histories survive a lock or a blank**.
+
+**Cadence.** Every 2 s (`SAMPLE_INTERVAL_SECONDS`) the service reads `/proc/stat`, `meminfo`, `swaps`,
+`pressure/*`, and `mm_stat` of the zram devices `/proc/swaps` lists. The per-app cgroup scan runs:
+
+- every 20 s while a **detail watch** is held, that is while the card can be seen or the dropdown is
+  open, and every 60 s otherwise, so a reveal never starts from nothing;
+- at once when a watch starts, at most once per 2 ticks, so rapid cover and uncover cannot set off a
+  storm of scans;
+- while a watch is held, at once when CPU busy rises 15 points above its value at the last scan, or a
+  pressure meter's band rises (a burst, also at most once per 2 ticks);
+- once more on the tick after a watch or burst scan, to sharpen a CPU ranking taken over a short
+  window. No CPU ranking covers less than 1 s.
+
+It skips leaves whose unit type never hosts an app (`.mount .socket .swap .automount .path .timer
+.device`), and runs a full garbage collection after every scan. The top bar keeps 30 samples (60 s),
+the card 150 (5 minutes).
+
+**No data, never a stale number.** The first sample is *no data*, never 0%. When no sample has
+arrived for 6 s (`SAMPLE_STALL_TICKS` × 2 s), both surfaces show "no data since HH:MM" and each
+history gets one gap; they recover by themselves when samples resume. A service that restarted (its
+samples are numbered from 1 again) shows no data until its state has been read afresh, and one that
+is down shows no data while the extension retries its start.
+
+**The card** has a fixed width: names ellipsize, numbers are never cut. It counts as covered when one
+normal or dialog window on the primary monitor's active workspace fully contains it, or that monitor
+is fullscreen (ding's desktop window never counts, and partly covered counts as visible). While
+covered it repaints nothing and releases its detail watch; on reveal it repaints at once from the
+latest state and takes the watch again. `Super+D` reveals it without waiting for a sample.
+
+**The dropdown.** Clicking the top-bar graphs opens a dropdown holding a second card, live while it is
+open, and an **Open Resources** button (Resources, else System Monitor; hidden when neither is
+installed). Resting the pointer on the graphs shows a one-line summary, never while the dropdown is
+open.
 
 ### Every number, defined
 
@@ -92,23 +149,22 @@ kept across a blank or a lock.
 |---|---|---|
 | CPU busy % (total) | `1 − Δ(idle+iowait) / Δtotal` over the interval. `total` = user+nice+system+idle+iowait+irq+softirq+steal. guest/guest_nice are excluded because the kernel already counts them in user. 100% = every core. | `/proc/stat` `cpu` line |
 | P / E busy % | The same formula over the per-CPU lines of each cluster. | `/proc/stat` `cpuN` lines, cluster map below |
-| Cluster map | The hybrid PMU (`/sys/devices/cpu_core/cpus`, `/sys/devices/cpu_atom/cpus`). Fallback: group by distinct `cpu_capacity`. Fallback: one cluster, and the P/E row is hidden. | sysfs, read once at enable |
+| Cluster map | The hybrid PMU (`/sys/devices/cpu_core/cpus`, `/sys/devices/cpu_atom/cpus`). Fallback: group by distinct `cpu_capacity`. Fallback: one cluster, and the P/E row is hidden. | sysfs, read once when the service starts |
 | Memory used | `MemTotal − MemAvailable`, shown as "16.4 of 30.3 GiB". It already includes zram's RAM cost. | `/proc/meminfo` |
-| Swap | "swap 1.6 GiB (0.4 in RAM)". The lead number is zram's swap alone: Σ `Used` of the `/dev/zram*` areas in `/proc/swaps`. In RAM = Σ zram `mem_used_total` of those same devices (a zram device that is not a swap area does not count). **Swap on disk** = Σ `Used` of every other area. It is shown only when it is above 0, as a separate "+ X on disk" note that adds to the lead number, because paging to disk is a real "why slow" signal. With no zram swap in use the line is "swap X GiB on disk"; with nothing in use, "swap none"; with `/proc/swaps` unreadable, "swap no data". zram's `orig_data_size` is not used: it under-counts zram's share of swap (same-filled pages, slot use), and a formula built on it reported disk swap that did not exist. | `/proc/swaps`, `/sys/block/zram*/mm_stat` |
+| Swap | "swap 1.6 GiB (0.4 in RAM)". The lead number is zram's swap alone: Σ `Used` of the `/dev/zram*` areas in `/proc/swaps`. In RAM = Σ zram `mem_used_total` of those same devices, the only `mm_stat` files read (a zram device that is not a swap area does not count, and `/sys/block` is never listed). **Swap on disk** = Σ `Used` of every other area. It is shown only when it is above 0, as a separate "+ X on disk" note that adds to the lead number, because paging to disk is a real "why slow" signal. With no zram swap in use the line is "swap X GiB on disk"; with nothing in use, "swap none"; with `/proc/swaps` unreadable, "swap no data". zram's `orig_data_size` is not used: it under-counts zram's share of swap (same-filled pages, slot use), and a formula built on it reported disk swap that did not exist. | `/proc/swaps`, `/sys/block/zram*/mm_stat` |
 | Waiting on | PSI `some avg10` for cpu, memory and **io**. It is a 10 s average by definition, so it lags on purpose. Each is a drawn meter of three cells (not glyphs, which fell back to another font): none filled < 10%, one 10–25%, two 25–50%, all three ≥ 50%. The top band matches oomd's 50% kill limit. With no data the cells give way to a dash, so it never reads as calm. | `/proc/pressure/*` |
 | App CPU | Each leaf cgroup's Δ`cpu.stat usage_usec` / (interval × ncpu), as a % of the whole machine, so it is comparable with the total. | cgroup v2 |
-| App memory | Each leaf cgroup's memory **minus reclaimable page cache**: `memory.current − (active_file + inactive_file)`. This matches the MemAvailable semantics, so cache never counts as used. | cgroup v2 `memory.current`, `memory.stat` |
+| App memory | Each leaf cgroup's memory **minus reclaimable page cache**: `memory.current − (active_file + inactive_file)`. This matches the MemAvailable semantics, so cache never counts as used. A leaf at or under 64 MiB (`APP_MEMORY_STAT_MIN_BYTES`) ranks by `memory.current` as it is: too small to top the ranking, so its `memory.stat` is not read. | cgroup v2 `memory.current`, `memory.stat` |
 | "kernel" | A computed CPU-only entry: the root `/sys/fs/cgroup/cpu.stat` Δ minus the Σ of the scanned **parent slices'** Δ (`app.slice`, `session.slice`, `background.slice` under `user@<uid>.service`, and `system.slice`), clamped at 0. That covers kernel threads, irq, reclaim, zram compression, PID 1, the user managers and login-session scopes. It is ranked only when every parent has a delta: with none read, "root minus zero parents" would name the whole machine. It is **not a memory candidate** (the user's decision): the memory half of "heaviest" names real apps only, and unattributed memory still counts in the MEM total. | root and parent cgroups |
 | "short jobs" | A computed CPU-only entry: Σ over the scanned parents of max(0, the parent's Δ minus the Σ of its leaves' Δ). These are units that started and ended between two scans (timers, oneshots); a parent whose leaves exceed its Δ (read skew) adds 0. A leaf whose counter went backwards (a unit recreated at the same path) counts its current value; a leaf absent from the previous scan counts its full usage only when its parent was listed in that scan. | parent cgroups |
-| Heaviest | **One line**, as in the mockup: the top entry by CPU (an app, "kernel" or "short jobs"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. When the top CPU entry is below 1% of the machine the CPU half reads `idle`. The halves collapse into one (`herdr agents 31% · 15.7 GiB`) only when they are the same group, never merely the same name: `docker.service` and `docker-x.scope` stay separate. | the two rankings above |
+| Heaviest | **One line**, as in the mockup: the top entry by CPU (an app, "kernel" or "short jobs"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. Names ellipsize to fit the card's fixed width; the numbers are never cut. When the top CPU entry is below 1% of the machine the CPU half reads `idle`. The halves collapse into one (`herdr agents 31% · 15.7 GiB`) only when they are the same group, never merely the same name: `docker.service` and `docker-x.scope` stay separate. | the two rankings above |
 | Names | The launcher prefix is matched before unescaping, so `app-gnome\x2dcalculator-1234.scope` is the app `gnome-calculator`. `org.gnome.SettingsDaemon.Power.service` is `gsd-power`; any other reverse-DNS unit drops its first two segments (`org.freedesktop.IBus.session.GNOME.service` is `IBus.session.GNOME`). A snap is named through `<snap>_<app>.desktop` when that exists, else by its snap name. | cgroup names |
 
-In the in-shell sampler, which has no parent slices yet, neither "kernel" nor "short jobs" is ranked.
 
 ### Enabling it
 
-`./install` links the extension into `~/.local/share/gnome-shell/extensions/`, which does nothing by
-itself. To turn it on:
+`./install` links the extension into `~/.local/share/gnome-shell/extensions/` and the service's unit
+into `~/.config/systemd/user/`, which does nothing by itself. To turn it on:
 
 1. Put `genable_extension resource-pulse@dotfiles` in `~/.gnome-settings.local` (the template has it
    commented; `gnome-init` creates the file).
@@ -117,18 +173,38 @@ itself. To turn it on:
    when `disable-user-extensions` is true, since then nothing user-installed loads, or when
    `allow-extension-installation` is false, since GNOME 50 then skips the user extension directory
    where the extension is linked.
-3. Log out and back in once: GNOME on Wayland discovers a new extension only at login.
+3. Log out and back in once: GNOME on Wayland discovers a new extension only at login. The extension
+   then starts its service itself.
 
-To turn it off, remove the line and `gnome-extensions disable resource-pulse@dotfiles`.
+To turn it off, remove the line and `gnome-extensions disable resource-pulse@dotfiles`. The service
+runs on until logout; `systemctl --user stop resource-pulse.service` ends it at once.
 
 ### Checking that it runs
 
-`gnome-status` prints `Resource Pulse: linked=… enabled=… state=…`. The state is the shell's own
-verdict (`ACTIVE`, `ERROR`, `OUT OF DATE`), so a failure after a GNOME update is visible. When
-`enabled-extensions` asks for it but it is not `ACTIVE`, the next line names either setting above that
-keeps it from loading (the shell then does not know it at all, so `enabled=no`). Problems
-are logged to the journal under `resource-pulse:` (each distinct message at most once per 10 minutes):
-`journalctl --user -b -g resource-pulse`.
+`gnome-status` prints, for example:
+
+```
+Resource Pulse: linked=yes enabled=yes state=ACTIVE
+  service: active, protocol 1, last sample 1 s ago
+```
+
+- `enabled=` reads `enabled-extensions` itself, and says `yes (starts at next login)` while the shell
+  does not know the extension yet (after linking, before the next login).
+- `state=` is the shell's own verdict (`ACTIVE`, `ERROR`, `OUT OF DATE`), so a failure after a GNOME
+  update is visible. When `enabled-extensions` asks for it but it is not `ACTIVE`, the next line names
+  either setting above that keeps it from loading.
+- `service:` is the unit's `ActiveState`; for an active service, also the protocol and the age of its
+  last sample, asked with `GetState` through `gdbus` and bounded at 3 s ("no answer" otherwise).
+- A ⚠ line follows for each of: the service **failed**; it is **not running** while the extension is
+  enabled; it does **not answer**; it has **not sampled for more than 6 s** (the extension shows no
+  data then); it **runs older code** than the checkout (a file under `service/` or `lib/` changed after
+  it started, as when the deploy's restart failed: `systemctl --user try-restart
+  resource-pulse.service`); and **the desktop runs an older copy** (a file outside `service/` changed
+  after this login: it takes effect at the next login).
+
+The service logs to its unit's journal, `journalctl --user -u resource-pulse.service`; the extension
+logs under `resource-pulse:` in the shell's, `journalctl --user -b -g resource-pulse`. Each distinct
+message appears at most once per 10 minutes.
 
 ### Trying changes in a nested shell
 
@@ -137,7 +213,7 @@ Never restart the live shell to test a change, and never use the plain
 writes the live session's crash-guard file, takes a logind inhibitor and sets the live session's
 locked hint, registers with GDM and GeoClue, and posts your extension list to extensions.gnome.org.
 Use `scripts/resource-pulse-nested.sh`, which starts a headless nested shell that can reach none of
-that, with a copy of the checkout's extension enabled:
+that, with a copy of the checkout's extension enabled and its sampler service on the same private bus:
 
 ```bash
 scripts/resource-pulse-nested.sh start        # prints the nested shell's private bus address
@@ -152,44 +228,66 @@ other access): a private runtime dir, HOME and XDG dirs, a private session bus t
 only dconf and a fake empty system bus with a fake GDM, both on path sockets inside the run
 directory (never abstract sockets, which any local process could reach), an `env -i` allowlist (no
 tokens, no live display or bus), nested settings that never lock, blank, use the network or check
-for extension updates, and the extension-update apps masked. Unsafe mode (which `eval` and
-`screenshot` need) comes from a throwaway helper extension that exists only in that directory and
-refuses to act anywhere else, and `eval` and `screenshot` refuse a run whose supervisor and
-recorded gnome-shell are not both running in its own session. A run lives at most 20 minutes
-(`setsid timeout`). `stop` signals only processes in the run's own session, and only while that
-session is still led by the run's own `timeout`: a run that already ended is just cleaned up, since
-its session id may since belong to something else. Any isolation step that fails stops the run with
-exit 2, and a shell whose unsafe-mode helper did not load is reported within 15 s. It needs gnome-shell and a GPU, so CI does not run it; its
-hermetic rows are in the suite below.
+for extension updates, and the extension-update apps masked. The run's own copy of the sampler
+service starts on the private session bus before the shell, with the same allowlist, and the run
+refuses to go on when it does not own its name within 15 s (its log is `log/service.log`, its pid
+`service=` in `state/run.values`). The extension's `StartUnit` finds no systemd there; that is
+expected, since it draws from the service's samples whatever `StartUnit` answers. Unsafe mode (which
+`eval` and `screenshot` need) comes from a throwaway helper extension that exists only in that
+directory and refuses to act anywhere else, and `eval` and `screenshot` refuse a run whose
+supervisor and recorded gnome-shell are not both running in its own session. A run lives at most 20
+minutes (`setsid timeout`). `stop` ends the shell and the service, and signals only processes in the
+run's own session, only while that session is still led by the run's own `timeout`: a run that
+already ended is just cleaned up, since its session id may since belong to something else. Any
+isolation step that fails stops the run with exit 2, and a shell whose unsafe-mode helper did not
+load is reported within 15 s. It needs gnome-shell and a GPU, so CI does not run it; its hermetic
+rows are in the suite below.
 
 ### What it costs
 
-`scripts/resource-pulse-cost.sh` measures gnome-shell, which is where the extension's cost lands.
-Take a reading with the extension off and one with it on:
+The budgets, at idle:
+
+| What | Budget |
+|---|---|
+| gnome-shell, added by the extension | under 0.1% of one core |
+| the service, with a detail watch held | under 0.25% of one core |
+| the service, with no watch | under 0.1% of one core |
+| the service's resident memory | at most 64 MiB, flat over 24 h |
+| gnome-shell's resident memory | flat over 24 h |
+
+`scripts/resource-pulse-cost.sh` measures them. The extension's cost lands in gnome-shell, so take a
+reading with the extension off and one with it on; `--service` measures the service itself, found by
+its unit's `MainPID`. Read the service once with a detail watch held (the card visible, or the
+dropdown open) and once with none (the card covered), each over 10 idle minutes:
 
 ```bash
-scripts/resource-pulse-cost.sh --cpu-percent 60      # gnome-shell CPU over 60 s, % of one core
-scripts/resource-pulse-cost.sh --rss-kib             # resident memory
-scripts/resource-pulse-cost.sh --rss-check <kib>     # exit 1 if it grew more than 64 MiB since <kib>
+scripts/resource-pulse-cost.sh --cpu-percent 600            # gnome-shell CPU over 10 min, % of one core
+scripts/resource-pulse-cost.sh --service --cpu-percent 600  # the service's
+scripts/resource-pulse-cost.sh --service --rss-kib          # the service's resident memory: at most 65536
+scripts/resource-pulse-cost.sh --rss-kib                    # gnome-shell's resident memory
+scripts/resource-pulse-cost.sh --rss-check <kib>            # exit 1 if gnome-shell grew more than 64 MiB since <kib>
 ```
 
-It reads only `comm`, `stat` and `status` under `/proc`. Measured on the reference laptop in plain
-`gjs`, outside the shell, the sampler's work (the app scan plus the 2 s fast tick) went from 0.86% to
-about 0.42% of one core when the scan moved from every 6 s to every 10 s with the skipped unit types.
-Reading the scan's files at low priority, so that their completions wait behind redraws, then added
-10–20% to the scan's whole-process CPU (alternating runs of the two versions, 2026-11-08), which puts
-the figure near 0.5%. Under heavy load these plain-`gjs` figures roughly double, so they guide rather
-than decide. They also leave out what drawing costs inside the shell (the graphs' repaints and the
-card's relayout). Only a `resource-pulse-cost.sh` reading of gnome-shell itself, as above, includes
-it, and that reading is the budget: under 0.5% of one core added at idle. Over it, the remedy is a
-longer scan interval (`APP_SCAN_INTERVAL_SECONDS`), never a shorter history.
+It reads only `comm`, `stat` and `status` under `/proc`. Over a budget, the remedy is a longer
+interval, or pruning slices that cannot beat the current leader; never a shorter history. Before the
+service existed the sampling ran inside gnome-shell, measured in plain `gjs` at about 0.5% of one core
+on the reference laptop: that work is the service's now. In plain `gjs`, a full garbage collection
+after every scan held the service's resident memory flat at about 52 MB, where natural collection let
+it pile up to about 480 MB.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (447 checks) runs the `gjs -m` unit tests of the pure modules
-against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
-exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
-hermetic: it never touches the real session.
+`scripts/test-resource-pulse.sh` (447 checks) runs the `gjs -m` unit tests of `lib/`, of the
+service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
+version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
+runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the
+Shell glue, enforces the no-blocking and `metadata.json` rules, and covers `genable_extension`,
+`gnome-status`, the unit and its install step, the cost script and the nested harness against stubs.
+It never touches the live session, but it is **not fully hermetic**: the `service/main.js` rows sample
+this machine's real `/proc` and `/sys`. It needs `gjs`, `zsh`, `dbus-run-session` (package
+`dbus-daemon`), `gdbus` (`libglib2.0-bin`), and for the card-width row Pango's typelibs
+(`gir1.2-pango-1.0`) and the card's font, Ubuntu Sans (`fonts-ubuntu`). A missing tool is exit 2,
+never a pass.
 
 ## Keyboard-driven workflow (no extensions needed)
 

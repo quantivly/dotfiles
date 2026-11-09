@@ -10,21 +10,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Resource Pulse, an opt-in GNOME Shell 50 extension: a top-bar CPU/memory indicator and a desktop
-  card that adds swap, pressure and the heaviest apps.** Lives in `gnome-shell/extensions/resource-pulse@dotfiles/`; `./install` links it for
+  card that adds swap, pressure and the heaviest apps, fed by a sampler service outside the shell.**
+  Lives in `gnome-shell/extensions/resource-pulse@dotfiles/`; `./install` links it for
   everyone, but nothing enables it until `~/.gnome-settings.local` says `genable_extension
   resource-pulse@dotfiles` (new helper in `scripts/apply-gnome-settings.sh`: appends to
   `enabled-extensions`, removes from `disabled-extensions`, warns on `disable-user-extensions` and on a
-  false `allow-extension-installation`, which makes GNOME 50 skip the user extension directory). It
-  samples every 2 s and scans per-app cgroups every 10 s, never blocks the shell and never draws stale
-  numbers as live. `gnome-status` gains a `Resource Pulse:` line (linked, enabled, shell State);
-  `scripts/resource-pulse-cost.sh` measures gnome-shell CPU and memory; every number is defined in
-  `docs/GNOME_CONFIGURATION_GUIDE.md`. `scripts/resource-pulse-nested.sh` (`start`, `eval`,
-  `screenshot`, `stop`) runs it in a headless nested shell that cannot reach the live session: private
-  runtime dir and buses (path sockets in a 0700 run directory, never abstract ones), a fake system bus
-  and GDM, an `env -i` allowlist, unsafe mode only from a helper that exists in the run directory, and
-  `eval`/`screenshot` only to a run whose recorded gnome-shell still runs in its own session. The plain `gnome-shell --devkit` recipe is not safe: it
-  writes the live crash-guard file and reaches logind, GDM, GeoClue and extensions.gnome.org. State
-  table: `scripts/test-resource-pulse.sh`.
+  false `allow-extension-installation`, which makes GNOME 50 skip the user extension directory).
+  - **Two parts.** The sampling runs in `resource-pulse.service` (`gjs -m service/main.js`; a systemd
+    user unit `./install` links and never enables, capped at `CPUQuota=10%` and `MemoryMax=128M`), which
+    serves JSON on the session bus (`io.github.quantivly.dotfiles.ResourcePulse1`, additive-only within
+    it). The extension only draws: no file IO, no subprocess, every D-Bus call asynchronous. It starts
+    the service on demand (`StartUnit`, retried after 5 s, 30 s, then every 5 minutes until the service
+    owns its name) and never stops it.
+  - **Cadence and no data.** It samples every 2 s and scans per-app cgroups every 20 s while the card
+    or the dropdown can be seen, every 60 s otherwise, and at once on a reveal or a CPU or pressure
+    burst. "kernel" and "short jobs" are separate CPU-only entries. After 6 s without a sample both
+    surfaces show "no data since HH:MM"; a stale number is never drawn as live.
+  - **Deploys and logins.** `./install` restarts the service only when `service/` or `lib/` changed
+    since it started, so a data-side change needs no logout and every other deploy keeps the
+    histories; a drawing change waits for the next login. The histories survive lock and blank.
+  - **UX.** Clicking the graphs opens a dropdown with the card and an Open Resources button. While a
+    window fully covers the card, it stops repainting and releases its scan watch; it repaints at once
+    on reveal.
+  - **Status and cost.** `gnome-status` gains a `Resource Pulse:` line (linked, enabled from the
+    setting, shell State) and a `service:` line (its state, protocol and the age of its last sample),
+    with a ⚠ line for a failed, stopped, silent, stalled or out-of-date service and for a desktop that
+    runs an older copy. `scripts/resource-pulse-cost.sh` measures gnome-shell, and with `--service` the
+    service; every number and budget is defined in `docs/GNOME_CONFIGURATION_GUIDE.md`.
+    `check-timer-health.sh` reports a unit with no `[Install]` as started on demand, not as an arming
+    decision.
+  - **Nested shell.** `scripts/resource-pulse-nested.sh` (`start`, `eval`, `screenshot`, `stop`) runs
+    it in a headless nested shell that cannot reach the live session: private runtime dir and buses
+    (path sockets in a 0700 run directory, never abstract ones), a fake system bus and GDM, an `env -i`
+    allowlist, unsafe mode only from a helper that exists in the run directory, and
+    `eval`/`screenshot` only to a run whose recorded gnome-shell still runs in its own session. It
+    starts the run's own copy of the service on that private bus, and `stop` ends both. The plain
+    `gnome-shell --devkit` recipe is not safe: it writes the live crash-guard file and reaches logind,
+    GDM, GeoClue and extensions.gnome.org.
+
+  State table: `scripts/test-resource-pulse.sh`.
 
 - **`scripts/claude-memory-sync.sh` syncs each Claude Code memory store with its remote, every 10
   minutes once a host arms its timer (DO-892).** The sync half of D7 in the shared-configuration
