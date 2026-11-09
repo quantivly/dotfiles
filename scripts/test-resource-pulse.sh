@@ -1374,6 +1374,8 @@ REFRESH_STUB_BIN="$WIRING_TMP/refresh-bin"
 REFRESH_NO_SYSTEMCTL_BIN="$WIRING_TMP/refresh-no-systemctl-bin"
 REFRESH_CALLS="$WIRING_TMP/refresh-systemctl-calls"
 REFRESH_EXTENSION_DIR="$WIRING_TMP/refresh-extension"
+# The fixture's own copy of systemd/resource-pulse.service, with a chosen mtime.
+REFRESH_UNIT_FILE="$WIRING_TMP/refresh-unit/resource-pulse.service"
 UNIT_STARTED_AT_EPOCH=1700000100
 BEFORE_START_EPOCH=1700000000
 AFTER_START_EPOCH=1700000200
@@ -1421,6 +1423,9 @@ reset_refresh_extension() {
   : >"$REFRESH_EXTENSION_DIR/stylesheet.css"
   touch -d "@$3" "$REFRESH_EXTENSION_DIR/extension.js" "$REFRESH_EXTENSION_DIR/stylesheet.css" \
     || fatal "touch -d @$3 failed"
+  mkdir -p "${REFRESH_UNIT_FILE%/*}" || fatal "cannot create ${REFRESH_UNIT_FILE%/*}"
+  : >"$REFRESH_UNIT_FILE"
+  touch -d "@$BEFORE_START_EPOCH" "$REFRESH_UNIT_FILE" || fatal "touch -d @$BEFORE_START_EPOCH failed"
 }
 # refresh_extension_with_change <module>: the fixture with every file older than
 # the unit's start but that one module, which is newer.
@@ -1436,7 +1441,8 @@ run_refresh() {
   refresh_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$stub_bin:$PATH" REFRESH_CALLS="$REFRESH_CALLS" \
     REFRESH_STUB_MANAGER_EXIT="$1" REFRESH_STUB_RELOAD_EXIT="$2" REFRESH_STUB_ACTIVE_STATE="$3" \
     REFRESH_STUB_STARTED_AT="$4" REFRESH_STUB_RESTART_EXIT="$5" \
-    RESOURCE_PULSE_EXTENSION_DIR="$REFRESH_EXTENSION_DIR" "$BASH" "$REFRESH_SCRIPT" 2>&1)"
+    RESOURCE_PULSE_EXTENSION_DIR="$REFRESH_EXTENSION_DIR" RESOURCE_PULSE_UNIT_FILE="$REFRESH_UNIT_FILE" \
+    "$BASH" "$REFRESH_SCRIPT" 2>&1)"
   refresh_exit=$?
   printf 'exit=%s calls=[%s] output=[%s]' "$refresh_exit" "$(tr '\n' ';' <"$REFRESH_CALLS")" "$refresh_output"
 }
@@ -1523,6 +1529,25 @@ restart_failed_summary="$(run_refresh 0 0 active "$STARTED_AT" 1)"
 check "refresh: a failed try-restart warns, naming it, and returns 0" \
   "${restart_failed_summary%% output=*} warned=$(warnings_naming "$restart_failed_summary" try-restart)" \
   "exit=0 calls=[$CALLS_WITH_RESTART] warned=1"
+# The unit file counts too: after the daemon-reload has loaded a newer one, its
+# [Service] settings (a cap, the ExecStart) apply only from the next start. A
+# missing one, beside a newer module, is a search that failed: a partial answer
+# never decides a restart.
+unit_file_summary=""
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+touch -d "@$AFTER_START_EPOCH" "$REFRESH_UNIT_FILE" || fatal "touch -d @$AFTER_START_EPOCH failed"
+unit_file_run="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+unit_file_summary+="newer:${unit_file_run%% output=*} said=$(grep -c -F 'restarted: its unit file changed since it started' <<<"$unit_file_run")"
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+unit_file_run="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+unit_file_summary+=" older:${unit_file_run%% output=*}"
+reset_refresh_extension "$BEFORE_START_EPOCH" "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH"
+rm -f "$REFRESH_UNIT_FILE"
+unit_file_run="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+unit_file_summary+=" missing:${unit_file_run%% output=*} warned=$(warnings_naming "$unit_file_run" 'cannot search')"
+check "refresh: a unit file newer than the unit's start try-restarts it, after the reload, and says so; an older one does not; a missing one warns and restarts nothing, though a module changed" \
+  "$unit_file_summary" \
+  "newer:exit=0 calls=[$CALLS_WITH_RESTART] said=1 older:exit=0 calls=[$CALLS_UP_TO_START_TIME] missing:exit=0 calls=[$CALLS_UP_TO_START_TIME] warned=1"
 # service/main.js missing while lib/ holds a newer module: which modules the
 # service runs cannot be worked out, and a partial answer must never decide a
 # restart.
@@ -2438,7 +2463,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=472
+EXPECTED_ROWS=473
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

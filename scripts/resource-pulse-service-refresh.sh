@@ -16,7 +16,10 @@
 # scripts/resource-pulse-module-closure.sh lists them (ruling R23). A change to
 # the drawing side (extension.js, card.js, a lib/ module only the shell
 # imports, the stylesheet) never restarts it; the shell picks that up at its
-# next login. A lib/ module both sides import counts for both.
+# next login. A lib/ module both sides import counts for both. So does the unit
+# file itself (systemd/resource-pulse.service) when it is newer than the start:
+# the daemon-reload loads it, but its [Service] settings (a cap, the ExecStart)
+# apply only from the next start.
 #
 # What it does, in order, and what it says:
 #   - no systemctl, or no reachable user manager (a server, a container, CI):
@@ -26,15 +29,17 @@
 #     which systemd reports as inactive):
 #     nothing more, silently, exit 0. A stopped service stays stopped: only the
 #     extension starts it;
-#   - active, no module it runs newer than its start: silent, exit 0;
+#   - active, no module it runs and not its unit file newer than its start:
+#     silent, exit 0;
 #   - active, one newer: `systemctl --user try-restart`, one ✓ line.
 # A failure (the reload, a state or start time it cannot read, modules it
-# cannot work out or search, the restart) prints a ⚠ line on stderr naming the
-# step and what to run, restarts nothing it could not decide about (a partial
-# answer never decides a restart), and still exits 0. It never fails the install: under
-# `set -e` an exit 1 here would abort the rest of ./install for every desktop
-# user, for a service that at worst keeps running its previous code, which is
-# what reconcile-systemd-units.sh decides for its own failures too.
+# cannot work out, modules or a unit file it cannot search, the restart) prints
+# a ⚠ line on stderr naming the step and what to run, restarts nothing it could
+# not decide about (a partial answer never decides a restart), and still exits
+# 0. It never fails the install: under `set -e` an exit 1 here would abort the
+# rest of ./install for every desktop user, for a service that at worst keeps
+# running its previous code, which is what reconcile-systemd-units.sh decides
+# for its own failures too.
 #
 # Comparing times: the start time is read in whole seconds (@<epoch>), and
 # `find -newermt @<epoch>` keeps files strictly newer than that second's start.
@@ -42,9 +47,11 @@
 # in that same second restarts it once more than needed, which only costs the
 # histories once.
 #
-# Test override: RESOURCE_PULSE_EXTENSION_DIR, the extension directory (default:
-# this checkout's gnome-shell/extensions/resource-pulse@dotfiles). The state
-# table is in scripts/test-resource-pulse.sh, against a systemctl stub.
+# Test overrides: RESOURCE_PULSE_EXTENSION_DIR, the extension directory
+# (default: this checkout's gnome-shell/extensions/resource-pulse@dotfiles), and
+# RESOURCE_PULSE_UNIT_FILE, the unit file (default: this checkout's
+# systemd/resource-pulse.service). The state table is in
+# scripts/test-resource-pulse.sh, against a systemctl stub.
 #
 # Usage: scripts/resource-pulse-service-refresh.sh
 
@@ -67,6 +74,10 @@ fi
 DEFAULT_EXTENSION_DIR="$SCRIPT_DIRECTORY/../gnome-shell/extensions/resource-pulse@dotfiles"
 EXTENSION_DIR="${RESOURCE_PULSE_EXTENSION_DIR:-$DEFAULT_EXTENSION_DIR}"
 MODULE_CLOSURE_SCRIPT="$SCRIPT_DIRECTORY/resource-pulse-module-closure.sh"
+DEFAULT_UNIT_FILE="$SCRIPT_DIRECTORY/../systemd/$SERVICE_UNIT"
+UNIT_FILE="${RESOURCE_PULSE_UNIT_FILE:-$DEFAULT_UNIT_FILE}"
+# How the ✓ line names a changed unit file.
+UNIT_FILE_LABEL="its unit file"
 
 # warn <message>: one ⚠ line on stderr.
 warn() { printf '  ⚠ %s: %s\n' "$SERVICE_UNIT" "$*" >&2; }
@@ -98,20 +109,26 @@ service_module_list() {
   "$BASH" "$MODULE_CLOSURE_SCRIPT" "$EXTENSION_DIR" "$SERVICE_ENTRY_MODULE"
 }
 
-# first_module_changed_since <epoch> <module list>: prints the first of those
-# modules modified after that second began, relative to EXTENSION_DIR, or
-# nothing; fails when any of them cannot be searched, whatever it found in the
-# others. find's stderr goes straight to this script's stderr, never into the
-# list, so a warning from find can never pass for a changed file.
-first_module_changed_since() {
+# first_change_since <epoch> <module list>: prints the first of those modules,
+# then the unit file, modified after that second began: a module relative to
+# EXTENSION_DIR, the unit file as UNIT_FILE_LABEL; or nothing. Fails when any of
+# them cannot be searched, whatever it found in the others. find's stderr goes
+# straight to this script's stderr, never into the list, so a warning from find
+# can never pass for a changed file.
+first_change_since() {
   local started_at_epoch="$1" module_list="$2" module_path changed_files first_changed_path
-  local -a module_paths=()
+  local -a watched_paths=()
   while IFS= read -r module_path; do
-    module_paths+=("$EXTENSION_DIR/$module_path")
+    watched_paths+=("$EXTENSION_DIR/$module_path")
   done <<<"$module_list"
-  changed_files="$(find "${module_paths[@]}" -maxdepth 0 -type f -newermt "@$started_at_epoch")" || return 1
+  watched_paths+=("$UNIT_FILE")
+  changed_files="$(find "${watched_paths[@]}" -maxdepth 0 -type f -newermt "@$started_at_epoch")" || return 1
   first_changed_path="${changed_files%%$'\n'*}"
-  printf '%s\n' "${first_changed_path#"$EXTENSION_DIR"/}"
+  if [[ "$first_changed_path" == "$UNIT_FILE" ]]; then
+    printf '%s\n' "$UNIT_FILE_LABEL"
+  else
+    printf '%s\n' "${first_changed_path#"$EXTENSION_DIR"/}"
+  fi
 }
 
 main() {
@@ -141,8 +158,8 @@ main() {
     warn "cannot work out which modules it runs ($SERVICE_ENTRY_MODULE and what it imports, under $EXTENSION_DIR), so it was not restarted — $manual_restart_hint"
     return 0
   fi
-  if ! changed_file="$(first_module_changed_since "$started_at_epoch" "$module_list")"; then
-    warn "cannot search the modules it runs under $EXTENSION_DIR, so it was not restarted — $manual_restart_hint"
+  if ! changed_file="$(first_change_since "$started_at_epoch" "$module_list")"; then
+    warn "cannot search the modules it runs under $EXTENSION_DIR, or its unit file $UNIT_FILE, so it was not restarted — $manual_restart_hint"
     return 0
   fi
   [[ -n "$changed_file" ]] || return 0

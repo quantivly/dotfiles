@@ -93,7 +93,7 @@ only once the service owns its bus name, within 15 s; until then the extension r
 logout, and `systemctl --user stop resource-pulse.service` stops it at once.
 
 **Deploys.** `./install` links the unit, runs `systemctl --user daemon-reload`, and restarts the
-service only when a module it runs changed after it started
+service only when a module it runs, or its unit file, changed after it started
 (`scripts/resource-pulse-service-refresh.sh`, which warns on a failure and never fails the install).
 Each side runs its entry and every module that imports, directly or not, as
 `scripts/resource-pulse-module-closure.sh` lists them: the service `service/main.js`, the shell
@@ -299,7 +299,7 @@ shorter history. Before the service existed the sampling ran inside gnome-shell,
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (472 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (473 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
 version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the
