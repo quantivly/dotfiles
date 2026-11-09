@@ -166,6 +166,9 @@ about 236 files with roughly 1,000 async completions on the thread that draws th
 - **kernel** (CPU) = the root's Δ minus the Σ of the scanned parents' Δ.
   - Scanned parents: `app.slice`, `session.slice` and `background.slice` under `user@<uid>.service`, plus
     `system.slice`.
+  - **Ruling R22 (2026-11-09) replaces those four:** every `*.slice` directly under `user@<uid>.service` and every
+    top-level `*.slice` but `user.slice`, listed each scan, so VMs (`machine.slice`), rootless containers and
+    `systemd-run --user --slice=` jobs are named, not counted as kernel.
   - It covers kernel threads, irq, reclaim and zram compression, plus PID 1, the user managers and login-session
     scopes: system plumbing.
   - Its label is "kernel".

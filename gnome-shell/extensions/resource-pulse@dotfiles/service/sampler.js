@@ -55,12 +55,13 @@ const CPU_CAPACITY_FILE = 'cpu_capacity';
 const CGROUP_CPU_STAT_FILE = 'cpu.stat';
 const CGROUP_MEMORY_CURRENT_FILE = 'memory.current';
 const CGROUP_MEMORY_STAT_FILE = 'memory.stat';
+/** The top-level slice of every user's session: never a scanned parent, since its users' slices are (ruling R22). */
 const USER_SLICE = 'user.slice';
-const SYSTEM_SLICE = 'system.slice';
-const USER_SERVICE_SLICES = ['app.slice', 'session.slice', 'background.slice'];
 const SLICE_SUFFIX = '.slice';
 /** The root cgroup's path relative to the cgroup root (joinPath drops it, leaving the root itself). */
 const ROOT_CGROUP_RELATIVE_PATH = '';
+/** How a failure log line names the root cgroup, whose path relative to the cgroup root is empty. */
+const ROOT_CGROUP_LOG_NAME = 'the cgroup root';
 
 const NAME_AND_TYPE_ATTRIBUTES = 'standard::name,standard::type';
 const CLOCK_LABEL_FORMAT = '%H:%M';
@@ -433,11 +434,14 @@ class CgroupReadFailures {
     /**
      * The journal line for every failure counted.
      *
-     * @returns {string} For example 'cannot read 3 cgroups, first: system.slice/x.service: Permission denied'.
+     * @returns {string} For example 'cannot read 3 cgroups, first: system.slice/x.service: Permission denied'; a
+     *     first failure at the root cgroup itself names it ROOT_CGROUP_LOG_NAME.
      */
     describe() {
         const firstErrorText = describeError(this._firstError);
-        return `cannot read ${this.count} cgroups, first: ${this._firstRelativePath}: ${firstErrorText}`;
+        const isRootFirst = this._firstRelativePath === ROOT_CGROUP_RELATIVE_PATH;
+        const firstPathText = isRootFirst ? ROOT_CGROUP_LOG_NAME : this._firstRelativePath;
+        return `cannot read ${this.count} cgroups, first: ${firstPathText}: ${firstErrorText}`;
     }
 }
 
@@ -1144,10 +1148,11 @@ export class ServiceSampler {
      * @param {CgroupReadFailures} failures - Collects the listings that failed.
      * @returns {{parentRelativePaths: string[], parentOfLeaf: Map<string, string>, fullyListedParentPaths: Set<string>,
      *     isEveryParentFullyListed: boolean}} The scanned parents, each leaf's parent (paths relative to the cgroup
-     *     root), the parents whose every listing succeeded, and whether that is all of them with the uid known.
+     *     root), the parents whose every listing succeeded, and whether that is all of them, every parent was found,
+     *     and the uid is known.
      */
     _listCgroupTree(cgroupRootPath, failures) {
-        const parentRelativePaths = this._appScanParentPaths();
+        const {parentRelativePaths, isEveryParentFound} = this._findAppScanParents(cgroupRootPath, failures);
         const parentOfLeaf = new Map();
         const fullyListedParentPaths = new Set();
         for (const parentRelativePath of parentRelativePaths) {
@@ -1159,8 +1164,9 @@ export class ServiceSampler {
                 fullyListedParentPaths.add(parentRelativePath);
         }
         // Without the uid the user service's slices are not scanned at all, so "kernel" (the root minus the scanned
-        // parents) would take in the whole user session: it counts as a parent that could not be listed.
-        const isEveryParentFullyListed = this._uid !== null &&
+        // parents) would take in the whole user session: it counts as a parent that could not be listed. So does a
+        // parent that may exist unfound, behind a listing of the root or the user's manager that failed.
+        const isEveryParentFullyListed = this._uid !== null && isEveryParentFound &&
             fullyListedParentPaths.size === parentRelativePaths.length;
         return {parentRelativePaths, parentOfLeaf, fullyListedParentPaths, isEveryParentFullyListed};
     }
@@ -1198,21 +1204,49 @@ export class ServiceSampler {
     }
 
     /**
-     * The cgroups whose children an app scan ranks. Without a known uid only system.slice is scanned (initialize
-     * has already logged why).
+     * Finds the cgroups whose children an app scan ranks, listed afresh every scan (ruling R22), so a VM, a rootless
+     * container or a `systemd-run --user --slice=` job is named rather than counted as "kernel":
+     * - every slice directly under the user's manager, user.slice/user-<uid>.slice/user@<uid>.service: app.slice,
+     *   session.slice, background.slice and any other;
+     * - every top-level slice but user.slice: system.slice, machine.slice and any other. user.slice holds the user's
+     *   slices above, so as a parent too it would count their CPU twice.
+     * That is two directory listings per scan. A listing of a cgroup that does not exist finds no parent and is no
+     * failure (_listChildPaths); without a known uid the user's manager is not listed at all (initialize has already
+     * logged why).
      *
-     * @returns {string[]} Paths relative to the cgroup root.
+     * @param {string} cgroupRootPath - Absolute path of the cgroup v2 root.
+     * @param {CgroupReadFailures} failures - Collects the listings that failed.
+     * @returns {{parentRelativePaths: string[], isEveryParentFound: boolean}} The parents, relative to the cgroup
+     *     root, and whether both listings succeeded: when one failed, a parent may exist unfound, and its CPU would
+     *     read as kernel.
      */
-    _appScanParentPaths() {
+    _findAppScanParents(cgroupRootPath, failures) {
         const parentRelativePaths = [];
+        let isEveryParentFound = true;
+        /**
+         * Adds a listing's slices to the parents, or notes that it failed.
+         *
+         * @param {string[]|null} childRelativePaths - _listChildPaths' answer.
+         * @param {(sliceRelativePath: string) => boolean} isParent - Which of its slices are parents.
+         * @returns {void}
+         */
+        const addSlices = (childRelativePaths, isParent) => {
+            if (childRelativePaths === null) {
+                isEveryParentFound = false;
+                return;
+            }
+            const sliceRelativePaths = childRelativePaths.filter(childPath => childPath.endsWith(SLICE_SUFFIX));
+            parentRelativePaths.push(...sliceRelativePaths.filter(isParent));
+        };
         if (this._uid !== null) {
             const userSliceName = `user-${this._uid}.slice`;
-            const userServiceName = `user@${this._uid}.service`;
-            for (const sliceName of USER_SERVICE_SLICES)
-                parentRelativePaths.push(joinPath(USER_SLICE, userSliceName, userServiceName, sliceName));
+            const userManagerName = `user@${this._uid}.service`;
+            const userManagerRelativePath = joinPath(USER_SLICE, userSliceName, userManagerName);
+            addSlices(this._listChildPaths(cgroupRootPath, userManagerRelativePath, failures), () => true);
         }
-        parentRelativePaths.push(SYSTEM_SLICE);
-        return parentRelativePaths;
+        addSlices(this._listChildPaths(cgroupRootPath, ROOT_CGROUP_RELATIVE_PATH, failures),
+            sliceRelativePath => sliceRelativePath !== USER_SLICE);
+        return {parentRelativePaths, isEveryParentFound};
     }
 
     /**

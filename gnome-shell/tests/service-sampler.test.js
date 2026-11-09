@@ -38,7 +38,18 @@ const APP_SLICE = `${USER_SERVICE_PATH}/app.slice`;
 const SESSION_SLICE = `${USER_SERVICE_PATH}/session.slice`;
 const BACKGROUND_SLICE = `${USER_SERVICE_PATH}/background.slice`;
 const SYSTEM_SLICE = 'system.slice';
-const SCANNED_PARENT_PATHS = [APP_SLICE, SESSION_SLICE, BACKGROUND_SLICE, SYSTEM_SLICE];
+/** The slice every user's session lives in, and this user's: never scanned parents themselves (ruling R22). */
+const USER_SLICE = 'user.slice';
+const USER_1000_SLICE = `${USER_SLICE}/user-1000.slice`;
+/** Where systemd-machined puts VMs and containers, a top-level slice like system.slice. */
+const MACHINE_SLICE = 'machine.slice';
+/** A libvirt VM's scope, named as machined escapes it, and the name it ranks under. */
+const VM_LEAF = `${MACHINE_SLICE}/machine-qemu\\x2d1\\x2dwin11.scope`;
+const VM_NAME = 'machine-qemu-1-win11';
+/** The slice a `systemd-run --user --slice=build` job runs in, beside app.slice, and the job's own unit. */
+const BUILD_SLICE = `${USER_SERVICE_PATH}/build.slice`;
+const BUILD_JOB_LEAF = `${BUILD_SLICE}/run-u42.service`;
+const BUILD_JOB_NAME = 'run-u42';
 const EDITOR_LEAF = `${APP_SLICE}/app-org.example.Editor-1.scope`;
 const BUILDER_LEAF = `${APP_SLICE}/app-org.example.Builder-7.scope`;
 const SHELL_LEAF = `${SESSION_SLICE}/org.gnome.Shell@ubuntu.service`;
@@ -48,6 +59,7 @@ const ROOT_CGROUP_CPU_STAT_SUFFIX = '/sys/fs/cgroup/cpu.stat';
 const CGROUP_ROOT_RELATIVE_PATH = 'sys/fs/cgroup';
 /** The root cgroup's key in a counters object: its path relative to the cgroup root. */
 const ROOT_CGROUP_KEY = '';
+const SLICE_SUFFIX = '.slice';
 const BLOCK_DEVICES_SUFFIX = '/sys/block';
 /** Linux's errno for "No such device": what reading a removed kernfs (cgroup) file returns. */
 const ENODEV_ERRNO = 19;
@@ -85,6 +97,16 @@ const STEADY_DELTAS_USEC = {
     [BACKGROUND_SLICE]: 100_000,
     [SYSTEM_SLICE]: 300_000, [DAEMON_LEAF]: 100_000,
 };
+/** What the parents of STEADY_DELTAS_USEC spend in all. */
+const STEADY_PARENTS_DELTA_USEC = 1_000_000;
+/** What the root spends beyond every parent in the R22 rows: kernel, at 2.5%. */
+const KERNEL_ONLY_DELTA_USEC = 100_000;
+/** What the VM under machine.slice spends between the scans: 40% of the machine. */
+const VM_DELTA_USEC = 1_600_000;
+/** What the job under build.slice spends between the scans: 30% of the machine. */
+const BUILD_JOB_DELTA_USEC = 1_200_000;
+/** What user.slice and user-1000.slice spend between the scans: the user's slices' 700,000 µs and a login's 50,000. */
+const USER_SLICE_DELTA_USEC = 750_000;
 /** A new app leaf's whole usage, and what its parent spends with it: Editor 300,000, Builder this, short 100,000. */
 const BUILDER_USAGE_USEC = 1_500_000;
 const APP_SLICE_DELTA_WITH_BUILDER_USEC = 1_900_000;
@@ -344,7 +366,7 @@ function makeFakeTreeWithSampleFiles() {
 
 /**
  * Writes cgroup counters into an in-memory tree: a cpu.stat for each cgroup, and a memory.current for each one that
- * is neither the root nor a scanned parent (a leaf).
+ * is neither the root nor a slice (a leaf).
  *
  * @param {object} tree - makeFakeFileTree's tree.
  * @param {Object<string, number>} usageUsecByCgroup - usage_usec by cgroup path relative to the cgroup root.
@@ -354,7 +376,7 @@ function writeCgroupCounters(tree, usageUsecByCgroup) {
     for (const [cgroupPath, usageUsec] of Object.entries(usageUsecByCgroup)) {
         const cgroupDirectory = GLib.build_filenamev([CGROUP_ROOT_RELATIVE_PATH, cgroupPath]);
         tree.writeFile(GLib.build_filenamev([cgroupDirectory, 'cpu.stat']), `usage_usec ${usageUsec}\n`);
-        const isLeaf = cgroupPath !== ROOT_CGROUP_KEY && !SCANNED_PARENT_PATHS.includes(cgroupPath);
+        const isLeaf = cgroupPath !== ROOT_CGROUP_KEY && !cgroupPath.endsWith(SLICE_SUFFIX);
         if (isLeaf)
             tree.writeFile(GLib.build_filenamev([cgroupDirectory, 'memory.current']), `${LEAF_MEMORY_BYTES}\n`);
     }
@@ -755,6 +777,76 @@ test('service sampler: a scanned parent that does not exist (systemd removes an 
         {firstScanCountersUsec: withoutCgroup(FIRST_SCAN_COUNTERS_USEC, BACKGROUND_SLICE)});
     assertEqual([topCpu, logged],
         [{groupKey: 'pseudo:kernel', name: KERNEL_LABEL, cpuPercent: 2_100_000 / 4_000_000 * 100}, []]);
+});
+
+test('service sampler: a VM\'s leaf under machine.slice (a top-level slice, like system.slice) is scanned and ranks ' +
+    'under its own name, not as kernel (ruling R22)', () => {
+    // The VM spends 1,600,000 µs (40%) and its slice nothing beyond it; the root spends 100,000 beyond every parent
+    // (kernel, 2.5%). Were machine.slice not scanned, its whole Δ would read as kernel: 1,700,000 µs, 42.5%.
+    const {topCpu, logged} = topCpuAfterTwoScans({
+        ...STEADY_DELTAS_USEC, [MACHINE_SLICE]: VM_DELTA_USEC, [VM_LEAF]: VM_DELTA_USEC,
+        [ROOT_CGROUP_KEY]: STEADY_PARENTS_DELTA_USEC + VM_DELTA_USEC + KERNEL_ONLY_DELTA_USEC,
+    }, {firstScanCountersUsec: {...FIRST_SCAN_COUNTERS_USEC, [MACHINE_SLICE]: 1_000_000, [VM_LEAF]: 900_000}});
+    assertEqual([topCpu, logged], [{groupKey: `unit:${VM_NAME}`, name: VM_NAME, cpuPercent: 40}, []]);
+});
+
+test('service sampler: a slice that a `systemd-run --user --slice=` job made under user@<uid>.service is scanned like ' +
+    'app.slice, so the job ranks under its own name, not as kernel (ruling R22)', () => {
+    // The job spends 1,200,000 µs (30%); kernel is 100,000 (2.5%). Were build.slice not scanned, kernel would be
+    // 1,300,000 µs, 32.5%.
+    const {topCpu, logged} = topCpuAfterTwoScans({
+        ...STEADY_DELTAS_USEC, [BUILD_SLICE]: BUILD_JOB_DELTA_USEC, [BUILD_JOB_LEAF]: BUILD_JOB_DELTA_USEC,
+        [ROOT_CGROUP_KEY]: STEADY_PARENTS_DELTA_USEC + BUILD_JOB_DELTA_USEC + KERNEL_ONLY_DELTA_USEC,
+    }, {firstScanCountersUsec: {...FIRST_SCAN_COUNTERS_USEC, [BUILD_SLICE]: 1_000_000, [BUILD_JOB_LEAF]: 900_000}});
+    assertEqual([topCpu, logged],
+        [{groupKey: `unit:${BUILD_JOB_NAME}`, name: BUILD_JOB_NAME, cpuPercent: 30}, []]);
+});
+
+test('service sampler: user.slice and user-<uid>.slice are never scanned parents: neither cpu.stat is read, and ' +
+    'kernel is the root beyond the slices under them, never beyond those twice (ruling R22)', () => {
+    // As on a real machine, user.slice and user-1000.slice carry the Δ of everything under them: the user slices'
+    // 700,000 µs and a login session's 50,000. Kernel is 3,000,000 − the parents' 1,000,000: 50%.
+    let scannedTree = null;
+    const {topCpu, logged} = topCpuAfterTwoScans({
+        ...STEADY_DELTAS_USEC, [USER_SLICE]: USER_SLICE_DELTA_USEC, [USER_1000_SLICE]: USER_SLICE_DELTA_USEC,
+        [ROOT_CGROUP_KEY]: 3_000_000,
+    }, {
+        firstScanCountersUsec: {...FIRST_SCAN_COUNTERS_USEC, [USER_SLICE]: 5_000_000, [USER_1000_SLICE]: 5_000_000},
+        beforeFirstScan: tree => {
+            scannedTree = tree;
+        },
+    });
+    const userSliceCpuStatReads = scannedTree.readPaths.filter(path =>
+        [USER_SLICE, USER_1000_SLICE].some(slicePath => path.endsWith(`/${slicePath}/cpu.stat`)));
+    assertEqual([topCpu, userSliceCpuStatReads, logged],
+        [{groupKey: 'pseudo:kernel', name: KERNEL_LABEL, cpuPercent: 50}, [], []]);
+});
+
+test('service sampler: a scan that cannot list where its parents are (the cgroup root, or the user\'s manager) ranks ' +
+    'neither kernel nor short jobs, and logs it: kernel never absorbs a parent it could not find (R1, ruling R22)',
+() => {
+    // A root Δ of 3,000,000 µs. With the root unlisted system.slice is not found, and kernel would read
+    // 3,000,000 − 700,000 (57.5%); with the manager unlisted the user's slices are not, and it would read 67.5%.
+    const listingError = permissionDeniedError('Error opening directory: Permission denied');
+    const scanWithUnlistable = directoryRelativePath => topCpuAfterTwoScans(
+        {...STEADY_DELTAS_USEC, [ROOT_CGROUP_KEY]: 3_000_000},
+        {beforeSecondScan: tree => tree.failWith(
+            GLib.build_filenamev([CGROUP_ROOT_RELATIVE_PATH, directoryRelativePath]), listingError)});
+    assertEqual({
+        rootUnlisted: scanWithUnlistable(ROOT_CGROUP_KEY),
+        managerUnlisted: scanWithUnlistable(USER_SERVICE_PATH),
+    }, {
+        rootUnlisted: {
+            topCpu: {groupKey: 'app:org.example.Editor', name: 'Editor', cpuPercent: 7.5},
+            logged: [`${LOG_PREFIX} cannot read 1 cgroups, first: the cgroup root: ` +
+                'Error opening directory: Permission denied'],
+        },
+        managerUnlisted: {
+            topCpu: {groupKey: 'unit:example-daemon', name: 'example-daemon', cpuPercent: 2.5},
+            logged: [`${LOG_PREFIX} cannot read 1 cgroups, first: ${USER_SERVICE_PATH}: ` +
+                'Error opening directory: Permission denied'],
+        },
+    });
 });
 
 test('service sampler: a long-lived leaf that could not be read in one scan is not counted at its whole lifetime ' +
