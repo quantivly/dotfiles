@@ -1936,6 +1936,185 @@ in_bus_summary+=" address=$([[ -e "$PREPARED_RUN/state/session.addr" ]] && print
 check "nested: the in-bus stage refuses a live environment and a missing private bus, each on its own guard" \
   "$in_bus_summary" "live-env=2/1 no-private-bus=2/1 stub-calls=0 address=none"
 
+# The in-bus stage's service step, run for real against stubs: gsettings
+# succeeds; gjs stands in for the service (it records its arguments, the names
+# in its environment and the bus it was given, then waits, or exits at once);
+# busctl says the name is owned once the stand-in has started; gnome-shell
+# records whether the service was recorded before it, then exits. The stage runs
+# in its isolated environment with the run's private bus address (a socket
+# nobody listens on), inside `setsid timeout`, from a caller whose own
+# environment carries a display, the live bus and a token.
+NESTED_SERVICE_STUB_BIN="$WIRING_TMP/nested-service-bin"
+NESTED_SERVICE_CALLS="$WIRING_TMP/nested-service-calls"
+NESTED_SERVICE_ENV_NAMES="$WIRING_TMP/nested-service-env-names"
+NESTED_SERVICE_BUS_SEEN="$WIRING_TMP/nested-service-bus-seen"
+NESTED_SERVICE_STARTED="$WIRING_TMP/nested-service-started"
+NESTED_SERVICE_RUN_LIMIT_SECONDS=30
+NESTED_SERVICE_STAND_IN_TEXT='stand-in service started'
+# Pinned here, not read from the script: the run's own copy of the service.
+NESTED_SERVICE_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/main.js"
+# nested_constant <name>: one of the script's readonly numbers, read by sourcing it.
+nested_constant() {
+  local constant_value
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  constant_value="$(bash -c 'source "$1" || exit 99; printf "%s" "${!2}"' nested-constant "$NESTED_SCRIPT" "$1")"
+  [[ "$constant_value" =~ ^[0-9]+$ ]] || fatal "cannot read $1 from $NESTED_SCRIPT"
+  printf '%s' "$constant_value"
+}
+NESTED_SERVICE_START_TIMEOUT_SECONDS="$(nested_constant SERVICE_START_TIMEOUT_SECONDS)" || exit 2
+NESTED_STOP_GRACE_SECONDS="$(nested_constant STOP_GRACE_SECONDS)" || exit 2
+# shellcheck disable=SC2016  # The stubs' own source: their variables expand when they run.
+install_stub "$NESTED_SERVICE_STUB_BIN" gsettings '#!/usr/bin/env bash
+printf "gsettings %s\n" "$*" >>"$NESTED_SERVICE_CALLS"'
+# shellcheck disable=SC2016
+install_stub "$NESTED_SERVICE_STUB_BIN" gjs '#!/usr/bin/env bash
+# Stands in for the sampler service: records how it was started, then waits to be signalled (or exits at once).
+printf "gjs %s\n" "$*" >>"$NESTED_SERVICE_CALLS"
+compgen -e >"$NESTED_SERVICE_ENV_NAMES"
+printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS" >"$NESTED_SERVICE_BUS_SEEN"
+printf "%s\n" "$NESTED_SERVICE_STAND_IN_TEXT"
+[[ "$NESTED_SERVICE_MODE" == exits ]] && exit 1
+: >"$NESTED_SERVICE_STARTED"
+exec sleep 60'
+# shellcheck disable=SC2016
+install_stub "$NESTED_SERVICE_STUB_BIN" busctl '#!/usr/bin/env bash
+printf "busctl %s\n" "$*" >>"$NESTED_SERVICE_CALLS"
+if [[ -e "$NESTED_SERVICE_STARTED" ]]; then echo "b true"; else echo "b false"; fi'
+# shellcheck disable=SC2016
+install_stub "$NESTED_SERVICE_STUB_BIN" gnome-shell '#!/usr/bin/env bash
+printf "gnome-shell %s\n" "$*" >>"$NESTED_SERVICE_CALLS"
+printf "service-recorded-before-the-shell=%s\n" "$(grep -c "^service=" "$RESOURCE_PULSE_NESTED_DIR/state/run.values")" \
+  >>"$NESTED_SERVICE_CALLS"'
+# make_service_run <suffix>: a run directory laid out as `start` lays it out, with
+# the nested dconf already written (the gsettings stub writes nothing).
+make_service_run() {
+  local run_dir="$WIRING_TMP/service-runs/rpn.$1"
+  if ! mkdir -p "$run_dir" || ! chmod 700 "$run_dir"; then
+    fatal "cannot create $run_dir"
+  fi
+  nested_call prepare_run_directory "$run_dir" "$1" || fatal "cannot prepare $run_dir"
+  if ! mkdir -p "$run_dir/config/dconf" || ! printf 'nested settings\n' >"$run_dir/config/dconf/user"; then
+    fatal "cannot write $run_dir's nested dconf"
+  fi
+  printf '%s' "$run_dir"
+}
+# run_in_bus_stage_with_service <run dir> <stand-in mode: waits | exits>; leaves
+# NESTED_SERVICE_EXIT and NESTED_SERVICE_ELAPSED_SECONDS.
+run_in_bus_stage_with_service() {
+  local run_dir="$1" started_seconds=$SECONDS
+  rm -f "$NESTED_SERVICE_STARTED"
+  : >"$NESTED_SERVICE_CALLS"; : >"$NESTED_SERVICE_ENV_NAMES"; : >"$NESTED_SERVICE_BUS_SEEN"
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 GH_TOKEN=poison-not-a-token DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+    setsid --wait timeout "$NESTED_SERVICE_RUN_LIMIT_SECONDS" \
+    bash -c 'source "$1" || exit 99; shift; "$@"' nested-call "$NESTED_SCRIPT" run_isolated "$run_dir" \
+    env GSETTINGS_BACKEND=memory DBUS_SESSION_BUS_ADDRESS="unix:path=$run_dir/bus/session.sock" \
+    PATH="$NESTED_SERVICE_STUB_BIN:/usr/bin:/bin" NESTED_SERVICE_CALLS="$NESTED_SERVICE_CALLS" \
+    NESTED_SERVICE_ENV_NAMES="$NESTED_SERVICE_ENV_NAMES" NESTED_SERVICE_BUS_SEEN="$NESTED_SERVICE_BUS_SEEN" \
+    NESTED_SERVICE_STARTED="$NESTED_SERVICE_STARTED" NESTED_SERVICE_STAND_IN_TEXT="$NESTED_SERVICE_STAND_IN_TEXT" \
+    NESTED_SERVICE_MODE="$2" bash "$NESTED_SCRIPT" __inside-session-bus "$run_dir" >/dev/null 2>&1
+  NESTED_SERVICE_EXIT=$?
+  NESTED_SERVICE_ELAPSED_SECONDS=$((SECONDS - started_seconds))
+}
+# end_recorded_stand_in <run dir>: the stand-in waits after the stage ends; end it,
+# only while it is still the process the run recorded.
+end_recorded_stand_in() {
+  local service_pid service_starttime
+  service_pid="$(grep '^service=' "$1/state/run.values" 2>/dev/null | cut -d= -f2)"
+  service_starttime="$(grep '^service-starttime=' "$1/state/run.values" 2>/dev/null | cut -d= -f2)"
+  [[ -n "$service_pid" ]] && kill_sacrifice "$service_pid" sleep "$service_starttime"
+  return 0
+}
+
+SERVICE_RUN="$(make_service_run Service1)"
+run_in_bus_stage_with_service "$SERVICE_RUN" waits
+SERVICE_RUN_PRIVATE_BUS="unix:path=$SERVICE_RUN/bus/session.sock"
+# What the service may see: the allowlist, the private bus, and what this row
+# itself passes the stubs (PWD, SHLVL and _ are bash's own). Byte order for both
+# sort and comm: uutils comm compares bytes whatever the locale's collation.
+ALLOWED_SERVICE_ENV_NAMES="$( { nested_call nested_environment_assignments "$SERVICE_RUN" | cut -d= -f1
+  printf '%s\n' DBUS_SESSION_BUS_ADDRESS GSETTINGS_BACKEND NESTED_SERVICE_CALLS NESTED_SERVICE_ENV_NAMES \
+    NESTED_SERVICE_BUS_SEEN NESTED_SERVICE_STARTED NESTED_SERVICE_STAND_IN_TEXT NESTED_SERVICE_MODE PWD SHLVL _
+} | LC_ALL=C sort -u)"
+unexpected_service_env_names="$(LC_ALL=C sort -u "$NESTED_SERVICE_ENV_NAMES" \
+  | LC_ALL=C comm -23 - <(printf '%s\n' "$ALLOWED_SERVICE_ENV_NAMES") | tr '\n' ' ')"
+# An empty record would have no unexpected name either: the whole allowlist must be there.
+allowlist_names_seen="$(LC_ALL=C sort -u "$NESTED_SERVICE_ENV_NAMES" \
+  | LC_ALL=C comm -12 - <(nested_call nested_environment_assignments "$SERVICE_RUN" | cut -d= -f1 | LC_ALL=C sort -u) \
+  | wc -l)"
+service_start_summary="exit=$NESTED_SERVICE_EXIT"
+service_start_summary+=" gjs=[$(grep '^gjs ' "$NESTED_SERVICE_CALLS")]"
+service_start_summary+=" bus=$([[ "$(<"$NESTED_SERVICE_BUS_SEEN")" == "$SERVICE_RUN_PRIVATE_BUS" ]] && printf private || printf other)"
+service_start_summary+=" allowlist-seen=$allowlist_names_seen unexpected=[$unexpected_service_env_names]"
+service_start_summary+=" recorded=$(grep -c -E '^service(-starttime)?=[0-9]+$' "$SERVICE_RUN/state/run.values")"
+service_start_summary+=" $(grep '^service-recorded-before-the-shell=' "$NESTED_SERVICE_CALLS")"
+service_start_summary+=" asked-the-private-bus=$(grep -c -x -F "busctl --address=$SERVICE_RUN_PRIVATE_BUS call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s $RESOURCE_PULSE_BUS_NAME" "$NESTED_SERVICE_CALLS" | sed 's/^[1-9][0-9]*$/yes/')"
+service_start_summary+=" logged=$(grep -c -x -F "$NESTED_SERVICE_STAND_IN_TEXT" "$SERVICE_RUN/log/service.log" 2>/dev/null)"
+end_recorded_stand_in "$SERVICE_RUN"
+check "nested: the in-bus stage starts the run's copy of the service on the private bus, with only the allowlist, before the shell" \
+  "$service_start_summary" \
+  "exit=0 gjs=[gjs -m $SERVICE_RUN/$NESTED_SERVICE_MAIN_RELATIVE_PATH] bus=private allowlist-seen=22 unexpected=[] recorded=2 service-recorded-before-the-shell=1 asked-the-private-bus=yes logged=1"
+
+EXITING_SERVICE_RUN="$(make_service_run Service2)"
+run_in_bus_stage_with_service "$EXITING_SERVICE_RUN" exits
+exiting_service_summary="exit=$NESTED_SERVICE_EXIT"
+exiting_service_summary+=" refused=$(grep -c -F 'the sampler service did not take' "$EXITING_SERVICE_RUN/state/refused" 2>/dev/null)"
+exiting_service_summary+=" shell-started=$(grep -c '^gnome-shell ' "$NESTED_SERVICE_CALLS")"
+exiting_service_summary+=" address=$([[ -e "$EXITING_SERVICE_RUN/state/session.addr" ]] && printf recorded || printf none)"
+exiting_service_summary+=" at-once=$( (( NESTED_SERVICE_ELAPSED_SECONDS < NESTED_SERVICE_START_TIMEOUT_SECONDS )) && printf yes || printf 'no-%ss' "$NESTED_SERVICE_ELAPSED_SECONDS")"
+check "nested: a service that exits before owning its name refuses the run at once, and the shell never starts" \
+  "$exiting_service_summary" "exit=2 refused=1 shell-started=0 address=none at-once=yes"
+
+# `stop` ends the recorded service in the run's session at once, and never one
+# outside it. (1) A session led by the run's timeout, whose child bash runs a
+# `sleep` recorded as the service: without its own SIGTERM it would linger the
+# whole STOP_GRACE_SECONDS. (2) A session led by the run's timeout (also
+# recorded as its gnome-shell, so it ends at once), whose recorded service is a
+# process of ANOTHER session: that one must be left running.
+SERVICE_SLEEP_PID_FILE="$SACRIFICE_DIR/service-sleep.pid"
+# shellcheck disable=SC2016  # Expanded by the sacrificial session's own bash.
+service_session_id="$(start_sacrificial_session timeout 60 bash -c 'sleep 60 & printf "%s\n" "$!" >"$1"; wait' \
+  sacrificial-service "$SERVICE_SLEEP_PID_FILE")"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -s "$SERVICE_SLEEP_PID_FILE" && "$(cat "/proc/$service_session_id/comm" 2>/dev/null)" == timeout ]] && break
+  sleep 0.1
+done
+service_sleep_pid="$(cat "$SERVICE_SLEEP_PID_FILE")"
+service_session_starttime="$(starttime_of "$service_session_id")"
+service_sleep_starttime="$(starttime_of "$service_sleep_pid")"
+IN_SESSION_SERVICE_RUN="$NESTED_BASE/rpn.SvcStop1"
+make_run_dir "$IN_SESSION_SERVICE_RUN" "launcher=$service_session_id" "launcher-starttime=$service_session_starttime" \
+  "session=$service_session_id" "supervisor=$service_session_id" "supervisor-starttime=$service_session_starttime" \
+  "service=$service_sleep_pid" "service-starttime=$service_sleep_starttime"
+stop_started_seconds=$SECONDS
+NESTED_RUN_DIR="$IN_SESSION_SERVICE_RUN" nested_run stop
+stop_elapsed_seconds=$((SECONDS - stop_started_seconds))
+service_stop_summary="in-session=$NESTED_EXIT/$(is_running "$service_sleep_pid" && printf left-running || printf ended)"
+service_stop_summary+="/$( (( stop_elapsed_seconds < NESTED_STOP_GRACE_SECONDS )) && printf at-once || printf 'after-%ss' "$stop_elapsed_seconds")"
+kill_sacrifice "$service_sleep_pid" sleep "$service_sleep_starttime"
+kill_sacrifice "$service_session_id" timeout "$service_session_starttime"
+outside_service_id="$(start_sacrificial_session sleep 60)"
+outside_service_starttime="$(starttime_of "$outside_service_id")"
+outside_run_session_id="$(start_sacrificial_session timeout 60 sleep 60)"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ "$(cat "/proc/$outside_run_session_id/comm" 2>/dev/null)" == timeout ]] && break
+  sleep 0.1
+done
+outside_run_session_starttime="$(starttime_of "$outside_run_session_id")"
+OUTSIDE_SERVICE_RUN="$NESTED_BASE/rpn.SvcStop2"
+make_run_dir "$OUTSIDE_SERVICE_RUN" "launcher=$outside_run_session_id" \
+  "launcher-starttime=$outside_run_session_starttime" "session=$outside_run_session_id" \
+  "supervisor=$outside_run_session_id" "supervisor-starttime=$outside_run_session_starttime" \
+  "gnome-shell=$outside_run_session_id" "gnome-shell-starttime=$outside_run_session_starttime" \
+  "service=$outside_service_id" "service-starttime=$outside_service_starttime"
+NESTED_RUN_DIR="$OUTSIDE_SERVICE_RUN" nested_run stop
+service_stop_summary+=" outside=$NESTED_EXIT/$(is_running "$outside_service_id" && printf left-running || printf ended)"
+kill_sacrifice "$outside_service_id" sleep "$outside_service_starttime"
+kill_sacrifice "$outside_run_session_id" timeout "$outside_run_session_starttime"
+check "nested: stop ends the run's recorded service in its session at once, and leaves one in another session alone" \
+  "$service_stop_summary" "in-session=0/ended/at-once outside=0/left-running"
+rm -rf "$IN_SESSION_SERVICE_RUN" "$OUTSIDE_SERVICE_RUN"
+
 printf '\nthe stub, never the real session, answered gsettings\n'
 run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
 check "the apply script called the stub gsettings to set enabled-extensions, behind the dead-bus barrier" \
@@ -1950,7 +2129,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=444
+EXPECTED_ROWS=447
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
