@@ -43,6 +43,9 @@ readonly PROC_ROOT="${PROC_ROOT:-/proc}"
 readonly SHELL_COMM="gnome-shell"
 readonly SERVICE_UNIT="resource-pulse.service"
 readonly SERVICE_FLAG="--service"
+# What is measured: gnome-shell (the default), or the sampler service.
+readonly MEASURED_GNOME_SHELL="gnome-shell"
+readonly MEASURED_SERVICE="service"
 readonly RSS_GROWTH_TOLERANCE_MIB=64
 # The design's budget for the service's resident memory (docs/GNOME_CONFIGURATION_GUIDE.md).
 readonly SERVICE_RSS_BUDGET_MIB=64
@@ -101,10 +104,10 @@ find_service_pid() {
 #######################################
 # Print the pid of what is measured: the sampler service, or gnome-shell.
 # Arguments:
-#   $1 - "service" or "gnome-shell"
+#   $1 - MEASURED_SERVICE or MEASURED_GNOME_SHELL
 #######################################
 find_measured_pid() {
-    if [[ "$1" == service ]]; then
+    if [[ "$1" == "$MEASURED_SERVICE" ]]; then
         find_service_pid
     else
         find_gnome_shell_pid
@@ -181,9 +184,9 @@ check_rss_growth() {
 }
 
 main() {
-    local measured="gnome-shell" mode measured_pid
+    local measured="$MEASURED_GNOME_SHELL" mode measured_pid
     if [[ "${1:-}" == "$SERVICE_FLAG" ]]; then
-        measured="service"
+        measured="$MEASURED_SERVICE"
         shift
     fi
     mode="${1:-}"
@@ -197,7 +200,7 @@ main() {
             read_rss_kib "$measured_pid" || exit $?
             printf '\n' ;;
         --rss-check)
-            [[ "$measured" == gnome-shell ]] || die "--rss-check is gnome-shell's growth tripwire; the service's" \
+            [[ "$measured" == "$MEASURED_GNOME_SHELL" ]] || die "--rss-check is gnome-shell's growth tripwire; the service's" \
                 "budget is absolute: $SERVICE_FLAG --rss-kib must read at most $(( SERVICE_RSS_BUDGET_MIB * KIB_PER_MIB ))"
             [[ -n "${2:-}" ]] || die "usage: --rss-check <baseline_kib>"
             measured_pid="$(find_gnome_shell_pid)" || exit $?
