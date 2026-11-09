@@ -24,14 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     owns its name) and never stops it.
   - **Cadence and no data.** It samples every 2 s and scans per-app cgroups every 20 s while the card
     or the dropdown can be seen, every 60 s otherwise, and at once on a reveal or a CPU or pressure
-    burst. "kernel" and "short jobs" are separate CPU-only entries. After 6 s without a sample both
+    burst. Every slice under the user's manager and every top-level slice but `user.slice` is scanned,
+    so a VM, a container or a `systemd-run --slice=` job is named. "kernel" and "short jobs" are separate
+    CPU-only entries. After 6 s without a sample both
     surfaces show "no data since HH:MM"; a stale number is never drawn as live.
-  - **Deploys and logins.** `./install` restarts the service only when `service/` or `lib/` changed
-    since it started, so a data-side change needs no logout and every other deploy keeps the
-    histories; a drawing change waits for the next login. The histories survive lock and blank.
+  - **Deploys and logins.** `./install` restarts the service only when a module it runs
+    (`service/main.js` and what it imports, listed by `scripts/resource-pulse-module-closure.sh`) or its
+    unit file changed since it started, so a data-side change needs no logout and every other deploy
+    keeps the histories; a drawing change, a `lib/` module only the shell imports among them, waits for
+    the next login. The histories survive lock and blank.
   - **UX.** Clicking the graphs opens a dropdown with the card and an Open Resources button. While a
-    window fully covers the card, it stops repainting and releases its scan watch; it repaints at once
-    on reveal.
+    window fully covers the card, it is dimmed, repaints only every 30 s and releases its scan watch, so
+    a card wrongly judged covered never shows stale numbers as live; it repaints at once, undimmed, on
+    reveal.
   - **Status and cost.** `gnome-status` gains a `Resource Pulse:` line (linked, enabled from the
     setting, shell State) and a `service:` line (its state, protocol and the age of its last sample),
     with a ⚠ line, naming its remedy, for a missing, failed, restarting, stopped, silent, stalled or

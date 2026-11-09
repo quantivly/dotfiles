@@ -312,11 +312,12 @@
       fi
     - |
       # Resource Pulse's sampler service (linked above, never enabled): reload
-      # systemd, then try-restart the service only when a file under the
-      # extension's service/ or lib/ changed after it started, because a restart
-      # resets its histories and most deploys leave the data side alone. Silent
-      # and successful with no user manager (a server) or with the service not
-      # running. A failure (the reload, reading its start time, the restart)
+      # systemd, then try-restart the service only when a module it runs
+      # (service/main.js and what it imports) or its unit file changed after it
+      # started, because a restart resets its histories and most deploys leave
+      # the data side alone. Silent and successful with no user manager (a
+      # server) or with the service not running. A failure (the reload, reading
+      # its start time, working out or searching what it runs, the restart)
       # prints a ⚠ line naming the step and what to run, and still exits 0,
       # like the reconcile step above: an exit 1 would abort the rest of this
       # install for every desktop user, for a service that at worst keeps its
