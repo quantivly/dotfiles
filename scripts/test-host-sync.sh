@@ -802,6 +802,7 @@ check "the remote run killed (137): exit 2, never read as drift" "$RC" 2
 mkdir -p "$C/sshbin"; printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexit 255\n' "$C/ssh-argv" >"$C/sshbin/ssh"
 chmod +x "$C/sshbin/ssh"
 env -u HOST_SYNC_SSH HOME="$L" PATH="$C/sshbin:/usr/local/bin:/usr/bin:/bin" HOST_SYNC_NO_SCOPE=1 \
+    HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH" \
     bash "$SUT" --host dev --check >/dev/null 2>&1 </dev/null
 check "host-sync's ssh never forwards an agent (-o ForwardAgent=no)" \
     "$(grep -c -e '-o ForwardAgent=no' "$C/ssh-argv" 2>/dev/null | awk '{print ($1 > 0)}')" 1
@@ -812,12 +813,19 @@ echo "== --host is required, and the dev-sync wrapper"
 WRAPPER_ENV=(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_NO_SCOPE=1
     HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH"
     HOST_SYNC_NPM_URL="file://$C/npm.json")
-OUT="$(env "${WRAPPER_ENV[@]}" bash "$SUT" --check 2>&1 </dev/null)"; RC=$?
-check "host-sync with neither --host nor --here: usage (64)" "$RC" 64
 # A stub ssh that records its first argument (the host alias) and answers as an unreachable host.
 # shellcheck disable=SC2016  # expanded by the stub itself, deliberately
 printf '#!/bin/sh\nprintf "%%s\\n" "$1" >>"%s"\nexit 255\n' "$C/wrapper-ssh-hosts" >"$C/wrapper-ssh"
 chmod +x "$C/wrapper-ssh"
+# Without --host or --here nothing may reach ssh at all: the stub and no agent make a regression visible.
+: >"$C/wrapper-ssh-hosts"
+OUT="$(env -u SSH_AUTH_SOCK "${WRAPPER_ENV[@]}" HOST_SYNC_SSH="$C/wrapper-ssh" bash "$SUT" --check 2>&1 </dev/null)"; RC=$?
+check "host-sync with neither --host nor --here: usage (64)" "$RC" 64
+has   "host-sync with neither --host nor --here: says --host is required" "$OUT" "--host <ssh alias> is required"
+check "host-sync with neither --host nor --here: ssh is never run" "$(cat "$C/wrapper-ssh-hosts")" ""
+OUT="$(env -u SSH_AUTH_SOCK "${WRAPPER_ENV[@]}" bash "$SUT" --help 2>&1 </dev/null)"; RC=$?
+check "host-sync --help: exit 0" "$RC" 0
+has   "host-sync --help: prints the usage" "$OUT" "--print-facts"
 wrapper_hosts_after() {   # $@ = the wrapper's arguments; prints the aliases the stub ssh saw
     : >"$C/wrapper-ssh-hosts"
     env "${WRAPPER_ENV[@]}" HOST_SYNC_SSH="$C/wrapper-ssh" bash "$WRAPPER" "$@" >/dev/null 2>&1 </dev/null
@@ -1392,7 +1400,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=332
+EXPECTED_ROWS=336
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

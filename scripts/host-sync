@@ -152,7 +152,7 @@ TOKEN_LINE_RE='^CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat[0-9]+-[A-Za-z0-9_-]+$'
 # claude-oauth-store spells the same string, and a row in scripts/test-host-sync.sh checks they agree.
 SEAT_RE='^quantivly-[a-z0-9][a-z0-9-]{0,30}$'
 
-usage() { sed -n '/^# Usage (laptop):/,/^# Exit:/p' "${SELF:-/dev/null}" 2>/dev/null | sed '$d; s/^# \{0,1\}//'; }
+usage() { sed -n '/^# Usage (the controlling host/,/^# Exit:/p' "${SELF:-/dev/null}" 2>/dev/null | sed '$d; s/^# \{0,1\}//'; }
 
 # owner/repo from any GitHub remote URL: https://github.com/o/r(.git), git@github.com:o/r.git,
 # and host aliases such as git@github-work:o/r.git. Lowercased, since GitHub is case-insensitive.
