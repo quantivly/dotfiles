@@ -221,6 +221,11 @@ repo_of_url() {
 
 N_DRIFT=0
 N_OPER=0
+# What sync_checkout did with each checkout THIS run, keyed by its row area (dotfiles |
+# dotfiles-local), so the links row neither runs ./install a second time nor runs it on a checkout
+# that was left alone: left-alone (a ⚠ row: not a checkout, off main, ahead, diverged, overlapping
+# local edits), installed or install-failed (its ./install ran; CHECKOUT_INSTALL_LOG holds the log).
+declare -A CHECKOUT_THIS_RUN=() CHECKOUT_INSTALL_LOG=()
 row() {   # $1 = ok|drift|oper|info, $2 = area, $3 = message
     local g
     case "$1" in
@@ -305,9 +310,11 @@ clone_overlay() {
 
 here_dotfiles() { sync_checkout dotfiles "$DOTFILES" installed-head; }
 
-# The overlay is managed only on a host with a profile marker (H1), usable or not, once it exists.
+# The overlay is managed only on a host with a profile marker (H1), usable or not, once it exists:
+# its checkout row and its links row alike.
+overlay_is_managed() { [[ -n "$PROFILE" || -n "$PROFILE_FAULT" ]] && [[ -d "$DOTFILES_LOCAL" ]]; }
 here_dotfiles_local() {
-    [[ -n "$PROFILE" || -n "$PROFILE_FAULT" ]] && [[ -d "$DOTFILES_LOCAL" ]] || return 0
+    overlay_is_managed || return 0
     sync_checkout dotfiles-local "$DOTFILES_LOCAL" installed-head-dotfiles-local
 }
 
@@ -334,12 +341,12 @@ sync_checkout() {
     local laptop_sha="" laptop_behind="" fix="move it aside, and --apply clones it again"
     [[ "$label" == dotfiles ]] && fix="bootstrap it (scripts/server-bootstrap.sh)"
     if ! git -C "$d" rev-parse --git-dir >/dev/null 2>&1; then
-        row oper "$label" "$d is not a git checkout; $fix"
+        leave_checkout_alone "$label" "$d is not a git checkout; $fix"
         return
     fi
     branch="$(git -C "$d" symbolic-ref --quiet --short HEAD 2>/dev/null)" || branch="(detached)"
     if [[ "$branch" != main ]]; then
-        row oper "$label" "on '$branch', not main; host-sync only moves main, so it has not touched it"
+        leave_checkout_alone "$label" "on '$branch', not main; host-sync only moves main, so it has not touched it"
         return
     fi
     case "$label" in
@@ -369,11 +376,11 @@ sync_checkout() {
             return
         fi
         if git -C "$d" merge-base --is-ancestor "$target" "$head"; then
-            row oper "$label" "$(short "$head") is AHEAD of $src: unpushed commits on this host, not touched"
+            leave_checkout_alone "$label" "$(short "$head") is AHEAD of $src: unpushed commits on this host, not touched"
             return
         fi
         if ! git -C "$d" merge-base --is-ancestor "$head" "$target"; then
-            row oper "$label" "diverged from $src; not fast-forwardable, resolve by hand"
+            leave_checkout_alone "$label" "diverged from $src; not fast-forwardable, resolve by hand"
             return
         fi
         n="$(git -C "$d" rev-list --count "$head..$target")"
@@ -388,7 +395,7 @@ sync_checkout() {
             <({ git -C "$d" diff --name-only HEAD; git -C "$d" ls-files --others --exclude-standard; } | sort -u) \
             <(git -C "$d" diff --name-only "$head" "$target" | sort -u) | tr '\n' ' ')"
         if [[ -n "$overlap" ]]; then
-            row oper "$label" "local edits to ${overlap% } that origin/main also changes; not merged"
+            leave_checkout_alone "$label" "local edits to ${overlap% } that origin/main also changes; not merged"
             return
         fi
         if ! git -C "$d" merge --ff-only --quiet "$target" </dev/null >/dev/null 2>&1; then
@@ -398,6 +405,10 @@ sync_checkout() {
         head="$target"
     fi
     install_checkout "$label" "$d" "$STATE/$stamp_name" "$old" "$head" "$n"
+}
+leave_checkout_alone() {   # $1 = the area, $2 = why; the ⚠ row, and the record the links row reads
+    CHECKOUT_THIS_RUN[$1]="left-alone"
+    row oper "$1" "$2"
 }
 
 # The install half of sync_checkout. ./install is part of deploying (CLAUDE.md, "The checkout IS
@@ -419,10 +430,13 @@ install_checkout() {
         row drift "$label" "main at $(short "$head"), but ./install has not run for it"
         return
     fi
+    CHECKOUT_INSTALL_LOG[$label]="$STATE/$log_name"
     if (cd "$d" && bash ./install) >"$STATE/$log_name" 2>&1 </dev/null; then
+        CHECKOUT_THIS_RUN[$label]="installed"
         printf '%s\n' "$head" >"$stamp"
         row ok "$label" "$level_text"
     else
+        CHECKOUT_THIS_RUN[$label]="install-failed"
         row drift "$label" "./install failed at $(short "$head"); log: ~/.local/state/host-sync/$log_name"
         tail -n 5 "$STATE/$log_name" | sed 's/^/        /'
     fi
@@ -1045,14 +1059,15 @@ renderer_could_not_run_row() {   # $1 = the renderer's status
 }
 
 # Every link each checkout's install.conf.yaml declares is in place (H8): ~/.dotfiles always, and
-# ~/.dotfiles-local when it is there. One checker for both, the public checkout's own: a host whose
+# ~/.dotfiles-local under the overlay's own gate (overlay_is_managed): with no marker, host-sync
+# neither checks nor installs it. One checker for both, the public checkout's own: a host whose
 # checkout predates it gets ⚠ (exit 127). A link that is missing, points elsewhere or is a regular
 # file is drift that repo's ./install fixes, run once per repo per run; dotbot backs a regular file
 # up beside it before relinking (`backup: true`), and the row names that backup when its content
 # was not the repo's. A source the manifest names that is not in the checkout is a person's step.
 here_links() {
     links_of_checkout dotfiles "$DOTFILES"
-    [[ -d "$DOTFILES_LOCAL" ]] && links_of_checkout dotfiles-local "$DOTFILES_LOCAL"
+    overlay_is_managed && links_of_checkout dotfiles-local "$DOTFILES_LOCAL"
     return 0
 }
 links_of_checkout() {   # $1 = the repo's name in the rows, $2 = its checkout
@@ -1074,6 +1089,7 @@ links_of_checkout() {   # $1 = the repo's name in the rows, $2 = its checkout
         (( ${#LINK_SOURCES_FOR_A_PERSON[@]} )) || row ok links "$label: $LINKS_DECLARED declared links in place"
         return
     fi
+    explain_links_left_this_run "$label" && return
     if [[ "$MODE" == apply ]]; then
         relink_checkout "$label" "$dir"
     else
@@ -1139,10 +1155,10 @@ report_links_to_fix() {   # $1 = the repo's name; --check's ✗ rows
 }
 # --apply: the repo's ./install, once, then the checker again. $1 = the repo's name, $2 = its checkout.
 relink_checkout() {
-    local label="$1" dir="$2" log="$STATE/install-links-$1.log" rc fixed left still
+    local label="$1" dir="$2" log="$STATE/install-links-$1.log" rc install_rc fixed
     local differing=(${LINK_TARGETS_DIFFERING[@]+"${LINK_TARGETS_DIFFERING[@]}"})
     fixed=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
-    (cd "$dir" && bash ./install </dev/null) >"$log" 2>&1
+    (cd "$dir" && bash ./install </dev/null) >"$log" 2>&1; install_rc=$?
     run_link_checker "$dir"; rc=$?
     if (( rc != 0 && rc != 1 )); then
         links_could_not_run_row "$label" "$rc"
@@ -1153,13 +1169,37 @@ relink_checkout() {
         unknown_link_fault_row "$label"
         return
     fi
-    left=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
-    if (( left == 0 )); then
-        row ok links "$label: $fixed link(s) relinked$(backups_kept ${differing[@]+"${differing[@]}"})"
+    if (( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} )); then
+        still_to_fix_row "$label" "$log"
         return
     fi
+    row ok links "$label: $fixed link(s) relinked$(backups_kept ${differing[@]+"${differing[@]}"})"
+    # The link step can succeed and a later step of the same ./install fail. Its stamp is the
+    # checkout's, already level, so no later run would ever name this log.
+    (( install_rc == 0 )) || row oper links "$label: ./install exited $install_rc after relinking; log: $(tilde_path "$log")"
+}
+# ✗ for the links an ./install left out of place. $1 = the repo's name, $2 = that ./install's log.
+still_to_fix_row() {
+    local left still
+    left=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
     still="$(join_comma ${LINK_TARGETS_TO_FIX[@]+"${LINK_TARGETS_TO_FIX[@]}"} ${LINK_TARGETS_DIFFERING[@]+"${LINK_TARGETS_DIFFERING[@]}"})"
-    row drift links "$label: still $left to fix after ./install ($still); log: $(tilde_path "$log")"
+    row drift links "$1: still $left to fix after ./install ($still); log: $(tilde_path "$2")"
+}
+# ./install runs at most once per repo per run, and never on a checkout sync_checkout left alone.
+# When this run's sync_checkout already decided, print the row that says what that means for the
+# links and return 0; return 1 when the links row may run ./install itself. $1 = the repo's name.
+explain_links_left_this_run() {
+    local label="$1" faults log
+    faults=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
+    log="$(tilde_path "${CHECKOUT_INSTALL_LOG[$label]:-}")"
+    case "${CHECKOUT_THIS_RUN[$label]:-}" in
+        left-alone)
+            row oper links "$label: $faults link(s) to fix, but the checkout was left alone this run; fix the checkout first" ;;
+        install-failed)
+            row oper links "$label: $faults link(s) to fix, but ./install already failed this run (log: $log)" ;;
+        installed) still_to_fix_row "$label" "${CHECKOUT_INSTALL_LOG[$label]}" ;;
+        *) return 1 ;;
+    esac
 }
 # "; the old ~/.x is kept as ~/.x.dotbot-backup.<stamp>" for each target ($@, as ~/…) whose
 # backup dotbot left beside it: the newest by name, since the names sort by their stamp.

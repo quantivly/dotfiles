@@ -201,17 +201,21 @@ STUB
     chmod +x "$b"/* "$1/stub/go/bin/go"
 }
 
-# A seed repo's ./install: it refuses on its fail flag, logs that it ran, then does dotbot's link
-# step in miniature for the `~/target: source` lines of its own install.conf.yaml. A regular file at
-# a target is first moved aside under dotbot's backup name (install.conf.yaml's `backup: true`;
-# dotbot/src/dotbot/plugins/link.py, _backup: <path>.dotbot-backup.<YYYYMMDD-HHMMSS>, local time).
+# A seed repo's ./install: it logs the attempt (so a row can count attempts, failed ones included),
+# refuses on its fail flag, then does dotbot's link step in miniature for the `~/target: source`
+# lines of its own install.conf.yaml. A regular file at a target is first moved aside under dotbot's
+# backup name (install.conf.yaml's `backup: true`; dotbot/src/dotbot/plugins/link.py, _backup:
+# <path>.dotbot-backup.<YYYYMMDD-HHMMSS>, local time). Two more flags, named by its install-order
+# word: <word>-install-links-nothing (exit 0, nothing linked) and <word>-install-fails-after-linking
+# (exit 1 once every link is made, as a later step of a real ./install can).
 write_install_stub() {   # $1 = the file, $2 = its fail flag, $3 = its install-order word, $4 = its ran log
     {
         printf '#!/usr/bin/env bash\nFAIL_FLAG=%q ORDER_WORD=%q RAN_LOG=%q\n' "$2" "$3" "$4"
         cat <<'STUB'
-[[ -e "$HOME/stub/$FAIL_FLAG" ]] && exit 1
 echo "$ORDER_WORD" >>"$HOME/stub/install-order"
 echo ran >>"$HOME/stub/$RAN_LOG"
+[[ -e "$HOME/stub/$FAIL_FLAG" ]] && exit 1
+[[ -e "$HOME/stub/$ORDER_WORD-install-links-nothing" ]] && exit 0
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 while IFS=$'\t' read -r target source; do
     live="$HOME/${target#\~/}"
@@ -219,6 +223,7 @@ while IFS=$'\t' read -r target source; do
     [[ -e "$live" && ! -L "$live" ]] && mv "$live" "$live.dotbot-backup.$(date +%Y%m%d-%H%M%S)"
     ln -sfn "$PWD/$source" "$live"
 done < <(awk '/^ +~\// { sub(/^ +/, ""); i = index($0, ": "); print substr($0, 1, i - 1) "\t" substr($0, i + 2) }' install.conf.yaml)
+if [[ -e "$HOME/stub/$ORDER_WORD-install-fails-after-linking" ]]; then exit 1; fi
 STUB
     } >"$1"
     chmod +x "$1"
@@ -1045,6 +1050,55 @@ run_level --apply
 has   "links: an ./install that leaves a link out of place is ✗, naming its log" "$OUT" \
     "${LINKS_DRIFT}dotfiles: still 1 to fix after ./install (~/.x); log: ~/.local/state/host-sync/install-links-dotfiles.log"
 check "links: an ./install that leaves a link out of place is ✗, naming its log: exit 1" "$RC" 1
+
+# The link step succeeds and a later step of the same ./install fails: the stamp is already level,
+# so this run is the only one that can name the log.
+new_case
+rm "$H/.x"; touch "$H/stub/public-install-fails-after-linking"
+run_level --apply
+has   "links: an ./install that relinks and then fails is ⚠, naming its log: the relink verdict" "$OUT" \
+    "${LINKS_OK}dotfiles: 1 link(s) relinked"
+has   "links: an ./install that relinks and then fails is ⚠, naming its log: the ⚠ row" "$OUT" \
+    "${LINKS_OPER}dotfiles: ./install exited 1 after relinking; log: ~/.local/state/host-sync/install-links-dotfiles.log"
+check "links: an ./install that relinks and then fails is ⚠, naming its log: the link, exit 0" \
+    "$(readlink "$H/.x")/$RC" "$H/.dotfiles/config/x/0"
+
+# ./install runs at most once per repo per run: sync_checkout's ./install, run for a stale stamp,
+# fails (its stub logs the attempt first, so a second attempt would be a second line).
+new_case
+rm "$H/.local/state/host-sync/installed-head" "$H/.x"; touch "$H/stub/install-fails"
+run_level --apply
+check "links: an ./install that already failed this run is not run again: one attempt" "$(ran_count install-ran)" 1
+has   "links: an ./install that already failed this run is not run again: the ⚠ row" "$OUT" \
+    "${LINKS_OPER}dotfiles: 1 link(s) to fix, but ./install already failed this run (log: ~/.local/state/host-sync/install.log)"
+
+# sync_checkout's ./install ran and succeeded, and a link is still out of place.
+new_case
+rm "$H/.local/state/host-sync/installed-head" "$H/.x"; touch "$H/stub/public-install-links-nothing"
+run_level --apply
+check "links: an ./install that already ran this run is not run again: one attempt" "$(ran_count install-ran)" 1
+has   "links: an ./install that already ran this run is not run again: ✗ naming that ./install's log" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: still 1 to fix after ./install (~/.x); log: ~/.local/state/host-sync/install.log"
+
+new_case
+git -C "$H/.dotfiles" checkout -q -b feature; rm "$H/.x"
+run_level --check
+has   "links: a checkout left alone this run is not installed: --check says so, ⚠ not ✗" "$OUT" \
+    "${LINKS_OPER}dotfiles: 1 link(s) to fix, but the checkout was left alone this run; fix the checkout first"
+run_level --apply
+check "links: a checkout left alone this run is not installed: no ./install, the link still missing" \
+    "$(ran_count install-ran)/$(present "$H/.x")" 0/gone
+has   "links: a checkout left alone this run is not installed: --apply's ⚠ row" "$OUT" \
+    "${LINKS_OPER}dotfiles: 1 link(s) to fix, but the checkout was left alone this run; fix the checkout first"
+
+# H1: the overlay is managed only with a marker, its links included.
+new_case
+rm "$H/.config/claude-host-profile" "$H/.claude/CLAUDE.md"
+run_level --apply
+hasnt "links: with no marker the overlay's links are not judged: no dotfiles-local links row" "$OUT" "${LINKS_AREA}dotfiles-local:"
+check "links: with no marker the overlay's links are not judged: no ./install of the overlay" "$(ran_count local-install-ran)" 0
+has   "links: with no marker the overlay's links are not judged: the public links row still prints" "$OUT" \
+    "${LINKS_OK}dotfiles: 2 declared links in place"
 
 echo "== plugins"
 new_case
@@ -2067,7 +2121,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=487
+EXPECTED_ROWS=500
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
