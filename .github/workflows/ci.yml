@@ -724,8 +724,8 @@ jobs:
       - name: Run the seat onboarding state table
         run: ./scripts/test-claude-seat.sh
 
-  dev-sync-test:
-    name: dev-sync State Table
+  host-sync-test:
+    name: host-sync State Table
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -743,8 +743,8 @@ jobs:
       # fix only that, and refuse rather than guess at anything a person must decide
       # (a checkout off main, local edits, a linked plugin, a sign-in, sudo)? claude,
       # herdr, mise and systemctl are stubs; git runs against file:// bare repos.
-      - name: Run the dev-sync state table
-        run: ./scripts/test-dev-sync.sh
+      - name: Run the host-sync state table
+        run: ./scripts/test-host-sync.sh
 
   tenant-route-test:
     name: Tenant Router State Table
@@ -1278,7 +1278,7 @@ jobs:
       - name: Verify the TMPDIR that environment.d points at exists
         run: |
           # tmpdir.conf hands every user unit TMPDIR=~/.cache/tmp; a missing
-          # directory broke dev-sync's first timer run on dev.
+          # directory broke host-sync's first timer run on dev.
           test -L ~/.config/environment.d/tmpdir.conf || (echo "tmpdir.conf not linked" && exit 1)
           test -d ~/.cache/tmp || (echo "~/.cache/tmp not created" && exit 1)
           [ "$(stat -c %a ~/.cache/tmp)" = 700 ] || (echo "~/.cache/tmp is not mode 700" && exit 1)

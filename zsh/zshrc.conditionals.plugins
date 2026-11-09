@@ -33,9 +33,10 @@
 # A shared host also never starts an `ssh-agent -s` of its own (Try 3, below).
 # The laptop is not a shared host, so nothing below changes there.
 
-# Helper: Is this a shared agent host? Marked by the directory dev-sync's timer
-# keeps there (~/.config/dev-sync), so no hostname is hard-coded.
-_ssh_shared_host() { [[ -d "$HOME/.config/dev-sync" ]]; }
+# Helper: Is this a shared agent host? Marked by the directory host-sync's timer keeps
+# there (~/.config/host-sync; ~/.config/dev-sync on a host armed by the release before the
+# rename), so no hostname is hard-coded.
+_ssh_shared_host() { [[ -d "$HOME/.config/host-sync" || -d "$HOME/.config/dev-sync" ]]; }
 
 # Helper: Is the live socket $1 a FORWARDED agent? VSCode's, or sshd's
 # (/tmp/ssh-*/agent.<pid of sshd>). A local `ssh-agent -s` makes the same shape,
