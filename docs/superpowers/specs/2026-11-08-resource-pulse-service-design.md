@@ -3,6 +3,9 @@
 **Amends** [2026-11-07-resource-pulse-design.md](2026-11-07-resource-pulse-design.md). Where they disagree, this
 document wins. Everything it does not mention stands. **Date:** 2026-11-08.
 
+**Extended by** [2026-11-09-desktop-cockpit-design.md](2026-11-09-desktop-cockpit-design.md): the desktop
+cockpit, a second service and a grid of cards on the same pattern (2026-11-09).
+
 ## Why
 
 An independent review of v1 (a9ed51e) found nothing that could destabilise the desktop. Its verdicts are in

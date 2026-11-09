@@ -71,6 +71,9 @@ A top-bar CPU and memory indicator, and a desktop card that adds swap, pressure 
 to answer "why is this machine slow right now". It lives in
 `gnome-shell/extensions/resource-pulse@dotfiles/` (GNOME Shell 50 only). The design, and why the
 sampling left the shell: [the service design](superpowers/specs/2026-11-08-resource-pulse-service-design.md).
+The approved design for growing it into a desktop cockpit (a second service, a grid of cards on the 27",
+ding off, tooltips and a focus click): [the cockpit design](superpowers/specs/2026-11-09-desktop-cockpit-design.md);
+nothing of it is built yet.
 
 ### How it runs
 
