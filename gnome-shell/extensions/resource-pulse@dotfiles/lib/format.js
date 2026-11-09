@@ -1,6 +1,6 @@
 // Every string the top-bar label and the desktop card show, and the bands of the card's drawn pressure meters.
 // Pure functions; the Shell glue only calls these.
-import {APP_NAME_MAX_CHARS, BYTES_PER_GIBIBYTE} from './constants.js';
+import {APP_NAME_MAX_CHARS, BYTES_PER_GIBIBYTE, CPU_IDLE_LABEL, CPU_IDLE_THRESHOLD_PERCENT} from './constants.js';
 import {pressureBand} from './pressure.js';
 
 const NO_DATA_TEXT = 'no data';
@@ -135,29 +135,62 @@ export function ellipsize(name, maxChars) {
 }
 
 /**
- * Describes the heaviest apps on one line.
+ * Splits the app ranking into the two halves of "heaviest", and says whether they are one group.
  *
- * @param {{topCpu: {name: string, cpuPercent: number}|null, topMemory: {name: string, memoryBytes: number}|null}|null}
- *     apps - App ranking.
- * @returns {string} 'Chromium 31% · herdr agents 15.7 GiB', 'herdr agents 31% · 15.7 GiB' when one app tops
- *     both, one half alone when the other is missing, or '—' with no data.
+ * @param {{topCpu: {groupKey?: string, name: string, cpuPercent: number}|null,
+ *     topMemory: {groupKey?: string, name: string, memoryBytes: number}|null}|null} apps - App ranking.
+ * @returns {{cpuHalf: {name: string, valueText: string}|null, memoryHalf: {name: string, valueText: string}|null,
+ *     isCollapsed: boolean}} The CPU half reads CPU_IDLE_LABEL (no value) when the top entry is below
+ *     CPU_IDLE_THRESHOLD_PERCENT; isCollapsed is true only when both halves are the same group (by groupKey, never
+ *     merely by name) and the CPU half is not idle.
  */
-export function heaviestLine(apps) {
+export function heaviestParts(apps) {
     const topCpu = apps?.topCpu ?? null;
     const topMemory = apps?.topMemory ?? null;
-    if (topCpu === null && topMemory === null)
+    const isIdle = topCpu !== null && topCpu.cpuPercent < CPU_IDLE_THRESHOLD_PERCENT;
+    let cpuHalf = null;
+    if (isIdle)
+        cpuHalf = {name: CPU_IDLE_LABEL, valueText: ''};
+    else if (topCpu !== null)
+        cpuHalf = {name: topCpu.name, valueText: formatWholePercent(topCpu.cpuPercent)};
+    const memoryHalf = topMemory === null ? null
+        : {name: topMemory.name, valueText: `${formatGibibytes(topMemory.memoryBytes)} GiB`};
+    const isCollapsed = !isIdle && topCpu !== null && topMemory !== null &&
+        topCpu.groupKey !== undefined && topCpu.groupKey === topMemory.groupKey;
+    return {cpuHalf, memoryHalf, isCollapsed};
+}
+
+/**
+ * Writes one half of "heaviest": its name, ellipsized, then its value when it has one.
+ *
+ * @param {{name: string, valueText: string}} half - from heaviestParts.
+ * @returns {string} For example 'Chromium 31%', or 'idle'.
+ */
+function halfText(half) {
+    const name = ellipsize(half.name, APP_NAME_MAX_CHARS);
+    return half.valueText === '' ? name : `${name} ${half.valueText}`;
+}
+
+/**
+ * Describes the heaviest apps on one line.
+ *
+ * @param {{topCpu: {groupKey?: string, name: string, cpuPercent: number}|null,
+ *     topMemory: {groupKey?: string, name: string, memoryBytes: number}|null}|null} apps - App ranking.
+ * @returns {string} 'Chromium 31% · herdr agents 15.7 GiB', 'herdr agents 31% · 15.7 GiB' when one group tops
+ *     both, 'idle · Chromium 2.0 GiB' when the CPU is idle, one half alone when the other is missing, or '—' with
+ *     no data.
+ */
+export function heaviestLine(apps) {
+    const {cpuHalf, memoryHalf, isCollapsed} = heaviestParts(apps);
+    if (cpuHalf === null && memoryHalf === null)
         return EM_DASH;
-    const cpuText = topCpu === null ? null : formatWholePercent(topCpu.cpuPercent);
-    const memoryText = topMemory === null ? null : `${formatGibibytes(topMemory.memoryBytes)} GiB`;
-    if (topCpu === null)
-        return `${ellipsize(topMemory.name, APP_NAME_MAX_CHARS)} ${memoryText}`;
-    if (topMemory === null)
-        return `${ellipsize(topCpu.name, APP_NAME_MAX_CHARS)} ${cpuText}`;
-    if (topCpu.name === topMemory.name)
-        return `${ellipsize(topCpu.name, APP_NAME_MAX_CHARS)} ${cpuText}${SEPARATOR}${memoryText}`;
-    const cpuHalf = `${ellipsize(topCpu.name, APP_NAME_MAX_CHARS)} ${cpuText}`;
-    const memoryHalf = `${ellipsize(topMemory.name, APP_NAME_MAX_CHARS)} ${memoryText}`;
-    return `${cpuHalf}${SEPARATOR}${memoryHalf}`;
+    if (cpuHalf === null)
+        return halfText(memoryHalf);
+    if (memoryHalf === null)
+        return halfText(cpuHalf);
+    if (isCollapsed)
+        return `${halfText(cpuHalf)}${SEPARATOR}${memoryHalf.valueText}`;
+    return `${halfText(cpuHalf)}${SEPARATOR}${halfText(memoryHalf)}`;
 }
 
 /**

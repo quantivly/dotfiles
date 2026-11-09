@@ -1,7 +1,7 @@
 import {test, assertEqual} from './harness.js';
 import {
     formatGibibytes, formatWholePercent, memoryLine, swapLine, swapAmount, clusterSuffix, waitingOnMeters,
-    ellipsize, heaviestLine, hoverLabel, cardText,
+    ellipsize, heaviestLine, heaviestParts, hoverLabel, cardText,
 } from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {cardPosition, hoverLabelPosition} from '../extensions/resource-pulse@dotfiles/lib/layout.js';
 
@@ -130,12 +130,34 @@ test('heaviestLine: two different apps', () =>
     assertEqual(heaviestLine({topCpu: {name: 'Chromium', cpuPercent: 31},
         topMemory: {name: 'herdr agents', memoryBytes: 15.7 * GIB}}), 'Chromium 31% · herdr agents 15.7 GiB'));
 test('heaviestLine collapses when one app tops both', () =>
-    assertEqual(heaviestLine({topCpu: {name: 'herdr agents', cpuPercent: 31},
-        topMemory: {name: 'herdr agents', memoryBytes: 15.7 * GIB}}), 'herdr agents 31% · 15.7 GiB'));
-test('heaviestLine ellipsizes a long name, and names "kernel & other" in the CPU half as it is', () =>
-    assertEqual(heaviestLine({topCpu: {name: 'kernel & other', cpuPercent: 5},
-        topMemory: {name: 'a-very-long-application-name', memoryBytes: 2 * GIB}}),
-    'kernel & other 5% · a-very-long-appli… 2.0 GiB'));
+    assertEqual(heaviestLine({topCpu: {groupKey: 'unit:herdr-server', name: 'herdr agents', cpuPercent: 31},
+        topMemory: {groupKey: 'unit:herdr-server', name: 'herdr agents', memoryBytes: 15.7 * GIB}}), 'herdr agents 31% · 15.7 GiB'));
+test('heaviestLine ellipsizes a long name, and names "kernel" in the CPU half as it is', () =>
+    assertEqual(heaviestLine({topCpu: {groupKey: 'pseudo:kernel', name: 'kernel', cpuPercent: 5},
+        topMemory: {groupKey: 'a', name: 'a-very-long-application-name', memoryBytes: 2 * GIB}}),
+    'kernel 5% · a-very-long-appli… 2.0 GiB'));
+test('heaviestParts: docker.service (CPU) and docker-x.scope (memory) share a name, not a group, so they do not collapse',
+    () => {
+        const parts = heaviestParts({topCpu: {groupKey: 'unit:docker', name: 'docker', cpuPercent: 20},
+            topMemory: {groupKey: 'docker:docker', name: 'docker', memoryBytes: GIB}});
+        assertEqual([parts.isCollapsed, parts.cpuHalf, parts.memoryHalf],
+            [false, {name: 'docker', valueText: '20%'}, {name: 'docker', valueText: '1.0 GiB'}]);
+    });
+test('heaviestParts: the same groupKey on both halves collapses', () =>
+    assertEqual(heaviestParts({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 20},
+        topMemory: {groupKey: 'app:x', name: 'X', memoryBytes: GIB}}).isCollapsed, true));
+test('heaviestLine: different groups with one name are two halves', () =>
+    assertEqual(heaviestLine({topCpu: {groupKey: 'unit:docker', name: 'docker', cpuPercent: 20},
+        topMemory: {groupKey: 'docker:docker', name: 'docker', memoryBytes: GIB}}), 'docker 20% · docker 1.0 GiB'));
+test('heaviestParts: a top CPU entry at 0.6% is idle, at 1.0% it keeps its name and percent', () => {
+    const memory = {groupKey: 'app:m', name: 'M', memoryBytes: GIB};
+    const idle = heaviestParts({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 0.6}, topMemory: memory});
+    const busy = heaviestParts({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 1.0}, topMemory: memory});
+    assertEqual([idle.cpuHalf, busy.cpuHalf], [{name: 'idle', valueText: ''}, {name: 'X', valueText: '1%'}]);
+});
+test('heaviestLine: an idle CPU half reads "idle", and an idle half never collapses with the same group', () =>
+    assertEqual(heaviestLine({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 0.6},
+        topMemory: {groupKey: 'app:x', name: 'X', memoryBytes: GIB}}), 'idle · X 1.0 GiB'));
 test('heaviestLine with only one ranking shows just that half', () =>
     assertEqual([heaviestLine({topCpu: {name: 'Chromium', cpuPercent: 31}, topMemory: null}),
         heaviestLine({topCpu: null, topMemory: {name: 'Chromium', memoryBytes: GIB}})],

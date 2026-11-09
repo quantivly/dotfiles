@@ -98,11 +98,12 @@ kept across a blank or a lock.
 | Waiting on | PSI `some avg10` for cpu, memory and **io**. It is a 10 s average by definition, so it lags on purpose. Each is a drawn meter of three cells (not glyphs, which fell back to another font): none filled < 10%, one 10–25%, two 25–50%, all three ≥ 50%. The top band matches oomd's 50% kill limit. With no data the cells give way to a dash, so it never reads as calm. | `/proc/pressure/*` |
 | App CPU | Each leaf cgroup's Δ`cpu.stat usage_usec` / (interval × ncpu), as a % of the whole machine, so it is comparable with the total. | cgroup v2 |
 | App memory | Each leaf cgroup's memory **minus reclaimable page cache**: `memory.current − (active_file + inactive_file)`. This matches the MemAvailable semantics, so cache never counts as used. | cgroup v2 `memory.current`, `memory.stat` |
-| "kernel & other" | A computed pseudo-app that ranks **for CPU only**: the root `/sys/fs/cgroup/cpu.stat` Δ minus the Σ of the scanned leaves, clamped at 0. That covers kswapd, zram compression, writeback, `init.scope` and ssh `session-N.scope`, so reclaim stays nameable: kernel CPU is a real "why slow" answer. It is **not a memory candidate** (the user's decision): memory no cgroup is charged for (kernel memory, zram's RAM, GPU buffers, unscanned scopes) is mostly not attributable to anything nameable, so the memory half of "heaviest" names real apps only. That memory still counts in the MEM total. | root cgroup |
-| Heaviest | **One line**, as in the mockup: the top app by CPU (which may be "kernel & other"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. When the same app tops both, it collapses to `herdr agents 31% · 15.7 GiB`. | the two rankings above |
+| "kernel" | A computed CPU-only entry: the root `/sys/fs/cgroup/cpu.stat` Δ minus the Σ of the scanned **parent slices'** Δ (`app.slice`, `session.slice`, `background.slice` under `user@<uid>.service`, and `system.slice`), clamped at 0. That covers kernel threads, irq, reclaim, zram compression, PID 1, the user managers and login-session scopes. It is ranked only when every parent has a delta: with none read, "root minus zero parents" would name the whole machine. It is **not a memory candidate** (the user's decision): the memory half of "heaviest" names real apps only, and unattributed memory still counts in the MEM total. | root and parent cgroups |
+| "short jobs" | A computed CPU-only entry: Σ over the scanned parents of max(0, the parent's Δ minus the Σ of its leaves' Δ). These are units that started and ended between two scans (timers, oneshots); a parent whose leaves exceed its Δ (read skew) adds 0. A leaf whose counter went backwards (a unit recreated at the same path) counts its current value; a leaf absent from the previous scan counts its full usage only when its parent was listed in that scan. | parent cgroups |
+| Heaviest | **One line**, as in the mockup: the top entry by CPU (an app, "kernel" or "short jobs"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. When the top CPU entry is below 1% of the machine the CPU half reads `idle`. The halves collapse into one (`herdr agents 31% · 15.7 GiB`) only when they are the same group, never merely the same name: `docker.service` and `docker-x.scope` stay separate. | the two rankings above |
+| Names | The launcher prefix is matched before unescaping, so `app-gnome\x2dcalculator-1234.scope` is the app `gnome-calculator`. `org.gnome.SettingsDaemon.Power.service` is `gsd-power`; any other reverse-DNS unit drops its first two segments (`org.freedesktop.IBus.session.GNOME.service` is `IBus.session.GNOME`). A snap is named through `<snap>_<app>.desktop` when that exists, else by its snap name. | cgroup names |
 
-In CPU, "kernel & other" also absorbs the unit types the app scan skips and any cgroup that started
-or ended between two scans.
+In the in-shell sampler, which has no parent slices yet, neither "kernel" nor "short jobs" is ranked.
 
 ### Enabling it
 
@@ -185,7 +186,7 @@ longer scan interval (`APP_SCAN_INTERVAL_SECONDS`), never a shorter history.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (251 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (266 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.

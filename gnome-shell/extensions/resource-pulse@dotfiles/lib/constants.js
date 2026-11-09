@@ -98,8 +98,14 @@ export const BASELINE_RGBA = [1, 1, 1, 0.25];
 export const USED_BAR_TRACK_RGBA = [1, 1, 1, 0.15];
 /** Prefix of every journal line this extension writes. */
 export const LOG_PREFIX = 'resource-pulse:';
-/** Name of the computed pseudo-app that takes the CPU and memory no scanned cgroup accounts for. */
-export const KERNEL_AND_OTHER_LABEL = 'kernel & other';
+/** Name of the CPU-only pseudo-entry for the root cgroup's CPU no scanned parent slice accounts for. */
+export const KERNEL_LABEL = 'kernel';
+/** Name of the CPU-only pseudo-entry for units that started and ended between two scans. */
+export const SHORT_JOBS_LABEL = 'short jobs';
+/** What the CPU half of "heaviest" reads when even the top entry is below CPU_IDLE_THRESHOLD_PERCENT. */
+export const CPU_IDLE_LABEL = 'idle';
+/** Below this share of the whole machine, the top CPU entry is not worth naming: the machine is idle. */
+export const CPU_IDLE_THRESHOLD_PERCENT = 1;
 /** Display names for service units whose own name reads badly, keyed by unit name without suffix. */
 export const UNIT_DISPLAY_ALIASES = {'herdr-server': 'herdr agents', 'org.gnome.Shell': 'GNOME Shell'};
 /** Bytes in one gibibyte (the memory unit shown everywhere). */

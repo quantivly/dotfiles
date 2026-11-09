@@ -1013,6 +1013,11 @@ export class Sampler {
             elapsedUsec: previousScan === null ? 0 : takenAtUsec - previousScan.takenAtUsec,
             cpuCount: this._cpuCount ?? 0,
             rootCpuDeltaUsec: hasRootDelta ? rootUsageUsec - previousScan.rootUsageUsec : null,
+            // Empty until this sampler is replaced by the service: with no parent deltas neither "kernel" nor
+            // "short jobs" is ranked.
+            parentOfLeaf: new Map(),
+            parentsListedPreviously: new Set(),
+            parentCpuDeltaUsec: new Map(),
             nameOfCgroup: cgroupPath => groupOfCgroup(cgroupPath, this._resolveAppName),
         });
 

@@ -8,7 +8,7 @@ import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/error
 import {cardText} from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {
     APP_SCAN_EVERY_N_TICKS, APP_SCAN_INTERVAL_SECONDS, APP_SCAN_READ_BATCH_LEAVES, APP_SCAN_STALL_TICKS,
-    ERROR_LOG_REPEAT_INTERVAL_USEC, FILE_READ_CHUNK_BYTES, KERNEL_AND_OTHER_LABEL, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS, SAMPLE_STALL_TICKS,
+    ERROR_LOG_REPEAT_INTERVAL_USEC, FILE_READ_CHUNK_BYTES, LOG_PREFIX, SAMPLE_INTERVAL_SECONDS, SAMPLE_STALL_TICKS,
 } from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const [TEST_FILE_PATH] = GLib.filename_from_uri(import.meta.url);
@@ -307,8 +307,8 @@ test('sampler: destroy() while a sample is in flight resolves it null, calls no 
 test('sampler: app scan root-a → root-b ranks herdr agents top for CPU (50%) and memory (15 GB)', async () => {
     const {ranking, logged} = await scanTwice('root-b');
     assertEqual([ranking, logged], [{
-        topCpu: {name: 'herdr agents', cpuPercent: 50},
-        topMemory: {name: 'herdr agents', memoryBytes: 15_000_000_000},
+        topCpu: {groupKey: 'unit:herdr-server', name: 'herdr agents', cpuPercent: 50},
+        topMemory: {groupKey: 'unit:herdr-server', name: 'herdr agents', memoryBytes: 15_000_000_000},
     }, []]);
 });
 
@@ -319,7 +319,7 @@ test('sampler: the app scan skips units that never host an app (.mount, .socket)
     // boot.mount (5 MB, in system.slice) and example.socket (9 MB, in a sub-slice) would each top memory if scanned.
     const {sampler} = makeSampler('root-unit-types');
     const ranking = await sampler.scanAppsOnce();
-    assertEqual(ranking.topMemory, {name: 'example-daemon', memoryBytes: 1_000_000});
+    assertEqual(ranking.topMemory, {groupKey: 'unit:example-daemon', name: 'example-daemon', memoryBytes: 1_000_000});
 });
 
 test('sampler: app CPU divides by the real time between scans, not the nominal interval', async () => {
@@ -330,7 +330,7 @@ test('sampler: app CPU divides by the real time between scans, not the nominal i
     clock.nowUsec += 2 * APP_SCAN_SPACING_USEC;
     sampler.fsRoot = fixtureRoot('root-b');
     const ranking = await sampler.scanAppsOnce();
-    assertEqual(ranking.topCpu, {name: 'herdr agents', cpuPercent: 25});
+    assertEqual(ranking.topCpu, {groupKey: 'unit:herdr-server', name: 'herdr agents', cpuPercent: 25});
 });
 
 test('sampler: a sample in flight across a pause, or a scan in flight when scanning stops, is dropped', async () => {
@@ -379,13 +379,14 @@ test('sampler: two Chrome scopes are one app (one group key, one name)', () => {
 });
 
 test('sampler: a cgroup that vanished mid-scan is skipped in both rankings and the scan succeeds', async () => {
-    // Leaf CPU Δ 4.5 s of root Δ 12 s, so "kernel & other" tops CPU. Memory names real apps only: Chromium's
+    // This sampler passes no parent deltas, so neither kernel nor short jobs is ranked and Chromium tops CPU too.
+    // Memory names real apps only: Chromium's
     // 4.0 GB tops Chrome 2×0.5, GNOME Shell 0.3 and docker 0.3, although 14.88 of the 20.48 GB used is
     // unattributed. Had herdr been kept, it would top both rankings (see the row above).
     const {ranking, logged} = await scanTwice('root-vanished');
     assertEqual([ranking, logged], [{
-        topCpu: {name: KERNEL_AND_OTHER_LABEL, cpuPercent: 62.5},
-        topMemory: {name: 'Chromium', memoryBytes: 4_000_000_000},
+        topCpu: {groupKey: 'app:org.chromium.Chromium', name: 'Chromium', cpuPercent: 16.666666666666664},
+        topMemory: {groupKey: 'app:org.chromium.Chromium', name: 'Chromium', memoryBytes: 4_000_000_000},
     }, []]);
 });
 
@@ -395,7 +396,7 @@ test('sampler: a leaf inside a sub-slice is found, and at or under 64 MiB it is 
     const {sampler} = makeSampler('root-small-leaf');
     await sampler.initialize();
     const ranking = await sampler.scanAppsOnce();
-    assertEqual(ranking.topMemory, {name: 'example-tool', memoryBytes: 1_000_000});
+    assertEqual(ranking.topMemory, {groupKey: 'unit:example-tool', name: 'example-tool', memoryBytes: 1_000_000});
 });
 
 test('sampler: runTick samples first, scans only while enabled, and disabling drops the ranking', async () => {
@@ -842,7 +843,7 @@ test('sampler: the app scan reads at PRIORITY_LOW, at most APP_SCAN_READ_BATCH_L
             sampler.destroy();
             assertEqual([[...record.priorities], record.maxLeavesInFlight, ranking?.topMemory],
                 [[GLib.PRIORITY_LOW], APP_SCAN_READ_BATCH_LEAVES,
-                    {name: heaviestLeafName, memoryBytes: HEAVIEST_GENERATED_LEAF_MEMORY_BYTES}]);
+                    {groupKey: `unit:${heaviestLeafName}`, name: heaviestLeafName, memoryBytes: HEAVIEST_GENERATED_LEAF_MEMORY_BYTES}]);
         } finally {
             removeTree(rootPath);
         }
