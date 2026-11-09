@@ -1,12 +1,13 @@
 // The sampler service's one source of numbers: synchronous reads of /proc, /sys and the cgroup tree on one GLib
-// timer, in its own process (`gjs -m service/main.js` under systemd), never inside gnome-shell. It imports Gio, GLib,
-// system and lib/ only, so it runs under plain gjs.
+// timer, in its own process (`gjs -m service/main.js` under systemd), never inside gnome-shell. It imports Gio,
+// GioUnix, GLib, system and lib/ only, so it runs under plain gjs.
 //
 // - Reads are synchronous (Gio.File.load_contents, which reads to EOF whatever size kernfs reports). A slow read
 //   delays only this process's next tick, and a synchronous scan can never be in flight across ticks, so none of the
 //   in-shell sampler's batching, priorities or stall handling is needed here.
 // - A tick samples, then runs the app scan when lib/cadence.js says one is due, then publishes one snapshot carrying
-//   this tick's ranking. A watch start scans at once, outside the tick, and publishes again.
+//   this tick's ranking. A watch start scans at once, outside the tick, and publishes again. No CPU ranking covers
+//   less than MIN_CPU_RANKING_WINDOW_SECONDS.
 // - A full garbage collection follows every app scan: without it, native memory piles up between collections.
 // - Everything that can throw runs before state changes, and nothing a tick does can throw out of the timer callback.
 //   A failure becomes "no data": a sample that throws publishes an all-null snapshot and a gap in the histories, and a
@@ -14,11 +15,13 @@
 // - Every failure is logged rate-limited by a stable template key, so a failure whose text varies (a count, a path, an
 //   error) still logs once per ERROR_LOG_REPEAT_INTERVAL_USEC; one scan's cgroup failures become one line.
 import Gio from 'gi://Gio';
+import GioUnix from 'gi://GioUnix';
 import GLib from 'gi://GLib';
 import System from 'system';
 
 import {
-    APP_MEMORY_STAT_MIN_BYTES, APP_SCAN_SKIPPED_UNIT_SUFFIXES, CARD_HISTORY_SAMPLES, SAMPLE_INTERVAL_SECONDS,
+    APP_MEMORY_STAT_MIN_BYTES, APP_SCAN_SKIPPED_UNIT_SUFFIXES, CARD_HISTORY_SAMPLES, MIN_CPU_RANKING_WINDOW_SECONDS,
+    SAMPLE_INTERVAL_SECONDS,
 } from '../lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from '../lib/errorLog.js';
 import {
@@ -63,6 +66,8 @@ const NAME_AND_TYPE_ATTRIBUTES = 'standard::name,standard::type';
 const CLOCK_LABEL_FORMAT = '%H:%M';
 const PERCENT_SCALE = 100;
 const DECIMAL_RADIX = 10;
+const USEC_PER_SECOND = 1_000_000;
+const MIN_CPU_RANKING_WINDOW_USEC = MIN_CPU_RANKING_WINDOW_SECONDS * USEC_PER_SECOND;
 const UTF8_DECODER = new TextDecoder();
 /** The pressure part of a snapshot with no data. Spread into each snapshot, never shared. */
 const NO_DATA_PRESSURE_AVG10 = {cpu: null, memory: null, io: null};
@@ -73,6 +78,11 @@ const NO_DATA_PRESSURE_AVG10 = {cpu: null, memory: null, io: null};
  * nothing to reveal, and that tick scans anyway.
  */
 const WATCH_START_SCAN_REASONS = ['watch-start'];
+/**
+ * The scan reasons a tick puts off by one tick when the previous scan is less than MIN_CPU_RANKING_WINDOW_SECONDS old:
+ * a warm-up exists only to sharpen the CPU ranking, which over so short a window would be noise. It stays pending.
+ */
+const WINDOW_DEFERRED_SCAN_REASONS = ['warm-up'];
 
 // Template keys of the rate-limited journal lines whose text varies (lib/errorLog.js).
 const SAMPLE_FAILURE_LOG_KEY = 'sample failed';
@@ -81,6 +91,7 @@ const CGROUP_READ_FAILURES_LOG_KEY = 'cannot read cgroups';
 const LISTENER_FAILURE_LOG_KEY = 'listener failed';
 const TICK_FAILURE_LOG_KEY = 'tick failed';
 const GARBAGE_COLLECTION_FAILURE_LOG_KEY = 'garbage collection failed';
+const APP_NAME_LOOKUP_FAILURE_LOG_KEY = 'cannot look up app names';
 
 /**
  * @typedef {object} AppRanking
@@ -165,26 +176,15 @@ export function listSubdirectoryNames(directoryPath) {
 }
 
 /**
- * Gio.DesktopAppInfo, looked up on first use and kept: gjs 1.88 logs a warning (it moved to GioUnix) for each place
- * that reads it, so reading it once keeps that to one line per service run.
- */
-let desktopAppInfoClass = null;
-
-/**
  * Looks up a `.desktop` id's display name: the service's stand-in for Shell.AppSystem, which exists only in the
- * shell.
+ * shell. GioUnix, not Gio: gjs 1.88 warns that Gio.DesktopAppInfo moved there.
  *
  * @param {string} desktopId - For example 'org.gnome.Nautilus.desktop'.
- * @returns {string|null} The app's name; null for an unknown id, or when the lookup throws.
+ * @returns {string|null} The app's name; null for an unknown id.
+ * @throws {Error} On an unexpected failure, which the sampler logs (see ServiceSampler._lookUpAppName).
  */
 function resolveDesktopAppName(desktopId) {
-    try {
-        desktopAppInfoClass ??= Gio.DesktopAppInfo;
-        return desktopAppInfoClass.new(desktopId)?.get_name() ?? null;
-    } catch {
-        // An unreadable or malformed .desktop file: the caller falls back to a name built from the unit.
-        return null;
-    }
+    return GioUnix.DesktopAppInfo.new(desktopId)?.get_name() ?? null;
 }
 
 /**
@@ -390,6 +390,23 @@ function parentCpuDeltasUsec(previousScan, currentScan) {
     return deltasUsec;
 }
 
+/**
+ * The parents whose every leaf this scan knows: listed completely, and each leaf read or seen to vanish. The next scan
+ * counts a new leaf in full only under one of these. A leaf that exists but could not be read (EACCES, EIO, a parse
+ * failure) is missing from this scan's readings, so in the next it would look new and count its whole lifetime's
+ * usage: its parent is left out, its leaves are skipped next time, and their CPU stays in "short jobs".
+ *
+ * @param {{fullyListedParentPaths: Set<string>, parentOfLeaf: Map<string, string>}} cgroupTree - The scan's listing.
+ * @param {string[]} unreadLeafPaths - The leaves that exist but could not be read.
+ * @returns {Set<string>} Parent paths relative to the cgroup root.
+ */
+function fullyAccountedParentPaths(cgroupTree, unreadLeafPaths) {
+    const parentsWithUnreadLeaves = new Set(unreadLeafPaths.map(leafPath => cgroupTree.parentOfLeaf.get(leafPath)));
+    const accountedParentPaths = [...cgroupTree.fullyListedParentPaths]
+        .filter(parentPath => !parentsWithUnreadLeaves.has(parentPath));
+    return new Set(accountedParentPaths);
+}
+
 /** The cgroup reads and listings that failed in one app scan, logged together as one line. */
 class CgroupReadFailures {
     constructor() {
@@ -435,7 +452,8 @@ export class ServiceSampler {
      *     throws a GLib.Error when it cannot list it.
      * @param {() => number} [options.nowUsec] - Monotonic microseconds.
      * @param {() => string} [options.clockLabel] - Wall-clock 'HH:MM'.
-     * @param {(desktopId: string) => string|null} [options.resolveAppName] - Real name of a `.desktop` id.
+     * @param {(desktopId: string) => string|null} [options.resolveAppName] - Real name of a `.desktop` id; null for
+     *     an unknown one. A throw is logged, and the app keeps the name its unit gives. Each id is looked up once.
      * @param {() => void} [options.collectGarbage] - Runs a full garbage collection, after each app scan.
      * @param {(line: string) => void} [options.logWriter] - Where rate-limited journal lines go.
      * @param {number} [options.sampleIntervalSeconds] - Seconds between timer ticks. Tests change it; the scan
@@ -479,6 +497,11 @@ export class ServiceSampler {
         this._memoryHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
         this._listeners = new Map();
         this._nextListenerId = 1;
+        // True while the latest snapshot is a no-data one (its sample threw): a watch start then publishes nothing.
+        this._isLatestSnapshotNoData = false;
+        // Resolved app names by desktop id, misses (null) included, for as long as the service runs: an app's
+        // .desktop file is read once, not on every scan.
+        this._appNameByDesktopId = new Map();
 
         // What lib/cadence.js's decideAppScan reads. Ticks since a scan are a difference of tick numbers, and null
         // (never undefined, which compares false with every number, so nothing would ever scan) means never.
@@ -573,9 +596,10 @@ export class ServiceSampler {
 
     /**
      * Says whether a client holds a detail watch, which sets the scan cadence (lib/cadence.js). A watch that starts
-     * scans at once, outside the tick, unless the reveal cooldown holds, and publishes a snapshot with the new
-     * ranking (see _scanForWatchStart); the warm-up scan follows on the next tick. Ending a watch only changes the
-     * cadence: the ranking stays.
+     * scans at once, outside the tick, and publishes a snapshot with the new ranking (see _scanForWatchStart); the
+     * warm-up scan follows on the next tick. It does not scan inside the reveal cooldown, nor less than
+     * MIN_CPU_RANKING_WINDOW_SECONDS after the last scan, and publishes nothing after a tick that had no data. Ending
+     * a watch only changes the cadence: the ranking stays.
      *
      * @param {boolean} isWatched - True while any client holds a watch.
      * @returns {void}
@@ -636,6 +660,7 @@ export class ServiceSampler {
         if (fastSample.procStat !== null)
             this._recordProcStat(fastSample.procStat);
         const didScan = this._scanAppsIfDue(tickNumber, fastSample.fields);
+        this._isLatestSnapshotNoData = false;
         this._publishTickSnapshot(buildSnapshot(fastSample.fields, this._latestAppRanking));
         if (didScan)
             this._collectGarbageAfterScan();
@@ -825,6 +850,7 @@ export class ServiceSampler {
             pressureAvg10: {...NO_DATA_PRESSURE_AVG10},
             isComplete: false,
         };
+        this._isLatestSnapshotNoData = true;
         this._publishTickSnapshot(buildSnapshot(noDataFields, null));
         this._logRateLimited(failureMessage, SAMPLE_FAILURE_LOG_KEY);
     }
@@ -895,18 +921,37 @@ export class ServiceSampler {
     }
 
     /**
-     * Runs the app scan when lib/cadence.js says one is due at this tick.
+     * Runs the app scan when lib/cadence.js says one is due at this tick. A warm-up due less than
+     * MIN_CPU_RANKING_WINDOW_SECONDS after the previous scan waits a tick (WINDOW_DEFERRED_SCAN_REASONS): nothing is
+     * recorded, so it is still pending at the next tick.
      *
      * @param {number} tickNumber - The tick.
-     * @param {object} sampleFields - The tick's sample (its CPU and pressure feed the burst rule).
+     * @param {object} sampleFields - The tick's sample (its CPU and pressure feed the burst rule; its time measures the
+     *     window).
      * @returns {boolean} True when a scan ran (whether or not it succeeded).
      */
     _scanAppsIfDue(tickNumber, sampleFields) {
         const decision = decideAppScan(this._cadenceState(tickNumber, sampleFields, false));
         if (!decision.shouldScan)
             return false;
+        const isDeferredForItsWindow = WINDOW_DEFERRED_SCAN_REASONS.includes(decision.reason) &&
+            this._isCpuRankingWindowTooShort(sampleFields.takenAtUsec);
+        if (isDeferredForItsWindow)
+            return false;
         this._runAppScan(decision.reason, tickNumber, sampleFields);
         return true;
+    }
+
+    /**
+     * Says whether a scan now would rank CPU over less than MIN_CPU_RANKING_WINDOW_SECONDS. With no previous scan to
+     * diff against, a scan is only a baseline, so its window does not matter.
+     *
+     * @param {number} nowUsec - When the scan would run, on the nowUsec clock.
+     * @returns {boolean} True when the previous scan is too recent.
+     */
+    _isCpuRankingWindowTooShort(nowUsec) {
+        const previousScan = this._previousAppScan;
+        return previousScan !== null && nowUsec - previousScan.takenAtUsec < MIN_CPU_RANKING_WINDOW_USEC;
     }
 
     /**
@@ -914,19 +959,29 @@ export class ServiceSampler {
      * decideAppScan) runs at once, and a snapshot of the latest fast tick's values with the new ranking is published,
      * without touching the histories. Any other reason is left to the ticks (see WATCH_START_SCAN_REASONS).
      *
+     * It does not scan less than MIN_CPU_RANKING_WINDOW_SECONDS after the last scan: the client already has that
+     * ranking, so nothing is published and no warm-up is armed. After a tick that had no data it scans but publishes
+     * nothing, since there are no fast-tick values to reuse and a no-data snapshot keeps apps null; the next tick
+     * that samples carries the ranking.
+     *
      * @returns {void}
      */
     _scanForWatchStart() {
         const latestSnapshot = this._latestSnapshot;
         if (this._latestTickNumber === null || latestSnapshot === null)
             return;
+        const nowUsec = callOrNull(this._nowUsec);
+        if (nowUsec === null || this._isCpuRankingWindowTooShort(nowUsec))
+            return;
         const decision = decideAppScan(this._cadenceState(this._latestTickNumber, latestSnapshot, true));
         if (!decision.shouldScan || !WATCH_START_SCAN_REASONS.includes(decision.reason))
             return;
         this._runAppScan(decision.reason, this._latestTickNumber, latestSnapshot);
-        const revealSnapshot = {...latestSnapshot, apps: this._latestAppRanking};
-        this._latestSnapshot = revealSnapshot;
-        this._notifyListeners(revealSnapshot, null);
+        if (!this._isLatestSnapshotNoData) {
+            const revealSnapshot = {...latestSnapshot, apps: this._latestAppRanking};
+            this._latestSnapshot = revealSnapshot;
+            this._notifyListeners(revealSnapshot, null);
+        }
         this._collectGarbageAfterScan();
     }
 
@@ -1001,7 +1056,7 @@ export class ServiceSampler {
      * needs for kernel and short jobs.
      *
      * @returns {void}
-     * @throws {Error} When ranking throws (resolveAppName may); no state has changed by then.
+     * @throws {Error} On a bug in the scan; no state has changed by then.
      */
     _scanApps() {
         const fsRoot = this.fsRoot;
@@ -1019,10 +1074,10 @@ export class ServiceSampler {
             rootUsageUsec,
             parentUsageUsecByPath,
             usageUsecByCgroup: leafReadings.usageUsecByCgroup,
-            fullyListedParentPaths: cgroupTree.fullyListedParentPaths,
+            fullyAccountedParentPaths: fullyAccountedParentPaths(cgroupTree, leafReadings.unreadLeafPaths),
             isEveryParentFullyListed: cgroupTree.isEveryParentFullyListed,
         };
-        // Everything that can throw (resolveAppName included) runs before any state below is changed.
+        // Everything that can throw runs before any state below is changed.
         const ranking = rankApps(this._rankingInputs(currentScan, cgroupTree.parentOfLeaf,
             leafReadings.memoryBytesByCgroup));
         this._previousAppScan = currentScan;
@@ -1040,13 +1095,7 @@ export class ServiceSampler {
      */
     _rankingInputs(currentScan, parentOfLeaf, memoryBytesByCgroup) {
         const previousScan = this._previousAppScan;
-        // rankApps names each leaf once for CPU and once for memory; name it once per scan.
-        const groupsByCgroup = new Map();
-        const nameOfCgroup = cgroupPath => {
-            if (!groupsByCgroup.has(cgroupPath))
-                groupsByCgroup.set(cgroupPath, groupOfCgroup(cgroupPath, this._resolveAppName));
-            return groupsByCgroup.get(cgroupPath);
-        };
+        const lookUpAppName = desktopId => this._lookUpAppName(desktopId);
         return {
             previousUsageUsec: previousScan === null ? new Map() : previousScan.usageUsecByCgroup,
             currentUsageUsec: currentScan.usageUsecByCgroup,
@@ -1059,10 +1108,32 @@ export class ServiceSampler {
             // A new leaf counts in full only when its parent's listing in the previous scan proves it did not exist
             // then. A new leaf whose parent's previous listing failed is skipped (it may be an old leaf that was
             // merely unlisted), so its CPU stays inside its parent's Δ and is counted as "short jobs".
-            parentsListedPreviously: previousScan === null ? new Set() : previousScan.fullyListedParentPaths,
+            parentsListedPreviously: previousScan === null ? new Set() : previousScan.fullyAccountedParentPaths,
             parentCpuDeltaUsec: parentCpuDeltasUsec(previousScan, currentScan),
-            nameOfCgroup,
+            nameOfCgroup: cgroupPath => groupOfCgroup(cgroupPath, lookUpAppName),
         };
+    }
+
+    /**
+     * Looks up an app's name once per desktop id for as long as the service runs, misses included. A lookup that
+     * throws is logged (rate-limited) and counts as a miss, so the app keeps the name its unit gives and the scan
+     * goes on.
+     *
+     * @param {string} desktopId - For example 'org.chromium.Chromium.desktop'.
+     * @returns {string|null} The name, or null for none.
+     */
+    _lookUpAppName(desktopId) {
+        if (this._appNameByDesktopId.has(desktopId))
+            return this._appNameByDesktopId.get(desktopId);
+        let appName = null;
+        try {
+            appName = this._resolveAppName(desktopId) ?? null;
+        } catch (error) {
+            const errorText = describeError(error);
+            this._logRateLimited(`cannot look up ${desktopId}: ${errorText}`, APP_NAME_LOOKUP_FAILURE_LOG_KEY);
+        }
+        this._appNameByDesktopId.set(desktopId, appName);
+        return appName;
     }
 
     /**
@@ -1073,7 +1144,7 @@ export class ServiceSampler {
      * @param {CgroupReadFailures} failures - Collects the listings that failed.
      * @returns {{parentRelativePaths: string[], parentOfLeaf: Map<string, string>, fullyListedParentPaths: Set<string>,
      *     isEveryParentFullyListed: boolean}} The scanned parents, each leaf's parent (paths relative to the cgroup
-     *     root), and the parents whose every listing succeeded.
+     *     root), the parents whose every listing succeeded, and whether that is all of them with the uid known.
      */
     _listCgroupTree(cgroupRootPath, failures) {
         const parentRelativePaths = this._appScanParentPaths();
@@ -1087,7 +1158,10 @@ export class ServiceSampler {
             if (isFullyListed)
                 fullyListedParentPaths.add(parentRelativePath);
         }
-        const isEveryParentFullyListed = fullyListedParentPaths.size === parentRelativePaths.length;
+        // Without the uid the user service's slices are not scanned at all, so "kernel" (the root minus the scanned
+        // parents) would take in the whole user session: it counts as a parent that could not be listed.
+        const isEveryParentFullyListed = this._uid !== null &&
+            fullyListedParentPaths.size === parentRelativePaths.length;
         return {parentRelativePaths, parentOfLeaf, fullyListedParentPaths, isEveryParentFullyListed};
     }
 
@@ -1210,29 +1284,33 @@ export class ServiceSampler {
 
     /**
      * Reads every leaf. A leaf with any failed read is skipped from both rankings: silently when the cgroup vanished
-     * between listing and reading (isVanishedCgroupError), counted otherwise.
+     * between listing and reading (isVanishedCgroupError), counted (and returned as unread) otherwise.
      *
      * @param {string} cgroupRootPath - Absolute path of the cgroup v2 root.
      * @param {string[]} leafRelativePaths - Leaf paths relative to the cgroup root.
      * @param {CgroupReadFailures} failures - Collects the failed reads.
-     * @returns {{usageUsecByCgroup: Map<string, number>, memoryBytesByCgroup: Map<string, number>}} The readings.
+     * @returns {{usageUsecByCgroup: Map<string, number>, memoryBytesByCgroup: Map<string, number>,
+     *     unreadLeafPaths: string[]}} The readings, and the leaves that exist but could not be read.
      */
     _readCgroupLeaves(cgroupRootPath, leafRelativePaths, failures) {
         const usageUsecByCgroup = new Map();
         const memoryBytesByCgroup = new Map();
+        const unreadLeafPaths = [];
         for (const leafRelativePath of leafRelativePaths) {
             let leafReading;
             try {
                 leafReading = readCgroupLeaf(joinPath(cgroupRootPath, leafRelativePath), this._readFile);
             } catch (error) {
-                if (!isVanishedCgroupError(error))
+                if (!isVanishedCgroupError(error)) {
                     failures.note(leafRelativePath, error);
+                    unreadLeafPaths.push(leafRelativePath);
+                }
                 continue;
             }
             usageUsecByCgroup.set(leafRelativePath, leafReading.usageUsec);
             memoryBytesByCgroup.set(leafRelativePath, leafReading.memoryBytes);
         }
-        return {usageUsecByCgroup, memoryBytesByCgroup};
+        return {usageUsecByCgroup, memoryBytesByCgroup, unreadLeafPaths};
     }
 
     /**

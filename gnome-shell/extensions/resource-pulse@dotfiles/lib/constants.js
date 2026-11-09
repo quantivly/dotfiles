@@ -20,6 +20,11 @@ export const BURST_CPU_RISE_POINTS = 15;
 export const BURST_COOLDOWN_TICKS = 2;
 /** Ticks after a watch-start or burst scan during which a watch starting does not scan at once. */
 export const REVEAL_SCAN_COOLDOWN_TICKS = 2;
+/**
+ * Shortest window, in seconds, a CPU ranking may cover. Over less, a scan ranks noise: a watch start that soon after
+ * the last scan does not scan (the client already has that ranking), and a warm-up due that soon waits a tick.
+ */
+export const MIN_CPU_RANKING_WINDOW_SECONDS = 1;
 /** Sample ticks between per-app scans. */
 export const APP_SCAN_EVERY_N_TICKS = APP_SCAN_INTERVAL_SECONDS / SAMPLE_INTERVAL_SECONDS;
 /**

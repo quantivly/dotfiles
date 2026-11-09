@@ -88,6 +88,12 @@ const STEADY_DELTAS_USEC = {
 /** A new app leaf's whole usage, and what its parent spends with it: Editor 300,000, Builder this, short 100,000. */
 const BUILDER_USAGE_USEC = 1_500_000;
 const APP_SLICE_DELTA_WITH_BUILDER_USEC = 1_900_000;
+/** An hour of CPU: a long-lived leaf's usage_usec, which no scan may ever count as one interval's CPU. */
+const LONG_LIVED_LEAF_USAGE_USEC = 3_600_000_000;
+/** 150 ms: well inside the shortest window a CPU ranking may cover (MIN_CPU_RANKING_WINDOW_SECONDS, 1 s). */
+const WITHIN_CPU_RANKING_WINDOW_USEC = 150_000;
+const CHROME_DESKTOP_ID = 'com.google.Chrome.desktop';
+const CHROMIUM_DESKTOP_ID = 'org.chromium.Chromium.desktop';
 /** Generated leaves whose cpu.stat cannot be read: far more than one journal line each could be allowed. */
 const FAILING_LEAF_COUNT = 109;
 const GENERATED_LEAF_INDEX_DIGITS = 3;
@@ -386,18 +392,21 @@ function withoutCgroup(usecByCgroup, cgroupPath) {
  * counters, then those plus the deltas.
  *
  * @param {Object<string, number>} deltasUsec - What each cgroup spends between the scans.
- * @param {object} [options] - The first scan's counters, and changes to the tree before each scan.
+ * @param {object} [options] - The first scan's counters, and changes to the tree before initialize() and each scan.
  * @param {Object<string, number>} [options.firstScanCountersUsec] - Defaults to FIRST_SCAN_COUNTERS_USEC.
+ * @param {(tree: object) => void} [options.beforeInitialize] - Runs before initialize().
  * @param {(tree: object) => void} [options.beforeFirstScan] - Runs before the first.
  * @param {(tree: object) => void} [options.beforeSecondScan] - Runs before the second.
  * @returns {{topCpu: object|null, logged: string[]}} The second scan's top CPU entry, and what was logged.
  */
 function topCpuAfterTwoScans(deltasUsec, {
-    firstScanCountersUsec = FIRST_SCAN_COUNTERS_USEC, beforeFirstScan = () => {}, beforeSecondScan = () => {},
+    firstScanCountersUsec = FIRST_SCAN_COUNTERS_USEC, beforeInitialize = () => {}, beforeFirstScan = () => {},
+    beforeSecondScan = () => {},
 } = {}) {
     const tree = makeFakeTreeWithSampleFiles();
     writeCgroupCounters(tree, firstScanCountersUsec);
     const {sampler, clock, logged} = makeTreeSampler(tree);
+    beforeInitialize(tree);
     sampler.initialize();
     beforeFirstScan(tree);
     sampler.runTick(0);
@@ -748,6 +757,36 @@ test('service sampler: a scanned parent that does not exist (systemd removes an 
         [{groupKey: 'pseudo:kernel', name: KERNEL_LABEL, cpuPercent: 2_100_000 / 4_000_000 * 100}, []]);
 });
 
+test('service sampler: a long-lived leaf that could not be read in one scan is not counted at its whole lifetime ' +
+    'when it reads again: its CPU goes to short jobs', () => {
+    // Editor has run for an hour. Denied in the first scan, it would look new in the second, under a parent listed in
+    // the first, and count 3,600,300,000 µs: about 90,000% of the machine.
+    const editorCpuStatPath = GLib.build_filenamev([CGROUP_ROOT_RELATIVE_PATH, EDITOR_LEAF, 'cpu.stat']);
+    const deniedError = permissionDeniedError('Error opening file: Permission denied');
+    const {topCpu, logged} = topCpuAfterTwoScans({...STEADY_DELTAS_USEC, [ROOT_CGROUP_KEY]: 1_100_000}, {
+        firstScanCountersUsec: {...FIRST_SCAN_COUNTERS_USEC, [EDITOR_LEAF]: LONG_LIVED_LEAF_USAGE_USEC},
+        beforeFirstScan: tree => tree.failWith(editorCpuStatPath, deniedError),
+        beforeSecondScan: tree => tree.clearFailure(editorCpuStatPath),
+    });
+    // app.slice's 400,000 µs (Editor's 300,000 among them), plus the other parents' 300,000 beyond their leaves.
+    assertEqual([topCpu, logged], [
+        {groupKey: 'pseudo:short-jobs', name: SHORT_JOBS_LABEL, cpuPercent: 700_000 / 4_000_000 * 100},
+        [`${LOG_PREFIX} cannot read 1 cgroups, first: ${EDITOR_LEAF}: Error opening file: Permission denied`],
+    ]);
+});
+
+test('service sampler: without a uid (unreadable /proc/self/status) neither kernel nor short jobs is ranked, so ' +
+    'kernel never absorbs the user session', () => {
+    // Only system.slice is scanned: kernel would be 3,000,000 − 300,000 µs (67.5%), the user session's CPU included.
+    const deniedError = permissionDeniedError('Error opening file: Permission denied');
+    const {topCpu, logged} = topCpuAfterTwoScans({...STEADY_DELTAS_USEC, [ROOT_CGROUP_KEY]: 3_000_000}, {
+        beforeInitialize: tree => tree.failWith('proc/self/status', deniedError),
+    });
+    assertEqual([topCpu, logged.some(line => line.includes('proc/self/status'))], [
+        {groupKey: 'unit:example-daemon', name: 'example-daemon', cpuPercent: 100_000 / 4_000_000 * 100}, true,
+    ]);
+});
+
 test('service sampler: unwatched, a fresh sampler scans at tick 0 (first), 1 (warm-up) and 31, and no other', () =>
     assertEqual(scanTicksAndReasons(false, FIRST_UNWATCHED_INTERVAL_SCAN_TICK + 4),
         [[0, 'first'], [1, 'warm-up'], [FIRST_UNWATCHED_INTERVAL_SCAN_TICK, 'interval']]));
@@ -807,6 +846,81 @@ test('service sampler: a watch start inside the reveal cooldown does not scan; t
         [scansAtStart + 1, publishesAtStart + 2], [scansAtStart + 2, publishesAtStart + 3]]);
 });
 
+test('service sampler: a watch start right after a scan neither scans nor publishes, arms no warm-up, and still ' +
+    'switches to the watched cadence', () => {
+    // The client already has the ranking that scan published, and a new one over 150 ms would rank noise.
+    let currentTickNumber = null;
+    const scanTickNumbers = [];
+    const {sampler, clock} = makeSampler('root-a', {
+        readFile: makeScanSpottingReader(() => scanTickNumbers.push(currentTickNumber)),
+    });
+    let publishCount = 0;
+    sampler.addListener(() => publishCount++);
+    sampler.initialize();
+    for (currentTickNumber = 0; currentTickNumber <= 1; currentTickNumber++) {
+        clock.nowUsec += SAMPLE_SPACING_USEC;
+        sampler.runTick(currentTickNumber);
+    }
+    currentTickNumber = null;
+    clock.nowUsec += WITHIN_CPU_RANKING_WINDOW_USEC;
+    const publishCountBefore = publishCount;
+    sampler.setDetailWatched(true);
+    const publishedByWatchStart = publishCount - publishCountBefore;
+    for (currentTickNumber = 2; currentTickNumber <= 12; currentTickNumber++) {
+        clock.nowUsec += SAMPLE_SPACING_USEC;
+        sampler.runTick(currentTickNumber);
+    }
+    sampler.destroy();
+    // Watched, the next scan is 10 ticks after the warm-up at tick 1 (unwatched it would be 30).
+    assertEqual([publishedByWatchStart, scanTickNumbers], [0, [0, 1, 11]]);
+});
+
+test('service sampler: a warm-up due 150 ms after a watch-start scan waits one tick, then runs', () => {
+    const {sampler, clock, scanCount} = makeSamplerPastItsWarmUp();
+    clock.nowUsec += SAMPLE_SPACING_USEC;
+    sampler.setDetailWatched(true);
+    const scansAfterWatchStart = scanCount();
+    clock.nowUsec += WITHIN_CPU_RANKING_WINDOW_USEC;
+    sampler.runTick(WARM_UP_SETUP_LAST_TICK + 1);
+    const afterShortWindowTick = [scanCount() - scansAfterWatchStart, sampler.lastAppScanReason];
+    clock.nowUsec += SAMPLE_SPACING_USEC;
+    sampler.runTick(WARM_UP_SETUP_LAST_TICK + 2);
+    const afterNextTick = [scanCount() - scansAfterWatchStart, sampler.lastAppScanReason];
+    sampler.destroy();
+    assertEqual([afterShortWindowTick, afterNextTick], [[0, 'watch-start'], [1, 'warm-up']]);
+});
+
+test('service sampler: a watch start after a tick whose sample threw publishes nothing, and its no-data snapshot ' +
+    'keeps apps null; the next tick that samples carries the ranking', () => {
+    let isClockBroken = false;
+    const {sampler, clock} = makeSampler('root-a', {
+        clockLabel: () => {
+            if (isClockBroken)
+                throw new Error('clock exploded');
+            return FIXTURE_CLOCK_LABEL;
+        },
+    });
+    let publishCount = 0;
+    sampler.addListener(() => publishCount++);
+    sampler.initialize();
+    for (let tickNumber = 0; tickNumber <= WARM_UP_SETUP_LAST_TICK; tickNumber++) {
+        isClockBroken = tickNumber === WARM_UP_SETUP_LAST_TICK;
+        clock.nowUsec += SAMPLE_SPACING_USEC;
+        sampler.runTick(tickNumber);
+    }
+    const noDataSnapshot = sampler.latestSnapshot;
+    const publishCountBefore = publishCount;
+    sampler.setDetailWatched(true);
+    const afterWatchStart = [publishCount - publishCountBefore, sampler.latestSnapshot === noDataSnapshot,
+        noDataSnapshot.apps];
+    isClockBroken = false;
+    clock.nowUsec += SAMPLE_SPACING_USEC;
+    sampler.runTick(WARM_UP_SETUP_LAST_TICK + 1);
+    const appsOfNextTick = sampler.latestSnapshot.apps;
+    sampler.destroy();
+    assertEqual([afterWatchStart, appsOfNextTick !== null], [[0, true, null], true]);
+});
+
 test('service sampler: collectGarbage runs once after each app scan (after its publish), never after a fast tick alone',
     () => {
         const events = [];
@@ -831,27 +945,62 @@ test('service sampler: collectGarbage runs once after each app scan (after its p
     });
 
 test('service sampler: a scan that throws is logged, drops the ranking, and never costs the tick its sample', () => {
-    let isNameLookupBroken = false;
+    // A lister that breaks its contract (no array) stands for a bug in the scan: a failing name lookup no longer
+    // can, since the scan catches that (see the lookup rows).
+    let isListingBroken = false;
     const {sampler, clock, logged} = makeSampler('root-a', {
-        resolveAppName: () => {
-            if (isNameLookupBroken)
-                throw new Error('name lookup exploded');
-            return null;
-        },
+        listDirectoryNames: path => (isListingBroken ? undefined : listSubdirectoryNames(path)),
     });
     sampler.initialize();
     sampler.runTick(0);
     clock.nowUsec += SAMPLE_SPACING_USEC;
     sampler.runTick(1);
     const appsBeforeTheFailure = sampler.latestSnapshot.apps;
-    isNameLookupBroken = true;
+    isListingBroken = true;
     const historyLengthBefore = sampler.cpuHistory.values().length;
     clock.nowUsec += SAMPLE_SPACING_USEC;
     sampler.runTick(FIRST_UNWATCHED_INTERVAL_SCAN_TICK);
     assertEqual([appsBeforeTheFailure !== null, sampler.cpuHistory.values().length - historyLengthBefore,
-        sampler.latestSnapshot.apps, logged.length, logged[0]?.startsWith(LOG_PREFIX),
-        logged[0]?.includes('name lookup exploded')], [true, 1, null, 1, true, true]);
+        sampler.latestSnapshot.apps, logged.length, logged[0]?.startsWith(`${LOG_PREFIX} app scan failed: `)],
+    [true, 1, null, 1, true]);
 });
+
+test('service sampler: app names are looked up once per desktop id and kept across scans, misses included', () => {
+    const lookUpCountsByDesktopId = {};
+    const {sampler, clock} = makeSampler('root-a', {
+        resolveAppName: desktopId => {
+            lookUpCountsByDesktopId[desktopId] = (lookUpCountsByDesktopId[desktopId] ?? 0) + 1;
+            return desktopId === CHROME_DESKTOP_ID ? 'Google Chrome' : null;
+        },
+    });
+    sampler.initialize();
+    sampler.runTick(0);
+    clock.nowUsec += APP_SCAN_SPACING_USEC;
+    sampler.runTick(1);
+    sampler.destroy();
+    // Two Chrome scopes and a Chromium scope, named in both scans: one lookup per desktop id in all.
+    assertEqual(Object.entries(lookUpCountsByDesktopId).sort(), [[CHROME_DESKTOP_ID, 1], [CHROMIUM_DESKTOP_ID, 1]]);
+});
+
+test('service sampler: a name lookup that throws is logged once, and the scan goes on with the name the unit gives',
+    () => {
+        const {sampler, clock, logged} = makeSampler('root-a', {
+            resolveAppName: desktopId => {
+                if (desktopId === CHROMIUM_DESKTOP_ID)
+                    throw new Error('desktop file unreadable');
+                return null;
+            },
+        });
+        sampler.initialize();
+        sampler.runTick(0);
+        clock.nowUsec += APP_SCAN_SPACING_USEC;
+        sampler.fsRoot = fixtureRoot('root-vanished');
+        sampler.runTick(1);
+        sampler.destroy();
+        // root-vanished has no herdr, so Chromium tops memory, by the name its scope gives.
+        assertEqual([sampler.latestSnapshot.apps?.topMemory?.name, logged],
+            ['Chromium', [`${LOG_PREFIX} cannot look up ${CHROMIUM_DESKTOP_ID}: desktop file unreadable`]]);
+    });
 
 test('service sampler: a throwing sample publishes an all-null, incomplete snapshot and a gap in both histories',
     () => {
@@ -957,7 +1106,7 @@ test('service sampler: 109 cgroups failing with one error log one line per 10 mi
     const failingLeafPaths = Array.from({length: FAILING_LEAF_COUNT},
         (_unused, leafIndex) => `${SYSTEM_SLICE}/${generatedLeafName(leafIndex)}`);
     writeCgroupCounters(tree, Object.fromEntries([[ROOT_CGROUP_KEY, 1_000_000], [SYSTEM_SLICE, 1_000_000],
-        ...failingLeafPaths.map(leafPath => [leafPath, 1_000])]));
+        ...failingLeafPaths.map(leafPath => [leafPath, LONG_LIVED_LEAF_USAGE_USEC])]));
     const deniedError = permissionDeniedError('Error opening file: Permission denied');
     const cpuStatOf = leafPath => GLib.build_filenamev([CGROUP_ROOT_RELATIVE_PATH, leafPath, 'cpu.stat']);
     failingLeafPaths.forEach(leafPath => tree.failWith(cpuStatOf(leafPath), deniedError));
@@ -965,18 +1114,21 @@ test('service sampler: 109 cgroups failing with one error log one line per 10 mi
     sampler.initialize();
     sampler.runTick(0);
     const linesAfterFirstScan = [...logged];
-    // The warm-up scan, 2 s later: another count and another first path, the same template.
+    // The warm-up scan, 2 s later: another count and another first path, the same template. The leaf that reads
+    // again has an hour of CPU and spent none since; counted as new, it would top CPU at about 90,000%.
     tree.clearFailure(cpuStatOf(failingLeafPaths[0]));
     clock.nowUsec += SAMPLE_SPACING_USEC;
     sampler.runTick(1);
     const lineCountAfterSecondScan = logged.length;
+    const topCpuPercentAfterSecondScan = sampler.latestSnapshot.apps?.topCpu?.cpuPercent;
     clock.nowUsec = ERROR_LOG_REPEAT_INTERVAL_USEC + SAMPLE_SPACING_USEC;
     sampler.runTick(FIRST_UNWATCHED_INTERVAL_SCAN_TICK);
     sampler.destroy();
-    assertEqual([linesAfterFirstScan, lineCountAfterSecondScan, logged.at(-1)], [
+    assertEqual([linesAfterFirstScan, lineCountAfterSecondScan, topCpuPercentAfterSecondScan, logged.at(-1)], [
         [`${LOG_PREFIX} cannot read ${FAILING_LEAF_COUNT} cgroups, first: ${failingLeafPaths[0]}: ` +
             'Error opening file: Permission denied'],
         1,
+        0,
         `${LOG_PREFIX} cannot read ${FAILING_LEAF_COUNT - 1} cgroups, first: ${failingLeafPaths[1]}: ` +
             'Error opening file: Permission denied',
     ]);
