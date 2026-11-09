@@ -77,8 +77,9 @@ const TOP_MEMORY_VALUE_FIELD = 'memoryBytes';
 /**
  * The JSON GetState returns: everything a client needs to draw from scratch.
  *
- * latestSampledAtUsec is written before the snapshot on purpose: gnome-status reads it out of gdbus's text with a
- * pattern and takes the first match, which is then always this top-level field.
+ * The top-level numbers (protocol, the two times and the sequence) are written before the snapshot on purpose:
+ * gnome-status reads them out of gdbus's text with a pattern, from the part before "snapshot" only, so a field of the
+ * same name nested in the snapshot is never mistaken for one of them.
  *
  * @param {object} state - The service's state.
  * @param {object|null} state.snapshot - The latest snapshot (service/sampler.js's Snapshot), or null before the first.

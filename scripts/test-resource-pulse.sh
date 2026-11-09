@@ -21,12 +21,13 @@
 # and refuse to run on any other: never on the live session bus. The service's
 # install step runs against a systemctl stub, never the live user manager.
 #
-# "Could not run" is exit 2, never a pass: a missing gjs, zsh, find, timeout or
-# dbus-run-session, or a missing tally line (an import error prints none) is
-# fatal. The suite asserts its own row total.
+# "Could not run" is exit 2, never a pass: a missing gjs, zsh, find, timeout,
+# dbus-run-session or gdbus, or a missing tally line (an import error prints
+# none) is fatal. The suite asserts its own row total.
 #
 # Requires: bash, gjs, zsh (for gnome-status), find, timeout, dbus-run-session
-# (Ubuntu: dbus-daemon), and for the card-width row the Pango typelibs
+# (Ubuntu: dbus-daemon), gdbus (libglib2.0-bin; gnome-status asks the real
+# service through it), and for the card-width row the Pango typelibs
 # (gir1.2-pango-1.0) and the card's font, Ubuntu Sans (fonts-ubuntu): without
 # them that row fails, never passes. No network, no root.
 #
@@ -50,7 +51,7 @@ fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
 [[ -r "$RUNNER" ]] || fatal "cannot read $RUNNER"
 [[ -d "$EXT_DIR" ]] || fatal "no extension directory at $EXT_DIR"
-for required_tool in gjs zsh find timeout dbus-run-session; do
+for required_tool in gjs zsh find timeout dbus-run-session gdbus; do
   command -v "$required_tool" >/dev/null || fatal "$required_tool is required"
 done
 # Every fixture this run writes lives here, from the placement rows on; removed on exit.
@@ -357,6 +358,8 @@ check "metadata.json: no session-modes key, so the lock screen disables it" "$me
 APPLY_SCRIPT="$DOTFILES/scripts/apply-gnome-settings.sh"
 COST_SCRIPT="$DOTFILES/scripts/resource-pulse-cost.sh"
 EXTENSION_UUID="resource-pulse@dotfiles"
+RESOURCE_PULSE_BUS_NAME='io.github.quantivly.dotfiles.ResourcePulse1'
+RESOURCE_PULSE_OBJECT_PATH='/io/github/quantivly/dotfiles/ResourcePulse1'
 SHELL_SCHEMA="org.gnome.shell"
 LIVE_SETTINGS_BARRIER_RUNTIME_DIR="$WIRING_TMP/barrier-runtime"
 LIVE_SETTINGS_BARRIER_BUS="unix:path=$WIRING_TMP/barrier-no-session-bus"
@@ -504,6 +507,248 @@ gnome_status_summary+=" not-asked-for=$(gnome_status_hints '@as []' false true '
 check "gnome-status names the setting that keeps an enabled Resource Pulse from loading, and only then" \
   "$gnome_status_summary" "installation-off=1/0/rc0 user-extensions-off=0/1/rc0 running=0/0/rc0 not-asked-for=0/0/rc0"
 
+# The service half of the block: systemctl, gdbus, pgrep and date are stubs too.
+# Each answers from GNOME_STATUS_* variables and logs its call to
+# GNOME_STATUS_CALLS; systemctl answers only the two properties gnome-status
+# reads, gdbus answers GetState in its own text form, ('<json>',), and date
+# answers `+%s%N` with a fixed now (anything else goes to the real date).
+GNOME_STATUS_CALLS="$WIRING_TMP/gnome-status-calls"
+REAL_DATE_PATH="$(command -v date)" || fatal "date is required"
+GNOME_STATUS_SYSTEMCTL_STUB="$(cat <<'STUB'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
+case "$*" in
+  "--user show -p ActiveState --value resource-pulse.service")
+    [[ -z "${GNOME_STATUS_NO_MANAGER:-}" ]] || { echo "Failed to connect to user scope bus" >&2; exit 1; }
+    printf '%s\n' "${GNOME_STATUS_SERVICE_ACTIVE_STATE-inactive}" ;;
+  "--user show -p ActiveEnterTimestamp --value --timestamp=unix resource-pulse.service")
+    printf '%s\n' "${GNOME_STATUS_SERVICE_STARTED_AT-}" ;;
+  *) printf 'unexpected systemctl call: %s\n' "$*" >&2; exit 64 ;;
+esac
+STUB
+)"
+install_stub "$GNOME_STATUS_STUB_BIN" systemctl "$GNOME_STATUS_SYSTEMCTL_STUB"
+GNOME_STATUS_GDBUS_STUB="$(cat <<'STUB'
+#!/usr/bin/env bash
+# answer: GetState's JSON as gdbus prints it; hang: never answers; anything else: no owner.
+printf 'gdbus %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
+case "${GNOME_STATUS_GDBUS_MODE:-fail}" in
+  answer) printf "('%s',)\n" "$GNOME_STATUS_STATE_JSON" ;;
+  hang) exec sleep 30 ;;
+  *) echo "Error: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable" >&2; exit 1 ;;
+esac
+STUB
+)"
+install_stub "$GNOME_STATUS_STUB_BIN" gdbus "$GNOME_STATUS_GDBUS_STUB"
+GNOME_STATUS_PGREP_STUB="$(cat <<'STUB'
+#!/usr/bin/env bash
+printf 'pgrep %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
+[[ -n "${GNOME_STATUS_SHELL_PID:-}" ]] || exit 1
+printf '%s\n' "$GNOME_STATUS_SHELL_PID"
+STUB
+)"
+install_stub "$GNOME_STATUS_STUB_BIN" pgrep "$GNOME_STATUS_PGREP_STUB"
+# shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
+install_stub "$GNOME_STATUS_STUB_BIN" date "$(printf '#!/usr/bin/env bash\nif [[ "$1" == "+%%s%%N" && -n "${GNOME_STATUS_NOW_NSEC:-}" ]]; then\n  printf "%%s\\n" "$GNOME_STATUS_NOW_NSEC"\n  exit 0\nfi\nexec %q "$@"' "$REAL_DATE_PATH")"
+
+# suite_started_at_epoch: this suite's own start, in whole seconds since the
+# epoch (/proc/stat btime + stat field 22 / CLK_TCK), read here independently of
+# gnome-status. The suite's own pid stands in for the desktop's gnome-shell.
+suite_started_at_epoch() {
+  local stat_line boot_epoch="" ticks_per_second key value _rest
+  local -a stat_fields
+  read -r stat_line <"/proc/$$/stat" || return 1
+  read -r -a stat_fields <<<"${stat_line##*) }"
+  while read -r key value _rest; do
+    [[ "$key" == btime ]] && boot_epoch="$value"
+  done </proc/stat
+  ticks_per_second="$(getconf CLK_TCK)" || return 1
+  [[ "$boot_epoch" =~ ^[0-9]+$ && "${stat_fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$(( boot_epoch + stat_fields[19] / ticks_per_second ))"
+}
+SUITE_STARTED_AT_EPOCH="$(suite_started_at_epoch)" || fatal "cannot read this suite's own start time from /proc"
+# Two seconds either side of it, so whole-second rounding can never decide a row.
+BEFORE_SHELL_START_EPOCH=$((SUITE_STARTED_AT_EPOCH - 2))
+AFTER_SHELL_START_EPOCH=$((SUITE_STARTED_AT_EPOCH + 2))
+SERVICE_STARTED_LONG_AFTER_EPOCH=$((SUITE_STARTED_AT_EPOCH + 1000))
+
+# A home where the extension is linked (a symlink, as ./install makes it) to a
+# fixture extension whose files carry chosen mtimes.
+GNOME_STATUS_LINKED_HOME="$WIRING_TMP/gnome-status-linked-home"
+STATUS_EXTENSION_DIR="$WIRING_TMP/gnome-status-extension"
+mkdir -p "$GNOME_STATUS_LINKED_HOME/.local/share/gnome-shell/extensions" \
+  || fatal "cannot create gnome-status's linked fixture home"
+ln -s "$STATUS_EXTENSION_DIR" "$GNOME_STATUS_LINKED_HOME/.local/share/gnome-shell/extensions/$EXTENSION_UUID" \
+  || fatal "cannot link gnome-status's fixture extension"
+# reset_status_extension <card.js mtime> <lib/format.js mtime> <service/main.js mtime>
+# (epoch seconds); extension.js is always older than the shell.
+reset_status_extension() {
+  rm -rf "$STATUS_EXTENSION_DIR"
+  mkdir -p "$STATUS_EXTENSION_DIR/lib" "$STATUS_EXTENSION_DIR/service" || fatal "cannot create $STATUS_EXTENSION_DIR"
+  : >"$STATUS_EXTENSION_DIR/extension.js"
+  : >"$STATUS_EXTENSION_DIR/card.js"
+  : >"$STATUS_EXTENSION_DIR/lib/format.js"
+  : >"$STATUS_EXTENSION_DIR/service/main.js"
+  touch -d "@$BEFORE_SHELL_START_EPOCH" "$STATUS_EXTENSION_DIR/extension.js" || fatal "touch -d failed"
+  touch -d "@$1" "$STATUS_EXTENSION_DIR/card.js" || fatal "touch -d @$1 failed"
+  touch -d "@$2" "$STATUS_EXTENSION_DIR/lib/format.js" || fatal "touch -d @$2 failed"
+  touch -d "@$3" "$STATUS_EXTENSION_DIR/service/main.js" || fatal "touch -d @$3 failed"
+}
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+
+# A fixed now, and GetState answers whose latest sample is some seconds before it.
+# Each carries a decoy of the same key inside the snapshot, after the top-level
+# one: only the FIRST match is the service's.
+STATUS_NOW_EPOCH=1794000100
+STATUS_NOW_NSEC="${STATUS_NOW_EPOCH}000000000"
+# state_json_sampled <seconds before now | null | absent>: a GetState JSON.
+state_json_sampled() {
+  local latest_field
+  case "$1" in
+    absent) latest_field='' ;;
+    null) latest_field='"latestSampledAtUsec":null,' ;;
+    *) latest_field="\"latestSampledAtUsec\":$(( (STATUS_NOW_EPOCH - $1) * 1000000 ))," ;;
+  esac
+  printf '{"protocol":1,"serviceStartedAtUsec":1793990000000000,%s"sequence":42,"snapshot":{"apps":{"topCpu":{"name":"decoy","latestSampledAtUsec":5}}},"histories":{"cpu":[],"memory":[]}}' \
+    "$latest_field"
+}
+GNOME_STATUS_STUB_DEFAULTS=(GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
+  GNOME_STATUS_GDBUS_MODE=answer "GNOME_STATUS_STATE_JSON=$(state_json_sampled 3)"
+  "GNOME_STATUS_NOW_NSEC=$STATUS_NOW_NSEC" "GNOME_STATUS_SERVICE_STARTED_AT=@$SERVICE_STARTED_LONG_AFTER_EPOCH"
+  "GNOME_STATUS_SHELL_PID=$$")
+# gnome_status_run <enabled-extensions> <allow-extension-installation> [NAME=value...]
+# runs gnome-status against every stub, settings reset to those two, with the
+# defaults above overridden by the assignments (HOME=... included). Leaves its
+# output in GNOME_STATUS_OUTPUT; the stubs' calls are in GNOME_STATUS_CALLS.
+gnome_status_run() {
+  rm -rf "${STUB_STATE:?}"/*
+  mkdir -p "$STUB_STATE/$SHELL_SCHEMA"
+  printf '%s\n' "$1" >"$STUB_STATE/$SHELL_SCHEMA/enabled-extensions"
+  printf '%s\n' "$2" >"$STUB_STATE/$SHELL_SCHEMA/allow-extension-installation"
+  shift 2
+  : >"$GNOME_STATUS_CALLS"
+  # shellcheck disable=SC2016  # Expanded by zsh.
+  GNOME_STATUS_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_STUB_BIN:$PATH" \
+    STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" \
+    GNOME_STATUS_CALLS="$GNOME_STATUS_CALLS" "${GNOME_STATUS_STUB_DEFAULTS[@]}" "$@" \
+    zsh -c 'source "$1" && gnome-status' gnome-status "$DOTFILES/zsh/functions/system.sh" 2>&1)"
+}
+# The parts of GNOME_STATUS_OUTPUT the rows compare.
+status_enabled_field() { sed -n 's/^Resource Pulse: linked=[a-z]* enabled=\(.*\) state=.*$/\1/p' <<<"$GNOME_STATUS_OUTPUT"; }
+status_service_line() { sed -n 's/^  service: //p' <<<"$GNOME_STATUS_OUTPUT"; }
+status_warnings_naming() { grep -F '  ⚠ ' <<<"$GNOME_STATUS_OUTPUT" | grep -c -F "$1"; }
+status_warning_count() { grep -c -F '  ⚠ ' <<<"$GNOME_STATUS_OUTPUT"; }
+status_gdbus_calls() { grep -c '^gdbus ' "$GNOME_STATUS_CALLS"; }
+ASKED_FOR_SETTING="['$EXTENSION_UUID']"
+NOT_ASKED_FOR_SETTING='@as []'
+
+enabled_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_SHELL_STATE=
+enabled_summary+="unknown-to-shell=[$(status_enabled_field)]"
+gnome_status_run "$ASKED_FOR_SETTING" true
+enabled_summary+=" known=[$(status_enabled_field)]"
+gnome_status_run "$ASKED_FOR_SETTING" false GNOME_STATUS_SHELL_STATE=
+enabled_summary+=" kept-out=[$(status_enabled_field)]"
+gnome_status_run "$NOT_ASKED_FOR_SETTING" true GNOME_STATUS_SHELL_STATE=
+enabled_summary+=" not-asked-for=[$(status_enabled_field)]"
+check "gnome-status: enabled= reads enabled-extensions, and says it starts at next login while the shell does not know it" \
+  "$enabled_summary" "unknown-to-shell=[yes (starts at next login)] known=[yes] kept-out=[yes] not-asked-for=[no]"
+
+gnome_status_run "$ASKED_FOR_SETTING" true
+check "gnome-status: a running service shows its state, protocol and the age of its last sample (the top-level field), from GetState" \
+  "line=[$(status_service_line)] warnings=$(status_warning_count) call=[$(grep '^gdbus ' "$GNOME_STATUS_CALLS")]" \
+  "line=[active, protocol 1, last sample 3 s ago] warnings=0 call=[gdbus call --session --dest $RESOURCE_PULSE_BUS_NAME --object-path $RESOURCE_PULSE_OBJECT_PATH --method $RESOURCE_PULSE_BUS_NAME.GetState --timeout 2]"
+
+stall_summary=""
+for sample_age_seconds in 6 7 60 150; do
+  gnome_status_run "$ASKED_FOR_SETTING" true "GNOME_STATUS_STATE_JSON=$(state_json_sampled "$sample_age_seconds")"
+  stall_summary+="$sample_age_seconds=[$(status_service_line)]/$(status_warnings_naming 'has not sampled') "
+done
+check "gnome-status: a last sample older than the extension's 6 s is a ⚠ naming it; 6 s is not; from 120 s it reads in minutes" \
+  "$stall_summary" \
+  "6=[active, protocol 1, last sample 6 s ago]/0 7=[active, protocol 1, last sample 7 s ago]/1 60=[active, protocol 1, last sample 60 s ago]/1 150=[active, protocol 1, last sample 2 min ago]/1 "
+
+gnome_status_run "$ASKED_FOR_SETTING" true "GNOME_STATUS_STATE_JSON=$(state_json_sampled null)"
+unsampled_summary="null=[$(status_service_line)]/$(status_warning_count)"
+gnome_status_run "$ASKED_FOR_SETTING" true "GNOME_STATUS_STATE_JSON=$(state_json_sampled absent)"
+unsampled_summary+=" absent=[$(status_service_line)]/$(status_warning_count)"
+check "gnome-status: a null latestSampledAtUsec is no sample yet, and none at all (an older service) is not reported; neither warns" \
+  "$unsampled_summary" \
+  "null=[active, protocol 1, no sample yet]/0 absent=[active, protocol 1, last sample not reported (a service from before it was)]/0"
+
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_GDBUS_MODE=fail
+no_answer_summary="fail=[$(status_service_line)]/$(status_warnings_naming 'did not answer GetState')"
+# gnome-status bounds the call at 3 s; the hanging stub would take 30.
+HUNG_CALL_BOUND_SECONDS=10
+hang_started_seconds=$SECONDS
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_GDBUS_MODE=hang
+hang_elapsed_seconds=$((SECONDS - hang_started_seconds))
+no_answer_summary+=" hang=[$(status_service_line)]/$(status_warnings_naming 'did not answer GetState')"
+no_answer_summary+=" bounded=$( (( hang_elapsed_seconds < HUNG_CALL_BOUND_SECONDS )) && printf yes || printf 'no-%ss' "$hang_elapsed_seconds")"
+check "gnome-status: an active service that does not answer, or hangs, is 'no answer' and a ⚠, and the call ends within its limit" \
+  "$no_answer_summary" "fail=[active, no answer]/1 hang=[active, no answer]/1 bounded=yes"
+
+not_running_summary=""
+for state_and_setting in "failed:$ASKED_FOR_SETTING" "failed:$NOT_ASKED_FOR_SETTING" "inactive:$ASKED_FOR_SETTING" \
+  "inactive:$NOT_ASKED_FOR_SETTING" "activating:$ASKED_FOR_SETTING"; do
+  gnome_status_run "${state_and_setting#*:}" true "GNOME_STATUS_SERVICE_ACTIVE_STATE=${state_and_setting%%:*}"
+  enabled_flag="$([[ "${state_and_setting#*:}" == "$ASKED_FOR_SETTING" ]] && printf enabled || printf off)"
+  not_running_summary+="${state_and_setting%%:*}/$enabled_flag=[$(status_service_line)]/$(status_warning_count)/$(status_gdbus_calls) "
+done
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_NO_MANAGER=1
+not_running_summary+="no-manager=[$(status_service_line)]/$(status_warning_count)/$(status_gdbus_calls)"
+check "gnome-status: a failed service always warns, one not running only while enabled, no manager never; none is asked GetState" \
+  "$not_running_summary" \
+  "failed/enabled=[failed (not running)]/1/0 failed/off=[failed (not running)]/1/0 inactive/enabled=[inactive (not running)]/1/0 inactive/off=[inactive (not running)]/0/0 activating/enabled=[activating (not running)]/1/0 no-manager=[unknown (no systemd user manager answered)]/0/0"
+
+older_code_summary=""
+STATUS_SERVICE_STARTED_AT="GNOME_STATUS_SERVICE_STARTED_AT=@$SUITE_STARTED_AT_EPOCH"
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$AFTER_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
+older_code_summary+="service=$(status_warnings_naming 'runs older code: service/main.js changed after it started')"
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$AFTER_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
+older_code_summary+=" lib=$(status_warnings_naming 'runs older code: lib/format.js changed after it started')"
+reset_status_extension "$AFTER_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
+older_code_summary+=" drawing-only=$(status_warnings_naming 'runs older code')"
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT"
+older_code_summary+=" unchanged=$(status_warnings_naming 'runs older code')"
+check "gnome-status: a file under service/ or lib/ changed after the service started is a ⚠ that it runs older code; a drawing change is not" \
+  "$older_code_summary" "service=1 lib=1 drawing-only=0 unchanged=0"
+
+older_copy_summary=""
+OLDER_COPY_NEEDLE='the desktop runs an older copy; takes effect at next login'
+reset_status_extension "$AFTER_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME"
+older_copy_summary+="card=$(status_warnings_naming "$OLDER_COPY_NEEDLE (card.js changed after this login)")"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" GNOME_STATUS_SHELL_PID=
+older_copy_summary+=" no-shell=$(status_warnings_naming "$OLDER_COPY_NEEDLE")"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" GNOME_STATUS_SHELL_STATE=
+older_copy_summary+=" unknown-to-shell=$(status_warnings_naming "$OLDER_COPY_NEEDLE")"
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$AFTER_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME"
+older_copy_summary+=" lib=$(status_warnings_naming "$OLDER_COPY_NEEDLE (lib/format.js changed after this login)")"
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$AFTER_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME"
+older_copy_summary+=" service-only=$(status_warnings_naming "$OLDER_COPY_NEEDLE")"
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME"
+older_copy_summary+=" unchanged=$(status_warnings_naming "$OLDER_COPY_NEEDLE")"
+older_copy_summary+=" pgrep=[$(grep '^pgrep ' "$GNOME_STATUS_CALLS")]"
+check "gnome-status: a file outside service/ newer than the desktop's gnome-shell says the desktop runs an older copy, and only then" \
+  "$older_copy_summary" \
+  "card=1 no-shell=0 unknown-to-shell=0 lib=1 service-only=0 unchanged=0 pgrep=[pgrep -o -x -u $(id -u) gnome-shell]"
+
+# Spelled by pieces so this row's own source is not what it finds.
+GNOME_STATUS_FORBIDDEN_PATTERN="cmd""line|env""iron\\b|\\bps -|pgre""p -[a-z]*[al]\\b"
+gnome_status_source="$(sed -n '/^gnome-status() {$/,/^}$/p' "$DOTFILES/zsh/functions/system.sh")"
+# The range must reach the service block (its GetState call), or an empty range would pass.
+check "gnome-status reads no argument list or environment, and runs no ps or pgrep -a/-l" \
+  "reaches-service-block=$(grep -c -F 'gdbus call --session' <<<"$gnome_status_source") forbidden=$(grep -c -E "$GNOME_STATUS_FORBIDDEN_PATTERN" <<<"$gnome_status_source")" \
+  "reaches-service-block=1 forbidden=0"
+
 printf '\nlink and template\n'
 check "install.conf.yaml links the extension directory" \
   "$(grep -c -x -F "    ~/.local/share/gnome-shell/extensions/$EXTENSION_UUID: gnome-shell/extensions/$EXTENSION_UUID" "$DOTFILES/install.conf.yaml")" 1
@@ -522,8 +767,6 @@ check "the template carries a commented genable_extension line" \
 # would find no live bus to fall back to.
 # ---------------------------------------------------------------------------
 SERVICE_MAIN_PATH="$EXT_DIR/service/main.js"
-RESOURCE_PULSE_BUS_NAME='io.github.quantivly.dotfiles.ResourcePulse1'
-RESOURCE_PULSE_OBJECT_PATH='/io/github/quantivly/dotfiles/ResourcePulse1'
 PRIVATE_BUS_DIR="$WIRING_TMP/private-bus"
 PRIVATE_BUS_CONFIG="$WIRING_TMP/private-bus.conf"
 PRIVATE_BUS_RUNNER="$DOTFILES/gnome-shell/tests/run-private-bus.js"
@@ -668,14 +911,30 @@ print(verdict);
 '
 SERVICE_LOG="$WIRING_TMP/service.log"
 : >"$SERVICE_LOG"
+# gnome-status with its gdbus and date real, so it asks the driver's private bus
+# (whose address dbus-run-session sets) and reads gdbus's real text; every other
+# tool it calls is the stub of the rows above.
+GNOME_STATUS_REAL_BUS_STUB_BIN="$WIRING_TMP/gnome-status-real-bus-bin"
+for real_bus_stubbed_tool in gsettings gnome-extensions gnome-shell systemctl pgrep; do
+  install_stub "$GNOME_STATUS_REAL_BUS_STUB_BIN" "$real_bus_stubbed_tool" \
+    "$(<"$GNOME_STATUS_STUB_BIN/$real_bus_stubbed_tool")"
+done
+GNOME_STATUS_REAL_BUS_OUTPUT="$WIRING_TMP/gnome-status-real-bus.out"
+# shellcheck disable=SC2016  # Expanded by zsh.
+GNOME_STATUS_REAL_BUS_COMMAND=(env HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_REAL_BUS_STUB_BIN:$PATH"
+  STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG"
+  GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
+  zsh -c 'source "$1" && gnome-status' gnome-status "$DOTFILES/zsh/functions/system.sh")
 # The driver starts one service, probes it, starts a second one (which must
-# find the name taken), probes the first again, then sends it SIGTERM and waits
-# at most 10 s. Every wait is bounded, so a service that ignores SIGTERM ends
-# the row as "hung" rather than hanging the suite.
+# find the name taken), probes the first again, runs gnome-status against it,
+# then sends it SIGTERM and waits at most 10 s. Every wait is bounded, so a
+# service that ignores SIGTERM ends the row as "hung" rather than hanging the
+# suite.
 # shellcheck disable=SC2016  # The driver's own source: its variables expand when it runs.
 SERVICE_DRIVER_OUTPUT="$(on_private_bus bash -c '
 set -u
-service_main="$1" service_log="$2" state_probe="$3" bus_name="$4" object_path="$5"
+service_main="$1" service_log="$2" state_probe="$3" bus_name="$4" object_path="$5" gnome_status_output="$6"
+shift 6
 is_private_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "${RESOURCE_PULSE_TEST_BUS_DIR:-}" \
   || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
 # still_running <pid>: the process exists and is not a zombie (the state after the last ") " of its stat).
@@ -691,6 +950,8 @@ printf "first=%s\n" "$(gjs -c "$state_probe" "$bus_name" "$object_path" "$bus_na
 timeout 30 gjs -m "$service_main" >>"$service_log" 2>&1
 printf "second-exit=%s\n" "$?"
 printf "after-second=%s\n" "$(gjs -c "$state_probe" "$bus_name" "$object_path" "$bus_name" 5)"
+"$@" >"$gnome_status_output" 2>&1
+printf "gnome-status-exit=%s\n" "$?"
 kill -TERM "$first_pid" 2>/dev/null
 for (( attempt = 0; attempt < 100; attempt++ )); do
   still_running "$first_pid" || break
@@ -705,13 +966,14 @@ else
   printf "first-exit=%s\n" "$?"
 fi
 ' service-driver "$SERVICE_MAIN_PATH" "$SERVICE_LOG" "$SERVICE_STATE_PROBE_JS" "$RESOURCE_PULSE_BUS_NAME" \
-  "$RESOURCE_PULSE_OBJECT_PATH" 2>&1)"
-service_first=""; service_second_exit=""; service_after_second=""; service_first_exit=""
+  "$RESOURCE_PULSE_OBJECT_PATH" "$GNOME_STATUS_REAL_BUS_OUTPUT" "${GNOME_STATUS_REAL_BUS_COMMAND[@]}" 2>&1)"
+service_first=""; service_second_exit=""; service_after_second=""; service_first_exit=""; gnome_status_real_bus_exit=""
 while IFS= read -r driver_line; do
   case "$driver_line" in
     first=*)        service_first="${driver_line#first=}" ;;
     second-exit=*)  service_second_exit="${driver_line#second-exit=}" ;;
     after-second=*) service_after_second="${driver_line#after-second=}" ;;
+    gnome-status-exit=*) gnome_status_real_bus_exit="${driver_line#gnome-status-exit=}" ;;
     first-exit=*)   service_first_exit="${driver_line#first-exit=}" ;;
   esac
 done <<<"$SERVICE_DRIVER_OUTPUT"
@@ -722,6 +984,13 @@ check "service/main.js owns the name, answers GetState with protocol 1 and a sam
 check "a second service/main.js finds the name taken and exits 1, while the first keeps serving" \
   "second-exit=$service_second_exit after-second=$service_after_second" \
   "second-exit=1 after-second=protocol=1 sample=yes memory=yes"
+# The age is the real one, so its shape is compared, not its number.
+REAL_BUS_SERVICE_LINE_PATTERN='^  service: active, protocol 1, last sample [0-9]+ s ago$'
+real_bus_service_line="$(grep -E '^  service: ' "$GNOME_STATUS_REAL_BUS_OUTPUT" 2>/dev/null)"
+real_bus_line_shape="$([[ "$real_bus_service_line" =~ $REAL_BUS_SERVICE_LINE_PATTERN ]] && printf ok || printf '[%s]' "$real_bus_service_line")"
+check "gnome-status reads the real service's GetState through the real gdbus: protocol 1 and a fresh last sample, no ⚠" \
+  "exit=$gnome_status_real_bus_exit shape=$real_bus_line_shape warnings=$(grep -c -F '  ⚠ ' "$GNOME_STATUS_REAL_BUS_OUTPUT" 2>/dev/null)" \
+  "exit=0 shape=ok warnings=0"
 # Warnings of gjs and GLib themselves only (a deprecated API, a misused call,
 # an uncaught error): the service's own lines are Gjs-Console-*, and a read
 # this runner's kernel refuses may well log one of those.
@@ -1616,7 +1885,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=430
+EXPECTED_ROWS=440
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

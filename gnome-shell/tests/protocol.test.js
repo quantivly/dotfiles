@@ -161,15 +161,18 @@ test('protocol: a state payload before the first sample round-trips with a null 
         });
     });
 
-test('protocol: GetState\'s latestSampledAtUsec comes before the snapshot, so a shell finds the top-level one first',
+test('protocol: GetState writes protocol and latestSampledAtUsec before the snapshot, where gnome-status reads them',
     () => {
-        // gnome-status reads it out of gdbus's text with a pattern, taking the first match; a nested field of the
-        // same name in a later service could only come after it.
+        // gnome-status reads them out of gdbus's text with a pattern, from the part before "snapshot" only, so a
+        // field of the same name nested in the snapshot is never mistaken for one of them.
         const payload = fullStatePayload();
-        const latestSampledAtOffset = payload.indexOf('"latestSampledAtUsec":');
         const snapshotOffset = payload.indexOf('"snapshot":');
-        assertEqual({isPresent: latestSampledAtOffset >= 0, isBeforeSnapshot: latestSampledAtOffset < snapshotOffset},
-            {isPresent: true, isBeforeSnapshot: true});
+        const isBeforeSnapshot = key => {
+            const keyOffset = payload.indexOf(`"${key}":`);
+            return keyOffset >= 0 && keyOffset < snapshotOffset;
+        };
+        const topLevelKeys = ['protocol', 'latestSampledAtUsec'];
+        assertEqual(topLevelKeys.map(isBeforeSnapshot), topLevelKeys.map(() => true));
     });
 
 test('protocol: a sample payload round-trips', () => {
