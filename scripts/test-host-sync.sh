@@ -36,6 +36,8 @@ hasnt() { if [[ "$2" != *"$3"* ]]; then ok "$1"; else bad "$1 — '$3' unexpecte
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
 for tool in bash zsh git jq curl flock; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
+# The git the fixture's wrapper (write_stubs) hands every call on to, resolved before any row's PATH.
+REAL_GIT="$(command -v git)"
 [[ -x "$SUT" ]] || fatal "$SUT is not executable — every row below would assert nothing"
 if git -C "$TMPROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
     fatal "$TMPROOT is inside a git repository; the fixture repos would resolve against it"
@@ -46,6 +48,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # The profile marker's override (the settings renderer's name) and the overlay's: a row sets what
 # it means to, so a caller's own (a real ~/.config/claude-host-profile, a real remote) never reaches one.
 unset CLAUDE_SETTINGS_RENDER_MARKER HOST_SYNC_DOTFILES_LOCAL_REPO HOST_SYNC_DOTFILES_LOCAL_REMOTE PROFILE_MARKER_PATH
+# The memory scripts' overrides likewise: run sets the stores root a row means, and nothing reads another table.
+unset CLAUDE_MEMORY_STORES_ROOT CLAUDE_MEMORY_CONFIG STORES_ROOT_PATH
 # A host profile may export it (dev, sol-build), and the HTTPS row must see only what host-sync sets.
 unset CLAUDE_CODE_PLUGIN_PREFER_HTTPS
 
@@ -55,9 +59,13 @@ ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
 # Built at runtime so no token-shaped literal sits in the repo for a scanner to flag.
 FAKE_TOK="sk-ant-""oat01-FIXTUREtokenNOTREAL0123456789abcdef"
-MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo |claude-settings-render.sh --apply|herdr-draft skill$'
+MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo |claude-settings-render.sh --apply|herdr-draft skill$|claude-memory-link.sh --apply|^git clone'
 # What the herdr-draft stub's `skill` prints with no draft-version file: the spawn skill a level host has.
 SPAWN_SKILL_TEXT="spawn skill for main"
+# Under a case's $HOME: where the memory stores are checked out (run's CLAUDE_MEMORY_STORES_ROOT
+# unless a row sets STORES_ROOT_PATH), and the store table the overlay carries.
+STORES_REL=".local/share/claude-memory"
+STORE_TABLE_REL=".dotfiles-local/claude/memory-stores.json"
 
 # ---------------------------------------------------------------------------------------------
 # Stubs. Each logs "<tool> <args>" to $HOME/stub/calls.
@@ -243,6 +251,18 @@ STUB
     # host-sync must never run sudo; a logging stub makes a call visible to the rows.
     # shellcheck disable=SC2016  # expanded by the stub, deliberately
     printf '#!/bin/sh\necho "sudo $*" >>"$HOME/stub/calls"\nexit 1\n' >"$b/sudo"
+    # git, first on host-sync's PATH (~/.local/bin): a clone is logged, since it writes a checkout;
+    # `--version` says 2.39.2 on its flag, below the memory sync's floor; everything else, and every
+    # clone too, is the real git.
+    {
+        printf '#!/usr/bin/env bash\nREAL_GIT=%q\n' "$REAL_GIT"
+        cat <<'STUB'
+S="$HOME/stub"
+if [[ "${1:-}" == --version && -e "$S/git-version-old" ]]; then echo "git version 2.39.2"; exit 0; fi
+[[ "${1:-}" == clone ]] && echo "git $*" >>"$S/calls"
+exec "$REAL_GIT" "$@"
+STUB
+    } >"$b/git"
     chmod +x "$b"/* "$1/stub/go/bin/go"
 }
 
@@ -298,6 +318,52 @@ STUB
     chmod +x "$1"
 }
 
+# The memory link script (scripts/claude-memory-link.sh): --check prints its summary line, the
+# counts $HOME/stub/link-summary holds or three keys linked, and exits $HOME/stub/link-rc (0 when
+# there is none); at 2 it says why on stderr and prints no summary, as the real one does. --apply
+# links, so the next --check is level: link-rc 0 and the summary reset. Two flags break --apply:
+# link-apply-fails (exit 2, with its reason) and link-apply-no-op (exit 0, nothing linked).
+write_memory_link_stub() {   # $1 = the file
+    cat >"$1" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "claude-memory-link.sh $*" >>"$S/calls"
+case "$1" in
+    --check)
+        rc="$(cat "$S/link-rc" 2>/dev/null || echo 0)"
+        if [[ "$rc" == 2 ]]; then echo "claude-memory-link: tenant-route could not answer for ~/code/x" >&2; exit 2; fi
+        cat "$S/link-summary" 2>/dev/null || echo "claude-memory-link: 3 linked, 0 to fix, 0 unmapped, 0 without a store"
+        exit "$rc" ;;
+    --apply)
+        if [[ -e "$S/link-apply-fails" ]]; then echo "claude-memory-link: link.lock still held after 120 s" >&2; exit 2; fi
+        [[ -e "$S/link-apply-no-op" ]] || { echo 0 >"$S/link-rc"; rm -f "$S/link-summary"; } ;;
+esac
+STUB
+    chmod +x "$1"
+}
+
+# The memory sync (scripts/claude-memory-sync.sh): --status prints $HOME/stub/status-lines when
+# that exists, else one ok line per checked-out store under CLAUDE_MEMORY_STORES_ROOT, as the real
+# one reads them, and exits $HOME/stub/status-rc (0 when there is none); at 2 it prints nothing
+# but its reason, on stderr.
+write_memory_sync_stub() {   # $1 = the file
+    cat >"$1" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "claude-memory-sync.sh $*" >>"$S/calls"
+[[ "$1" == --status ]] || exit 0
+rc="$(cat "$S/status-rc" 2>/dev/null || echo 0)"
+if [[ "$rc" == 2 ]]; then echo "claude-memory-sync: the store table cannot be read" >&2; exit 2; fi
+if [[ -e "$S/status-lines" ]]; then
+    cat "$S/status-lines"
+else
+    for store_dir in "$CLAUDE_MEMORY_STORES_ROOT"/*/; do
+        [[ -e "$store_dir.git" ]] && printf '%s\tok\tlast synced 4 min ago\n' "$(basename "$store_dir")"
+    done
+fi
+exit "$rc"
+STUB
+    chmod +x "$1"
+}
+
 # ---------------------------------------------------------------------------------------------
 # A LEVEL dev, per case: C = case dir, H = its $HOME, GH = its fake GitHub.
 # ---------------------------------------------------------------------------------------------
@@ -312,7 +378,7 @@ bare() {   # $1 = owner/repo -> a bare repo with one commit, under $GH
 new_case() {
     CASE=$((CASE + 1)); C="$TMPROOT/c$CASE"; H="$C/home"; GH="$C/gh"
     # $C/tmp is the run's $TMPDIR (run), so a row can see a temp file host-sync left behind.
-    mkdir -p "$C/tmp" "$H/stub" "$GH""$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/host-sync" "$H/quantivly"
+    mkdir -p "$C/tmp" "$H/stub" "$GH" "$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/host-sync" "$H/quantivly"
     write_stubs "$H"
     echo "$V_LAPTOP" >"$H/stub/claude-version"; echo "$HV" >"$H/stub/herdr-version"; echo "$HV" >"$H/stub/server-version"
     # herdr's "release": the stub with its version pinned, served over file://
@@ -324,7 +390,8 @@ new_case() {
     : >"$H/stub/calls"
 
     # dotfiles: origin with an install script, two declared links, the linear-key plugin, the
-    # settings renderer (a stub) and the REAL link checker, all tracked; dev at origin/main.
+    # settings renderer and the memory link and sync scripts (stubs) and the REAL link checker, all
+    # tracked; dev at origin/main.
     local w="$C/seed-dotfiles"
     git init -q -b main "$w"
     mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin" "$w/config" "$w/scripts"
@@ -334,6 +401,8 @@ new_case() {
     echo x >"$w/config/x"; echo y >"$w/config/y.conf"
     cp "$DOTFILES/scripts/check-links.sh" "$w/scripts/check-links.sh"
     write_render_stub "$w/scripts/claude-settings-render.sh"
+    write_memory_link_stub "$w/scripts/claude-memory-link.sh"
+    write_memory_sync_stub "$w/scripts/claude-memory-sync.sh"
     echo '{"name":"linear-key","version":"1.0.0"}' >"$w/claude/plugins/linear-key/.claude-plugin/plugin.json"
     echo '{"name":"dotfiles","plugins":[{"name":"linear-key"}]}' >"$w/claude/plugins/.claude-plugin/marketplace.json"
     echo one >"$w/a.txt"
@@ -344,14 +413,18 @@ new_case() {
     git -C "$H/.dotfiles" rev-parse HEAD >"$H/.local/state/host-sync/installed-head"
 
     # dotfiles-local, the private overlay, with the host profile `p` marked: an install stub of the
-    # same shape, a manifest declaring two links and the profile itself; cloned and installed, as a
-    # level host has it.
+    # same shape, a manifest declaring two links, the profile itself and the memory store table (a
+    # store for the profile's tenant, alpha, and one for a tenant it does not serve, beta); cloned
+    # and installed, as a level host has it.
     w="$C/seed-dotfiles-local"
     git init -q -b main "$w"; mkdir -p "$w/hosts" "$w/claude" "$w/config"
     write_install_stub "$w/install" install-fails-local local local-install-ran
     printf -- '- link:\n    ~/.claude/CLAUDE.md: claude/CLAUDE.md\n    ~/.config/overlay/note.txt: config/note.txt\n' >"$w/install.conf.yaml"
     echo '# the overlay instructions' >"$w/claude/CLAUDE.md"; echo note >"$w/config/note.txt"
     echo '{"tenants":["quantivly"]}' >"$w/hosts/p.json"
+    jq -n --arg gh "file://$GH" '{stores: {
+        alpha: {remote: ($gh + "/example-org/mem-alpha.git"), tenants: ["quantivly"]},
+        beta: {remote: ($gh + "/example-org/mem-beta.git"), tenants: ["personal"]}}}' >"$w/claude/memory-stores.json"
     git -C "$w" add -A; git -C "$w" commit -q -m init
     mkdir -p "$GH/ZviBaratz"; git clone -q --bare "$w" "$GH/ZviBaratz/dotfiles-local.git"; rm -rf "$w"
     git clone -q "$GH/ZviBaratz/dotfiles-local.git" "$H/.dotfiles-local"
@@ -369,6 +442,13 @@ new_case() {
     : >"$H/.config/host-sync/armed"
     : >"$H/.config/systemd/user/host-sync.timer"; : >"$H/.config/systemd/user/dev-sync.timer"
     stub_timer_live host-sync.timer
+
+    # Memory: both stores' remotes on the fake GitHub, the served store (alpha) cloned from the
+    # table's remote, and the memory timer live, since a served store is checked out.
+    bare example-org/mem-alpha; bare example-org/mem-beta
+    git clone -q "file://$GH/example-org/mem-alpha.git" "$H/$STORES_REL/alpha"
+    : >"$H/.config/systemd/user/claude-memory-sync.timer"
+    stub_timer_live claude-memory-sync.timer
 
     # herdr-draft at the target commit
     bare ZviBaratz/herdr-draft
@@ -505,7 +585,8 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
 
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
 # PROFILE_MARKER_PATH, when a row sets it, is where CLAUDE_SETTINGS_RENDER_MARKER points instead of
-# the default path, so a row can tell an honoured override from a hard-coded default.
+# the default path, so a row can tell an honoured override from a hard-coded default; STORES_ROOT_PATH
+# likewise for CLAUDE_MEMORY_STORES_ROOT.
 run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     # The trace goes to its own fd, as a person debugging with BASH_XTRACEFD would see it: a
     # command's own 2>/dev/null then hides nothing from it.
@@ -514,6 +595,7 @@ run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
         HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" TMPDIR="$C/tmp" \
         CLAUDE_SETTINGS_RENDER_MARKER="${PROFILE_MARKER_PATH:-$H/.config/claude-host-profile}" \
+        CLAUDE_MEMORY_STORES_ROOT="${STORES_ROOT_PATH:-$H/$STORES_REL}" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash ${XTRACE:+-x} "$SUT" --here "$@" 2>&1 3>"$C/xtrace")"
     RC=$?
 }
@@ -603,6 +685,7 @@ jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true | .enabledPlugi
     "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
 rm -rf "$H/.local/state/host-sync" "$H/.config/host-sync/armed"; touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
 echo 1 >"$H/stub/render-rc"; rm "$H/.x"   # settings and a link, each one gate from its apply path
+rm -rf "${H:?}/$STORES_REL/alpha"; echo 1 >"$H/stub/link-rc"   # memory: a store to clone and links to fix
 # Every path under $HOME with its size, mode and mtime, less the stub log and any path given.
 snapshot() {   # $@ = further paths to leave out
     local leave_out=(-path "$H/stub") path
@@ -1468,6 +1551,269 @@ check "an unsafe --clone dir is refused (64)" "$RC" 64
 new_case
 HOST_SYNC_DOTFILES_LOCAL_REPO='x;rm -rf /' run --check
 check "an unsafe HOST_SYNC_DOTFILES_LOCAL_REPO is refused (64)" "$RC" 64
+
+echo "== memory: the git floor, store checkouts, links, sync status, the memory timer"
+# The rows' glyph and area, as row() prints them, so a needle also pins the glyph.
+MEMORY_OK="$(printf '✓ %-14s ' memory)"; MEMORY_DRIFT="$(printf '✗ %-14s ' memory)"
+MEMORY_OPER="$(printf '⚠ %-14s ' memory)"; MEMORY_INFO="$(printf '· %-14s ' memory)"
+LEVEL_LINK_SUMMARY="claude-memory-link: 3 linked, 0 to fix, 0 unmapped, 0 without a store"
+memory_sibling_calls() { grep -E '^claude-memory-(link|sync)\.sh' "$H/stub/calls" | paste -sd'|'; }
+clone_calls() { grep -c '^git clone' "$H/stub/calls"; }
+# The memory timer's mutating calls, in order.
+memory_timer_arming_calls() { grep -E '^systemctl --user (daemon-reload|enable|reenable|disable)' "$H/stub/calls" | paste -sd'|'; }
+# Every row that names the memory timer, whatever its glyph.
+memory_timer_rows() { grep -c 'claude-memory-sync.timer' <<<"$OUT"; }
+
+new_case
+run_level --check
+has   "memory: level → the served store ✓" "$OUT" "${MEMORY_OK}store alpha checked out"
+has   "memory: linked → ✓ with the link script's summary" "$OUT" "${MEMORY_OK}${LEVEL_LINK_SUMMARY}"
+has   "memory: status ok → ✓" "$OUT" "${MEMORY_OK}store alpha: last synced 4 min ago"
+has   "memory: level → the memory timer ✓" "$OUT" "${MEMORY_OK}claude-memory-sync.timer armed"
+hasnt "memory: git at or above 2.40 prints no git row" "$OUT" "the memory sync needs"
+check "memory: level → four memory rows, and the siblings asked --check and --status only" \
+    "$(area_rows memory)/$(memory_sibling_calls)" "4/claude-memory-link.sh --check|claude-memory-sync.sh --status"
+check "memory: printed after the clones row and before the slice row" \
+    "$(( $(line_of "clones under ~/quantivly") < $(line_of "${MEMORY_OK}store alpha") && \
+        $(line_of "${MEMORY_OK}claude-memory-sync.timer") < $(line_of "agents.slice MemoryHigh") ))" 1
+
+new_case
+touch "$H/stub/git-version-old"
+run_level --check
+has   "memory: git older than 2.40 is a person's step" "$OUT" \
+    "${MEMORY_OPER}git 2.39.2 is older than 2.40; the memory sync needs --attr-source: upgrade git"
+
+new_case
+rm "$H/$STORE_TABLE_REL"
+run_level --apply
+has   "memory: no store table → · and nothing else: the · row" "$OUT" \
+    "${MEMORY_INFO}no memory store table at ~/.dotfiles-local/claude/memory-stores.json; memory is not linked or synced here"
+check "memory: no store table → · and nothing else: one memory row, no sibling called" \
+    "$(area_rows memory)/$(memory_sibling_calls)" "1/"
+
+new_case
+edit_json .dotfiles-local/claude/memory-stores.json '.stores.alpha.tenants = "quantivly"'
+run_level --apply
+has   "memory: a store table of the wrong shape is ⚠, and nothing else runs" "$OUT" \
+    "${MEMORY_OPER}the store table ~/.dotfiles-local/claude/memory-stores.json cannot be read, or a store in it has no remote or no tenants list"
+check "memory: a store table of the wrong shape is ⚠, and nothing else runs: one row, no sibling called" \
+    "$(area_rows memory)/$(memory_sibling_calls)" "1/"
+
+new_case
+rm "$H/.dotfiles-local/hosts/p.json"; rm -rf "${H:?}/$STORES_REL/alpha"
+run_level --apply
+has   "memory: tenants unknown → · store checkouts not judged, nothing cloned: the · row" "$OUT" \
+    "${MEMORY_INFO}store checkouts not judged: this host's tenants are unknown (see the profile row)"
+check "memory: tenants unknown → · store checkouts not judged, nothing cloned: no clone, no timer row" \
+    "$(present "$H/$STORES_REL/alpha")/$(clone_calls)/$(memory_timer_rows)" "gone/0/0"
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"
+run_level --check
+has   "memory: a served store that is not checked out is drift; --apply clones it: the ✗ row" "$OUT" \
+    "${MEMORY_DRIFT}store alpha not checked out (example-org/mem-alpha)"
+check "memory: a served store that is not checked out is drift; --apply clones it: --check clones nothing, exit 1" \
+    "$(present "$H/$STORES_REL/alpha")/$(clone_calls)/$RC" "gone/0/1"
+reset_calls; run_level --apply
+check "memory: a served store that is not checked out is drift; --apply clones it: the table's remote, verbatim" \
+    "$(grep '^git clone' "$H/stub/calls")" "git clone --quiet file://$GH/example-org/mem-alpha.git $H/$STORES_REL/alpha"
+check "memory: a served store that is not checked out is drift; --apply clones it: origin is the table's remote, byte for byte" \
+    "$(git -C "$H/$STORES_REL/alpha" config --get remote.origin.url)" "$(jq -r .stores.alpha.remote "$H/$STORE_TABLE_REL")"
+check "memory: a served store that is not checked out is drift; --apply clones it: on the remote's default branch" \
+    "$(git -C "$H/$STORES_REL/alpha" symbolic-ref --short HEAD)/$(head_of "$H/$STORES_REL/alpha")" \
+    "main/$(git --git-dir="$GH/example-org/mem-alpha.git" rev-parse main)"
+has   "memory: a served store that is not checked out is drift; --apply clones it: the ✓ row" "$OUT" \
+    "${MEMORY_OK}store alpha cloned"
+check "memory: a served store that is not checked out is drift; --apply clones it: exit 0" "$RC" 0
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"
+run_level --apply
+check "memory: a second --apply after the clone calls nothing mutating" "$(mutations)" 0
+check "memory: a second --apply after the clone changes no file" \
+    "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)" ""
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"; rm -rf "${GH:?}/example-org/mem-alpha.git"
+run_level --apply
+has   "memory: a clone that fails is ✗, and leaves no directory: the ✗ row" "$OUT" \
+    "${MEMORY_DRIFT}store alpha: git clone example-org/mem-alpha failed"
+check "memory: a clone that fails is ✗, and leaves no directory: no directory, exit 1" \
+    "$(present "$H/$STORES_REL/alpha")/$RC" "gone/1"
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"
+edit_json .dotfiles-local/claude/memory-stores.json '.stores.alpha.remote = "ssh://x/y.git"'
+run_level --apply
+has   "memory: a remote that is not under the GitHub base is not cloned: ⚠ naming the store" "$OUT" \
+    "${MEMORY_OPER}store alpha: its remote is not a repository URL under file://$GH; not cloned"
+check "memory: a remote that is not under the GitHub base is not cloned: no clone" \
+    "$(present "$H/$STORES_REL/alpha")/$(clone_calls)" "gone/0"
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"; mkdir -p "$H/$STORES_REL/alpha"; echo kept >"$H/$STORES_REL/alpha/note.md"
+run_level --apply
+has   "memory: a store directory that is not a checkout is a person's step: the ⚠ row" "$OUT" \
+    "${MEMORY_OPER}store alpha: ~/$STORES_REL/alpha exists but is not a checkout; not touched"
+check "memory: a store directory that is not a checkout is a person's step: no clone, its file kept" \
+    "$(clone_calls)/$(cat "$H/$STORES_REL/alpha/note.md")" "0/kept"
+
+new_case
+edit_json .dotfiles-local/claude/memory-stores.json \
+    ".stores[\"../escape\"] = {remote: \"file://$GH/example-org/mem-alpha.git\", tenants: [\"quantivly\"]}"
+run_level --apply
+has   "memory: a store name that is not a plain directory name is ⚠ and never cloned: the ⚠ row" "$OUT" \
+    "${MEMORY_OPER}a store in the table has a name that is not a plain directory name; it is not judged"
+check "memory: a store name that is not a plain directory name is ⚠ and never cloned: no clone, nothing beside the root" \
+    "$(clone_calls)/$(present "$H/.local/share/escape")" "0/gone"
+
+new_case
+git clone -q "file://$GH/example-org/mem-beta.git" "$H/$STORES_REL/beta"
+run_level --check
+has   "memory: a store for an unserved tenant is reported, not touched: the ⚠ row" "$OUT" \
+    "${MEMORY_OPER}store beta is checked out here but serves no tenant of profile p (its tenants: personal); remove it by hand"
+run_level --apply
+check "memory: a store for an unserved tenant is reported, not touched: still checked out after --apply, nothing synced" \
+    "$(present "$H/$STORES_REL/beta/.git")/$(git -C "$H/$STORES_REL/beta" config --get remote.origin.url)/$(grep -c 'claude-memory-sync.sh --apply' "$H/stub/calls")" \
+    "present/file://$GH/example-org/mem-beta.git/0"
+
+STORES_ROOT_PATH="$TMPROOT/stores-elsewhere"
+new_case
+mkdir -p "$STORES_ROOT_PATH"; rm -rf "${STORES_ROOT_PATH:?}/alpha"; mv "$H/$STORES_REL/alpha" "$STORES_ROOT_PATH/alpha"
+run_level --check
+has   "memory: CLAUDE_MEMORY_STORES_ROOT is honoured: the store is found there" "$OUT" "${MEMORY_OK}store alpha checked out"
+check "memory: CLAUDE_MEMORY_STORES_ROOT is honoured: exit 0" "$RC" 0
+rm -rf "${STORES_ROOT_PATH:?}"; unset STORES_ROOT_PATH
+
+new_case
+echo 'claude-memory-link: 3 linked, 0 to fix, 1 unmapped, 0 without a store' >"$H/stub/link-summary"
+run_level --check
+has   "memory: unmapped or store-less keys in the summary → ⚠ even at exit 0: unmapped" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link: 3 linked, 0 to fix, 1 unmapped, 0 without a store: memory that no store link reaches; claude-memory-link --list names the keys"
+check "memory: unmapped or store-less keys in the summary → ⚠ even at exit 0: no ✓ link row, exit 0" \
+    "$(grep -c "${MEMORY_OK}claude-memory-link:" <<<"$OUT")/$RC" "0/0"
+echo 'claude-memory-link: 3 linked, 0 to fix, 0 unmapped, 2 without a store' >"$H/stub/link-summary"
+run_level --check
+has   "memory: unmapped or store-less keys in the summary → ⚠ even at exit 0: without a store" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link: 3 linked, 0 to fix, 0 unmapped, 2 without a store: memory that no store link reaches"
+
+new_case
+echo 'claude-memory-link: no summary here' >"$H/stub/link-summary"
+run_level --check
+has   "memory: a link check with no summary line is ⚠, never ✓" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link --check printed no summary line (exit 0)"
+
+new_case
+echo 1 >"$H/stub/link-rc"; echo 'claude-memory-link: 1 linked, 2 to fix, 0 unmapped, 0 without a store' >"$H/stub/link-summary"
+run_level --check
+has   "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: the ✗ row" "$OUT" \
+    "${MEMORY_DRIFT}2 memory link(s) to fix (claude-memory-link: 1 linked, 2 to fix, 0 unmapped, 0 without a store)"
+check "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: --check links nothing, exit 1" \
+    "$(grep -c '^claude-memory-link.sh --apply' "$H/stub/calls")/$RC" "0/1"
+reset_calls; run_level --apply
+check "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: --check, --apply, --check" \
+    "$(grep '^claude-memory-link.sh' "$H/stub/calls" | paste -sd'|')" \
+    "claude-memory-link.sh --check|claude-memory-link.sh --apply|claude-memory-link.sh --check"
+has   "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: the ✓ row" "$OUT" \
+    "${MEMORY_OK}linked by claude-memory-link --apply (${LEVEL_LINK_SUMMARY})"
+check "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: exit 0" "$RC" 0
+
+new_case
+echo 1 >"$H/stub/link-rc"; echo 'claude-memory-link: 1 linked, 2 to fix, 0 unmapped, 0 without a store' >"$H/stub/link-summary"
+touch "$H/stub/link-apply-no-op"
+run_level --apply
+has   "memory: an --apply that leaves links to fix is ✗" "$OUT" \
+    "${MEMORY_DRIFT}still 2 memory link(s) to fix after claude-memory-link --apply (claude-memory-link: 1 linked, 2 to fix, 0 unmapped, 0 without a store)"
+rm "$H/stub/link-apply-no-op"; touch "$H/stub/link-apply-fails"
+reset_calls; run_level --apply
+has   "memory: an --apply that cannot run → ⚠ with its first line, not re-checked" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link --apply could not run: claude-memory-link: link.lock still held after 120 s"
+check "memory: an --apply that cannot run → ⚠ with its first line, not re-checked: the calls" \
+    "$(grep '^claude-memory-link.sh' "$H/stub/calls" | paste -sd'|')" "claude-memory-link.sh --check|claude-memory-link.sh --apply"
+
+new_case
+echo 2 >"$H/stub/link-rc"
+run_level --apply
+has   "memory: a link script that cannot run → ⚠ with its first line, no --apply" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link --check could not run: claude-memory-link: tenant-route could not answer for ~/code/x"
+check "memory: a link script that cannot run → ⚠ with its first line, no --apply: only --check, exit 0" \
+    "$(grep '^claude-memory-link.sh' "$H/stub/calls" | paste -sd'|')/$RC" "claude-memory-link.sh --check/0"
+rm "$H/.dotfiles/scripts/claude-memory-link.sh"
+run_level --check
+has   "memory: a link script that is not there → ⚠ could not run (exit 127)" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link --check could not run (exit 127)"
+
+new_case
+printf 'alpha\twarn\t2 conflict copies in the tree\n' >"$H/stub/status-lines"
+run_level --check
+has   "memory: status warn → ⚠ carrying the word warn" "$OUT" "${MEMORY_OPER}store alpha: warn: 2 conflict copies in the tree"
+check "memory: status warn → ⚠ carrying the word warn: no ✓ status row, exit 0" \
+    "$(grep -c "${MEMORY_OK}store alpha:" <<<"$OUT")/$RC" "0/0"
+printf 'alpha\tbad\tnever synced; last outcome unreachable: no answer within 60 s\n' >"$H/stub/status-lines"
+run_level --check
+has   "memory: status bad → ⚠ carrying the word bad" "$OUT" \
+    "${MEMORY_OPER}store alpha: bad: never synced; last outcome unreachable: no answer within 60 s"
+echo 2 >"$H/stub/status-rc"
+run_level --check
+has   "memory: status that cannot run → ⚠ with its first line" "$OUT" \
+    "${MEMORY_OPER}claude-memory-sync --status could not run: claude-memory-sync: the store table cannot be read"
+rm "$H/.dotfiles/scripts/claude-memory-sync.sh"
+run_level --check
+has   "memory: status that is not there → ⚠ could not run (exit 127)" "$OUT" \
+    "${MEMORY_OPER}claude-memory-sync --status could not run (exit 127)"
+
+new_case
+timer_off claude-memory-sync.timer
+run_level --check
+has   "memory: the memory timer is armed by --apply once a served store is checked out: the ✗ row" "$OUT" \
+    "${MEMORY_DRIFT}claude-memory-sync.timer not armed (is-enabled=disabled, is-active=inactive)"
+check "memory: the memory timer is armed by --apply once a served store is checked out: --check arms nothing, exit 1" \
+    "$(memory_timer_arming_calls)/$RC" "/1"
+reset_calls; run_level --apply
+check "memory: the memory timer is armed by --apply once a served store is checked out: daemon-reload, then enable --now, never reenable" \
+    "$(memory_timer_arming_calls)" "systemctl --user daemon-reload|systemctl --user enable --now claude-memory-sync.timer"
+has   "memory: the memory timer is armed by --apply once a served store is checked out: the ✓ row" "$OUT" \
+    "${MEMORY_OK}claude-memory-sync.timer armed by this run"
+check "memory: the memory timer is armed by --apply once a served store is checked out: exit 0" "$RC" 0
+
+new_case
+timer_off claude-memory-sync.timer; touch "$H/stub/enable-fails"
+run_level --apply
+has   "memory: a memory timer that cannot be armed is ✗ with what systemd reads back" "$OUT" \
+    "${MEMORY_DRIFT}arming claude-memory-sync.timer failed: is-enabled=disabled, is-active=inactive"
+
+new_case
+rm "$H/.config/host-sync/armed"; timer_off claude-memory-sync.timer
+run_level --check
+has   "memory: on a host that is not armed, a memory timer not armed is information" "$OUT" \
+    "${MEMORY_INFO}claude-memory-sync.timer not armed, nor is this host (see the timer row); host-sync arms it with the host"
+check "memory: on a host that is not armed, a memory timer not armed is information: exit 0" "$RC" 0
+
+new_case
+: >"$H/.config/host-sync/disarmed"; timer_off claude-memory-sync.timer
+reset_calls; run_level --apply
+check "memory: on a host disarmed by hand, --apply leaves the memory timer alone" \
+    "$(memory_timer_arming_calls)/$(grep -c -F "${MEMORY_INFO}claude-memory-sync.timer not armed, nor is this host" <<<"$OUT")" "/1"
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"; git clone -q "file://$GH/example-org/mem-beta.git" "$H/$STORES_REL/beta"
+timer_off claude-memory-sync.timer
+run_level --check
+check "memory: no served store checked out → no memory timer row (an unserved one does not count)" "$(memory_timer_rows)" 0
+
+# Each memory fix one gate from its apply path: a served store to clone (gamma), links to fix, and
+# the memory timer not armed while alpha is checked out.
+new_case
+edit_json .dotfiles-local/claude/memory-stores.json \
+    ".stores.gamma = {remote: \"file://$GH/example-org/mem-gamma.git\", tenants: [\"quantivly\"]}"
+echo 1 >"$H/stub/link-rc"; echo 'claude-memory-link: 2 linked, 1 to fix, 0 unmapped, 0 without a store' >"$H/stub/link-summary"
+timer_off claude-memory-sync.timer
+before="$(snapshot)"
+run_level --check
+check "memory: --check clones nothing and arms nothing: the three ✗ rows" \
+    "$(grep -c -F -e "${MEMORY_DRIFT}store gamma not checked out" -e "${MEMORY_DRIFT}1 memory link(s) to fix" \
+        -e "${MEMORY_DRIFT}claude-memory-sync.timer not armed" <<<"$OUT")" 3
+check "memory: --check clones nothing and arms nothing: nothing mutating, no clone" "$(mutations)/$(clone_calls)" "0/0"
+check "memory: --check clones nothing and arms nothing: no file changes" "$(diff <(echo "$before") <(snapshot) | head -n 5)" ""
 
 echo "== timer"
 # The timer row's glyph and area, as row() prints them, so a needle also pins ✓ against ✗ and ·.
@@ -2360,7 +2706,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=540
+EXPECTED_ROWS=608
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

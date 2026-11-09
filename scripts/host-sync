@@ -5,7 +5,8 @@
 #
 # Keep dev's tooling level with the laptop's: dotfiles, Claude Code, herdr and
 # herdr-draft and the skills generated from them, the Claude plugins its settings
-# declare, and the ~/quantivly clones.
+# declare, the ~/quantivly clones, and the Claude Code memory stores, their links
+# and their sync.
 #
 # WHY. dev (the team EC2) sat unused from 2026-09-28, partly because nothing kept
 # it current: on 2026-10-12 it was 73 dotfiles commits and 24 Claude Code
@@ -70,6 +71,9 @@
 #   - enable or disable a Claude plugin, or install one whose marketplace no settings
 #     fragment declares. settings.json declares the plugins (H4) and the render owns
 #     enablement; host-sync installs what it sets true, and nothing else.
+#   - remove a memory store checked out here that serves none of the profile's tenants,
+#     clone a store whose remote is not a repository under the GitHub base, or upgrade
+#     a git older than the memory sync needs (2.40). It names each.
 #
 # THE HOST PROFILE (shared-configuration design, H1). ~/.config/claude-host-profile, the
 # settings renderer's marker, names this host's profile, and the private overlay's
@@ -80,7 +84,9 @@
 # tenant: a host whose overlay is not cloned yet goes on fetching them. Where clauth manages the
 # Claude accounts (~/.clauth), the long-lived-token rows do not apply (H9). With a profile,
 # settings.json is the renderer's (scripts/claude-settings-render.sh); on every host, the links both
-# checkouts declare are checked by scripts/check-links.sh (H8).
+# checkouts declare are checked by scripts/check-links.sh (H8). Where the overlay carries the memory
+# store table, the stores that serve the profile's tenants are cloned and the memory sync's timer is
+# armed with the host (H6), and the memory links and sync are read through their own scripts.
 #
 # Usage (the controlling host, usually the laptop):
 #   host-sync --host <ssh alias> [--check]     report drift on <host>; changes nothing (default)
@@ -100,7 +106,8 @@
 # HOST_SYNC_HERDR_RELEASES, HOST_SYNC_DOTFILES_REMOTE, HOST_SYNC_DOTFILES_LOCAL_REMOTE (the
 # laptop's ls-remote of the overlay), HOST_SYNC_DOTFILES_LOCAL_REPO (its owner/repo, cloned from
 # HOST_SYNC_GITHUB_BASE), CLAUDE_SETTINGS_RENDER_MARKER (the renderer's own name for the profile
-# marker), HOST_SYNC_NO_SCOPE=1 (skip the systemd-run wrapper), HOST_SYNC_SSH (the ssh command),
+# marker), CLAUDE_MEMORY_STORES_ROOT (the memory scripts' own name for where the stores are checked
+# out), HOST_SYNC_NO_SCOPE=1 (skip the systemd-run wrapper), HOST_SYNC_SSH (the ssh command),
 # HOST_SYNC_PROC (/proc), HOST_SYNC_TOKEN_WARN_D.
 
 set -uo pipefail
@@ -172,9 +179,25 @@ SPAWN_SKILL_FILE="$HOME/.claude/skills/spawn/SKILL.md"
 SKILL_GENERATOR_TIMEOUT_SECONDS=60
 GIT_NET_TIMEOUT_SECONDS=300
 CLONE_TIMEOUT_SECONDS=300
-# How long a sibling script (the settings renderer, the link checker) may run before its row says
-# it could not run (exit 124).
+# How long a sibling script (the settings renderer, the link checker, the memory scripts' --check and
+# --status) may run before its row says it could not run (exit 124).
 SIBLING_TIMEOUT_SECONDS=120
+# The memory layer (shared-configuration design, D7, H6, H7): the store table the overlay carries,
+# where the stores are checked out (the memory scripts' own override, so one variable moves all
+# three), the git the memory sync needs (--attr-source), the sync's timer, and how long the link
+# script's --apply may run, merging real memory directories into the stores, before its row says so.
+STORE_TABLE_RELATIVE="claude/memory-stores.json"
+MEMORY_STORE_TABLE="$DOTFILES_LOCAL/$STORE_TABLE_RELATIVE"
+MEMORY_STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-$HOME/.local/share/claude-memory}"
+MIN_GIT_VERSION_FOR_MEMORY_SYNC="2.40"
+MEMORY_TIMER_UNIT="claude-memory-sync.timer"
+LINK_APPLY_TIMEOUT_SECONDS=300
+# The store table host-sync can act on: every store named, with a remote and a list of tenant names.
+STORE_TABLE_SHAPE_FILTER='.stores | type == "object" and all(to_entries[]; (.key | length > 0)
+    and (.value.remote | type == "string" and length > 0)
+    and (.value.tenants | type == "array" and all(type == "string")))'
+# claude-memory-link.sh --check's last line, its four counts captured.
+MEMORY_LINK_SUMMARY_RE='^claude-memory-link: ([0-9]+) linked, ([0-9]+) to fix, ([0-9]+) unmapped, ([0-9]+) without a store$'
 # scripts/check-links.sh's states, by who acts on them: the ones in place, the drift the repo's
 # ./install fixes, and a source the manifest names that is not in the checkout, which only a
 # person can fix. Any other first field on its output is not an entry.
@@ -1669,6 +1692,274 @@ here_clones() {
     fi
 }
 
+# Memory (shared-configuration design, D7, H6, H7), on a host whose overlay carries the store table:
+# git new enough for the sync; a checkout of every store that serves one of the profile's tenants,
+# which --apply clones from the table's remote, verbatim, and only from a repository under
+# GITHUB_BASE; the links into the stores (claude-memory-link.sh); how each store last synced
+# (claude-memory-sync.sh --status); and the sync's timer, once a served store is checked out. A
+# store that serves none of the profile's tenants is reported, never removed. Without known tenants
+# (no marker, an overlay not cloned yet, a profile that cannot be read) no store is judged, cloned or
+# timed (H1); the links and the sync status are still read. Every sibling call maps its status as the
+# settings row does: 2 is a ⚠ with its first stderr line, any other unexpected status (127 a checkout
+# that predates the script, 124 a timeout) a ⚠ with that status, never ✓ and never ✗.
+here_memory() {
+    memory_store_table_usable || return 0
+    memory_git_floor_row
+    memory_store_rows
+    memory_link_row
+    memory_status_rows
+    memory_timer_row
+}
+# 0 when the store table is there and has the shape the rows read; otherwise 1, with the row that
+# says why: · for no table (memory is not managed here), ⚠ for one that cannot be used.
+memory_store_table_usable() {
+    local shown
+    shown="$(tilde_path "$MEMORY_STORE_TABLE")"
+    if [[ ! -e "$MEMORY_STORE_TABLE" && ! -L "$MEMORY_STORE_TABLE" ]]; then
+        row info memory "no memory store table at $shown; memory is not linked or synced here"
+        return 1
+    fi
+    jq -e "$STORE_TABLE_SHAPE_FILTER" "$MEMORY_STORE_TABLE" >/dev/null 2>&1 && return 0
+    row oper memory "the store table $shown cannot be read, or a store in it has no remote or no tenants list"
+    return 1
+}
+# The memory sync reads no attribute a store holds by passing --attr-source, which git 2.40 added
+# (H7). Silent when this host's git has it.
+memory_git_floor_row() {
+    local version
+    version="$(git --version 2>/dev/null | awk '{print $3}')"
+    if [[ ! "$version" =~ $VER_RE ]]; then
+        row oper memory "could not read git's version; the memory sync needs git $MIN_GIT_VERSION_FOR_MEMORY_SYNC or later"
+    elif ! ver_ge "$version" "$MIN_GIT_VERSION_FOR_MEMORY_SYNC"; then
+        row oper memory "git $version is older than $MIN_GIT_VERSION_FOR_MEMORY_SYNC; the memory sync needs --attr-source: upgrade git"
+    fi
+}
+
+# A row for each store this host serves, and for each one checked out here that it does not.
+# Sets MEMORY_SERVED_CHECKED_OUT to 1 when a served store is checked out once this run is done.
+memory_store_rows() {
+    local store remote tenant_list
+    MEMORY_SERVED_CHECKED_OUT=0
+    if (( ! TENANTS_KNOWN )); then
+        row info memory "store checkouts not judged: this host's tenants are unknown (see the profile row)"
+        return
+    fi
+    # @tsv keeps each store on one line; the shape filter leaves only the last field possibly empty,
+    # so no empty field folds under a tab IFS.
+    while IFS=$'\t' read -r store remote tenant_list; do
+        if [[ ! "$store" =~ $SAFE_DIR_RE ]]; then
+            # The name becomes a directory under the stores root, and is never printed unchecked.
+            row oper memory "a store in the table has a name that is not a plain directory name; it is not judged"
+        elif store_serves_profile "$tenant_list"; then
+            served_store_row "$store" "$remote"
+        else
+            unserved_store_row "$store" "$tenant_list"
+        fi
+    done < <(jq -r '.stores | to_entries[] | [.key, .value.remote, (.value.tenants | join(","))] | @tsv' \
+        "$MEMORY_STORE_TABLE" 2>/dev/null)
+}
+store_serves_profile() {   # $1 = a store's tenants, comma-separated; 0 when the profile lists one of them
+    local tenant store_tenants=()
+    IFS=, read -r -a store_tenants <<<"$1"
+    for tenant in ${store_tenants[@]+"${store_tenants[@]}"}; do
+        has_tenant "$tenant" && return 0
+    done
+    return 1
+}
+# A store this host serves: ✓ when checked out (its .git, as the sync reads it), else drift that
+# --apply clones, from the table's remote string as it is (H6), and only when that is a repository
+# under GITHUB_BASE: the clone runs with this host's own git credentials. A path in the way that is
+# not a checkout is a person's step. $1 = the store, $2 = its remote, as the table spells it.
+served_store_row() {
+    local store="$1" remote="$2" dir="$MEMORY_STORES_ROOT/$1" repo
+    if [[ -e "$dir/.git" ]]; then
+        MEMORY_SERVED_CHECKED_OUT=1
+        row ok memory "store $store checked out"
+        return
+    fi
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        row oper memory "store $store: $(tilde_path "$dir") exists but is not a checkout; not touched"
+        return
+    fi
+    # The remote is never printed: a URL can carry a credential.
+    if ! repo="$(github_repo_of_remote "$remote")"; then
+        row oper memory "store $store: its remote is not a repository URL under $GITHUB_BASE; not cloned"
+        return
+    fi
+    if [[ "$MODE" != apply ]]; then
+        row drift memory "store $store not checked out ($repo)"
+    elif git_net_within "$CLONE_TIMEOUT_SECONDS" clone --quiet "$remote" "$dir" >/dev/null 2>&1; then
+        MEMORY_SERVED_CHECKED_OUT=1
+        row ok memory "store $store cloned"
+    else
+        row drift memory "store $store: git clone $repo failed"
+    fi
+}
+# owner/repo when $1 is GITHUB_BASE/<owner>/<repo>, with or without .git, each half a plain name (and
+# neither . nor ..); 1 otherwise.
+github_repo_of_remote() {
+    local path="${1#"$GITHUB_BASE/"}" owner name
+    [[ "$path" != "$1" ]] || return 1
+    path="${path%.git}"
+    [[ "$path" =~ $SAFE_REPO_RE ]] || return 1
+    owner="${path%%/*}"; name="${path#*/}"
+    [[ "$owner" != . && "$owner" != .. && "$name" != . && "$name" != .. ]] || return 1
+    printf '%s' "$path"
+}
+# A store this host does not serve, checked out here anyway: reported, never removed, since what it
+# holds may not be anywhere else. $1 = the store, $2 = its tenants, comma-separated.
+unserved_store_row() {
+    local store="$1" tenants_shown="${2//,/, }"
+    [[ -e "$MEMORY_STORES_ROOT/$store/.git" ]] || return 0
+    row oper memory "store $store is checked out here but serves no tenant of profile $PROFILE (its tenants: ${tenants_shown:-none}); remove it by hand"
+}
+
+# The links into the stores, as claude-memory-link.sh --check reads them: exit 0 is ✓ with its
+# summary line, 1 is links to fix, which --apply makes (claude-memory-link.sh --apply) and checks
+# again. Keys whose memory no store link reaches (the summary's unmapped and without-a-store counts)
+# are a person's step, whatever the exit.
+memory_link_row() {
+    local rc
+    run_memory_sibling "$SIBLING_TIMEOUT_SECONDS" claude-memory-link.sh --check; rc=$?
+    memory_link_check_answered "$rc" || return 0
+    if (( rc == 0 )); then
+        memory_links_level_row "$MEMORY_LINK_SUMMARY"
+    elif [[ "$MODE" == apply ]]; then
+        relink_memory
+    else
+        row drift memory "$MEMORY_LINKS_TO_FIX memory link(s) to fix ($MEMORY_LINK_SUMMARY)"
+        memory_unreached_keys_row
+    fi
+    return 0
+}
+# --apply's half: the link script's --apply, then its --check again.
+relink_memory() {
+    local rc
+    run_memory_sibling "$LINK_APPLY_TIMEOUT_SECONDS" claude-memory-link.sh --apply; rc=$?
+    if (( rc != 0 )); then
+        memory_sibling_could_not_run_row "claude-memory-link --apply" "$rc"
+        return
+    fi
+    run_memory_sibling "$SIBLING_TIMEOUT_SECONDS" claude-memory-link.sh --check; rc=$?
+    memory_link_check_answered "$rc" || return
+    if (( rc == 0 )); then
+        memory_links_level_row "linked by claude-memory-link --apply ($MEMORY_LINK_SUMMARY)"
+    else
+        row drift memory "still $MEMORY_LINKS_TO_FIX memory link(s) to fix after claude-memory-link --apply ($MEMORY_LINK_SUMMARY)"
+        memory_unreached_keys_row
+    fi
+}
+# 0 when --check exited 0 or 1 and printed its summary line; otherwise 1, with the ⚠ row that says why.
+memory_link_check_answered() {   # $1 = claude-memory-link --check's status
+    if (( $1 != 0 && $1 != 1 )); then
+        memory_sibling_could_not_run_row "claude-memory-link --check" "$1"
+        return 1
+    fi
+    read_memory_link_summary && return 0
+    row oper memory "claude-memory-link --check printed no summary line (exit $1)"
+    return 1
+}
+# The last summary line in SIBLING_STDOUT into MEMORY_LINK_SUMMARY, with its counts of links to fix,
+# unmapped keys and keys without a store; 1 when it printed none.
+read_memory_link_summary() {
+    local line
+    MEMORY_LINK_SUMMARY=""
+    while IFS= read -r line; do
+        [[ "$line" =~ $MEMORY_LINK_SUMMARY_RE ]] || continue
+        MEMORY_LINK_SUMMARY="$line"
+        MEMORY_LINKS_TO_FIX="${BASH_REMATCH[2]}"
+        MEMORY_LINKS_UNMAPPED="${BASH_REMATCH[3]}"
+        MEMORY_LINKS_WITHOUT_STORE="${BASH_REMATCH[4]}"
+    done <<<"$SIBLING_STDOUT"
+    [[ -n "$MEMORY_LINK_SUMMARY" ]]
+}
+# ✓ with $1, unless the summary counts keys whose memory no store link reaches: then only the ⚠.
+memory_links_level_row() {
+    memory_unreached_keys_row || row ok memory "$1"
+}
+# 0, with the ⚠ row, when the summary counts unmapped keys or keys without a store: memory that only
+# a person can place (a checkout glob, a store to check out); 1 when it counts none.
+memory_unreached_keys_row() {
+    (( MEMORY_LINKS_UNMAPPED + MEMORY_LINKS_WITHOUT_STORE > 0 )) || return 1
+    row oper memory "$MEMORY_LINK_SUMMARY: memory that no store link reaches; claude-memory-link --list names the keys"
+}
+
+# How each checked-out store last synced, as claude-memory-sync.sh --status says: ok is ✓, and any
+# other level (warn, bad) a ⚠ carrying that word. --status exits 0 whatever it reports.
+memory_status_rows() {
+    local rc store level message
+    run_memory_sibling "$SIBLING_TIMEOUT_SECONDS" claude-memory-sync.sh --status; rc=$?
+    if (( rc != 0 )); then
+        memory_sibling_could_not_run_row "claude-memory-sync --status" "$rc"
+        return
+    fi
+    # The sync redacts what it reports; this is a second pass, as for every sibling's text here.
+    while IFS=$'\t' read -r store level message; do
+        [[ -n "$store" ]] || continue
+        if [[ "$level" == ok ]]; then
+            row ok memory "store $store: $message"
+        else
+            row oper memory "store $store: $level: $message"
+        fi
+    done < <(printf '%s\n' "$SIBLING_STDOUT" | redact_stream)
+}
+
+# The memory sync's timer, once a served store is checked out (H6). The host-sync arming is that
+# decision: on an armed host, not live is drift that --apply enables (enable, never reenable: the
+# unit is a dotbot link into the checkout, as host-sync.timer is) and reads back; on a host that is
+# not armed, or was disarmed by hand, it is information.
+memory_timer_row() {
+    (( MEMORY_SERVED_CHECKED_OUT )) || return 0
+    if memory_timer_is_live; then
+        row ok memory "$MEMORY_TIMER_UNIT armed"
+    elif ! is_armed || is_disarmed; then
+        row info memory "$MEMORY_TIMER_UNIT not armed, nor is this host (see the timer row); host-sync arms it with the host"
+    elif [[ "$MODE" != apply ]]; then
+        row drift memory "$MEMORY_TIMER_UNIT not armed (is-enabled=${MEMORY_TIMER_ENABLED:-?}, is-active=${MEMORY_TIMER_ACTIVE:-?})"
+    else
+        systemctl --user daemon-reload >/dev/null 2>&1
+        systemctl --user enable --now "$MEMORY_TIMER_UNIT" >/dev/null 2>&1
+        if memory_timer_is_live; then
+            row ok memory "$MEMORY_TIMER_UNIT armed by this run"
+        else
+            row drift memory "arming $MEMORY_TIMER_UNIT failed: is-enabled=${MEMORY_TIMER_ENABLED:-?}, is-active=${MEMORY_TIMER_ACTIVE:-?}"
+        fi
+    fi
+}
+# Reads the memory timer's is-enabled and is-active into MEMORY_TIMER_ENABLED and MEMORY_TIMER_ACTIVE;
+# 0 when it is enabled and active.
+memory_timer_is_live() {
+    MEMORY_TIMER_ENABLED="$(systemctl --user is-enabled "$MEMORY_TIMER_UNIT" 2>/dev/null)"
+    MEMORY_TIMER_ACTIVE="$(systemctl --user is-active "$MEMORY_TIMER_UNIT" 2>/dev/null)"
+    [[ "$MEMORY_TIMER_ENABLED" == enabled && "$MEMORY_TIMER_ACTIVE" == active ]]
+}
+
+# Run a memory script with stdin closed, cut off after $1 seconds. $2 = its name under the checkout's
+# scripts/, $3 = its verb. Sets SIBLING_STDOUT to what it printed and SIBLING_ERROR_LINE to the first
+# line of its stderr, redacted on the way in (the unredacted stderr never reaches a variable), and
+# returns its status (124 a timeout, 127 a checkout without the script). Its stdout goes straight to
+# fd 3, the capture's own output, while its stderr runs through the redactor; once both are done the
+# status and that line follow, tab-separated, as the capture's last line, so one subshell yields all three.
+run_memory_sibling() {
+    local seconds="$1" script="$DOTFILES/scripts/$2" verb="$3" captured status_and_error
+    captured="$(
+        { SIBLING_ERROR_LINE="$(timeout "$seconds" "$script" "$verb" 2>&1 >&3 3>&- </dev/null \
+            | redact_stream | sed -n 1p; exit "${PIPESTATUS[0]}")"; } 3>&1
+        printf '\n%s\t%s' "$?" "$SIBLING_ERROR_LINE"
+    )"
+    status_and_error="${captured##*$'\n'}"
+    SIBLING_STDOUT="${captured%$'\n'*}"
+    SIBLING_ERROR_LINE="${status_and_error#*$'\t'}"
+    return "${status_and_error%%$'\t'*}"
+}
+memory_sibling_could_not_run_row() {   # $1 = the script and its verb, as the row names them, $2 = its status
+    if [[ "$2" == 2 && -n "$SIBLING_ERROR_LINE" ]]; then
+        row oper memory "$1 could not run: $SIBLING_ERROR_LINE"
+    else
+        row oper memory "$1 could not run (exit $2)"
+    fi
+}
+
 # The state dir moved with the rename. --check reads whichever exists, the new one first, so a
 # legacy host's install stamp is found where it is, and moves nothing.
 pick_state_dir() {
@@ -1757,7 +2048,9 @@ here_rows() {
     # checkouts have fast-forwarded and installed, so the render reads the overlay's current
     # fragments and the links its current manifest; plugins come after settings, since what the
     # plugin rows install is what the render declares (H4). The generated skills come after herdr
-    # and herdr-draft, so each is what the binary this run left in place prints.
+    # and herdr-draft, so each is what the binary this run left in place prints. Memory comes after
+    # both checkouts too: the store table is the overlay's, and the link and sync scripts and the
+    # memory timer's unit are what dotfiles' ./install left in place.
     read_profile
     clone_overlay
     here_dotfiles
@@ -1775,6 +2068,7 @@ here_rows() {
     here_plugins
     here_mcp
     here_clones
+    here_memory
     here_slice
     here_sessions
 

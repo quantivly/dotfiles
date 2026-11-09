@@ -107,8 +107,10 @@
 #            (a conflicted `git stash pop` leaves them with no MERGE_HEAD), or a detached HEAD, is
 #            could-not-run before anything is staged, and is never reset: a stage would take the
 #            conflict markers and a commit would conclude the operation. A person finishes or aborts it
-#   fetch    failure: auth-failed when git's error names an auth or not-found failure, unreachable for
-#            anything else. The store is still committed
+#   fetch    with --prune, so a branch deleted on origin leaves refs/remotes/origin too, and the
+#            branch check below reads origin's branches as they are. Failure: auth-failed when git's
+#            error names an auth or not-found failure, unreachable for anything else. The store is
+#            still committed
 #   branch   could-not-run, naming both, when the last-fetched origin has no <branch> but has another
 #            branch, before the lock and with nothing staged: a store `git init`ed on another name than
 #            the remote's would merge from and push to a branch no other host pushes, every run saying
@@ -1150,12 +1152,12 @@ report_unrouted_network_call() {
     report_store_failure "$1" "refused the $2: no route was settled for it (route mode '$shown_route_mode')"
 }
 
-# fetch_origin STORE STORE_DIR — fetch the store's origin. Returns 1 with NETWORK_OUTCOME and
-# NETWORK_DETAIL set when it failed, and NETWORK_STEP_COULD_NOT_RUN, having reported the store, when the
-# call was refused for want of a route.
+# fetch_origin STORE STORE_DIR — fetch the store's origin, pruning the refs of branches it no longer has.
+# Returns 1 with NETWORK_OUTCOME and NETWORK_DETAIL set when it failed, and NETWORK_STEP_COULD_NOT_RUN,
+# having reported the store, when the call was refused for want of a route.
 fetch_origin() {
     local store=$1 store_dir=$2 fetch_errors fetch_status
-    fetch_errors=$(network_git_in_store "$store_dir" fetch --quiet --no-recurse-submodules \
+    fetch_errors=$(network_git_in_store "$store_dir" fetch --quiet --prune --no-recurse-submodules \
         "$ORIGIN_REMOTE_NAME" 2>&1 >/dev/null)
     fetch_status=$?
     (( fetch_status != 0 )) || return 0
