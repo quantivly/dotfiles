@@ -997,6 +997,19 @@ gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$ST
 cannot_tell_summary+=" working=$(status_warnings_naming 'cannot tell')"
 check "gnome-status: an import closure it cannot work out (the helper refuses a shape, or there is none) is a ⚠ on each side that it cannot tell, never silence" \
   "$cannot_tell_summary" "refused=1/1 no-helper=1/1 working=0"
+# Until the next login the desktop may run the previous release, which samples
+# by itself and never starts the service: while the older copy is reported, a
+# service not running is not blamed as well. With the current copy it is.
+NOT_RUNNING_NEEDLE='is not running while the extension is enabled'
+not_running_beside_older_copy_summary=""
+status_extension_with_change card.js
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive
+not_running_beside_older_copy_summary+="older-copy=$(status_warnings_naming "$OLDER_COPY_NEEDLE")/$(status_warnings_naming "$NOT_RUNNING_NEEDLE")"
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive
+not_running_beside_older_copy_summary+=" current-copy=$(status_warnings_naming "$OLDER_COPY_NEEDLE")/$(status_warnings_naming "$NOT_RUNNING_NEEDLE")"
+check "gnome-status: while the desktop runs an older copy (which may be the previous release, sampling by itself), a service not running is not blamed; with the current copy it is" \
+  "$not_running_beside_older_copy_summary" "older-copy=1/0 current-copy=0/1"
 
 # Spelled by pieces so this row's own source is not what it finds.
 GNOME_STATUS_FORBIDDEN_PATTERN="cmd""line|env""iron\\b|\\bps -|pgre""p -[a-z]*[al]\\b"
@@ -2463,7 +2476,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=473
+EXPECTED_ROWS=474
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

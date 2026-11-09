@@ -209,7 +209,8 @@ Resource Pulse: linked=yes enabled=yes state=ACTIVE
   - the service **failed**, or is **restarting after a failure** (`auto-restart`): its journal;
   - while the extension is enabled (and not also disabled), from the first login after linking on:
     the unit is **not installed** (merged without `./install`: run `./install`); it **cannot load**
-    (`systemctl --user status`); it is **not running** (`systemctl --user start`); or it is still
+    (`systemctl --user status`); it is **not running** (`systemctl --user start`), except while the
+    desktop runs an older copy, which may be the previous release sampling by itself; or it is still
     **starting**;
   - it does **not answer**, or it has **not sampled for more than 6 s**, compared to the
     microsecond as the extension does (it shows no data then);
@@ -299,7 +300,7 @@ shorter history. Before the service existed the sampling ran inside gnome-shell,
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (473 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (474 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
 version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the

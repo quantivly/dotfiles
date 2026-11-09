@@ -2407,6 +2407,8 @@ gnome-status() {
     rp_epoch_usec_digits=16
     rp_linked="no"; rp_enabled="no"; rp_disabled="no"; rp_state="n/a"; rp_shell_knows_it="unknown"
     rp_load_hints=(); rp_warnings=()
+    # The "not running" ⚠ waits for the older-copy check, which can make it moot.
+    rp_not_running_warning=""; rp_runs_older_copy="no"
 
     # rp_first_number_after <text> <key>: the digits right after the first
     # "<key>": in text. gdbus prints GetState's JSON inside a GVariant string,
@@ -2615,7 +2617,7 @@ gnome-status() {
         inactive)
           rp_service_line="inactive (not running)"
           [ "$rp_extension_runs_it" = "yes" ] &&
-            rp_warnings+=("$rp_service_unit is not running while the extension is enabled, so it shows no data — systemctl --user start $rp_service_unit") ;;
+            rp_not_running_warning="$rp_service_unit is not running while the extension is enabled, so it shows no data — systemctl --user start $rp_service_unit" ;;
         *)
           if [ "$rp_sub_state" = "auto-restart" ]; then
             rp_service_line="$rp_service_state (auto-restart: restarting after a failure)"
@@ -2656,9 +2658,16 @@ gnome-status() {
         if ! rp_changed_file="$(rp_first_module_changed_since "$rp_shell_entry_module" "$rp_shell_started_at")"; then
           rp_warnings+=("cannot tell whether the desktop runs an older copy: what $rp_shell_entry_module imports could not be worked out or searched — bash $rp_module_closure_script $rp_extension_dir $rp_shell_entry_module")
         elif [ -n "$rp_changed_file" ]; then
+          rp_runs_older_copy="yes"
           rp_warnings+=("the desktop runs an older copy; takes effect at next login ($rp_changed_file changed after this login)")
         fi
       fi
+    fi
+    # Until the next login the desktop's copy may be the previous release, which
+    # samples by itself and never starts the service: while it runs an older
+    # copy, a service not running is no fault of its own to report.
+    if [ -n "$rp_not_running_warning" ] && [ "$rp_runs_older_copy" = "no" ]; then
+      rp_warnings+=("$rp_not_running_warning")
     fi
     for rp_warning in "${rp_warnings[@]}"; do echo "  ⚠ $rp_warning"; done
   )
