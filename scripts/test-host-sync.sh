@@ -1632,6 +1632,21 @@ check "memory: a second --apply after the clone calls nothing mutating" "$(mutat
 check "memory: a second --apply after the clone changes no file" \
     "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)" ""
 
+# alpha's remote ends in .git, which is also what a URL rebuilt from owner/repo ends in; gamma's is
+# spelled without it, and its repository lives only at that suffix-less path. So a clone of the
+# table's string resolves, and one of a rebuilt "$GITHUB_BASE/$repo.git" (here_clones' shape) names
+# no repository. Between them, the two stores pin the string as the table spells it either way.
+new_case
+git clone -q --bare "$GH/example-org/mem-alpha.git" "$GH/example-org/mem-gamma"
+edit_json .dotfiles-local/claude/memory-stores.json \
+    ".stores.gamma = {remote: \"file://$GH/example-org/mem-gamma\", tenants: [\"quantivly\"]}"
+run_level --apply
+check "memory: a remote spelled without .git is cloned as spelled: the clone's arguments" \
+    "$(grep '^git clone' "$H/stub/calls")" "git clone --quiet file://$GH/example-org/mem-gamma $H/$STORES_REL/gamma"
+check "memory: a remote spelled without .git is cloned as spelled: origin is the table's remote, byte for byte" \
+    "$(git -C "$H/$STORES_REL/gamma" config --get remote.origin.url 2>/dev/null)" \
+    "$(jq -r .stores.gamma.remote "$H/$STORE_TABLE_REL")"
+
 new_case
 rm -rf "${H:?}/$STORES_REL/alpha"; rm -rf "${GH:?}/example-org/mem-alpha.git"
 run_level --apply
@@ -2706,7 +2721,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=608
+EXPECTED_ROWS=610
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
