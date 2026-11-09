@@ -18,6 +18,8 @@ const SAMPLE_INTERVAL_USEC = SAMPLE_INTERVAL_SECONDS * USEC_PER_SECOND;
 /** SAMPLE_STALL_TICKS (3) × SAMPLE_INTERVAL_SECONDS: the design's 6 s, written out. */
 const STALL_USEC = 6 * USEC_PER_SECOND;
 const ONE_MICROSECOND = 1;
+/** START_CONFIRMATION_TIMEOUT_SECONDS (15), written out: how long an accepted StartUnit waits for the service. */
+const START_CONFIRMATION_SECONDS = 15;
 const START_USEC = 1_000_000_000;
 /** Well past any staleness, for rows that wait out the clock. */
 const LONG_WAIT_USEC = 60 * USEC_PER_SECOND;
@@ -40,9 +42,9 @@ const NO_DATA_TEXT = 'no data';
 const LATEST_ATTEMPT_INDEX = -1;
 const FIRST_ATTEMPT_INDEX = 0;
 
-/** The snapshot GetState answers: every field set. */
+/** The snapshot GetState answers: every field set, taken at START_USEC on the clock both sides share. */
 const STATE_SNAPSHOT = {
-    takenAtUsec: 120_000_000,
+    takenAtUsec: START_USEC,
     takenAtClockLabel: '14:02',
     cpuBusyPercent: 23.5,
     cpuClusters: {performancePercent: 41, efficiencyPercent: 6},
@@ -58,7 +60,9 @@ const STATE_SNAPSHOT = {
 const STATE_HISTORIES = {cpu: [0.25, null, 0.5], memory: [0.6, 0.61, null]};
 const STATE_SEQUENCE = 7;
 /** The next fast tick's snapshot, a minute later. */
-const TICK_SNAPSHOT = {...STATE_SNAPSHOT, takenAtUsec: 122_000_000, takenAtClockLabel: '14:03', cpuBusyPercent: 50};
+const TICK_SNAPSHOT = {
+    ...STATE_SNAPSHOT, takenAtUsec: START_USEC + SAMPLE_INTERVAL_USEC, takenAtClockLabel: '14:03', cpuBusyPercent: 50,
+};
 const TICK_APPENDED_HISTORY = {cpu: 0.5, memory: 0.25};
 /** A watch start's reveal: the tick's values with a new ranking, appending nothing. */
 const REVEAL_SNAPSHOT = {
@@ -66,11 +70,11 @@ const REVEAL_SNAPSHOT = {
     apps: {...TICK_SNAPSHOT.apps, topCpu: {groupKey: 'kernel', name: 'kernel', cpuPercent: 12}},
 };
 /** What a restarted service answers GetState with: a history of its own, numbered from 1 again. */
-const RESTARTED_SNAPSHOT = {...STATE_SNAPSHOT, takenAtUsec: 4_000_000, takenAtClockLabel: '14:05', cpuBusyPercent: 9};
+const RESTARTED_SNAPSHOT = {...STATE_SNAPSHOT, takenAtClockLabel: '14:05', cpuBusyPercent: 9};
 const RESTARTED_HISTORIES = {cpu: [0.09], memory: [0.4]};
 /** What the service publishes when its sample threw: a time and a label, but no numbers. */
 const SERVICE_NO_DATA_SNAPSHOT = {
-    takenAtUsec: 124_000_000,
+    takenAtUsec: START_USEC + 2 * SAMPLE_INTERVAL_USEC,
     takenAtClockLabel: '14:04',
     cpuBusyPercent: null,
     cpuClusters: null,
@@ -414,6 +418,16 @@ function makeLiveClientFixture() {
 }
 
 /**
+ * The pending step of the StartUnit chain: every pending timeout but the staleness check.
+ *
+ * @param {FakeTimeouts} timeouts - The fixture's timeouts.
+ * @returns {number[]} Their intervals, in seconds.
+ */
+function pendingStartChainSeconds(timeouts) {
+    return timeouts.pendingIntervalsSeconds().filter(intervalSeconds => intervalSeconds !== SAMPLE_INTERVAL_SECONDS);
+}
+
+/**
  * @param {object} fixture - A fixture.
  * @returns {{cpu: Array<number|null>, memory: Array<number|null>}} The client's histories now.
  */
@@ -522,8 +536,8 @@ test('client: a sequence that restarts publishes no data once, and draws nothing
     });
 });
 
-test('client: a failed StartUnit is retried after 5, 30, 300, then 300 s, logged once, and a success ends the retries',
-    () => {
+test('client: a failed StartUnit is retried after 5, 30, 300, then 300 s and logged once; an accepted one then waits ' +
+    `${START_CONFIRMATION_SECONDS} s for the service to appear`, () => {
         const {timeouts, serviceStarter, logged} = makeClientFixture({nameOwner: null});
         const retryDelaysSeconds = [];
         for (const _failedAttempt of [1, 2, 3, 4]) {
@@ -539,8 +553,8 @@ test('client: a failed StartUnit is retried after 5, 30, 300, then 300 s, logged
             pendingAfterSuccess: timeouts.pendingIntervalsSeconds(),
             startUnitLogLines: logged.filter(line => line.includes('StartUnit')).length,
         }, {
-            retryDelaysSeconds: [5, 30, 300, 300], attemptCount: 5, pendingAfterSuccess: [SAMPLE_INTERVAL_SECONDS],
-            startUnitLogLines: 1,
+            retryDelaysSeconds: [5, 30, 300, 300], attemptCount: 5,
+            pendingAfterSuccess: [SAMPLE_INTERVAL_SECONDS, START_CONFIRMATION_SECONDS], startUnitLogLines: 1,
         });
     });
 
@@ -569,30 +583,151 @@ test('client: the name losing its owner publishes no data once and never calls S
     const notificationsWhileGone = [...notifications];
     const pendingWhileGone = timeouts.pendingIntervalsSeconds();
     proxy.setNameOwner(NEXT_OWNER);
-    answerState(proxy, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 1});
+    const returnedSnapshot = {...RESTARTED_SNAPSHOT, takenAtUsec: clock.nowUsec};
+    answerState(proxy, {snapshot: returnedSnapshot, histories: RESTARTED_HISTORIES, sequence: 1});
     assertEqual({
         notificationsWhileGone, pendingWhileGone, attemptCount: serviceStarter.attempts.length,
         notificationsAfterReturn: notifications.slice(notificationsWhileGone.length), histories: historiesOf(fixture),
     }, {
         notificationsWhileGone: [STATE_SNAPSHOT, TICK_SNAPSHOT, NO_DATA_SNAPSHOT],
         pendingWhileGone: [SAMPLE_INTERVAL_SECONDS], attemptCount: 1,
-        notificationsAfterReturn: [RESTARTED_SNAPSHOT], histories: RESTARTED_HISTORIES,
+        notificationsAfterReturn: [returnedSnapshot], histories: RESTARTED_HISTORIES,
     });
 });
 
-test('client: Samples are drawn although StartUnit failed (no systemd, as in the nested harness), and a failure ' +
-    'while the service runs schedules no retry', () => {
+test('client: Samples are drawn although StartUnit failed (no systemd, as in the nested harness), and a StartUnit ' +
+    'answered while the service runs, failed or accepted, schedules nothing', () => {
     const fixture = makeClientFixture();
-    const {timeouts, serviceStarter, proxy, notifications} = fixture;
+    const {client, timeouts, serviceStarter, proxy, notifications} = fixture;
     serviceStarter.fail();
     answerState(proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
-    assertEqual({notifications, histories: historiesOf(fixture), pending: timeouts.pendingIntervalsSeconds()}, {
+    client.start();
+    serviceStarter.fail();
+    const pendingAfterFailureWhileRunning = timeouts.pendingIntervalsSeconds();
+    client.start();
+    serviceStarter.succeed();
+    assertEqual({
+        notifications, histories: historiesOf(fixture), pendingAfterFailureWhileRunning,
+        pendingAfterAcceptedWhileRunning: timeouts.pendingIntervalsSeconds(),
+    }, {
         notifications: [STATE_SNAPSHOT, TICK_SNAPSHOT],
         histories: {cpu: [...STATE_HISTORIES.cpu, 0.5], memory: [...STATE_HISTORIES.memory, 0.25]},
-        pending: [SAMPLE_INTERVAL_SECONDS],
+        pendingAfterFailureWhileRunning: [SAMPLE_INTERVAL_SECONDS],
+        pendingAfterAcceptedWhileRunning: [SAMPLE_INTERVAL_SECONDS],
     });
 });
+
+test('client: an accepted StartUnit with no owner within 15 s is no success: the chain goes on, 5, 30, 300, then ' +
+    '300 s after each unconfirmed attempt, and each is logged', () => {
+    const {timeouts, serviceStarter, logged} = makeClientFixture({nameOwner: null});
+    const confirmationWaitsSeconds = [];
+    const retryDelaysSeconds = [];
+    for (const _unconfirmedAttempt of [1, 2, 3, 4]) {
+        serviceStarter.succeed();
+        confirmationWaitsSeconds.push(...pendingStartChainSeconds(timeouts));
+        timeouts.fire(START_CONFIRMATION_SECONDS);
+        const pendingRetryDelaysSeconds = pendingStartChainSeconds(timeouts);
+        retryDelaysSeconds.push(...pendingRetryDelaysSeconds);
+        timeouts.fire(pendingRetryDelaysSeconds[0]);
+    }
+    assertEqual({
+        confirmationWaitsSeconds, retryDelaysSeconds, attemptCount: serviceStarter.attempts.length,
+        hasUnconfirmedLogLine: logged.some(line => line.includes('did not appear')),
+    }, {
+        confirmationWaitsSeconds: Array(4).fill(START_CONFIRMATION_SECONDS), retryDelaysSeconds: [5, 30, 300, 300],
+        attemptCount: 5, hasUnconfirmedLogLine: true,
+    });
+});
+
+test('client: an owner within 15 s of an accepted StartUnit confirms it and ends the chain, and its later leaving ' +
+    'starts nothing', () => {
+    const {clock, timeouts, serviceStarter, proxy} = makeClientFixture({nameOwner: null});
+    serviceStarter.succeed();
+    const pendingWhileWaiting = timeouts.pendingIntervalsSeconds();
+    clock.nowUsec += (START_CONFIRMATION_SECONDS - 1) * USEC_PER_SECOND;
+    proxy.setNameOwner(OWNER);
+    const pendingAfterOwner = timeouts.pendingIntervalsSeconds();
+    proxy.setNameOwner(null);
+    assertEqual({
+        pendingWhileWaiting, pendingAfterOwner, pendingAfterLeaving: timeouts.pendingIntervalsSeconds(),
+        attemptCount: serviceStarter.attempts.length,
+    }, {
+        pendingWhileWaiting: [SAMPLE_INTERVAL_SECONDS, START_CONFIRMATION_SECONDS],
+        pendingAfterOwner: [SAMPLE_INTERVAL_SECONDS], pendingAfterLeaving: [SAMPLE_INTERVAL_SECONDS], attemptCount: 1,
+    });
+});
+
+test('client: destroy() while an accepted StartUnit waits for the service leaves no timeout behind', () => {
+    const {client, timeouts, serviceStarter} = makeClientFixture({nameOwner: null});
+    serviceStarter.succeed();
+    const pendingWhileWaiting = timeouts.pendingIntervalsSeconds();
+    client.destroy();
+    assertEqual({pendingWhileWaiting, pending: timeouts.pendingIntervalsSeconds()},
+        {pendingWhileWaiting: [SAMPLE_INTERVAL_SECONDS, START_CONFIRMATION_SECONDS], pending: []});
+});
+
+test('client: a StartUnit still on its way when the service appears is superseded: its failure, after the owner ' +
+    'left again, schedules no retry', () => {
+    const {timeouts, serviceStarter, proxy, logged} = makeClientFixture({nameOwner: null});
+    proxy.setNameOwner(OWNER);
+    proxy.setNameOwner(null);
+    serviceStarter.fail();
+    assertEqual({pending: timeouts.pendingIntervalsSeconds(), attemptCount: serviceStarter.attempts.length,
+        startUnitLogLines: logged.filter(line => line.includes('StartUnit')).length},
+    {pending: [SAMPLE_INTERVAL_SECONDS], attemptCount: 1, startUnitLogLines: 0});
+});
+
+test('client: a state whose snapshot was taken more than 6 s before it arrived (a service that answers while its ' +
+    'sampler has stopped) shows no data at once, since that snapshot\'s time; the next Sample of the run draws', () => {
+    const fixture = makeClientFixture();
+    const {proxy, notifications} = fixture;
+    const staleSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC - STALL_USEC - ONE_MICROSECOND};
+    answerState(proxy, {snapshot: staleSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    const notificationsAfterState = [...notifications];
+    const lastGoodClockLabelAfterState = fixture.client.lastGoodClockLabel;
+    const historiesAfterState = historiesOf(fixture);
+    emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    assertEqual({notificationsAfterState, lastGoodClockLabelAfterState, historiesAfterState, notifications}, {
+        notificationsAfterState: [NO_DATA_SNAPSHOT], lastGoodClockLabelAfterState: '14:02',
+        historiesAfterState: {cpu: [...STATE_HISTORIES.cpu, null], memory: [...STATE_HISTORIES.memory, null]},
+        notifications: [NO_DATA_SNAPSHOT, TICK_SNAPSHOT],
+    });
+});
+
+test('client: freshness counts from the state snapshot\'s own time: taken exactly 6 s before it arrived, it is drawn, ' +
+    'and stale 1 µs later', () => {
+    const {clock, timeouts, proxy, notifications} = makeClientFixture();
+    const oldSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC - STALL_USEC};
+    answerState(proxy, {snapshot: oldSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+    const notificationsAtExactlyStall = [...notifications];
+    clock.nowUsec += ONE_MICROSECOND;
+    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+    assertEqual({notificationsAtExactlyStall, notifications},
+        {notificationsAtExactlyStall: [oldSnapshot], notifications: [oldSnapshot, NO_DATA_SNAPSHOT]});
+});
+
+test('client: a state snapshot with no time counts from its arrival, and one stamped in the future counts from now',
+    () => {
+        const untimed = makeClientFixture();
+        const untimedSnapshot = {...STATE_SNAPSHOT, takenAtUsec: null};
+        answerState(untimed.proxy, {snapshot: untimedSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+        untimed.clock.nowUsec += STALL_USEC;
+        untimed.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+        const untimedAtExactlyStall = untimed.notifications.length;
+        untimed.clock.nowUsec += ONE_MICROSECOND;
+        untimed.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+        const future = makeClientFixture();
+        const futureSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC + LONG_WAIT_USEC};
+        answerState(future.proxy, {snapshot: futureSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+        future.clock.nowUsec += STALL_USEC + ONE_MICROSECOND;
+        future.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+        assertEqual({untimedAtExactlyStall, untimed: untimed.notifications, future: future.notifications}, {
+            untimedAtExactlyStall: 1, untimed: [untimedSnapshot, NO_DATA_SNAPSHOT],
+            future: [futureSnapshot, NO_DATA_SNAPSHOT],
+        });
+    });
 
 test('client: a Sample from another version (an unknown field, swap missing) notifies with swap null and every ' +
     'other row intact', () => {

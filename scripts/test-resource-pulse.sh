@@ -137,12 +137,16 @@ fi
 # service, its own process outside the shell, so it may read files
 # synchronously; it still starts no subprocess. Each Gio call is matched with
 # its "(" so its _async form (enumerate_children_async( and so on) does not
-# match, and _sync( catches every synchronous D-Bus call (call_sync, new_sync,
-# bus_get_sync) without catching an _async one.
+# match, and _sync( and Sync( catch every synchronous D-Bus call (call_sync,
+# new_sync, bus_get_sync, a proxy wrapper's GetStateSync) without catching an
+# _async or Async one.
 SUBPROCESS_CALL_PATTERN='Gio.Subprocess|GLib.spawn|Util.spawn|util_spawn'
 SYNCHRONOUS_IO_CALL_PATTERN='load_contents\(|file_get_contents|enumerate_children\(|query_info\(|read_bytes\(|load_bytes\('
 SYNCHRONOUS_IO_CALL_PATTERN+='|replace_contents\(|next_file\(|next_files\(|query_exists\(|query_file_type\(|GLib\.file_test'
 SYNCHRONOUS_IO_CALL_PATTERN+='|read_all\(|GLib\.Dir\.open|\.read\(null\)|\.close\(null\)|_sync\('
+# A GJS proxy wrapper (Gio.DBusProxy.makeProxyWrapper) gives each method an XxxSync( besides XxxRemote( and
+# XxxAsync(; the capital S keeps Async( out.
+SYNCHRONOUS_IO_CALL_PATTERN+='|Sync\('
 BLOCKING_CALL_PATTERN="$SUBPROCESS_CALL_PATTERN|$SYNCHRONOUS_IO_CALL_PATTERN"
 # blocking_calls_in <extension dir>: one line, "<path>: <call>", for each file
 # making a call its place forbids: a subprocess anywhere, synchronous IO
@@ -173,7 +177,7 @@ FORBIDDEN_CALLS=('Gio.Subprocess.new(' 'GLib.spawn_command_line_async(' 'Util.sp
   'file.query_file_type(flags, null)' 'GLib.file_test(path, GLib.FileTest.EXISTS)' 'stream.read_all(buffer, null)'
   'GLib.Dir.open(path, 0)' 'file.read(null)' 'stream.close(null)' 'Shell.util_spawn_async(workingDirectory, argv, envp, flags)'
   'connection.call_sync(busName, objectPath, interfaceName, methodName, null, null, flags, timeoutMs, null)'
-  'Gio.DBusProxy.new_sync(connection, flags, null, busName, objectPath, interfaceName, null)')
+  'Gio.DBusProxy.new_sync(connection, flags, null, busName, objectPath, interfaceName, null)' 'proxy.GetStateSync()')
 ASYNCHRONOUS_CALLS=('file.load_contents_async(null)' 'file.enumerate_children_async(attributes, flags, priority, null)'
   'file.query_info_async(attributes, flags, priority, null)' 'stream.read_bytes_async(4096, priority, null)'
   'file.load_bytes_async(null)' 'file.replace_contents_async(bytes, null, false, 0, null)'
@@ -182,7 +186,7 @@ ASYNCHRONOUS_CALLS=('file.load_contents_async(null)' 'file.enumerate_children_as
   'Gio.DBusProxy.new(connection, flags, null, busName, objectPath, interfaceName, cancellable, callback)'
   'Gio.DBusProxy.new_finish(result)' 'proxy.call(methodName, null, flags, timeoutMs, cancellable, callback)'
   'proxy.call_finish(result)' 'connection.call(busName, objectPath, interfaceName, methodName, parameters, replyType, flags, timeoutMs, cancellable, callback)'
-  'connection.call_finish(result)')
+  'connection.call_finish(result)' 'proxy.GetStateAsync()' 'proxy.GetStateRemote(callback)')
 unmatched_forbidden_calls=()
 for io_call in "${FORBIDDEN_CALLS[@]}"; do
   [[ "$io_call" =~ $BLOCKING_CALL_PATTERN ]] || unmatched_forbidden_calls+=("$io_call")
@@ -1608,7 +1612,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=387
+EXPECTED_ROWS=394
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

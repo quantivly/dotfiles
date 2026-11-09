@@ -13,6 +13,12 @@ export const SAMPLE_STALL_TICKS = 3;
  * appearing on the bus, ends the retries.
  */
 export const START_RETRY_DELAYS_SECONDS = [5, 30, 300];
+/**
+ * Seconds an accepted StartUnit waits for the service to appear on the bus before it counts as failed. systemd answers
+ * StartUnit with a job before it checks Restart= and the start limit, so a unit at its StartLimitBurst is "started"
+ * and then never runs; without this wait that answer would end the retries.
+ */
+export const START_CONFIRMATION_TIMEOUT_SECONDS = 15;
 /** Milliseconds the client waits for any D-Bus reply: GetState, WatchDetail, UnwatchDetail and StartUnit. */
 export const DBUS_CALL_TIMEOUT_MS = 2000;
 /**

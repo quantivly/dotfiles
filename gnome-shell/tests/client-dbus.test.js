@@ -16,6 +16,9 @@ const BUS_ROUND_TRIP_TIMEOUT_MS = 2000;
 const SYSTEMD_BUS_NAME = 'org.freedesktop.systemd1';
 const SYSTEMD_OBJECT_PATH = '/org/freedesktop/systemd1';
 const SYSTEMD_MANAGER_INTERFACE_NAME = 'org.freedesktop.systemd1.Manager';
+/** The standard interface every GDBus connection answers on any path; Ping returns once earlier replies are sent. */
+const PEER_INTERFACE_NAME = 'org.freedesktop.DBus.Peer';
+const PING_METHOD_NAME = 'Ping';
 const START_UNIT_JOB_PATH = '/org/freedesktop/systemd1/job/1';
 /** Just StartUnit of systemd's Manager interface, as the user manager serves it. */
 const SYSTEMD_MANAGER_INTERFACE_XML = `<node>
@@ -62,6 +65,29 @@ async function ownName(connection, busName) {
         }, null);
     await waitUntil(() => isOwned, BUS_ROUND_TRIP_TIMEOUT_MS);
     return {ownerId, isOwned};
+}
+
+/**
+ * Pings a peer and waits for its answer. A peer answers in order, so by then every reply it sent before has been
+ * received, and its callback run.
+ *
+ * @param {Gio.DBusConnection} connection - The caller.
+ * @param {string} busName - The peer.
+ * @returns {Promise<boolean>} True once answered; false on an error.
+ */
+function pingPeer(connection, busName) {
+    return new Promise(resolve => {
+        connection.call(busName, SYSTEMD_OBJECT_PATH, PEER_INTERFACE_NAME, PING_METHOD_NAME, null, null,
+            Gio.DBusCallFlags.NONE, BUS_ROUND_TRIP_TIMEOUT_MS, null, (callingConnection, result) => {
+                try {
+                    callingConnection.call_finish(result);
+                } catch {
+                    resolve(false);
+                    return;
+                }
+                resolve(true);
+            });
+    });
 }
 
 /**
@@ -124,7 +150,9 @@ test('client on a private bus with no systemd: StartUnit fails, yet it follows t
     withServedResourcePulse(async ({sampler, service, isNameOwned, logged, makeClient}) => {
         sampler.cpuHistory.push(0.25);
         sampler.memoryHistory.push(0.6);
-        sampler.latestSnapshot = STATE_SNAPSHOT;
+        // Taken now, on the monotonic clock the service and the client share, so the state is fresh.
+        const stateSnapshot = {...STATE_SNAPSHOT, takenAtUsec: GLib.get_monotonic_time()};
+        sampler.latestSnapshot = stateSnapshot;
         const client = makeClient();
         const notifications = [];
         client.addListener(snapshot => notifications.push(snapshot));
@@ -141,7 +169,7 @@ test('client on a private bus with no systemd: StartUnit fails, yet it follows t
             histories: {cpu: client.cpuHistory.values(), memory: client.memoryHistory.values()},
             detailWatchCount: service.detailWatchCount,
         }, {
-            isNameOwned: true, isReady: true, hasDrawnSample: true, notifications: [STATE_SNAPSHOT, TICK_SNAPSHOT],
+            isNameOwned: true, isReady: true, hasDrawnSample: true, notifications: [stateSnapshot, TICK_SNAPSHOT],
             histories: {cpu: [0.25, 0.5], memory: [0.6, 0.25]}, detailWatchCount: 1,
         });
     }));
@@ -183,9 +211,11 @@ test('client on a private bus: start() asks the session bus\'s systemd for Start
         });
         client.start();
         const didCall = await waitUntil(() => startUnitCalls.length >= 1, BUS_ROUND_TRIP_TIMEOUT_MS);
-        assertEqual({isNameOwned: ownership.isOwned, didCall, startUnitCalls, logged},
-            {isNameOwned: true, didCall: true, startUnitCalls: [{unitName: 'resource-pulse.service', mode: 'replace'}],
-                logged: []});
+        // The client has handled systemd's (o) reply once a later round trip to the same peer is back.
+        const isReplyHandled = await pingPeer(clientConnection, SYSTEMD_BUS_NAME);
+        assertEqual({isNameOwned: ownership.isOwned, didCall, isReplyHandled, startUnitCalls, logged},
+            {isNameOwned: true, didCall: true, isReplyHandled: true,
+                startUnitCalls: [{unitName: 'resource-pulse.service', mode: 'replace'}], logged: []});
     } finally {
         client?.destroy();
         if (ownerId !== null)

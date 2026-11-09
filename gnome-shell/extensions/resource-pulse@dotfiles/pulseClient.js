@@ -12,9 +12,11 @@
 // - nothing a timeout runs can throw out of its callback, which would end the GLib source.
 //
 // How it follows the service (docs/superpowers/specs/2026-11-08-resource-pulse-service-design.md, "Lifecycle"):
-// - start() asks systemd's user manager to start the unit (StartUnit, "replace"), on every start(). A failure is
-//   retried after START_RETRY_DELAYS_SECONDS (5, 30, 300 s, then every 300 s); a success, or the service appearing on
-//   the bus, ends the retries.
+// - start() asks systemd's user manager to start the unit (StartUnit, "replace"), on every start(). A failure, or an
+//   accepted StartUnit after which the service does not appear on the bus within START_CONFIRMATION_TIMEOUT_SECONDS
+//   (systemd accepts the job before it checks the start limit), is retried after START_RETRY_DELAYS_SECONDS (5, 30,
+//   300 s, then every 300 s). The service appearing on the bus ends the retries, and supersedes a StartUnit still on
+//   its way.
 // - It follows the bus name's owner. When an owner appears it calls GetState, whose histories and snapshot replace the
 //   client's, and asserts the detail watch again if one is wanted. When the owner vanishes it shows no data and starts
 //   nothing: a service stopped on purpose stays stopped until the next start(), and a crash is systemd's Restart=.
@@ -30,7 +32,9 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import {CARD_HISTORY_SAMPLES, DBUS_CALL_TIMEOUT_MS, SAMPLE_INTERVAL_SECONDS} from './lib/constants.js';
+import {
+    CARD_HISTORY_SAMPLES, DBUS_CALL_TIMEOUT_MS, SAMPLE_INTERVAL_SECONDS, START_CONFIRMATION_TIMEOUT_SECONDS,
+} from './lib/constants.js';
 import {RateLimitedLogger, describeError} from './lib/errorLog.js';
 import {RingBuffer} from './lib/history.js';
 import {
@@ -70,6 +74,7 @@ const PROXY_DBUS_SIGNAL_SIGNAL = 'g-signal';
 
 // Template keys of the rate-limited journal lines whose text varies (lib/errorLog.js).
 const START_UNIT_FAILURE_LOG_KEY = 'StartUnit failed';
+const START_UNCONFIRMED_LOG_KEY = 'StartUnit unconfirmed';
 const CONNECT_FAILURE_LOG_KEY = 'cannot follow the service';
 const STATE_FAILURE_LOG_KEY = 'GetState failed';
 const UNREADABLE_STATE_LOG_KEY = 'unreadable state';
@@ -193,6 +198,20 @@ function isSequenceRestart(lastAppliedSequence, sampleSequence) {
 }
 
 /**
+ * When a state's data was fresh: its snapshot's own time, on the monotonic clock the service and the client share, so
+ * a state served by a service whose sampler has stopped is as old as its snapshot. A snapshot with no time counts from
+ * now (its arrival), and one stamped in the future from now.
+ *
+ * @param {Snapshot|null} snapshot - The state's snapshot.
+ * @param {number} nowUsec - Monotonic microseconds now.
+ * @returns {number} Monotonic microseconds.
+ */
+function freshnessOfStateSnapshot(snapshot, nowUsec) {
+    const takenAtUsec = snapshot?.takenAtUsec ?? null;
+    return takenAtUsec === null ? nowUsec : Math.min(takenAtUsec, nowUsec);
+}
+
+/**
  * Says whether a snapshot has the numbers "no data since" counts from: CPU or memory.
  *
  * @param {Snapshot|null} snapshot - A snapshot.
@@ -289,7 +308,9 @@ export class PulseClient {
         // The unique name owning the service's bus name, as last seen; null while nobody does.
         this._nameOwner = null;
         this._staleCheckSourceId = null;
-        this._startRetrySourceId = null;
+        // The StartUnit chain's pending step, at most one: a retry after a failure, or the wait for the service to
+        // appear after an accepted StartUnit. Every way the chain ends or restarts removes it.
+        this._startChainSourceId = null;
         // The latest StartUnit sent: {attemptNumber}, counted from 1 by each start(). An answer to an older one is
         // ignored, so two start() calls in a row cannot both schedule a retry.
         this._latestStartAttempt = null;
@@ -424,7 +445,7 @@ export class PulseClient {
      * @returns {void}
      */
     _restartServiceStartAttempts() {
-        this._cancelStartRetry();
+        this._cancelStartChainStep();
         this._latestStartAttempt = null;
         this._isServiceStartPending = true;
         this._attemptServiceStartIfConnected();
@@ -447,49 +468,94 @@ export class PulseClient {
     }
 
     /**
-     * Handles systemd's answer to the latest StartUnit (an answer to an older one is ignored). A success ends the
-     * retries: none is pending while an attempt is in flight, and none is scheduled after it. A failure is logged and
-     * retried after nextStartRetryDelaySeconds, unless the service is on the bus anyway (then there is nothing left to
-     * start, and a retry could restart it after someone stopped it on purpose).
+     * Handles systemd's answer to the latest StartUnit (an answer to an older one, or to one the service appearing
+     * superseded, is ignored). A failure is logged. While the service is on the bus nothing follows: there is nothing
+     * left to start, and a retry could restart it after someone stopped it on purpose. Otherwise an accepted StartUnit
+     * waits for the service to appear, and a failure is retried after nextStartRetryDelaySeconds.
      *
      * @param {{attemptNumber: number}} startAttempt - The attempt answered.
-     * @param {Error|null} error - Null for a success.
+     * @param {Error|null} error - Null when systemd accepted the start job.
      * @returns {void}
      */
     _onServiceStartAnswered(startAttempt, error) {
-        if (this._isDestroyed || startAttempt !== this._latestStartAttempt || error === null)
+        if (this._isDestroyed || startAttempt !== this._latestStartAttempt)
             return;
-        const errorText = describeError(error);
-        this._errorLog.log(`StartUnit ${RESOURCE_PULSE_UNIT_NAME} failed: ${errorText}`, START_UNIT_FAILURE_LOG_KEY);
+        if (error !== null) {
+            const errorText = describeError(error);
+            this._errorLog.log(`StartUnit ${RESOURCE_PULSE_UNIT_NAME} failed: ${errorText}`,
+                START_UNIT_FAILURE_LOG_KEY);
+        }
         if (this._nameOwner !== null)
             return;
+        if (error === null)
+            this._awaitServiceAppearance(startAttempt);
+        else
+            this._scheduleStartRetry(startAttempt);
+    }
+
+    /**
+     * Waits START_CONFIRMATION_TIMEOUT_SECONDS for the service an accepted StartUnit started to appear on the bus. Its
+     * appearing ends the chain (and removes this wait); otherwise the attempt counts as failed.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The accepted attempt.
+     * @returns {void}
+     */
+    _awaitServiceAppearance(startAttempt) {
+        this._startChainSourceId = this._timeouts.addSeconds(START_CONFIRMATION_TIMEOUT_SECONDS,
+            () => this._onStartConfirmationTimeout(startAttempt));
+    }
+
+    /**
+     * The service did not appear after an accepted StartUnit (the unit at its start limit, or exiting at once): logs
+     * it and retries, as for a failure. Runs as a GLib timeout, so it never throws.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The accepted attempt.
+     * @returns {boolean} GLib.SOURCE_REMOVE: each step of the chain is a timeout of its own.
+     */
+    _onStartConfirmationTimeout(startAttempt) {
+        this._startChainSourceId = null;
+        this._runWithoutThrowing('retry an unconfirmed StartUnit', () => {
+            this._errorLog.log(`StartUnit ${RESOURCE_PULSE_UNIT_NAME} was accepted, but the service did not appear ` +
+                `on the bus within ${START_CONFIRMATION_TIMEOUT_SECONDS} s`, START_UNCONFIRMED_LOG_KEY);
+            this._scheduleStartRetry(startAttempt);
+        });
+        return GLib.SOURCE_REMOVE;
+    }
+
+    /**
+     * Schedules the next StartUnit after nextStartRetryDelaySeconds for the attempt that failed.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The failed (or unconfirmed) attempt.
+     * @returns {void}
+     */
+    _scheduleStartRetry(startAttempt) {
         const retryDelaySeconds = nextStartRetryDelaySeconds(startAttempt.attemptNumber);
-        this._startRetrySourceId = this._timeouts.addSeconds(retryDelaySeconds, () => this._onStartRetryTimeout());
+        this._startChainSourceId = this._timeouts.addSeconds(retryDelaySeconds, () => this._onStartRetryTimeout());
     }
 
     /**
      * Sends the next StartUnit of the chain. Runs as a GLib timeout, so it never throws.
      *
-     * @returns {boolean} GLib.SOURCE_REMOVE: each retry is a timeout of its own.
+     * @returns {boolean} GLib.SOURCE_REMOVE: each step of the chain is a timeout of its own.
      */
     _onStartRetryTimeout() {
-        this._startRetrySourceId = null;
+        this._startChainSourceId = null;
         this._isServiceStartPending = true;
         this._runWithoutThrowing('retry StartUnit', () => this._attemptServiceStartIfConnected());
         return GLib.SOURCE_REMOVE;
     }
 
     /**
-     * Removes a pending StartUnit retry, if any.
+     * Removes the StartUnit chain's pending step, if any: a retry, or the wait for the service to appear.
      *
      * @returns {void}
      */
-    _cancelStartRetry() {
-        if (this._startRetrySourceId === null)
+    _cancelStartChainStep() {
+        if (this._startChainSourceId === null)
             return;
-        const retrySourceId = this._startRetrySourceId;
-        this._startRetrySourceId = null;
-        this._timeouts.remove(retrySourceId);
+        const startChainSourceId = this._startChainSourceId;
+        this._startChainSourceId = null;
+        this._timeouts.remove(startChainSourceId);
     }
 
     /**
@@ -598,14 +664,17 @@ export class PulseClient {
     }
 
     /**
-     * A service is on the bus: it runs, so StartUnit retries end; its state is read, and a wanted watch asserted.
+     * A service is on the bus: it runs, so the StartUnit chain ends (its pending step removed, and a StartUnit still
+     * on its way superseded, so its answer cannot start a retry once this owner has left again); its state is read,
+     * and a wanted watch asserted.
      *
      * @param {string} nameOwner - Its unique name.
      * @returns {void}
      */
     _onServiceAppeared(nameOwner) {
         this._nameOwner = nameOwner;
-        this._cancelStartRetry();
+        this._cancelStartChainStep();
+        this._latestStartAttempt = null;
         this._requestState();
         if (this._isDetailWatchWanted)
             this._sendWatchDetail();
@@ -653,6 +722,9 @@ export class PulseClient {
 
     /**
      * Takes a state whole: both histories and the snapshot replace the client's, and Samples are drawn from here on.
+     * Its freshness is its snapshot's own time (freshnessOfStateSnapshot), so a state whose snapshot is already stale
+     * (a service that answers while its sampler has stopped) shows no data at once, since that snapshot's time, rather
+     * than its old numbers as live; the next Sample of the same run draws again.
      *
      * @param {object} state - lib/protocol.js parseStatePayload's result.
      * @returns {void}
@@ -661,8 +733,13 @@ export class PulseClient {
         replaceHistory(this._cpuHistory, state.histories.cpu);
         replaceHistory(this._memoryHistory, state.histories.memory);
         this._lastAppliedSequence = state.sequence;
-        this._lastFreshDataAtUsec = this._nowUsec();
+        this._lastFreshDataAtUsec = freshnessOfStateSnapshot(state.snapshot, this._nowUsec());
         this._dataState = DataState.LIVE;
+        if (this._isLiveDataStale()) {
+            this._recordLastGoodClockLabel(state.snapshot);
+            this._stopDrawing(DataState.STALLED);
+            return;
+        }
         this._publish(state.snapshot);
     }
 
@@ -765,9 +842,19 @@ export class PulseClient {
      */
     _publish(snapshot) {
         this._latestSnapshot = snapshot;
+        this._recordLastGoodClockLabel(snapshot);
+        this._notifyListeners(snapshot);
+    }
+
+    /**
+     * Moves "no data since" to a snapshot's time, when it has numbers and a time.
+     *
+     * @param {Snapshot|null} snapshot - A snapshot from the service.
+     * @returns {void}
+     */
+    _recordLastGoodClockLabel(snapshot) {
         if (hasNumbers(snapshot) && snapshot.takenAtClockLabel !== null)
             this._lastGoodClockLabel = snapshot.takenAtClockLabel;
-        this._notifyListeners(snapshot);
     }
 
     /**
@@ -807,10 +894,17 @@ export class PulseClient {
      * @returns {void}
      */
     _stopDrawingIfStale() {
-        if (this._dataState !== DataState.LIVE)
-            return;
-        if (isSampleStale({lastSampleReceivedAtUsec: this._lastFreshDataAtUsec, nowUsec: this._nowUsec()}))
+        if (this._dataState === DataState.LIVE && this._isLiveDataStale())
             this._stopDrawing(DataState.STALLED);
+    }
+
+    /**
+     * Says whether the data last received is older than the stall (lib/wiring.js isSampleStale).
+     *
+     * @returns {boolean} True when stale.
+     */
+    _isLiveDataStale() {
+        return isSampleStale({lastSampleReceivedAtUsec: this._lastFreshDataAtUsec, nowUsec: this._nowUsec()});
     }
 
     /**
@@ -891,12 +985,12 @@ export class PulseClient {
     }
 
     /**
-     * Removes the staleness check and a pending StartUnit retry.
+     * Removes the staleness check and the StartUnit chain's pending step.
      *
      * @returns {void}
      */
     _removeTimeouts() {
-        this._cancelStartRetry();
+        this._cancelStartChainStep();
         if (this._staleCheckSourceId === null)
             return;
         const staleCheckSourceId = this._staleCheckSourceId;
