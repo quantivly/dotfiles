@@ -81,7 +81,9 @@ class PulseIndicator extends PanelMenu.Button {
         // draws nothing, and the first unfreeze repaints it at once from the client's latest state.
         this._buildDropdown();
         this._dropdownCard.setFrozen(true);
-        this.menu.connect('open-state-changed', (_menu, isOpen) => this._onMenuOpenStateChanged(isOpen));
+        // Disconnected first in _onDestroy: destroying an open menu closes it, which emits this again.
+        this.menu.connectObject('open-state-changed', (_menu, isOpen) => this._onMenuOpenStateChanged(isOpen),
+            this);
 
         this.connect('notify::hover', () => this._syncHoverLabel());
         // Hidden while hovered (say, a fullscreen window hides the panel): the label must not stay up above it.
@@ -374,6 +376,7 @@ class PulseIndicator extends PanelMenu.Button {
      * @returns {void}
      */
     _onDestroy() {
+        this.menu.disconnectObject(this);
         St.ThemeContext.get_for_stage(global.stage).disconnectObject(this);
         if (this._placeHoverLabelLaterId !== null) {
             global.compositor.get_laters().remove(this._placeHoverLabelLaterId);

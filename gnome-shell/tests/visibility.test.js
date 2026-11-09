@@ -783,7 +783,7 @@ test('indicator.js: the dropdown card is never frozen while the menu is open: cl
         recheckedOnEveryChange: statementCount(openStateBody, 'this._syncOpenResourcesVisibility();'),
         startsFrozen: statementCount(initBody, 'this._dropdownCard.setFrozen(true);'),
         listensToTheMenu: statementCount(initBody,
-            'this.menu.connect(\'open-state-changed\', (_menu, isOpen) => this._onMenuOpenStateChanged(isOpen));'),
+            'this.menu.connectObject(\'open-state-changed\', (_menu, isOpen) => this._onMenuOpenStateChanged(isOpen),'),
     }, {freezesExactlyWhileClosed: 1, recheckedOnEveryChange: 1, startsFrozen: 1, listensToTheMenu: 1});
 });
 
@@ -798,7 +798,7 @@ test('indicator.js: the hover label is suppressed while the menu is open, and op
     }, {showsOnlyWhenHoveredMappedAndMenuClosed: 1, reSyncsOnOpenStateChange: 1});
 });
 
-test('indicator.js: destroying the indicator destroys the dropdown card and its fade and timeouts, and nothing is ' +
+test('indicator.js: destroying the indicator destroys the dropdown card and the hover label, cancels the pending show, and nothing is ' +
     'connected outside the indicator, its menu or its label', () => {
     const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
     const onDestroyBody = declarationBody(indicatorSource, '_onDestroy() {');
@@ -846,4 +846,16 @@ test('stylesheet.css styles the dropdown with classes of its own, added beside t
     const selectedClassNames = new Set(stylesheetRules(readExtensionFile('stylesheet.css'))
         .flatMap(rule => rule.classNames));
     assertEqual(['resource-pulse-menu-card-item'].filter(className => !selectedClassNames.has(className)), []);
+});
+
+test('indicator.js: _onDestroy disconnects the menu handler first, before it clears the dropdown fields and before ' +
+    'super._onDestroy() destroys the menu (whose close() emits open-state-changed against a cleared card)', () => {
+    const onDestroyLines = trimmedLines(declarationBody(readExtensionFile(INDICATOR_SOURCE_FILE), '_onDestroy() {'));
+    const indexOfLine = statement => onDestroyLines.indexOf(statement);
+    const disconnectIndex = indexOfLine('this.menu.disconnectObject(this);');
+    assertEqual({
+        disconnects: disconnectIndex >= 0,
+        beforeClearingTheCard: disconnectIndex < indexOfLine('this._dropdownCard = null;'),
+        beforeDestroyingTheMenu: disconnectIndex < indexOfLine('super._onDestroy();'),
+    }, {disconnects: true, beforeClearingTheCard: true, beforeDestroyingTheMenu: true});
 });

@@ -6,8 +6,8 @@
   spacing: 4px;
 }
 
-/* The dropdown's card item (a non-reactive popup item): the card inside has its own surface, so the item only pads
-   it, and the menu's own hover and focus colours stay off it. */
+/* The dropdown's card item: the card inside has its own surface, so the item only pads it. That the menu's hover
+   and focus colours stay off it is the item's doing (reactive: false, can_focus: false in indicator.js), not this rule. */
 .resource-pulse-menu-card-item {
   padding: 4px 6px;
 }
