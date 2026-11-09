@@ -74,6 +74,9 @@
 #   - remove a memory store checked out here that serves none of the profile's tenants,
 #     clone a store whose remote is not a repository under the GitHub base, or upgrade
 #     a git older than the memory sync needs (2.40). It names each.
+#   - delete anything under ~/.claude. A stale skill, hook or agent is moved to
+#     ~/.local/state/host-sync/retired/<UTC stamp>/, and only on a host with a profile
+#     marker; a skills, hooks or agents directory that is itself a link is not walked.
 #
 # THE HOST PROFILE (shared-configuration design, H1). ~/.config/claude-host-profile, the
 # settings renderer's marker, names this host's profile, and the private overlay's
@@ -86,7 +89,10 @@
 # settings.json is the renderer's (scripts/claude-settings-render.sh); on every host, the links both
 # checkouts declare are checked by scripts/check-links.sh (H8). Where the overlay carries the memory
 # store table, the stores that serve the profile's tenants are cloned and the memory sync's timer is
-# armed with the host (H6), and the memory links and sync are read through their own scripts.
+# armed with the host (H6), and the memory links and sync are read through their own scripts. On
+# every host, an entry under ~/.claude's skills, hooks or agents that is neither a link into one of
+# the two checkouts, nor generated, nor Claude Code's own is reported as stale; with a profile,
+# --apply moves it aside (H5).
 #
 # Usage (the controlling host, usually the laptop):
 #   host-sync --host <ssh alias> [--check]     report drift on <host>; changes nothing (default)
@@ -177,6 +183,17 @@ HERDR_SKILL_FILE="$HOME/.claude/skills/herdr/SKILL.md"
 SPAWN_SKILL_FILE="$HOME/.claude/skills/spawn/SKILL.md"
 # How long a skill generator (`herdr --skill`, `herdr-draft skill`) may run before its row says so.
 SKILL_GENERATOR_TIMEOUT_SECONDS=60
+# What belongs under ~/.claude's skills, hooks and agents (shared-configuration design, H5), named
+# <kind>/<name>: the entries generated on this host from its own binaries, and Claude Code's own, as
+# glob patterns (skills/synced, and any dot-entry under skills/). Anything else that is not a link
+# into one of the two checkouts is stale, and --apply moves it under the state dir's retired/, into
+# a directory named for the UTC second of the run.
+CLAUDE_USER_DIR="$HOME/.claude"
+CLAUDE_ENTRY_KINDS=(skills hooks agents)
+GENERATED_CLAUDE_ENTRIES=(skills/herdr skills/spawn hooks/herdr-agent-state.sh)
+CLAUDE_OWN_ENTRIES=(skills/synced 'skills/.*')
+RETIRED_DIR_NAME="retired"
+RETIRED_STAMP_FORMAT='+%Y%m%dT%H%M%SZ'
 GIT_NET_TIMEOUT_SECONDS=300
 CLONE_TIMEOUT_SECONDS=300
 # How long a sibling script (the settings renderer, the link checker, the memory scripts' --check and
@@ -1960,6 +1977,146 @@ memory_sibling_could_not_run_row() {   # $1 = the script and its verb, as the ro
     fi
 }
 
+# ----------------------------------------------------------------------------------------------
+# Stale skills, hooks and agents under ~/.claude
+# ----------------------------------------------------------------------------------------------
+
+# Stale is structural (shared-configuration design, H5): an entry under ~/.claude's skills, hooks or
+# agents that is not a link into one of the two checkouts, not generated and not Claude Code's own (a
+# copy left from before the links, a cache, a link left dangling or pointing elsewhere). --check
+# names each; --apply moves them into one stamp directory under the state dir, only on a host with a
+# profile (H1), and deletes nothing. A kind directory that is itself a link is a person's step and
+# is not walked: what is in it is not ~/.claude's, and through a link into a checkout --apply would
+# move tracked files out of it.
+here_retire() {
+    local kind
+    STALE_CLAUDE_ENTRIES=(); KIND_DIR_IS_LINK=0
+    read_checkout_roots
+    for kind in "${CLAUDE_ENTRY_KINDS[@]}"; do
+        collect_stale_entries "$kind"
+    done
+    if (( ${#STALE_CLAUDE_ENTRIES[@]} == 0 )); then
+        (( KIND_DIR_IS_LINK )) || row ok retire "no stale skill, hook or agent under $(tilde_path "$CLAUDE_USER_DIR")"
+    elif [[ -z "$PROFILE" ]]; then
+        stale_entries_left_row
+    elif [[ "$MODE" != apply ]]; then
+        stale_entries_to_move_row
+    else
+        retire_stale_entries
+    fi
+    return 0
+}
+# Each checkout that exists, resolved, with a trailing slash, into CHECKOUT_ROOTS: a ~/.dotfiles that
+# is itself a link still holds what a link through it resolves to, and the slash keeps a sibling
+# such as ~/.dotfiles-old from passing as the checkout.
+read_checkout_roots() {
+    local checkout resolved
+    CHECKOUT_ROOTS=()
+    for checkout in "$DOTFILES" "$DOTFILES_LOCAL"; do
+        [[ -d "$checkout" ]] || continue
+        resolved="$(readlink -f -- "$checkout" 2>/dev/null)"
+        # Never an empty prefix, nor the root: every path would pass.
+        [[ "$resolved" == /?* ]] && CHECKOUT_ROOTS+=("$resolved/")
+    done
+}
+# Append each stale entry under ~/.claude/<kind>/ to STALE_CLAUDE_ENTRIES as <kind>/<name>,
+# dot-entries included. An absent kind directory holds nothing; one that is a link gets the ⚠ row,
+# sets KIND_DIR_IS_LINK and is not walked.
+collect_stale_entries() {   # $1 = the kind: skills, hooks or agents
+    local kind="$1" dir="$CLAUDE_USER_DIR/$1" path name
+    if [[ -L "$dir" ]]; then
+        row oper retire "$(tilde_path "$dir") is a link, not a directory; its entries are not judged"
+        KIND_DIR_IS_LINK=1
+        return
+    fi
+    [[ -d "$dir" ]] || return 0
+    for path in "$dir"/* "$dir"/.*; do
+        name="${path##*/}"
+        [[ "$name" == . || "$name" == .. ]] && continue
+        [[ -e "$path" || -L "$path" ]] || continue   # a pattern that matched nothing is left as written
+        [[ "$(classify_claude_entry "$kind" "$name")" == stale ]] && STALE_CLAUDE_ENTRIES+=("$kind/$name")
+    done
+}
+# What ~/.claude/<kind>/<name> is, printed: generated, own (Claude Code's), declared or stale.
+classify_claude_entry() {   # $1 = the kind, $2 = the entry's name
+    local entry_key="$1/$2"
+    if list_has "$entry_key" "${GENERATED_CLAUDE_ENTRIES[@]}"; then
+        echo generated
+    elif matches_any_pattern "$entry_key" "${CLAUDE_OWN_ENTRIES[@]}"; then
+        echo own
+    elif is_declared_link "$CLAUDE_USER_DIR/$entry_key"; then
+        echo declared
+    else
+        echo stale
+    fi
+}
+matches_any_pattern() {   # $1 = a string, $2… = glob patterns; 0 when one of them matches it
+    local string="$1" pattern
+    shift
+    for pattern in "$@"; do
+        # shellcheck disable=SC2053  # the right side is a glob pattern, unquoted deliberately
+        [[ "$string" == $pattern ]] && return 0
+    done
+    return 1
+}
+# 0 when $1 is a link that resolves to a path that exists, inside one of CHECKOUT_ROOTS. readlink -f
+# prints a dangling link's target and exits 0, so the target's existence is tested on its own.
+is_declared_link() {   # $1 = the entry's path
+    local target root
+    [[ -L "$1" ]] || return 1
+    target="$(readlink -f -- "$1" 2>/dev/null)" || return 1
+    [[ -n "$target" && -e "$target" ]] || return 1
+    for root in ${CHECKOUT_ROOTS[@]+"${CHECKOUT_ROOTS[@]}"}; do
+        [[ "$target" == "$root"* ]] && return 0
+    done
+    return 1
+}
+# $@ = <kind>/<name> entries, printed sorted bytewise and comma-joined, as the rows name them. The
+# sort is for the row only: what is moved is the list as it was walked, each name exactly as it is.
+sorted_entries_shown() {
+    local sorted=()
+    mapfile -t sorted < <(printf '%s\n' "$@" | LC_ALL=C sort)
+    join_comma "${sorted[@]}"
+}
+entries_noun() { if (( $1 == 1 )); then printf entry; else printf entries; fi; }   # $1 = a count
+# The ⚠ for a host with no usable profile: the stale entries are named, and --apply leaves them.
+stale_entries_left_row() {
+    local count="${#STALE_CLAUDE_ENTRIES[@]}" noun shown
+    noun="$(entries_noun "$count")"
+    shown="$(sorted_entries_shown "${STALE_CLAUDE_ENTRIES[@]}")"
+    row oper retire "$count stale $noun under $(tilde_path "$CLAUDE_USER_DIR") ($shown); no host profile here, so --apply leaves them"
+}
+# --check's ✗, naming where --apply puts them: under the new state dir, which a legacy host's
+# --apply moves its state into before any row runs.
+stale_entries_to_move_row() {
+    local count="${#STALE_CLAUDE_ENTRIES[@]}" noun shown pronoun=them retired_root_shown
+    noun="$(entries_noun "$count")"
+    (( count == 1 )) && pronoun=it
+    shown="$(sorted_entries_shown "${STALE_CLAUDE_ENTRIES[@]}")"
+    retired_root_shown="$(tilde_path "$STATE_DIR/$RETIRED_DIR_NAME")"
+    row drift retire "$count stale $noun under $(tilde_path "$CLAUDE_USER_DIR"): $shown; --apply moves $pronoun to $retired_root_shown/<stamp>/"
+}
+# --apply's half: each stale entry to $STATE/retired/<one UTC stamp>/<kind>/<name>, by mv, never rm.
+# ✓ names what moved; an entry that could not be moved is a ✗ of its own and stays where it was.
+retire_stale_entries() {
+    local stamp retired_dir entry kind moved=() count noun shown
+    stamp="$(date -u "$RETIRED_STAMP_FORMAT")"
+    retired_dir="$STATE/$RETIRED_DIR_NAME/$stamp"
+    for entry in "${STALE_CLAUDE_ENTRIES[@]}"; do
+        kind="${entry%%/*}"
+        if mkdir -p -- "$retired_dir/$kind" 2>/dev/null && mv -- "$CLAUDE_USER_DIR/$entry" "$retired_dir/$entry" 2>/dev/null; then
+            moved+=("$entry")
+        else
+            row drift retire "could not move $(tilde_path "$CLAUDE_USER_DIR/$entry") to $(tilde_path "$retired_dir/$kind")/; left in place"
+        fi
+    done
+    count="${#moved[@]}"
+    (( count )) || return 0
+    noun="$(entries_noun "$count")"
+    shown="$(sorted_entries_shown "${moved[@]}")"
+    row ok retire "$count $noun moved to $(tilde_path "$retired_dir")/ ($shown)"
+}
+
 # The state dir moved with the rename. --check reads whichever exists, the new one first, so a
 # legacy host's install stamp is found where it is, and moves nothing.
 pick_state_dir() {
@@ -2050,7 +2207,9 @@ here_rows() {
     # plugin rows install is what the render declares (H4). The generated skills come after herdr
     # and herdr-draft, so each is what the binary this run left in place prints. Memory comes after
     # both checkouts too: the store table is the overlay's, and the link and sync scripts and the
-    # memory timer's unit are what dotfiles' ./install left in place.
+    # memory timer's unit are what dotfiles' ./install left in place. Retire comes after the links
+    # and the generated skills, so an entry an ./install or a generator made this run is declared or
+    # generated by then, never moved aside.
     read_profile
     clone_overlay
     here_dotfiles
@@ -2069,6 +2228,7 @@ here_rows() {
     here_mcp
     here_clones
     here_memory
+    here_retire
     here_slice
     here_sessions
 

@@ -391,10 +391,12 @@ new_case() {
 
     # dotfiles: origin with an install script, two declared links, the linear-key plugin, the
     # settings renderer and the memory link and sync scripts (stubs) and the REAL link checker, all
-    # tracked; dev at origin/main.
+    # tracked, and a skill and a hook for ~/.claude to link to; dev at origin/main.
     local w="$C/seed-dotfiles"
     git init -q -b main "$w"
-    mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin" "$w/config" "$w/scripts"
+    mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin" "$w/config" "$w/scripts" \
+        "$w/claude/skills/rabota" "$w/claude/hooks"
+    echo '# rabota' >"$w/claude/skills/rabota/SKILL.md"; echo 'exit 0' >"$w/claude/hooks/a.sh"
     # install-order is shared with dotfiles-local's stub, so a row can read which ran first.
     write_install_stub "$w/install" install-fails public install-ran
     printf -- '- link:\n    ~/.x: config/x\n    ~/.config/fixture/y.conf: config/y.conf\n' >"$w/install.conf.yaml"
@@ -414,10 +416,11 @@ new_case() {
 
     # dotfiles-local, the private overlay, with the host profile `p` marked: an install stub of the
     # same shape, a manifest declaring two links, the profile itself and the memory store table (a
-    # store for the profile's tenant, alpha, and one for a tenant it does not serve, beta); cloned
-    # and installed, as a level host has it.
+    # store for the profile's tenant, alpha, and one for a tenant it does not serve, beta), and a
+    # skill for ~/.claude to link to; cloned and installed, as a level host has it.
     w="$C/seed-dotfiles-local"
-    git init -q -b main "$w"; mkdir -p "$w/hosts" "$w/claude" "$w/config"
+    git init -q -b main "$w"; mkdir -p "$w/hosts" "$w/claude/skills/zvi-voice" "$w/config"
+    echo '# zvi-voice' >"$w/claude/skills/zvi-voice/SKILL.md"
     write_install_stub "$w/install" install-fails-local local local-install-ran
     printf -- '- link:\n    ~/.claude/CLAUDE.md: claude/CLAUDE.md\n    ~/.config/overlay/note.txt: config/note.txt\n' >"$w/install.conf.yaml"
     echo '# the overlay instructions' >"$w/claude/CLAUDE.md"; echo note >"$w/config/note.txt"
@@ -435,6 +438,16 @@ new_case() {
     { (cd "$H/.dotfiles" && HOME="$H" bash ./install) && (cd "$H/.dotfiles-local" && HOME="$H" bash ./install); } ||
         fatal "the fixture's ./install stubs could not link the declared links"
     rm -f "$H/stub/install-order" "$H/stub/install-ran" "$H/stub/local-install-ran"
+
+    # ~/.claude as declared (shared-configuration design, H5), with nothing stale in it: a skill
+    # linked from each checkout and a hook from the public one, the generated hook beside the two
+    # generated skills above, and Claude Code's own skills/synced and dot-entries under skills/. No
+    # agents directory: a host may have none.
+    mkdir -p "$H/.claude/hooks" "$H/.claude/skills/synced" "$H/.claude/skills/.trash" "$H/.claude/skills/.cache"
+    ln -s "$H/.dotfiles/claude/skills/rabota" "$H/.claude/skills/rabota"
+    ln -s "$H/.dotfiles-local/claude/skills/zvi-voice" "$H/.claude/skills/zvi-voice"
+    ln -s "$H/.dotfiles/claude/hooks/a.sh" "$H/.claude/hooks/a.sh"
+    echo 'the herdr agent-state hook' >"$H/.claude/hooks/herdr-agent-state.sh"
 
     # timer armed. ./install links both units on every host (plain files stand in for the links);
     # only host-sync.timer is enabled, which puts its link in the .wants directory.
@@ -523,6 +536,21 @@ armed_where() {
     else echo none; fi
 }
 present() { if [[ -e "$1" || -L "$1" ]]; then echo present; else echo gone; fi; }
+# The four entries under ~/.claude that the retire row moves aside (shared-configuration design, H5):
+# a copied skill (a directory), a hooks cache, a hook link left dangling, and an agent file nothing
+# declares. STALE_ENTRIES_SHOWN is how the rows name them: sorted, comma-joined.
+STALE_ENTRIES=(skills/review-pr hooks/__pycache__ hooks/gone.sh agents/x.md)
+STALE_ENTRIES_SHOWN="agents/x.md, hooks/__pycache__, hooks/gone.sh, skills/review-pr"
+STALE_SKILL_TEXT="a copy of a skill"
+STALE_AGENT_TEXT="an agent from 2025 that nothing declares"
+STALE_CACHE_FILE="a.cpython-312.pyc"
+add_stale_entries() {
+    mkdir -p "$H/.claude/skills/review-pr" "$H/.claude/hooks/__pycache__" "$H/.claude/agents"
+    echo "$STALE_SKILL_TEXT" >"$H/.claude/skills/review-pr/SKILL.md"
+    echo bytecode >"$H/.claude/hooks/__pycache__/$STALE_CACHE_FILE"
+    ln -s "$H/.dotfiles/claude/hooks/missing.sh" "$H/.claude/hooks/gone.sh"
+    echo "$STALE_AGENT_TEXT" >"$H/.claude/agents/x.md"
+}
 # From the stub log, by line: the enable of host-sync.timer, the first is-enabled read-back after
 # it, and the stop of dev-sync.timer must come in that order.
 arming_order() {
@@ -686,6 +714,7 @@ jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true | .enabledPlugi
 rm -rf "$H/.local/state/host-sync" "$H/.config/host-sync/armed"; touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
 echo 1 >"$H/stub/render-rc"; rm "$H/.x"   # settings and a link, each one gate from its apply path
 rm -rf "${H:?}/$STORES_REL/alpha"; echo 1 >"$H/stub/link-rc"   # memory: a store to clone and links to fix
+add_stale_entries   # retire: four entries to move aside
 # Every path under $HOME with its size, mode and mtime, less the stub log and any path given.
 snapshot() {   # $@ = further paths to leave out
     local leave_out=(-path "$H/stub") path
@@ -1830,6 +1859,134 @@ check "memory: --check clones nothing and arms nothing: the three ✗ rows" \
 check "memory: --check clones nothing and arms nothing: nothing mutating, no clone" "$(mutations)/$(clone_calls)" "0/0"
 check "memory: --check clones nothing and arms nothing: no file changes" "$(diff <(echo "$before") <(snapshot) | head -n 5)" ""
 
+echo "== retire: stale skills, hooks and agents under ~/.claude"
+# Stale is structural (shared-configuration design, H5): an entry that is not a link into one of the
+# two checkouts, not generated and not Claude Code's own. --apply moves it aside, only on a host with
+# a profile marker, and never deletes it. The fixture's declared, generated and own entries are
+# new_case's; add_stale_entries adds the four stale ones.
+RETIRE_OK="$(printf '✓ %-14s ' retire)"; RETIRE_DRIFT="$(printf '✗ %-14s ' retire)"; RETIRE_OPER="$(printf '⚠ %-14s ' retire)"
+NOTHING_STALE_ROW="${RETIRE_OK}no stale skill, hook or agent under ~/.claude"
+RETIRED_REL=".local/state/host-sync/retired"
+UTC_STAMP_RE='^[0-9]{8}T[0-9]{6}Z$'
+# Whether each stale entry is still under ~/.claude, in STALE_ENTRIES' order.
+stale_entries_left() {
+    local entry states=()
+    for entry in "${STALE_ENTRIES[@]}"; do states+=("$(present "$H/.claude/$entry")"); done
+    echo "${states[*]}"
+}
+retired_stamps() { ls -A "$H/$RETIRED_REL" 2>/dev/null; }   # the stamp directories, one per line
+# Every <kind>/<name> under the first stamp directory, sorted and space-joined; empty when there is none.
+retired_entries() {
+    local first_stamp
+    first_stamp="$(retired_stamps | head -n 1)"
+    [[ -n "$first_stamp" ]] || return 0
+    (cd "$H/$RETIRED_REL/$first_stamp" && find . -mindepth 2 -maxdepth 2 | sed 's#^\./##' | LC_ALL=C sort | paste -sd' ')
+}
+# Every path under retired/ with its size, mode and mtime: snapshot() leaves the whole state dir out.
+retired_tree() { find "$H/$RETIRED_REL" -printf '%p %s %m %T@\n' 2>/dev/null | sort; }
+# snapshot() less the stale entries and the lines of the kind directories that held them (a move
+# changes their mtime): what --apply must leave exactly as it was. $@ = further paths to leave out.
+snapshot_without_stale() {
+    local entry leave_out=()
+    for entry in "${STALE_ENTRIES[@]}"; do leave_out+=("$H/.claude/$entry"); done
+    snapshot "${leave_out[@]}" "$@" | grep -v -F -e "$H/.claude/skills " -e "$H/.claude/hooks " -e "$H/.claude/agents "
+}
+
+new_case
+run_level --check
+has   "retire: nothing stale → ✓" "$OUT" "$NOTHING_STALE_ROW"
+check "retire: printed after the memory rows and before the slice row" \
+    "$(( $(line_of "${MEMORY_OK}claude-memory-sync.timer") < $(line_of "$RETIRE_OK") && \
+        $(line_of "$RETIRE_OK") < $(line_of "agents.slice MemoryHigh") ))" 1
+run_level --apply
+check "retire: nothing stale → ✓: --apply moves nothing and makes no retired directory" \
+    "$(grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")/$(present "$H/$RETIRED_REL")" "1/gone"
+
+new_case
+add_stale_entries
+run_level --check
+has   "retire: stale entries are counted and named in --check" "$OUT" \
+    "${RETIRE_DRIFT}4 stale entries under ~/.claude: $STALE_ENTRIES_SHOWN; --apply moves them to ~/$RETIRED_REL/<stamp>/"
+check "retire: stale entries are counted and named in --check: nothing moved, exit 1" \
+    "$(stale_entries_left)/$(present "$H/$RETIRED_REL")/$RC" "present present present present/gone/1"
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+# A first --apply also writes each checkout's FETCH_HEAD, which changes its .git directory's mtime.
+before="$(snapshot_without_stale "${LEAVE_OUT[@]}" "$H/.dotfiles/.git" "$H/.dotfiles-local/.git")"
+run_level --apply
+STAMP="$(retired_stamps)"
+check "retire: --apply moves exactly the stale ones, keeping their paths: one stamp directory, in UTC" \
+    "$(grep -cE "$UTC_STAMP_RE" <<<"$STAMP")/$(grep -c . <<<"$STAMP")" "1/1"
+check "retire: --apply moves exactly the stale ones, keeping their paths: <kind>/<name> under the stamp" \
+    "$(retired_entries)" "agents/x.md hooks/__pycache__ hooks/gone.sh skills/review-pr"
+check "retire: --apply moves exactly the stale ones, keeping their paths: none left under ~/.claude, exit 0" \
+    "$(stale_entries_left)/$RC" "gone gone gone gone/0"
+check "retire: --apply moves exactly the stale ones: the declared, generated and own entries are untouched" \
+    "$(diff <(echo "$before") <(snapshot_without_stale "${LEAVE_OUT[@]}" "$H/.dotfiles/.git" "$H/.dotfiles-local/.git") | head -n 5)" ""
+has   "retire: --apply moves exactly the stale ones: ✓ names the count, the directory and the entries" "$OUT" \
+    "${RETIRE_OK}4 entries moved to ~/$RETIRED_REL/$STAMP/ ($STALE_ENTRIES_SHOWN)"
+check "retire: nothing is deleted: the agent file, the dangling link, the skill copy and the cache, as they were" \
+    "$(cat "$H/$RETIRED_REL/$STAMP/agents/x.md" 2>/dev/null)|$(readlink "$H/$RETIRED_REL/$STAMP/hooks/gone.sh")|$(
+        cat "$H/$RETIRED_REL/$STAMP/skills/review-pr/SKILL.md" 2>/dev/null)|$(ls -A "$H/$RETIRED_REL/$STAMP/hooks/__pycache__" 2>/dev/null)" \
+    "$STALE_AGENT_TEXT|$H/.dotfiles/claude/hooks/missing.sh|$STALE_SKILL_TEXT|$STALE_CACHE_FILE"
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"; retired_before="$(retired_tree)"
+run_level --apply
+retired_after="$(retired_tree)"
+check "retire: a second --apply is clean: nothing mutating, no file changes, retired/ as it was, ✓" \
+    "$(mutations)|$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)|$(
+        [[ -n "$retired_before" && "$retired_after" == "$retired_before" ]] && echo unchanged)|$(
+        grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")" "0||unchanged|1"
+
+# ~/.dotfiles a link to the clone: the rabota link resolves through it, so only a checkout that is
+# itself resolved before the prefix test still counts the link as declared.
+new_case
+mv "$H/.dotfiles" "$C/dotfiles-clone"; ln -s "$C/dotfiles-clone" "$H/.dotfiles"
+run_level --apply
+check "retire: a checkout reached through a symlink still counts as declared: the rabota link stays, ✓" \
+    "$(readlink "$H/.claude/skills/rabota")|$(grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")" \
+    "$H/.dotfiles/claude/skills/rabota|1"
+
+new_case
+add_stale_entries; rm "$H/.config/claude-host-profile"
+run_level --apply
+has   "retire: without a profile marker, --apply moves nothing and ⚠ says why" "$OUT" \
+    "${RETIRE_OPER}4 stale entries under ~/.claude ($STALE_ENTRIES_SHOWN); no host profile here, so --apply leaves them"
+check "retire: without a profile marker, --apply moves nothing: every stale entry in place, no retired directory" \
+    "$(stale_entries_left)/$(present "$H/$RETIRED_REL")" "present present present present/gone"
+
+# A link to a path that exists in neither checkout. ~/.dotfiles-old has ~/.dotfiles as a string
+# prefix, so only a prefix test that ends in / tells the two apart.
+new_case
+mkdir -p "$H/.dotfiles-old/claude/skills/old-skill"
+ln -s "$H/.dotfiles-old/claude/skills/old-skill" "$H/.claude/skills/old-skill"
+run_level --check
+has   "retire: a link to an existing path outside both checkouts is stale" "$OUT" \
+    "${RETIRE_DRIFT}1 stale entry under ~/.claude: skills/old-skill; --apply moves it to ~/$RETIRED_REL/<stamp>/"
+
+# Only skills/ has dot-entries of Claude Code's own; one under hooks/ is walked, and stale.
+new_case
+mkdir -p "$H/.claude/hooks/.old-cache"
+run_level --check
+has   "retire: a dot-entry under hooks is walked, and stale" "$OUT" \
+    "${RETIRE_DRIFT}1 stale entry under ~/.claude: hooks/.old-cache; --apply moves it to ~/$RETIRED_REL/<stamp>/"
+
+# retired/ is a regular file, so no stamp directory can be made under it, whoever runs the table.
+new_case
+mkdir -p "$H/.claude/agents"; echo "$STALE_AGENT_TEXT" >"$H/.claude/agents/x.md"; : >"$H/$RETIRED_REL"
+run_level --apply
+has   "retire: a move that fails is ✗ naming the entry" "$OUT" "${RETIRE_DRIFT}could not move ~/.claude/agents/x.md to ~/$RETIRED_REL/"
+check "retire: a move that fails leaves the entry in place, prints no ✓, and --apply exits 1" \
+    "$(cat "$H/.claude/agents/x.md")|$(grep -c -F "$RETIRE_OK" <<<"$OUT")|$RC" "$STALE_AGENT_TEXT|0|1"
+
+# A whole kind directory linked elsewhere (here, outside both checkouts): what is in it is not
+# ~/.claude's to move, and a link into a checkout would have --apply move tracked files out of it.
+new_case
+mkdir -p "$C/shared-agents"; echo "$STALE_AGENT_TEXT" >"$C/shared-agents/y.md"; ln -s "$C/shared-agents" "$H/.claude/agents"
+run_level --apply
+has   "retire: a kind directory that is itself a link is a person's step" "$OUT" \
+    "${RETIRE_OPER}~/.claude/agents is a link, not a directory; its entries are not judged"
+check "retire: a kind directory that is itself a link is never walked: its entry stays, nothing retired, no ✓" \
+    "$(cat "$C/shared-agents/y.md")|$(present "$H/$RETIRED_REL")|$(grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")" "$STALE_AGENT_TEXT|gone|0"
+
 echo "== timer"
 # The timer row's glyph and area, as row() prints them, so a needle also pins ✓ against ✗ and ·.
 TIMER_OK="$(printf '✓ %-14s ' timer)"; TIMER_DRIFT="$(printf '✗ %-14s ' timer)"; TIMER_INFO="$(printf '· %-14s ' timer)"
@@ -2721,7 +2878,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=610
+EXPECTED_ROWS=631
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
