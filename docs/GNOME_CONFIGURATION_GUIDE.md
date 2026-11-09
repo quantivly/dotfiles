@@ -196,7 +196,7 @@ Resource Pulse: linked=yes enabled=yes state=ACTIVE
 - `service:` is the unit's `ActiveState`; for an active service, also the protocol and the age of its
   last sample, asked with `GetState` through `gdbus` and bounded at 3 s ("no answer" otherwise).
 - A ⚠ line follows for each of: the service **failed**; it is **not running** while the extension is
-  enabled; it does **not answer**; it has **not sampled for more than 6 s** (the extension shows no
+  enabled (from the first login after linking on); it does **not answer**; it has **not sampled for more than 6 s** (the extension shows no
   data then); it **runs older code** than the checkout (a file under `service/` or `lib/` changed after
   it started, as when the deploy's restart failed: `systemctl --user try-restart
   resource-pulse.service`); and **the desktop runs an older copy** (a file outside `service/` changed

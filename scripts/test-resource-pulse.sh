@@ -695,11 +695,14 @@ for state_and_setting in "failed:$ASKED_FOR_SETTING" "failed:$NOT_ASKED_FOR_SETT
   enabled_flag="$([[ "${state_and_setting#*:}" == "$ASKED_FOR_SETTING" ]] && printf enabled || printf off)"
   not_running_summary+="${state_and_setting%%:*}/$enabled_flag=[$(status_service_line)]/$(status_warning_count)/$(status_gdbus_calls) "
 done
+# Enabled, but before the first login after linking: the extension has not run yet.
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_SERVICE_ACTIVE_STATE=inactive GNOME_STATUS_SHELL_STATE=
+not_running_summary+="inactive/before-login=[$(status_service_line)]/$(status_warning_count)/$(status_gdbus_calls) "
 gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_NO_MANAGER=1
 not_running_summary+="no-manager=[$(status_service_line)]/$(status_warning_count)/$(status_gdbus_calls)"
-check "gnome-status: a failed service always warns, one not running only while enabled, no manager never; none is asked GetState" \
+check "gnome-status: a failed service always warns, one not running only while enabled and loaded, no manager never; none is asked GetState" \
   "$not_running_summary" \
-  "failed/enabled=[failed (not running)]/1/0 failed/off=[failed (not running)]/1/0 inactive/enabled=[inactive (not running)]/1/0 inactive/off=[inactive (not running)]/0/0 activating/enabled=[activating (not running)]/1/0 no-manager=[unknown (no systemd user manager answered)]/0/0"
+  "failed/enabled=[failed (not running)]/1/0 failed/off=[failed (not running)]/1/0 inactive/enabled=[inactive (not running)]/1/0 inactive/off=[inactive (not running)]/0/0 activating/enabled=[activating (not running)]/1/0 inactive/before-login=[inactive (not running)]/0/0 no-manager=[unknown (no systemd user manager answered)]/0/0"
 
 older_code_summary=""
 STATUS_SERVICE_STARTED_AT="GNOME_STATUS_SERVICE_STARTED_AT=@$SUITE_STARTED_AT_EPOCH"

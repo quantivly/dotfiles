@@ -2525,7 +2525,9 @@ gnome-status() {
 
     # The sampler service. Failed, or not running while the extension is enabled,
     # is a ⚠: ./install's refresh step only warns (it never fails the install), so
-    # this is where a stopped, stalled or out-of-date service shows.
+    # this is where a stopped, stalled or out-of-date service shows. Before the
+    # first login after linking (the shell does not know the extension yet) the
+    # extension has not run, so a service not started yet is no fault.
     rp_service_state=""
     if has_command systemctl; then
       rp_service_state="$(systemctl --user show -p ActiveState --value "$rp_service_unit" 2>/dev/null)" ||
@@ -2538,7 +2540,7 @@ gnome-status() {
         rp_service_line="$rp_service_state (not running)"
         if [ "$rp_service_state" = "failed" ]; then
           rp_warnings+=("$rp_service_unit failed — journalctl --user -u $rp_service_unit -e")
-        elif [ "$rp_enabled" = "yes" ]; then
+        elif [ "$rp_enabled" = "yes" ] && [ "$rp_shell_knows_it" != "no" ]; then
           rp_warnings+=("$rp_service_unit is not running while the extension is enabled, so it shows no data — systemctl --user start $rp_service_unit")
         fi
         ;;
