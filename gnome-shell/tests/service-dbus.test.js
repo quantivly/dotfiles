@@ -19,6 +19,11 @@ const RUNTIME_DIRECTORY_VARIABLE = 'XDG_RUNTIME_DIR';
 const PATH_SOCKET_ADDRESS_PREFIX = 'unix:path=';
 /** Where the live session bus listens, under XDG_RUNTIME_DIR. */
 const LIVE_SESSION_BUS_SOCKET_NAME = 'bus';
+/**
+ * What may lead an address that starts inside the bus directory out of it: an address list (another address after
+ * the separator), a parent segment, and a percent escape (D-Bus decodes them, so %2e%2e is ..).
+ */
+const ADDRESS_ESCAPE_MARKERS = [';', '/../', '%'];
 const CONNECTION_FLAGS = Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT |
     Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION;
 const CALL_TIMEOUT_MS = 2000;
@@ -57,8 +62,9 @@ const REVEAL_SNAPSHOT = {
 const TICK_APPENDED_HISTORY = {cpu: 0.5, memory: 0.25};
 
 /**
- * The session bus address, refusing anything but a private bus: a path socket inside the directory
- * RESOURCE_PULSE_TEST_BUS_DIR names, and never the live bus's socket under XDG_RUNTIME_DIR.
+ * The session bus address, refusing anything but a private bus: one path socket inside the directory
+ * RESOURCE_PULSE_TEST_BUS_DIR names, with nothing that could lead it out (ADDRESS_ESCAPE_MARKERS), and never the
+ * live bus's socket under XDG_RUNTIME_DIR. scripts/test-resource-pulse.sh's is_private_bus_address is its twin.
  *
  * @returns {string} The private bus address.
  * @throws {Error} When the address is not provably the private bus.
@@ -73,7 +79,8 @@ export function requirePrivateBusAddress() {
         ? `${PATH_SOCKET_ADDRESS_PREFIX}${runtimeDirectory}/${LIVE_SESSION_BUS_SOCKET_NAME}`
         : null;
     const isLiveBus = liveBusAddressPrefix !== null && Boolean(address?.startsWith(liveBusAddressPrefix));
-    if (!isInsideBusDirectory || isLiveBus) {
+    const canLeadElsewhere = ADDRESS_ESCAPE_MARKERS.some(marker => Boolean(address?.includes(marker)));
+    if (!isInsideBusDirectory || isLiveBus || canLeadElsewhere) {
         throw new Error(`refusing to run: ${SESSION_BUS_ADDRESS_VARIABLE} (${address}) is not a private bus ` +
             `inside ${PRIVATE_BUS_DIRECTORY_VARIABLE} (${busDirectory})`);
     }
@@ -314,6 +321,19 @@ test('service D-Bus: a caller that closes its connection holding a watch loses i
         const didDrop = await waitUntil(() => sampler.detailWatchedCalls.length >= 2, VANISHED_WATCH_DROP_TIMEOUT_MS);
         assertEqual({callsWhileWatched, didDrop, calls: sampler.detailWatchedCalls},
             {callsWhileWatched: [true], didDrop: true, calls: [true, false]});
+    }));
+
+test('service D-Bus: a caller holding two watches that vanishes drops both: setDetailWatched(false), count 0', () =>
+    withExportedService(async ({sampler, service, serviceName, openClient}) => {
+        const clientConnection = openClient();
+        await callServiceMethod(clientConnection, serviceName, WATCH_DETAIL_METHOD);
+        await callServiceMethod(clientConnection, serviceName, WATCH_DETAIL_METHOD);
+        const countWhileWatched = service.detailWatchCount;
+        clientConnection.close_sync(null);
+        const didDropBoth = await waitUntil(() => service.detailWatchCount === 0, VANISHED_WATCH_DROP_TIMEOUT_MS);
+        assertEqual({countWhileWatched, didDropBoth, calls: sampler.detailWatchedCalls,
+            countAfter: service.detailWatchCount}, {countWhileWatched: 2, didDropBoth: true, calls: [true, false],
+            countAfter: 0});
     }));
 
 test('service D-Bus: two watches from one caller need two unwatches', () =>

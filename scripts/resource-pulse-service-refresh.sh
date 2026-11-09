@@ -27,8 +27,12 @@
 #   - active, nothing under service/ or lib/ newer than its start: silent, exit 0;
 #   - active, something newer: `systemctl --user try-restart`, one ✓ line.
 # A failure (the reload, a state or start time it cannot read, a directory it
-# cannot search, the restart) prints a ⚠ line on stderr and exits 1, and restarts
-# nothing it could not decide about: a partial answer never decides a restart.
+# cannot search, the restart) prints a ⚠ line on stderr naming the step and what
+# to run, restarts nothing it could not decide about (a partial answer never
+# decides a restart), and still exits 0. It never fails the install: under
+# `set -e` an exit 1 here would abort the rest of ./install for every desktop
+# user, for a service that at worst keeps running its previous code, which is
+# what reconcile-systemd-units.sh decides for its own failures too.
 #
 # Comparing times: the start time is read in whole seconds (@<epoch>), and
 # `find -newermt @<epoch>` keeps files strictly newer than that second's start.
@@ -84,49 +88,50 @@ unit_started_at_epoch() {
 
 # first_file_changed_since <epoch>: prints the first file under the watched
 # subdirectories modified after that second began, or nothing; fails when any
-# of them cannot be searched, whatever it found in the others.
+# of them cannot be searched, whatever it found in the others. find's stderr
+# goes straight to this script's stderr, never into the list, so a warning
+# from find can never pass for a changed file.
 first_file_changed_since() {
   local started_at_epoch="$1" watched_paths=() subdirectory changed_files
   for subdirectory in "${WATCHED_SUBDIRECTORIES[@]}"; do
     watched_paths+=("$EXTENSION_DIR/$subdirectory")
   done
-  changed_files="$(find "${watched_paths[@]}" -type f -newermt "@$started_at_epoch" 2>&1)" || {
-    printf '%s\n' "$changed_files" >&2
-    return 1
-  }
+  changed_files="$(find "${watched_paths[@]}" -type f -newermt "@$started_at_epoch")" || return 1
   printf '%s\n' "${changed_files%%$'\n'*}"
 }
 
 main() {
   local active_state started_at_epoch changed_file
+  local manual_restart_hint="if its code changed, run: systemctl --user try-restart $SERVICE_UNIT"
 
   # A server, a container and a CI runner legitimately have none.
   have_user_manager || return 0
 
+  # Every failure below warns and returns 0: see the header.
   if ! systemctl --user daemon-reload >/dev/null 2>&1; then
     warn "daemon-reload failed, so the service was not checked — run: systemctl --user daemon-reload"
-    return 1
+    return 0
   fi
 
   if ! active_state="$(unit_property ActiveState)"; then
-    warn "cannot read its state (ActiveState), so it was not checked"
-    return 1
+    warn "cannot read its state (ActiveState), so it was not checked — run: systemctl --user status $SERVICE_UNIT"
+    return 0
   fi
   [[ "$active_state" == "$ACTIVE_STATE" ]] || return 0
 
   if ! started_at_epoch="$(unit_started_at_epoch)"; then
-    warn "cannot read when it started (ActiveEnterTimestamp), so it was not restarted"
-    return 1
+    warn "cannot parse when it started (ActiveEnterTimestamp), so it was not restarted — $manual_restart_hint"
+    return 0
   fi
   if ! changed_file="$(first_file_changed_since "$started_at_epoch")"; then
-    warn "cannot search $EXTENSION_DIR's ${WATCHED_SUBDIRECTORIES[*]}, so it was not restarted"
-    return 1
+    warn "cannot search $EXTENSION_DIR's ${WATCHED_SUBDIRECTORIES[*]}, so it was not restarted — $manual_restart_hint"
+    return 0
   fi
   [[ -n "$changed_file" ]] || return 0
 
   if ! systemctl --user try-restart "$SERVICE_UNIT"; then
     warn "try-restart failed — journalctl --user -u $SERVICE_UNIT -e"
-    return 1
+    return 0
   fi
   printf '  ✓ %s restarted: %s changed since it started (its histories start again)\n' \
     "$SERVICE_UNIT" "${changed_file#"$EXTENSION_DIR"/}"

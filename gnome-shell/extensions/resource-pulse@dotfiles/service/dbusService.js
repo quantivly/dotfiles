@@ -10,12 +10,14 @@ import GLib from 'gi://GLib';
 
 import {RateLimitedLogger, describeError} from '../lib/errorLog.js';
 import {
-    RESOURCE_PULSE_INTERFACE_XML, RESOURCE_PULSE_OBJECT_PATH, buildSamplePayload, buildStatePayload,
+    GET_STATE_METHOD_NAME, RESOURCE_PULSE_INTERFACE_XML, RESOURCE_PULSE_OBJECT_PATH, SAMPLE_SIGNAL_NAME,
+    SAMPLE_SIGNAL_SIGNATURE, UNWATCH_DETAIL_METHOD_NAME, WATCH_DETAIL_METHOD_NAME, buildSamplePayload,
+    buildStatePayload,
 } from '../lib/protocol.js';
 import {runEveryStep} from '../lib/teardown.js';
 
-const SAMPLE_SIGNAL_NAME = 'Sample';
-const SAMPLE_SIGNAL_SIGNATURE = '(s)';
+/** wrapJSObject calls <Method><suffix>(parameters, invocation) for a method it finds no plain handler for. */
+const INVOCATION_HANDLER_SUFFIX = 'Async';
 /** The standard D-Bus error a watch call answers with when it could not be applied. */
 const DBUS_FAILED_ERROR_NAME = 'org.freedesktop.DBus.Error.Failed';
 const WATCH_CALL_FAILURE_LOG_KEY = 'watch call failed';
@@ -57,10 +59,10 @@ export class ResourcePulseDBusService {
         // wrapJSObject calls GetState for its return value, and a method named <Name>Async with the invocation,
         // which is what carries the caller's unique name.
         this._exportedObject = Gio.DBusExportedObject.wrapJSObject(RESOURCE_PULSE_INTERFACE_XML, {
-            GetState: () => this._buildStatePayload(),
-            WatchDetailAsync: (_parameters, invocation) =>
+            [GET_STATE_METHOD_NAME]: () => this._buildStatePayload(),
+            [`${WATCH_DETAIL_METHOD_NAME}${INVOCATION_HANDLER_SUFFIX}`]: (_parameters, invocation) =>
                 this._answerWatchCall(invocation, sender => this._addWatch(sender)),
-            UnwatchDetailAsync: (_parameters, invocation) =>
+            [`${UNWATCH_DETAIL_METHOD_NAME}${INVOCATION_HANDLER_SUFFIX}`]: (_parameters, invocation) =>
                 this._answerWatchCall(invocation, sender => this._removeWatch(sender)),
         });
         this._exportedObject.export(connection, RESOURCE_PULSE_OBJECT_PATH);

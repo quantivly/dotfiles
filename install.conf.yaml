@@ -316,8 +316,11 @@
       # extension's service/ or lib/ changed after it started, because a restart
       # resets its histories and most deploys leave the data side alone. Silent
       # and successful with no user manager (a server) or with the service not
-      # running; a failure says so and exits 1. Relative path, for the reason
-      # the reconcile step above gives.
+      # running. A failure (the reload, reading its start time, the restart)
+      # prints a ⚠ line naming the step and what to run, and still exits 0,
+      # like the reconcile step above: an exit 1 would abort the rest of this
+      # install for every desktop user, for a service that at worst keeps its
+      # previous code. Relative path, for the reason the reconcile step gives.
       if [ -f scripts/resource-pulse-service-refresh.sh ]; then
         bash scripts/resource-pulse-service-refresh.sh
       fi

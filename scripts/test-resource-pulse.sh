@@ -434,6 +434,7 @@ PRIVATE_BUS_DIR="$WIRING_TMP/private-bus"
 PRIVATE_BUS_CONFIG="$WIRING_TMP/private-bus.conf"
 PRIVATE_BUS_RUNNER="$DOTFILES/gnome-shell/tests/run-private-bus.js"
 PRIVATE_BUS_TIMEOUT_SECONDS=150
+PRIVATE_BUS_KILL_AFTER_SECONDS=10
 if ! mkdir -p "$PRIVATE_BUS_DIR" || ! chmod 700 "$PRIVATE_BUS_DIR"; then
   fatal "cannot create the private bus directory $PRIVATE_BUS_DIR"
 fi
@@ -452,18 +453,37 @@ cat >"$PRIVATE_BUS_CONFIG" <<BUS_CONFIG || fatal "cannot write $PRIVATE_BUS_CONF
 </busconfig>
 BUS_CONFIG
 # on_private_bus <command...> runs a command on its own private bus, behind the
-# barrier. GIO_USE_VFS=local keeps GIO from even asking that bus for gvfs.
+# barrier. GIO_USE_VFS=local keeps GIO from even asking that bus for gvfs. It
+# runs in a session of its own (setsid), and timeout signals its whole process
+# group, KILL 10 s after TERM: a timeout ends the private dbus-daemon and any
+# service/main.js with it, never only dbus-run-session.
 on_private_bus() {
   env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" GIO_USE_VFS=local \
-    timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" dbus-run-session --config-file="$PRIVATE_BUS_CONFIG" -- "$@"
+    setsid --wait timeout --kill-after="$PRIVATE_BUS_KILL_AFTER_SECONDS" "$PRIVATE_BUS_TIMEOUT_SECONDS" \
+    dbus-run-session --config-file="$PRIVATE_BUS_CONFIG" -- "$@"
 }
+# is_private_bus_address <address> <bus dir>: the drivers' twin of
+# requirePrivateBusAddress (gnome-shell/tests/service-dbus.test.js): one path
+# socket inside the bus dir, and nothing that could lead it out of it: an
+# address list (;), a /../ segment, or a percent escape (D-Bus decodes %2e%2e
+# to ..). Exported, so a driver run under on_private_bus checks its bus with
+# this same function.
+is_private_bus_address() {
+  local address="$1" bus_dir="$2"
+  [[ -n "$bus_dir" && "$address" == "unix:path=$bus_dir/"* ]] || return 1
+  [[ "$address" != *';'* && "$address" != *'/../'* && "$address" != *'%'* ]]
+}
+export -f is_private_bus_address
 
 printf '\nthe service D-Bus layer on a private bus (gnome-shell/tests/run-private-bus.js)\n'
 # The runner's own guard, first: outside its private bus it must refuse (exit 2)
-# before a row runs. Both addresses below are sockets that do not exist, so even
-# a runner without the guard could reach nothing: (a) the barrier's dead bus,
-# outside the private bus directory; (b) the live bus's socket name under
-# XDG_RUNTIME_DIR, with the bus directory set to that runtime dir.
+# before a row runs. Every address below is a socket that does not exist, so
+# even a runner without the guard could reach nothing: (a) the barrier's dead
+# bus, outside the private bus directory; (b) the live bus's socket name under
+# XDG_RUNTIME_DIR, with the bus directory set to that runtime dir; then three
+# that start inside the private bus directory but lead out of it: (c) an
+# address list (;) whose second entry is elsewhere, (d) a /../ segment, and
+# (e) a percent escape, which D-Bus decodes (%2e%2e is ..).
 runner_guard_summary=""
 runner_guard_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" \
   timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
@@ -474,8 +494,34 @@ runner_guard_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_TEST_BUS
   timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
 runner_guard_summary+=" runtime-bus=$?/$(grep -c -F 'refusing to run' <<<"$runner_guard_output")"
 runner_guard_summary+="/$(grep -c -F 'JS-TALLY' <<<"$runner_guard_output")"
-check "the private-bus runner refuses (exit 2, no row run) a bus outside its directory, and the live bus's socket" \
-  "$runner_guard_summary" "outside=2/1/0 runtime-bus=2/1/0"
+ESCAPING_BUS_ADDRESSES=(
+  "list=unix:path=$PRIVATE_BUS_DIR/no-bus;$LIVE_SETTINGS_BARRIER_BUS"
+  "dotdot=unix:path=$PRIVATE_BUS_DIR/../barrier-no-session-bus"
+  "escaped=unix:path=$PRIVATE_BUS_DIR/%2e%2e/barrier-no-session-bus"
+)
+for escaping_entry in "${ESCAPING_BUS_ADDRESSES[@]}"; do
+  runner_guard_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" \
+    DBUS_SESSION_BUS_ADDRESS="${escaping_entry#*=}" timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
+  runner_guard_summary+=" ${escaping_entry%%=*}=$?/$(grep -c -F 'refusing to run' <<<"$runner_guard_output")"
+  runner_guard_summary+="/$(grep -c -F 'JS-TALLY' <<<"$runner_guard_output")"
+done
+check "the private-bus runner refuses (exit 2, no row run) a bus outside its directory, the live bus, ;, /../ and %" \
+  "$runner_guard_summary" "outside=2/1/0 runtime-bus=2/1/0 list=2/1/0 dotdot=2/1/0 escaped=2/1/0"
+# The drivers' twin of that guard, which every bash driver below runs first.
+private_bus_check_summary=""
+PRIVATE_BUS_CHECK_CASES=(
+  "own=unix:path=$PRIVATE_BUS_DIR/dbus-0123456789,guid=0123456789abcdef"
+  "list=unix:path=$PRIVATE_BUS_DIR/dbus-0123456789;unix:path=/run/user/0/bus"
+  "dotdot=unix:path=$PRIVATE_BUS_DIR/../bus"
+  "escaped=unix:path=$PRIVATE_BUS_DIR/%2e%2e/bus"
+  "elsewhere=unix:path=$WIRING_TMP/bus"
+)
+for check_case in "${PRIVATE_BUS_CHECK_CASES[@]}"; do
+  if is_private_bus_address "${check_case#*=}" "$PRIVATE_BUS_DIR"; then check_verdict=accepted; else check_verdict=refused; fi
+  private_bus_check_summary+="${check_case%%=*}=$check_verdict "
+done
+check "the drivers' bus check accepts its own socket and refuses a list (;), a /../ segment, a % escape and elsewhere" \
+  "$private_bus_check_summary" "own=accepted list=refused dotdot=refused escaped=refused elsewhere=refused "
 PRIVATE_BUS_JS_OUTPUT="$(on_private_bus gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
 PRIVATE_BUS_JS_EXIT=$?
 printf '%s\n' "$PRIVATE_BUS_JS_OUTPUT"
@@ -536,7 +582,7 @@ SERVICE_LOG="$WIRING_TMP/service.log"
 SERVICE_DRIVER_OUTPUT="$(on_private_bus bash -c '
 set -u
 service_main="$1" service_log="$2" state_probe="$3" bus_name="$4" object_path="$5"
-[[ "${DBUS_SESSION_BUS_ADDRESS:-}" == "unix:path=$RESOURCE_PULSE_TEST_BUS_DIR/"* ]] \
+is_private_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "${RESOURCE_PULSE_TEST_BUS_DIR:-}" \
   || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
 # still_running <pid>: the process exists and is not a zombie (the state after the last ") " of its stat).
 still_running() {
@@ -607,6 +653,8 @@ UNIT_INTERPRETER='/usr/bin/gjs -m'
 EXPECTED_UNIT_SETTINGS=(
   '[Unit]Description=<set>'
   '[Unit]PartOf=graphical-session.target'
+  '[Unit]StartLimitIntervalSec=300'
+  '[Unit]StartLimitBurst=5'
   '[Service]Type=dbus'
   "[Service]BusName=$RESOURCE_PULSE_BUS_NAME"
   "[Service]ExecStart=$UNIT_INTERPRETER $UNIT_DOTFILES_PREFIX$SERVICE_MAIN_RELATIVE_PATH"
@@ -639,7 +687,7 @@ fi
 check "the unit has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
   "$unit_sections" "[Unit] [Service] "
 sorted_settings() { printf '%s\n' "$@" | LC_ALL=C sort | tr '\n' '|'; }
-check "the unit's settings are exactly the design's: Type=dbus on its bus name, PartOf, Restart, slice, Nice and caps" \
+check "the unit's settings are exactly the design's: Type=dbus on its bus name, PartOf, restart and its limit, caps" \
   "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_UNIT_SETTINGS[@]}")"
 # The ExecStart above is pinned as text; this row resolves it: the script it
 # names under ~/.dotfiles must be this checkout's service/main.js.
@@ -755,6 +803,8 @@ run_refresh() {
   printf 'exit=%s calls=[%s] output=[%s]' "$refresh_exit" "$(tr '\n' ';' <"$REFRESH_CALLS")" "$refresh_output"
 }
 STARTED_AT="@$UNIT_STARTED_AT_EPOCH"
+# warnings_naming <summary> <step>: how many ⚠ lines of a run name that step.
+warnings_naming() { grep -F '⚠' <<<"$1" | grep -c -F "$2"; }
 CALLS_UP_TO_STATE='--user show-environment;--user daemon-reload;--user show resource-pulse.service -p ActiveState --value;'
 CALLS_UP_TO_START_TIME="$CALLS_UP_TO_STATE--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix;"
 CALLS_WITH_RESTART="$CALLS_UP_TO_START_TIME--user try-restart resource-pulse.service;"
@@ -797,37 +847,51 @@ check "refresh: a file last changed exactly at the unit's start is not newer; on
   "same:exit=0 calls=[$CALLS_UP_TO_START_TIME] next:exit=0 calls=[$CALLS_WITH_RESTART]"
 reset_refresh_extension "$AFTER_START_EPOCH" "$AFTER_START_EPOCH" "$AFTER_START_EPOCH"
 reload_failed_summary="$(run_refresh 0 1 active "$STARTED_AT" 0)"
-check "refresh: a failed daemon-reload warns, exits 1 and restarts nothing" \
-  "${reload_failed_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$reload_failed_summary")" \
-  "exit=1 calls=[--user show-environment;--user daemon-reload;] warned=1"
+# Every failure below warns with a ⚠ line naming the step, restarts nothing, and
+# still returns 0: under `set -e` an exit 1 would abort the rest of ./install
+# for every desktop user (ruling R12; reconcile-systemd-units.sh does the same).
+check "refresh: a failed daemon-reload warns, naming it, restarts nothing and returns 0" \
+  "${reload_failed_summary%% output=*} warned=$(warnings_naming "$reload_failed_summary" daemon-reload)" \
+  "exit=0 calls=[--user show-environment;--user daemon-reload;] warned=1"
 # A state that cannot be read must not pass for "not active", which is silent.
 state_unreadable_summary="$(REFRESH_STUB_STATE_EXIT=1 run_refresh 0 0 active "$STARTED_AT" 0)"
-check "refresh: a state it cannot read warns, exits 1 and restarts nothing" \
-  "${state_unreadable_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$state_unreadable_summary")" \
-  "exit=1 calls=[$CALLS_UP_TO_STATE] warned=1"
+check "refresh: a state it cannot read warns, naming it, restarts nothing and returns 0" \
+  "${state_unreadable_summary%% output=*} warned=$(warnings_naming "$state_unreadable_summary" ActiveState)" \
+  "exit=0 calls=[$CALLS_UP_TO_STATE] warned=1"
 unreadable_start_summary=""
 UNREADABLE_START_TIMES=('' 'n/a' '@' '@12x')
 for unreadable_started_at in "${UNREADABLE_START_TIMES[@]}"; do
   unreadable_summary="$(run_refresh 0 0 active "$unreadable_started_at" 0)"
-  unreadable_start_summary+="${unreadable_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$unreadable_summary") "
+  unreadable_start_summary+="${unreadable_summary%% output=*} warned=$(warnings_naming "$unreadable_summary" ActiveEnterTimestamp) "
 done
 expected_unreadable_start_summary=""
 for _ in "${UNREADABLE_START_TIMES[@]}"; do
-  expected_unreadable_start_summary+="exit=1 calls=[$CALLS_UP_TO_START_TIME] warned=1 "
+  expected_unreadable_start_summary+="exit=0 calls=[$CALLS_UP_TO_START_TIME] warned=1 "
 done
-check "refresh: an active unit whose start time cannot be read warns, exits 1 and restarts nothing" \
+check "refresh: an active unit whose start time cannot be parsed warns, naming it, restarts nothing, returns 0" \
   "$unreadable_start_summary" "$expected_unreadable_start_summary"
 restart_failed_summary="$(run_refresh 0 0 active "$STARTED_AT" 1)"
-check "refresh: a failed try-restart warns and exits 1" \
-  "${restart_failed_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$restart_failed_summary")" \
-  "exit=1 calls=[$CALLS_WITH_RESTART] warned=1"
+check "refresh: a failed try-restart warns, naming it, and returns 0" \
+  "${restart_failed_summary%% output=*} warned=$(warnings_naming "$restart_failed_summary" try-restart)" \
+  "exit=0 calls=[$CALLS_WITH_RESTART] warned=1"
 # service/ missing while lib/ holds a newer file: find lists the newer file AND
 # fails, and a partial answer must never decide a restart.
 reset_refresh_extension '' "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH"
 unlistable_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
-check "refresh: a watched directory that cannot be searched warns, exits 1 and restarts nothing" \
-  "${unlistable_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$unlistable_summary")" \
-  "exit=1 calls=[$CALLS_UP_TO_START_TIME] warned=1"
+check "refresh: a watched directory that cannot be searched warns, naming it, restarts nothing and returns 0" \
+  "${unlistable_summary%% output=*} warned=$(warnings_naming "$unlistable_summary" 'cannot search')" \
+  "exit=0 calls=[$CALLS_UP_TO_START_TIME] warned=1"
+# A find that warns on stderr yet succeeds, listing nothing: its warning must
+# reach the terminal, and never be read as a changed file.
+REFRESH_FIND_WARNING_BIN="$WIRING_TMP/refresh-find-warning-bin"
+install_stub "$REFRESH_FIND_WARNING_BIN" find '#!/usr/bin/env bash
+printf "find: warning: a stand-in warning on stderr\n" >&2
+exit 0'
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+find_warning_summary="$(run_refresh 0 0 active "$STARTED_AT" 0 "$REFRESH_FIND_WARNING_BIN:$REFRESH_STUB_BIN")"
+check "refresh: a warning find prints on stderr while succeeding is shown, and never read as a changed file" \
+  "${find_warning_summary%% output=*} shown=$(grep -c -F 'stand-in warning' <<<"$find_warning_summary")" \
+  "exit=0 calls=[$CALLS_UP_TO_START_TIME] shown=1"
 
 printf '\nresource-pulse-cost.sh (fake PROC_ROOT)\n'
 # make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry.
@@ -1458,7 +1522,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=397
+EXPECTED_ROWS=404
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

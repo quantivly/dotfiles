@@ -28,6 +28,14 @@
 # ExecStart runs the checkout at ~/.dotfiles, because that checkout IS the
 # deployment (CLAUDE.md, "The checkout IS the deployment").
 #
+# A CRASH LOOP ENDS IN `failed`. Restart=on-failure restarts a crash after 5 s,
+# and the start limit in [Unit] stops that after 5 starts in 300 s, so a service
+# that always crashes costs a few runs, then sits failed where
+# `systemctl --user --failed` shows it. Without the limit it would never get
+# there: one start per 5 s never reaches systemd's default of 5 in 10 s. Once the
+# 300 s window has passed, the extension's next StartUnit starts it again: its
+# start retries back off to one every 5 min, and every enable() sends one.
+#
 # Watch it:  journalctl --user -u resource-pulse.service -e
 #
 # Comments must be on their own lines: systemd treats text after a value as part
@@ -37,6 +45,10 @@
 Description=Resource Pulse sampler: CPU, memory and app use for the GNOME Shell extension
 # Stops at logout, with the session it serves.
 PartOf=graphical-session.target
+# IN [Unit], NOT [Service]: in [Service] systemd ignores StartLimitIntervalSec
+# (see systemd/vpn-notify.service). At most 5 starts in 300 s; see the header.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 # Ready once it owns its bus name. service/main.js exports its object before it

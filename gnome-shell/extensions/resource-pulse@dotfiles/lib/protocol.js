@@ -7,8 +7,12 @@
 // reader's half of that promise:
 // - a field the reader does not know is ignored, at any depth;
 // - a field that is missing, or not of its type, is null for that field alone, so only its own row shows no data;
+//   out of its range is not of its type: a negative byte count or percentage, a history fraction outside 0–1, a
+//   number JSON could only read as infinite, a sequence past 2^53;
+// - a history longer than CARD_HISTORY_SAMPLES keeps its newest values, as the client's ring buffer would;
 // - text that is not JSON, or JSON that is not an object, parses to null as a whole.
 // A breaking change needs a new interface, ResourcePulse2, served beside this one.
+import {CARD_HISTORY_SAMPLES} from './constants.js';
 
 /** The `protocol` field of GetState's JSON. Within ResourcePulse1 it stays 1: changes there are additive. */
 export const PROTOCOL_VERSION = 1;
@@ -18,6 +22,16 @@ export const RESOURCE_PULSE_BUS_NAME = 'io.github.quantivly.dotfiles.ResourcePul
 export const RESOURCE_PULSE_INTERFACE_NAME = RESOURCE_PULSE_BUS_NAME;
 /** Where the service exports its one object. */
 export const RESOURCE_PULSE_OBJECT_PATH = '/io/github/quantivly/dotfiles/ResourcePulse1';
+/** The method a client calls for the whole state, once connected. */
+export const GET_STATE_METHOD_NAME = 'GetState';
+/** The method a client calls while its card is visible or its dropdown open. */
+export const WATCH_DETAIL_METHOD_NAME = 'WatchDetail';
+/** The method that ends one WatchDetail. */
+export const UNWATCH_DETAIL_METHOD_NAME = 'UnwatchDetail';
+/** The signal the service sends once per publish. */
+export const SAMPLE_SIGNAL_NAME = 'Sample';
+/** The Sample signal's parameters as a GLib.Variant type: one string, the sample JSON. */
+export const SAMPLE_SIGNAL_SIGNATURE = '(s)';
 /**
  * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side and a proxy on the client side:
  * - GetState() → s: the state JSON (buildStatePayload), for a client that has just connected;
@@ -27,12 +41,12 @@ export const RESOURCE_PULSE_OBJECT_PATH = '/io/github/quantivly/dotfiles/Resourc
  */
 export const RESOURCE_PULSE_INTERFACE_XML = `<node>
   <interface name="${RESOURCE_PULSE_INTERFACE_NAME}">
-    <method name="GetState">
+    <method name="${GET_STATE_METHOD_NAME}">
       <arg name="state" type="s" direction="out"/>
     </method>
-    <method name="WatchDetail"/>
-    <method name="UnwatchDetail"/>
-    <signal name="Sample">
+    <method name="${WATCH_DETAIL_METHOD_NAME}"/>
+    <method name="${UNWATCH_DETAIL_METHOD_NAME}"/>
+    <signal name="${SAMPLE_SIGNAL_NAME}">
       <arg name="sample" type="s"/>
     </signal>
   </interface>
@@ -175,6 +189,25 @@ function finiteNumberOrNull(value) {
 
 /**
  * @param {*} value - A parsed JSON value.
+ * @returns {number|null} The value when it is a finite number of zero or more (a byte count, a percentage); null
+ *     otherwise.
+ */
+function nonNegativeNumberOrNull(value) {
+    const number = finiteNumberOrNull(value);
+    return number !== null && number >= 0 ? number : null;
+}
+
+/**
+ * @param {*} value - A parsed JSON value.
+ * @returns {number|null} The value when it is a fraction from 0 to 1 (a history value); null (a gap) otherwise.
+ */
+function fractionOrNull(value) {
+    const number = finiteNumberOrNull(value);
+    return number !== null && number >= 0 && number <= 1 ? number : null;
+}
+
+/**
+ * @param {*} value - A parsed JSON value.
  * @returns {number|null} The value when it is a whole number of zero or more; null otherwise.
  */
 function countOrNull(value) {
@@ -198,14 +231,15 @@ function booleanOrNull(value) {
 }
 
 /**
- * Reads an object whose every listed field must be a finite number, as one value: memory or swap is no use in part.
+ * Reads an object whose every listed field must be a byte count, as one value: memory or swap is no use in part.
  *
  * @param {*} value - A parsed JSON value.
  * @param {string[]} fieldNames - The fields, in the order the result lists them.
- * @returns {object|null} Those fields; null unless the value is an object holding a finite number in each.
+ * @returns {object|null} Those fields; null unless the value is an object holding a finite number of zero or more
+ *     in each.
  */
-function parseAllNumbers(value, fieldNames) {
-    if (!isPlainObject(value) || !fieldNames.every(fieldName => finiteNumberOrNull(value[fieldName]) !== null))
+function parseAllByteCounts(value, fieldNames) {
+    if (!isPlainObject(value) || !fieldNames.every(fieldName => nonNegativeNumberOrNull(value[fieldName]) !== null))
         return null;
     return Object.fromEntries(fieldNames.map(fieldName => [fieldName, value[fieldName]]));
 }
@@ -215,12 +249,13 @@ function parseAllNumbers(value, fieldNames) {
  *
  * @param {*} value - A parsed JSON value.
  * @param {string[]} fieldNames - The fields, in the order the result lists them.
- * @returns {object|null} Each field as a finite number or null; null unless the value is an object.
+ * @param {(fieldValue: *) => number|null} readNumber - Reads one field: nonNegativeNumberOrNull or fractionOrNull.
+ * @returns {object|null} Each field as readNumber gives it; null unless the value is an object.
  */
-function parseEachNumber(value, fieldNames) {
+function parseEachNumber(value, fieldNames, readNumber) {
     if (!isPlainObject(value))
         return null;
-    return Object.fromEntries(fieldNames.map(fieldName => [fieldName, finiteNumberOrNull(value[fieldName])]));
+    return Object.fromEntries(fieldNames.map(fieldName => [fieldName, readNumber(value[fieldName])]));
 }
 
 /**
@@ -228,14 +263,15 @@ function parseEachNumber(value, fieldNames) {
  *
  * @param {*} value - A parsed JSON value.
  * @param {string} valueFieldName - 'cpuPercent' or 'memoryBytes'.
- * @returns {object|null} {groupKey, name, <valueFieldName>}; null unless all three are of their types.
+ * @returns {object|null} {groupKey, name, <valueFieldName>}; null unless all three are of their types, the value
+ *     zero or more.
  */
 function parseRankedApp(value, valueFieldName) {
     if (!isPlainObject(value))
         return null;
     const groupKey = stringOrNull(value.groupKey);
     const name = stringOrNull(value.name);
-    const rankedValue = finiteNumberOrNull(value[valueFieldName]);
+    const rankedValue = nonNegativeNumberOrNull(value[valueFieldName]);
     if (groupKey === null || name === null || rankedValue === null)
         return null;
     return {groupKey, name, [valueFieldName]: rankedValue};
@@ -268,24 +304,25 @@ function parseSnapshot(value) {
     return {
         takenAtUsec: finiteNumberOrNull(value.takenAtUsec),
         takenAtClockLabel: stringOrNull(value.takenAtClockLabel),
-        cpuBusyPercent: finiteNumberOrNull(value.cpuBusyPercent),
-        cpuClusters: parseEachNumber(value.cpuClusters, CPU_CLUSTER_FIELDS),
-        memory: parseAllNumbers(value.memory, MEMORY_FIELDS),
-        swap: parseAllNumbers(value.swap, SWAP_FIELDS),
-        pressureAvg10: parseEachNumber(value.pressureAvg10, PRESSURE_FIELDS),
+        cpuBusyPercent: nonNegativeNumberOrNull(value.cpuBusyPercent),
+        cpuClusters: parseEachNumber(value.cpuClusters, CPU_CLUSTER_FIELDS, nonNegativeNumberOrNull),
+        memory: parseAllByteCounts(value.memory, MEMORY_FIELDS),
+        swap: parseAllByteCounts(value.swap, SWAP_FIELDS),
+        pressureAvg10: parseEachNumber(value.pressureAvg10, PRESSURE_FIELDS, nonNegativeNumberOrNull),
         apps: parseAppRanking(value.apps),
         isComplete: booleanOrNull(value.isComplete),
     };
 }
 
 /**
- * Reads one history: a list of fractions, where anything not a number is a gap, so the list keeps its length.
+ * Reads one history: a list of fractions, where anything not a fraction from 0 to 1 is a gap, so the list keeps its
+ * length. A list longer than CARD_HISTORY_SAMPLES keeps its newest values.
  *
  * @param {*} value - A parsed JSON value.
  * @returns {Array<number|null>|null} The values, oldest first; null unless the value is an array.
  */
 function parseHistoryValues(value) {
-    return Array.isArray(value) ? value.map(finiteNumberOrNull) : null;
+    return Array.isArray(value) ? value.slice(-CARD_HISTORY_SAMPLES).map(fractionOrNull) : null;
 }
 
 /**
@@ -303,8 +340,9 @@ function parseHistories(value) {
  * Reads what one Sample appended.
  *
  * @param {*} value - A parsed JSON value.
- * @returns {AppendedHistory|null} Each fraction or a gap; null (append nothing) unless the value is an object.
+ * @returns {AppendedHistory|null} Each fraction from 0 to 1, or a gap; null (append nothing) unless the value is an
+ *     object.
  */
 function parseAppendedHistory(value) {
-    return parseEachNumber(value, APPENDED_HISTORY_FIELDS);
+    return parseEachNumber(value, APPENDED_HISTORY_FIELDS, fractionOrNull);
 }
