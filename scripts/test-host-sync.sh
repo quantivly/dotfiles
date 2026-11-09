@@ -156,7 +156,9 @@ S="$HOME/stub"; echo "herdr $*" >>"$S/calls"
 V="${V:-$(cat "$S/herdr-version")}"   # a release "asset" built from this stub pins V on line 2
 case "$1 ${2:-}" in
     "--version "*) echo "herdr $V" ;;
-    "--skill "*) [[ -e "$S/skill-empty" ]] || echo "skill for $V" ;;
+    "--skill "*)   # skill-fails: a truncated skill, then a failure, as a timeout or a crash leaves it
+        if [[ -e "$S/skill-fails" ]]; then echo "skill for"; exit 1; fi
+        [[ -e "$S/skill-empty" ]] || echo "skill for $V" ;;
     "status server") printf 'status: running\nversion: %s\n' "$(cat "$S/server-version")" ;;
     "agent list") printf '{"result":{"agents":[%s]}}\n' "$(cat "$S/agents" 2>/dev/null)" ;;
     "pane list") [[ -e "$S/panes-down" ]] && exit 1; printf '{"result":{"panes":[%s]}}\n' "$(cat "$S/panes" 2>/dev/null)" ;;
@@ -304,7 +306,8 @@ bare() {   # $1 = owner/repo -> a bare repo with one commit, under $GH
 
 new_case() {
     CASE=$((CASE + 1)); C="$TMPROOT/c$CASE"; H="$C/home"; GH="$C/gh"
-    mkdir -p "$H/stub" "$GH" "$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/host-sync" "$H/quantivly"
+    # $C/tmp is the run's $TMPDIR (run), so a row can see a temp file host-sync left behind.
+    mkdir -p "$C/tmp" "$H/stub" "$GH""$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/host-sync" "$H/quantivly"
     write_stubs "$H"
     echo "$V_LAPTOP" >"$H/stub/claude-version"; echo "$HV" >"$H/stub/herdr-version"; echo "$HV" >"$H/stub/server-version"
     # herdr's "release": the stub with its version pinned, served over file://
@@ -504,7 +507,7 @@ run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     local xt=(); [[ -n "${XTRACE:-}" ]] && xt=(BASH_XTRACEFD=3)
     # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
     OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
-        HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
+        HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" TMPDIR="$C/tmp" \
         CLAUDE_SETTINGS_RENDER_MARKER="${PROFILE_MARKER_PATH:-$H/.config/claude-host-profile}" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash ${XTRACE:+-x} "$SUT" --here "$@" 2>&1 3>"$C/xtrace")"
     RC=$?
@@ -838,7 +841,8 @@ hasnt "linked herdr-draft: never replaced" "$(calls)" "herdr plugin install"
 new_case
 touch "$H/stub/draft-down"
 run_level --check
-has   "herdr server down: ⚠, not ✓" "$OUT" "did not answer"
+has   "herdr server down: ⚠, not ✓" "$OUT" \
+    "$(printf '⚠ %-14s ' herdr-draft)the herdr server did not answer \`plugin list\`; is herdr-server.service running?"
 
 echo "== herdr itself"
 new_case
@@ -1157,6 +1161,7 @@ new_case
 run_level --check
 has   "skill: herdr skill current → ✓" "$OUT" "${SKILL_OK}herdr skill current (herdr $HV)"
 has   "skill: spawn current → ✓" "$OUT" "${SKILL_OK}spawn skill current"
+check "skill: judging the herdr skill leaves no temp file in TMPDIR" "$(ls -A "$C/tmp")" ""
 new_case
 echo stale >"$H/$HERDR_SKILL_REL"
 run_level --check
@@ -1182,6 +1187,15 @@ echo old >"$H/$HERDR_SKILL_REL"; touch "$H/stub/skill-empty"
 run_level --apply
 check "skill: an empty herdr --skill never replaces the file" "$(cat "$H/$HERDR_SKILL_REL")" old
 has   "skill: an empty herdr --skill is a person's step" "$OUT" "${SKILL_OPER}\`herdr --skill\` printed nothing (herdr $HV)"
+# A non-zero exit after partial output (a timeout's 124 is the same path): what it printed is a
+# truncated skill, so nothing is installed and nothing is left behind.
+new_case
+echo old >"$H/$HERDR_SKILL_REL"; touch "$H/stub/skill-fails"
+run_level --apply
+has   "skill: a herdr --skill that fails is a person's step" "$OUT" \
+    "${SKILL_OPER}\`herdr --skill\` could not run (exit 1, herdr $HV); ~/$HERDR_SKILL_REL left as it is"
+check "skill: a herdr --skill that fails installs nothing: the old file, no temp file beside it or in TMPDIR" \
+    "$(cat "$H/$HERDR_SKILL_REL")|$(ls -A "$H/.claude/skills/herdr")|$(ls -A "$C/tmp")" "old|SKILL.md|"
 new_case
 rm "$H/$HERDR_SKILL_REL"; mkdir "$H/$HERDR_SKILL_REL"
 run_level --apply
@@ -1241,7 +1255,7 @@ new_case
 touch "$H/stub/draft-down"
 run_level --check
 has   "skill: herdr not answering plugin list → ·, never ✓" "$OUT" \
-    "${SKILL_INFO}spawn skill not judged: herdr did not answer \`plugin list\`"
+    "${SKILL_INFO}spawn skill not judged: herdr gave no \`plugin list\` answer"
 
 echo "== plugins"
 new_case
@@ -2337,7 +2351,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=535
+EXPECTED_ROWS=538
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

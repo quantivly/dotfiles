@@ -1009,8 +1009,9 @@ here_draft() {
 # The generated skills (D6), each kept equal to what this host's binary prints: a stale herdr skill
 # teaches a lead Claude the wrong CLI flags (HERDR_GUIDE.md, "Updating"), and a spawn skill copied
 # from another host names a binary that is not here. Run after here_herdr and here_draft, so the
-# binaries are the ones this run left in place. A file is replaced by a rename and never by an
-# empty output; a SKILL.md that is a directory is a person's step.
+# binaries are the ones this run left in place. A file is replaced by a rename, and never by the
+# output of a generator that failed or printed nothing; a SKILL.md that is a directory is a
+# person's step.
 here_skills() {
     [[ -x "$HERDR" ]] || return 0   # here_draft reports a missing herdr
     herdr_skill_row
@@ -1020,21 +1021,34 @@ skill_is_directory_row() {   # $1 = the skill file; 0, with the ⚠ row, when it
     [[ -d "$1" ]] || return 1
     row oper skill "$(tilde_path "$1") is a directory; move it aside, and the next run regenerates it"
 }
+# `herdr --skill`'s raw output goes to a temp file under $TMPDIR, never beside the skill: a temp
+# file made and removed there would change the skill directory's mtime on every level run, and
+# --check would have to create the directory. The output is installed only after the command
+# exits 0 with something in it, by write_generated_file's rename.
 herdr_skill_row() {
-    local file="$HERDR_SKILL_FILE" shown version want
-    shown="$(tilde_path "$file")"
-    version="$(herdr_binary_version)"
-    skill_is_directory_row "$file" && return
-    want="$(timeout "$SKILL_GENERATOR_TIMEOUT_SECONDS" "$HERDR" --skill 2>/dev/null </dev/null)"
-    if [[ -z "$want" ]]; then
-        # A broken herdr install exits 0 and prints nothing.
-        row oper skill "\`herdr --skill\` printed nothing (herdr $version); $shown left as it is"
+    local generated status
+    skill_is_directory_row "$HERDR_SKILL_FILE" && return
+    if ! generated="$(mktemp 2>/dev/null)"; then
+        row oper skill "could not make a temp file to judge $(tilde_path "$HERDR_SKILL_FILE") with"
         return
     fi
-    # $( ) strips the trailing newlines, and one is put back. The file is written in the same form
-    # it is compared in, so a regenerated host reads level on the next run whatever herdr ends with
-    # (exactly one newline, as `herdr --skill` printed it on 2026-11-09).
-    if cmp -s <(printf '%s\n' "$want") "$file"; then
+    timeout "$SKILL_GENERATOR_TIMEOUT_SECONDS" "$HERDR" --skill >"$generated" 2>/dev/null </dev/null
+    status=$?
+    herdr_skill_verdict "$generated" "$status" "$(herdr_binary_version)"
+    rm -f "$generated"
+}
+# The herdr skill's row. $1 = the file `herdr --skill` printed into, $2 = its exit status (124 a
+# timeout), $3 = herdr's version.
+herdr_skill_verdict() {
+    local generated="$1" status="$2" version="$3" file="$HERDR_SKILL_FILE" shown
+    shown="$(tilde_path "$file")"
+    if (( status != 0 )); then
+        # Whatever it printed before failing may be a truncated skill: never installed.
+        row oper skill "\`herdr --skill\` could not run (exit $status, herdr $version); $shown left as it is"
+    elif [[ ! -s "$generated" ]]; then
+        # A broken herdr install exits 0 and prints nothing.
+        row oper skill "\`herdr --skill\` printed nothing (herdr $version); $shown left as it is"
+    elif cmp -s "$generated" "$file"; then
         row ok skill "herdr skill current (herdr $version)"
     elif [[ "$MODE" != apply ]]; then
         if [[ -e "$file" ]]; then
@@ -1042,7 +1056,7 @@ herdr_skill_row() {
         else
             row drift skill "no herdr skill at $shown (herdr $version)"
         fi
-    elif write_generated_file "$file" printf '%s\n' "$want"; then
+    elif write_generated_file "$file" cat "$generated"; then
         row ok skill "herdr skill regenerated (herdr $version)"
     else
         row drift skill "could not write $shown (herdr $version)"
@@ -1074,7 +1088,7 @@ spawn_skill_row() {
 # the · row that says why, when there is none to generate the spawn skill with.
 find_draft_binary() {
     if ! draft_state; then
-        row info skill "spawn skill not judged: herdr did not answer \`plugin list\`"
+        row info skill "spawn skill not judged: herdr gave no \`plugin list\` answer"
         return 1
     fi
     if [[ "$D_KIND" == absent ]]; then
