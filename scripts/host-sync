@@ -69,14 +69,15 @@
 #   - add a source a checkout's install.conf.yaml declares but does not carry.
 #     Every other link out of place is drift that repo's ./install fixes.
 #   - enable or disable a Claude plugin, or install one whose marketplace no settings
-#     fragment declares. settings.json declares the plugins (H4) and the render owns
+#     fragment declares with a source. settings.json declares the plugins (H4) and the render owns
 #     enablement; host-sync installs what it sets true, and nothing else.
 #   - remove a memory store checked out here that serves none of the profile's tenants,
 #     clone a store whose remote is not a repository under the GitHub base, or upgrade
 #     a git older than the memory sync needs (2.40). It names each.
 #   - delete anything under ~/.claude. A stale skill, hook or agent is moved to
 #     ~/.local/state/host-sync/retired/<UTC stamp>/, and only on a host with a profile
-#     marker; a skills, hooks or agents directory that is itself a link is not walked.
+#     marker; a skills, hooks or agents directory that is itself a link, resolves into a
+#     checkout or cannot be read is not walked.
 #
 # THE HOST PROFILE (shared-configuration design, H1). ~/.config/claude-host-profile, the
 # settings renderer's marker, names this host's profile, and the private overlay's
@@ -112,8 +113,8 @@
 # HOST_SYNC_HERDR_RELEASES, HOST_SYNC_DOTFILES_REMOTE, HOST_SYNC_DOTFILES_LOCAL_REMOTE (the
 # laptop's ls-remote of the overlay), HOST_SYNC_DOTFILES_LOCAL_REPO (its owner/repo, cloned from
 # HOST_SYNC_GITHUB_BASE), CLAUDE_SETTINGS_RENDER_MARKER (the renderer's own name for the profile
-# marker), CLAUDE_MEMORY_STORES_ROOT (the memory scripts' own name for where the stores are checked
-# out), HOST_SYNC_NO_SCOPE=1 (skip the systemd-run wrapper), HOST_SYNC_SSH (the ssh command),
+# marker), CLAUDE_MEMORY_STORES_ROOT and CLAUDE_MEMORY_CONFIG (the memory scripts' own names for where
+# the stores are checked out and for their table), HOST_SYNC_NO_SCOPE=1 (skip the systemd-run wrapper), HOST_SYNC_SSH (the ssh command),
 # HOST_SYNC_PROC (/proc), HOST_SYNC_TOKEN_WARN_D.
 
 set -uo pipefail
@@ -199,21 +200,25 @@ CLONE_TIMEOUT_SECONDS=300
 # How long a sibling script (the settings renderer, the link checker, the memory scripts' --check and
 # --status) may run before its row says it could not run (exit 124).
 SIBLING_TIMEOUT_SECONDS=120
-# The memory layer (shared-configuration design, D7, H6, H7): the store table the overlay carries,
-# where the stores are checked out (the memory scripts' own override, so one variable moves all
-# three), the git the memory sync needs (--attr-source), the sync's timer, and how long the link
-# script's --apply may run, merging real memory directories into the stores, before its row says so.
+# The memory layer (shared-configuration design, D7, H6, H7): the store table the overlay carries and
+# where the stores are checked out (each through the memory scripts' own override, so one variable
+# moves all three scripts, and host-sync never judges a table the siblings do not read), the git the
+# memory sync needs (--attr-source), the sync's timer, and how long the link script's --apply may run,
+# merging real memory directories into the stores, before its row says so.
 STORE_TABLE_RELATIVE="claude/memory-stores.json"
-MEMORY_STORE_TABLE="$DOTFILES_LOCAL/$STORE_TABLE_RELATIVE"
+MEMORY_STORE_TABLE="${CLAUDE_MEMORY_CONFIG:-$DOTFILES_LOCAL/$STORE_TABLE_RELATIVE}"
 MEMORY_STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-$HOME/.local/share/claude-memory}"
 MIN_GIT_VERSION_FOR_MEMORY_SYNC="2.40"
 MEMORY_TIMER_UNIT="claude-memory-sync.timer"
 LINK_APPLY_TIMEOUT_SECONDS=300
 # The store table host-sync can act on: every store named, with a remote and a list of tenant names.
+# A store's tenants travel as one field joined by the unit separator, never by a comma: a name is
+# free text in the table, so a comma inside one would split it into two tenants.
 STORE_TABLE_SHAPE_FILTER='.stores | type == "object" and all(to_entries[]; (.key | length > 0)
     and (.value.remote | type == "string" and length > 0)
     and (.value.tenants | type == "array" and all(type == "string")))'
 # claude-memory-link.sh --check's last line, its four counts captured.
+TENANT_SEPARATOR=$'\x1f'
 MEMORY_LINK_SUMMARY_RE='^claude-memory-link: ([0-9]+) linked, ([0-9]+) to fix, ([0-9]+) unmapped, ([0-9]+) without a store$'
 # scripts/check-links.sh's states, by who acts on them: the ones in place, the drift the repo's
 # ./install fixes, and a source the manifest names that is not in the checkout, which only a
@@ -1407,11 +1412,13 @@ claude_plugin() {
 }
 
 # The declaration's shape, read before it is indexed: settings.json is an object, and its
-# enabledPlugins and extraKnownMarketplaces are objects wherever they are present.
+# enabledPlugins and extraKnownMarketplaces are objects wherever they are present. Not `// {}`: jq's
+# // reads a literal false or null as missing, so such a container would pass as an empty one.
 settings_shape_ok() {
     jq -e 'type == "object"
-        and ((.enabledPlugins // {}) | type == "object")
-        and ((.extraKnownMarketplaces // {}) | type == "object")' "$SETTINGS" >/dev/null 2>&1
+        and ((has("enabledPlugins") | not) or (.enabledPlugins | type == "object"))
+        and ((has("extraKnownMarketplaces") | not) or (.extraKnownMarketplaces | type == "object"))' \
+        "$SETTINGS" >/dev/null 2>&1
 }
 # The declared plugins, one name@marketplace per line: the enabledPlugins entries that are
 # exactly true, so a false entry is never read as declared (nor, through jq's //, as missing).
@@ -1434,12 +1441,17 @@ declared_marketplaces() {
             printf '%s=%s\n' "${entry%%=*}" "$(expand_home_path "${entry#*=}")"
         done
 }
-marketplace_declared() {   # $1 = a marketplace name
+# Why no plugin can be installed from marketplace $1, printed, and 0; 1 when one can: it is declared
+# with a source. One declared with none is no declaration a plugin can come from (its own row is ⚠).
+marketplace_unusable_reason() {   # $1 = a marketplace name
     local entry
     while IFS= read -r entry; do
-        [[ "${entry%%=*}" == "$1" ]] && return 0
+        [[ "${entry%%=*}" == "$1" ]] || continue
+        [[ -n "${entry#*=}" ]] && return 1
+        printf "marketplace %s's extraKnownMarketplaces entry names no repo, url or path" "$1"
+        return 0
     done < <(declared_marketplaces)
-    return 1
+    printf 'marketplace %s is declared by no settings fragment' "$1"
 }
 
 # Why marketplace $1 (source $2) needs a refresh, or nothing if it does not. Asked again after
@@ -1515,16 +1527,16 @@ linear_key_current() {
     return 1
 }
 
-# One declared plugin's row: a person's step when no settings fragment declares its marketplace;
-# ✓ when it is installed at user scope (and, for linear-key, current); else drift --apply installs.
+# One declared plugin's row: a person's step when no settings fragment declares its marketplace with
+# a source; ✓ when it is installed at user scope (and, for linear-key, current); else drift --apply
+# installs.
 here_plugin() {   # $1 = name@marketplace
-    local plugin="$1" marketplace="${1##*@}" undeclared
-    if ! marketplace_declared "$marketplace"; then
-        undeclared="$plugin: marketplace $marketplace is declared by no settings fragment"
+    local plugin="$1" marketplace="${1##*@}" unusable_reason
+    if unusable_reason="$(marketplace_unusable_reason "$marketplace")"; then
         if plugin_installed "$plugin"; then
-            row oper plugin "$undeclared; installed, but its marketplace is not refreshed"
+            row oper plugin "$plugin: $unusable_reason; installed, but its marketplace is not refreshed"
         else
-            row oper plugin "$undeclared; not installed"
+            row oper plugin "$plugin: $unusable_reason; not installed"
         fi
         return
     fi
@@ -1772,12 +1784,13 @@ memory_store_rows() {
         else
             unserved_store_row "$store" "$tenant_list"
         fi
-    done < <(jq -r '.stores | to_entries[] | [.key, .value.remote, (.value.tenants | join(","))] | @tsv' \
+    done < <(jq -r --arg separator "$TENANT_SEPARATOR" \
+        '.stores | to_entries[] | [.key, .value.remote, (.value.tenants | join($separator))] | @tsv' \
         "$MEMORY_STORE_TABLE" 2>/dev/null)
 }
-store_serves_profile() {   # $1 = a store's tenants, comma-separated; 0 when the profile lists one of them
+store_serves_profile() {   # $1 = a store's tenants, TENANT_SEPARATOR-joined; 0 when the profile lists one of them
     local tenant store_tenants=()
-    IFS=, read -r -a store_tenants <<<"$1"
+    IFS="$TENANT_SEPARATOR" read -r -a store_tenants <<<"$1"
     for tenant in ${store_tenants[@]+"${store_tenants[@]}"}; do
         has_tenant "$tenant" && return 0
     done
@@ -1805,12 +1818,24 @@ served_store_row() {
     fi
     if [[ "$MODE" != apply ]]; then
         row drift memory "store $store not checked out ($repo)"
-    elif git_net_within "$CLONE_TIMEOUT_SECONDS" clone --quiet "$remote" "$dir" >/dev/null 2>&1; then
+    elif clone_store "$remote" "$dir"; then
         MEMORY_SERVED_CHECKED_OUT=1
         row ok memory "store $store cloned"
     else
-        row drift memory "store $store: git clone $repo failed"
+        row drift memory "store $store: git clone $repo failed: $CLONE_FAILURE_REASON"
     fi
+}
+# git clone $1 into $2. Returns git's status (124 a timeout), and on a failure sets
+# CLONE_FAILURE_REASON to the first line of its stderr, redacted (the unredacted text never reaches a
+# variable), or to its exit status when it printed none.
+clone_store() {   # $1 = the remote, as the table spells it, $2 = the directory
+    local status
+    CLONE_FAILURE_REASON="$(git_net_within "$CLONE_TIMEOUT_SECONDS" clone --quiet "$1" "$2" 2>&1 >/dev/null \
+        | redact_stream | sed -n 1p; exit "${PIPESTATUS[0]}")"
+    status=$?
+    (( status == 0 )) && return 0
+    [[ -n "$CLONE_FAILURE_REASON" ]] || CLONE_FAILURE_REASON="exit $status"
+    return "$status"
 }
 # owner/repo when $1 is GITHUB_BASE/<owner>/<repo>, with or without .git, each half a plain name (and
 # neither . nor ..); 1 otherwise.
@@ -1824,9 +1849,9 @@ github_repo_of_remote() {
     printf '%s' "$path"
 }
 # A store this host does not serve, checked out here anyway: reported, never removed, since what it
-# holds may not be anywhere else. $1 = the store, $2 = its tenants, comma-separated.
+# holds may not be anywhere else. $1 = the store, $2 = its tenants, TENANT_SEPARATOR-joined.
 unserved_store_row() {
-    local store="$1" tenants_shown="${2//,/, }"
+    local store="$1" tenants_shown="${2//"$TENANT_SEPARATOR"/, }"
     [[ -e "$MEMORY_STORES_ROOT/$store/.git" ]] || return 0
     row oper memory "store $store is checked out here but serves no tenant of profile $PROFILE (its tenants: ${tenants_shown:-none}); remove it by hand"
 }
@@ -1985,18 +2010,19 @@ memory_sibling_could_not_run_row() {   # $1 = the script and its verb, as the ro
 # agents that is not a link into one of the two checkouts, not generated and not Claude Code's own (a
 # copy left from before the links, a cache, a link left dangling or pointing elsewhere). --check
 # names each; --apply moves them into one stamp directory under the state dir, only on a host with a
-# profile (H1), and deletes nothing. A kind directory that is itself a link is a person's step and
-# is not walked: what is in it is not ~/.claude's, and through a link into a checkout --apply would
-# move tracked files out of it.
+# profile (H1), and deletes nothing. A kind directory that is itself a link, that resolves into a
+# checkout (~/.claude a link into one, say), or that cannot be read as a directory is a person's step
+# and is not walked: what is in it is not ~/.claude's to move, a move through a checkout would take
+# tracked files out of it, and an unread directory is no evidence that nothing in it is stale.
 here_retire() {
     local kind
-    STALE_CLAUDE_ENTRIES=(); KIND_DIR_IS_LINK=0
+    STALE_CLAUDE_ENTRIES=(); KIND_DIR_NOT_WALKED=0
     read_checkout_roots
     for kind in "${CLAUDE_ENTRY_KINDS[@]}"; do
         collect_stale_entries "$kind"
     done
     if (( ${#STALE_CLAUDE_ENTRIES[@]} == 0 )); then
-        (( KIND_DIR_IS_LINK )) || row ok retire "no stale skill, hook or agent under $(tilde_path "$CLAUDE_USER_DIR")"
+        (( KIND_DIR_NOT_WALKED )) || row ok retire "no stale skill, hook or agent under $(tilde_path "$CLAUDE_USER_DIR")"
     elif [[ -z "$PROFILE" ]]; then
         stale_entries_left_row
     elif [[ "$MODE" != apply ]]; then
@@ -2020,22 +2046,41 @@ read_checkout_roots() {
     done
 }
 # Append each stale entry under ~/.claude/<kind>/ to STALE_CLAUDE_ENTRIES as <kind>/<name>,
-# dot-entries included. An absent kind directory holds nothing; one that is a link gets the ⚠ row,
-# sets KIND_DIR_IS_LINK and is not walked.
+# dot-entries included. An absent kind directory holds nothing; one that kind_dir_walkable refuses is
+# not walked.
 collect_stale_entries() {   # $1 = the kind: skills, hooks or agents
     local kind="$1" dir="$CLAUDE_USER_DIR/$1" path name
-    if [[ -L "$dir" ]]; then
-        row oper retire "$(tilde_path "$dir") is a link, not a directory; its entries are not judged"
-        KIND_DIR_IS_LINK=1
-        return
-    fi
-    [[ -d "$dir" ]] || return 0
+    [[ -e "$dir" || -L "$dir" ]] || return 0
+    kind_dir_walkable "$dir" || return 0
     for path in "$dir"/* "$dir"/.*; do
         name="${path##*/}"
         [[ "$name" == . || "$name" == .. ]] && continue
         [[ -e "$path" || -L "$path" ]] || continue   # a pattern that matched nothing is left as written
         [[ "$(classify_claude_entry "$kind" "$name")" == stale ]] && STALE_CLAUDE_ENTRIES+=("$kind/$name")
     done
+}
+# 0 when the kind directory $1 may be walked: not itself a link, a directory this run can list, and
+# resolving outside every checkout. Otherwise 1, with the ⚠ row that says why, and KIND_DIR_NOT_WALKED
+# set. The last test catches what the first cannot: a link higher up the path (~/.claude itself).
+kind_dir_walkable() {   # $1 = the kind directory
+    local dir="$1" shown resolved root
+    shown="$(tilde_path "$dir")"
+    if [[ -L "$dir" ]]; then
+        row oper retire "$shown is a link, not a directory; its entries are not judged"
+    elif [[ ! -d "$dir" || ! -r "$dir" || ! -x "$dir" ]] || ! resolved="$(readlink -f -- "$dir" 2>/dev/null)" \
+        || [[ -z "$resolved" ]]; then
+        row oper retire "$shown could not be read as a directory; its entries are not judged"
+    else
+        for root in ${CHECKOUT_ROOTS[@]+"${CHECKOUT_ROOTS[@]}"}; do
+            [[ "$resolved/" == "$root"* ]] || continue
+            row oper retire "$shown resolves to $(tilde_path "$resolved"), inside a checkout; its entries are not judged"
+            KIND_DIR_NOT_WALKED=1
+            return 1
+        done
+        return 0
+    fi
+    KIND_DIR_NOT_WALKED=1
+    return 1
 }
 # What ~/.claude/<kind>/<name> is, printed: generated, own (Claude Code's), declared or stale.
 classify_claude_entry() {   # $1 = the kind, $2 = the entry's name

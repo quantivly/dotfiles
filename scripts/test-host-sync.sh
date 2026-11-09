@@ -49,7 +49,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # it means to, so a caller's own (a real ~/.config/claude-host-profile, a real remote) never reaches one.
 unset CLAUDE_SETTINGS_RENDER_MARKER HOST_SYNC_DOTFILES_LOCAL_REPO HOST_SYNC_DOTFILES_LOCAL_REMOTE PROFILE_MARKER_PATH
 # The memory scripts' overrides likewise: run sets the stores root a row means, and nothing reads another table.
-unset CLAUDE_MEMORY_STORES_ROOT CLAUDE_MEMORY_CONFIG STORES_ROOT_PATH
+unset CLAUDE_MEMORY_STORES_ROOT CLAUDE_MEMORY_CONFIG STORES_ROOT_PATH MEMORY_CONFIG_PATH
 # A host profile may export it (dev, sol-build), and the HTTPS row must see only what host-sync sets.
 unset CLAUDE_CODE_PLUGIN_PREFER_HTTPS
 
@@ -295,9 +295,9 @@ STUB
 }
 
 # The settings renderer: --check exits $HOME/stub/render-rc (0 when there is none) and at 2 says
-# why on stderr, as the real one does; --apply renders, so the next --check is level. Two flags
-# break --apply: render-apply-fails (it cannot write: exit 2, with its reason) and
-# render-apply-no-op (exit 0, the file left as it was).
+# why on stderr, as the real one does: its own line, or what $HOME/stub/render-error holds; --apply
+# renders, so the next --check is level. Two flags break --apply: render-apply-fails (it cannot
+# write: exit 2, with its reason) and render-apply-no-op (exit 0, the file left as it was).
 write_render_stub() {   # $1 = the file
     cat >"$1" <<'STUB'
 #!/usr/bin/env bash
@@ -305,7 +305,9 @@ S="$HOME/stub"; echo "claude-settings-render.sh $*" >>"$S/calls"
 case "$1" in
     --check)
         rc="$(cat "$S/render-rc" 2>/dev/null || echo 0)"
-        [[ "$rc" == 2 ]] && echo "claude-settings-render: settings.json is a symlink" >&2
+        if [[ "$rc" == 2 ]]; then
+            cat "$S/render-error" 2>/dev/null || echo "claude-settings-render: settings.json is a symlink"
+        fi >&2
         exit "$rc" ;;
     --apply)
         if [[ -e "$S/render-apply-fails" ]]; then
@@ -390,8 +392,8 @@ new_case() {
     : >"$H/stub/calls"
 
     # dotfiles: origin with an install script, two declared links, the linear-key plugin, the
-    # settings renderer and the memory link and sync scripts (stubs) and the REAL link checker, all
-    # tracked, and a skill and a hook for ~/.claude to link to; dev at origin/main.
+    # settings renderer and the memory link and sync scripts (stubs) and the REAL link checker and
+    # redactor, all tracked, and a skill and a hook for ~/.claude to link to; dev at origin/main.
     local w="$C/seed-dotfiles"
     git init -q -b main "$w"
     mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin" "$w/config" "$w/scripts" \
@@ -402,6 +404,9 @@ new_case() {
     printf -- '- link:\n    ~/.x: config/x\n    ~/.config/fixture/y.conf: config/y.conf\n' >"$w/install.conf.yaml"
     echo x >"$w/config/x"; echo y >"$w/config/y.conf"
     cp "$DOTFILES/scripts/check-links.sh" "$w/scripts/check-links.sh"
+    # The real redactor, so every sibling's stderr a row carries is redacted as on a host, never
+    # passed through by the `cat` a checkout without one falls back to.
+    cp "$DOTFILES/scripts/redact-secrets.sh" "$w/scripts/redact-secrets.sh"
     write_render_stub "$w/scripts/claude-settings-render.sh"
     write_memory_link_stub "$w/scripts/claude-memory-link.sh"
     write_memory_sync_stub "$w/scripts/claude-memory-sync.sh"
@@ -614,13 +619,16 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
 # PROFILE_MARKER_PATH, when a row sets it, is where CLAUDE_SETTINGS_RENDER_MARKER points instead of
 # the default path, so a row can tell an honoured override from a hard-coded default; STORES_ROOT_PATH
-# likewise for CLAUDE_MEMORY_STORES_ROOT.
+# likewise for CLAUDE_MEMORY_STORES_ROOT. MEMORY_CONFIG_PATH, when set, is passed as
+# CLAUDE_MEMORY_CONFIG; unset, the variable is not passed at all, as on a host that never sets it.
 run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     # The trace goes to its own fd, as a person debugging with BASH_XTRACEFD would see it: a
     # command's own 2>/dev/null then hides nothing from it.
     local xt=(); [[ -n "${XTRACE:-}" ]] && xt=(BASH_XTRACEFD=3)
+    local memory_config_override=()
+    [[ -n "${MEMORY_CONFIG_PATH:-}" ]] && memory_config_override=(CLAUDE_MEMORY_CONFIG="$MEMORY_CONFIG_PATH")
     # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
-    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
+    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" "${memory_config_override[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
         HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" TMPDIR="$C/tmp" \
         CLAUDE_SETTINGS_RENDER_MARKER="${PROFILE_MARKER_PATH:-$H/.config/claude-host-profile}" \
         CLAUDE_MEMORY_STORES_ROOT="${STORES_ROOT_PATH:-$H/$STORES_REL}" \
@@ -1116,6 +1124,15 @@ has   "settings: a renderer that cannot run → ⚠ with its first line, no --ap
 check "settings: a renderer that cannot run → ⚠ with its first line, no --apply: only --check, exit 0" \
     "$(renderer_calls)/$RC" "claude-settings-render.sh --check/0"
 
+# A sibling's stderr reaches a row only through the redactor. The token is FAKE_TOK, built from two
+# halves at runtime, and a shape the redactor knows; the seed carries the real redactor.
+new_case
+echo 2 >"$H/stub/render-rc"
+echo "claude-settings-render: the overlay's token file holds $FAKE_TOK" >"$H/stub/render-error"
+run_level --check
+check "settings: a sibling's stderr is redacted before a row carries it: the redactor's marker, never the token" \
+    "$(grep -c -F "${SETTINGS_OPER}claude-settings-render could not run: claude-settings-render: the overlay's token file holds <REDACTED:anthropic-key>" <<<"$OUT")/$(grep -c -F "$FAKE_TOK" <<<"$OUT")" "1/0"
+
 new_case
 rm "$H/.dotfiles/scripts/claude-settings-render.sh"
 run_level --check
@@ -1503,6 +1520,13 @@ has   "a marketplace entry that names no repo, url or path: ⚠, never added" "$
     "${MARKET_OPER}team: its extraKnownMarketplaces entry names no repo, url or path; not added"
 run_level --apply
 hasnt "a marketplace entry that names no repo, url or path: --apply adds nothing" "$(calls)" "claude plugin marketplace add"
+# A plugin declared from that marketplace has nowhere to come from: ⚠ like its marketplace, never an
+# install attempt that fails, a ✗ on every run.
+new_case
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.team = {source: {source: "github"}} | .enabledPlugins["x@team"] = true'
+run_level --apply
+check "a plugin whose marketplace entry names no repo, url or path is a person's step: the ⚠, no install call" \
+    "$(grep -c -F "${PLUGIN_OPER}x@team: marketplace team's extraKnownMarketplaces entry names no repo, url or path; not installed" <<<"$OUT")/$(grep -c '^claude plugin install x@team' "$H/stub/calls")" "1/0"
 # A settings.json of the wrong shape is one ⚠ and nothing else: no marketplace or plugin row is
 # judged from it, and --apply adds nothing. Each object key is broken in its own case, so each half
 # of the shape check has a row of its own; only the array-shaped marketplaces have a source to add.
@@ -1518,6 +1542,17 @@ edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces = [{source: {source: "gi
 run_level --apply
 has   "a settings.json whose extraKnownMarketplaces is not an object: ⚠" "$OUT" "$SHAPE_OPER"
 hasnt "a settings.json whose extraKnownMarketplaces is not an object: --apply adds nothing" "$(calls)" "claude plugin marketplace add"
+# A literal false or null is present and not an object: jq's // would read either as an empty one.
+new_case
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins = false'
+run_level --apply
+check "a settings.json whose enabledPlugins is false: ⚠, no marketplace or plugin row, no plugin call" \
+    "$(grep -c -F "$SHAPE_OPER" <<<"$OUT")/$(area_rows marketplace)/$(area_rows plugin)/$(grep -c '^claude plugin ' "$H/stub/calls")" "1/0/0/0"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces = null'
+run_level --apply
+check "a settings.json whose extraKnownMarketplaces is null: ⚠, no marketplace or plugin row, no plugin call" \
+    "$(grep -c -F "$SHAPE_OPER" <<<"$OUT")/$(area_rows marketplace)/$(area_rows plugin)/$(grep -c '^claude plugin ' "$H/stub/calls")" "1/0/0/0"
 new_case
 echo '{"name":"linear-key","version":"1.1.0"}' >"$H/.dotfiles/claude/plugins/linear-key/.claude-plugin/plugin.json"
 run_level --check
@@ -1620,6 +1655,14 @@ has   "memory: no store table → · and nothing else: the · row" "$OUT" \
 check "memory: no store table → · and nothing else: one memory row, no sibling called" \
     "$(area_rows memory)/$(memory_sibling_calls)" "1/"
 
+# The table is read before the git floor: a host with no table runs no memory sync, so an old git there
+# is nothing to warn about.
+new_case
+rm "$H/$STORE_TABLE_REL"; touch "$H/stub/git-version-old"
+run_level --check
+check "memory: no store table and an old git → the one · row, and no git ⚠" \
+    "$(area_rows memory)/$(grep -c -F "${MEMORY_INFO}no memory store table at" <<<"$OUT")/$(grep -c -F 'is older than 2.40' <<<"$OUT")" "1/1/0"
+
 new_case
 edit_json .dotfiles-local/claude/memory-stores.json '.stores.alpha.tenants = "quantivly"'
 run_level --apply
@@ -1683,6 +1726,8 @@ has   "memory: a clone that fails is ✗, and leaves no directory: the ✗ row" 
     "${MEMORY_DRIFT}store alpha: git clone example-org/mem-alpha failed"
 check "memory: a clone that fails is ✗, and leaves no directory: no directory, exit 1" \
     "$(present "$H/$STORES_REL/alpha")/$RC" "gone/1"
+check "memory: a clone that fails is ✗ with git's first error line: the store, and why" \
+    "$(grep -F "${MEMORY_DRIFT}store alpha: git clone example-org/mem-alpha failed: " <<<"$OUT" | grep -c 'does not appear to be a git repository')" 1
 
 new_case
 rm -rf "${H:?}/$STORES_REL/alpha"
@@ -1692,6 +1737,16 @@ has   "memory: a remote that is not under the GitHub base is not cloned: ⚠ nam
     "${MEMORY_OPER}store alpha: its remote is not a repository URL under file://$GH; not cloned"
 check "memory: a remote that is not under the GitHub base is not cloned: no clone" \
     "$(present "$H/$STORES_REL/alpha")/$(clone_calls)" "gone/0"
+hasnt "memory: a remote that is not under the GitHub base is not cloned: the remote is never printed" "$OUT" "ssh://x/y.git"
+
+# A remote under the base whose owner is .. passes the character rule alone; it names a path outside
+# the base, and is never cloned.
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"
+edit_json .dotfiles-local/claude/memory-stores.json ".stores.alpha.remote = \"file://$GH/../x\""
+run_level --apply
+check "memory: a remote whose owner is .. is not cloned: ⚠ naming the store, no clone" \
+    "$(grep -c -F "${MEMORY_OPER}store alpha: its remote is not a repository URL under file://$GH; not cloned" <<<"$OUT")/$(clone_calls)/$(present "$H/$STORES_REL/alpha")" "1/0/gone"
 
 new_case
 rm -rf "${H:?}/$STORES_REL/alpha"; mkdir -p "$H/$STORES_REL/alpha"; echo kept >"$H/$STORES_REL/alpha/note.md"
@@ -1720,6 +1775,15 @@ check "memory: a store for an unserved tenant is reported, not touched: still ch
     "$(present "$H/$STORES_REL/beta/.git")/$(git -C "$H/$STORES_REL/beta" config --get remote.origin.url)/$(grep -c 'claude-memory-sync.sh --apply' "$H/stub/calls")" \
     "present/file://$GH/example-org/mem-beta.git/0"
 
+# A tenant is one name, whatever it holds: personal,quantivly is not personal and quantivly.
+new_case
+git clone -q "file://$GH/example-org/mem-beta.git" "$H/$STORES_REL/delta"
+edit_json .dotfiles-local/claude/memory-stores.json \
+    ".stores.delta = {remote: \"file://$GH/example-org/mem-beta.git\", tenants: [\"personal,quantivly\"]}"
+run_level --check
+has   "memory: a tenant name holding a comma is one name: the store serves no tenant of the profile" "$OUT" \
+    "${MEMORY_OPER}store delta is checked out here but serves no tenant of profile p (its tenants: personal,quantivly); remove it by hand"
+
 STORES_ROOT_PATH="$TMPROOT/stores-elsewhere"
 new_case
 mkdir -p "$STORES_ROOT_PATH"; rm -rf "${STORES_ROOT_PATH:?}/alpha"; mv "$H/$STORES_REL/alpha" "$STORES_ROOT_PATH/alpha"
@@ -1727,6 +1791,16 @@ run_level --check
 has   "memory: CLAUDE_MEMORY_STORES_ROOT is honoured: the store is found there" "$OUT" "${MEMORY_OK}store alpha checked out"
 check "memory: CLAUDE_MEMORY_STORES_ROOT is honoured: exit 0" "$RC" 0
 rm -rf "${STORES_ROOT_PATH:?}"; unset STORES_ROOT_PATH
+
+# The link and sync scripts read CLAUDE_MEMORY_CONFIG's table; host-sync judges the same one.
+MEMORY_CONFIG_PATH="$TMPROOT/other-memory-stores.json"
+new_case
+jq -n --arg gh "file://$GH" '{stores: {omega: {remote: ($gh + "/example-org/mem-omega.git"), tenants: ["quantivly"]}}}' \
+    >"$MEMORY_CONFIG_PATH"
+run_level --check
+has   "memory: CLAUDE_MEMORY_CONFIG is honoured: a store named only in that table is judged" "$OUT" \
+    "${MEMORY_DRIFT}store omega not checked out (example-org/mem-omega)"
+rm -f "$MEMORY_CONFIG_PATH"; unset MEMORY_CONFIG_PATH
 
 new_case
 echo 'claude-memory-link: 3 linked, 0 to fix, 1 unmapped, 0 without a store' >"$H/stub/link-summary"
@@ -1986,6 +2060,26 @@ has   "retire: a kind directory that is itself a link is a person's step" "$OUT"
     "${RETIRE_OPER}~/.claude/agents is a link, not a directory; its entries are not judged"
 check "retire: a kind directory that is itself a link is never walked: its entry stays, nothing retired, no ✓" \
     "$(cat "$C/shared-agents/y.md")|$(present "$H/$RETIRED_REL")|$(grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")" "$STALE_AGENT_TEXT|gone|0"
+
+# ~/.claude itself a link into a checkout: no kind directory is a link, yet each resolves inside the
+# checkout, where a move would take files out of it.
+new_case
+add_stale_entries
+mv "$H/.claude" "$H/.dotfiles/claude-home"; ln -s "$H/.dotfiles/claude-home" "$H/.claude"
+run_level --apply
+check "retire: kind directories that resolve into a checkout are not walked: a ⚠ for each kind, nothing moved" \
+    "$(grep -c -F -e "${RETIRE_OPER}~/.claude/skills resolves to" -e "${RETIRE_OPER}~/.claude/hooks resolves to" \
+        -e "${RETIRE_OPER}~/.claude/agents resolves to" <<<"$OUT")/$(stale_entries_left)/$(present "$H/$RETIRED_REL")" \
+    "3/present present present present/gone"
+
+# A kind directory that is a regular file: nothing in it can be judged, so no ✓ says nothing is stale.
+new_case
+rm -rf "${H:?}/.claude/hooks"; echo 'not a directory' >"$H/.claude/hooks"
+run_level --apply
+check "retire: a kind directory that is a regular file is ⚠, not ✓: the ⚠, no ✓, the file as it was, nothing retired" \
+    "$(grep -c -F "${RETIRE_OPER}~/.claude/hooks could not be read as a directory; its entries are not judged" <<<"$OUT")/$(
+        grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")/$(cat "$H/.claude/hooks")/$(present "$H/$RETIRED_REL")" \
+    "1/0/not a directory/gone"
 
 echo "== timer"
 # The timer row's glyph and area, as row() prints them, so a needle also pins ✓ against ✗ and ·.
@@ -2878,7 +2972,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=631
+EXPECTED_ROWS=643
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
