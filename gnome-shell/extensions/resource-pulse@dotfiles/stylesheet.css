@@ -80,3 +80,19 @@
 .resource-pulse-card-pressure-group {
   spacing: 4px;
 }
+
+/* Added in the service release. Every class above stays as it was: GNOME re-reads this file on every enable but the
+   code only at login, so the previous release's code may meet this stylesheet until the next login. */
+
+/* The card's fixed width: the previous release's min-width, now also its width and max-width, so the left edge never
+   moves. Only the "heaviest" names give way to it (they ellipsize); no number is ever cut. */
+.rp-card-fixed {
+  min-width: 25em;
+  width: 25em;
+  max-width: 25em;
+}
+
+/* The "heaviest" line's names, values and separator, about a word apart, as one line of text would be. */
+.rp-card-heaviest-parts {
+  spacing: 4px;
+}

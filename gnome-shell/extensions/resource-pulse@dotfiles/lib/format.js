@@ -8,6 +8,8 @@ const NO_SWAP_TEXT = 'none';
 const SEPARATOR = ' · ';
 const ELLIPSIS = '…';
 const EM_DASH = '—';
+/** Between the two halves of the card's "heaviest" row, each its own label in a spaced box: a bare dot. */
+const HEAVIEST_HALVES_SEPARATOR = '·';
 const SWAP_LABEL = 'swap';
 // The desktop card's row labels, as in the mockup the user picked (the spec's "Decided by the user", item 1).
 const CARD_CPU_LABEL = 'CPU';
@@ -194,6 +196,45 @@ export function heaviestLine(apps) {
 }
 
 /**
+ * @typedef {object} HeaviestRowTexts
+ * @property {string} cpuName - The CPU half's name, whole: the card ellipsizes it by width. '' hides it.
+ * @property {string} cpuValue - Its percent; '' for an idle CPU half, or with no CPU half.
+ * @property {string} separator - '·' between two halves; '' with one half or none.
+ * @property {string} memoryName - The memory half's name, whole; '' when one group tops both halves (its name is
+ *     cpuName then), or with no memory half.
+ * @property {string} memoryValue - Its size in GiB; '' with no memory half.
+ */
+
+/**
+ * The texts of the desktop card's "heaviest" row: a name label and a value label for each half, and a separator
+ * between them. Each label with '' is hidden. Names are never cut to a character count, as heaviestLine cuts them: the
+ * card's name labels ellipsize by width, so the values beside them never are.
+ *
+ * @param {{topCpu: {groupKey?: string, name: string, cpuPercent: number}|null,
+ *     topMemory: {groupKey?: string, name: string, memoryBytes: number}|null}|null} apps - App ranking.
+ * @returns {HeaviestRowTexts} For example Chromium / 31% / · / herdr agents / 15.7 GiB; herdr agents / 31% / · / '' /
+ *     15.7 GiB when one group tops both; idle / '' / · / Chromium / 2.0 GiB when the CPU is idle; and '—' alone as the
+ *     CPU name with no data.
+ */
+export function heaviestRowTexts(apps) {
+    const {cpuHalf, memoryHalf, isCollapsed} = heaviestParts(apps);
+    const hasBothHalves = cpuHalf !== null && memoryHalf !== null;
+    const memoryName = memoryHalf === null || isCollapsed ? '' : memoryHalf.name;
+    let cpuName = EM_DASH;
+    if (cpuHalf !== null)
+        cpuName = cpuHalf.name;
+    else if (memoryHalf !== null)
+        cpuName = '';
+    return {
+        cpuName,
+        cpuValue: cpuHalf?.valueText ?? '',
+        separator: hasBothHalves ? HEAVIEST_HALVES_SEPARATOR : '',
+        memoryName,
+        memoryValue: memoryHalf?.valueText ?? '',
+    };
+}
+
+/**
  * Says there is no data, and since when when that is known.
  *
  * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data.
@@ -250,7 +291,7 @@ function cardCpuValue(cpuPercent, hasNoNumbers, lastGoodClockLabel) {
  * @property {string} waitingOnLabel - 'waiting on:'.
  * @property {PressureMeter[]} waitingOnMeters - waitingOnMeters: a label and a band for CPU, memory and io.
  * @property {string} heaviestLabel - 'heaviest:'.
- * @property {string} heaviestValue - heaviestLine: for example 'Chromium 31% · herdr agents 15.7 GiB'.
+ * @property {HeaviestRowTexts} heaviestRow - heaviestRowTexts: each half's name and value, and the separator.
  */
 
 /**
@@ -276,6 +317,6 @@ export function cardText(snapshot, lastGoodClockLabel) {
         waitingOnLabel: CARD_WAITING_ON_LABEL,
         waitingOnMeters: waitingOnMeters(snapshot?.pressureAvg10 ?? NO_PRESSURE_DATA),
         heaviestLabel: CARD_HEAVIEST_LABEL,
-        heaviestValue: heaviestLine(snapshot?.apps ?? null),
+        heaviestRow: heaviestRowTexts(snapshot?.apps ?? null),
     };
 }

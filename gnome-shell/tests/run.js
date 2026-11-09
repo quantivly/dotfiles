@@ -10,6 +10,7 @@ import './apps.test.js';
 import './format.test.js';
 import './cadence.test.js';
 import './wiring.test.js';
+import './visibility.test.js';
 import './protocol.test.js';
 import './service-sampler.test.js';
 import './client.test.js';

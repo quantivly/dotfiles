@@ -3,6 +3,8 @@ import {
     formatGibibytes, formatWholePercent, memoryLine, swapLine, swapAmount, clusterSuffix, waitingOnMeters,
     ellipsize, heaviestLine, heaviestParts, hoverLabel, cardText,
 } from '../extensions/resource-pulse@dotfiles/lib/format.js';
+// The heaviest row's parts, read through the namespace, so a missing export fails its rows rather than the whole run.
+import * as formatModule from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {cardPosition, hoverLabelPosition} from '../extensions/resource-pulse@dotfiles/lib/layout.js';
 
 const GIB = 1024 ** 3;
@@ -74,7 +76,7 @@ const CARD_LABELS = {
 const CARD_NO_DATA_VALUES = {
     cpuClusterSuffix: '', memoryValue: 'no data', swapValue: 'no data',
     waitingOnMeters: [{label: 'CPU', band: null}, {label: 'mem', band: null}, {label: 'io', band: null}],
-    heaviestValue: '—',
+    heaviestRow: {cpuName: '—', cpuValue: '', separator: '', memoryName: '', memoryValue: ''},
 };
 
 /**
@@ -165,6 +167,37 @@ test('heaviestLine with only one ranking shows just that half', () =>
 test('heaviestLine with no data is an em dash', () =>
     assertEqual([heaviestLine(null), heaviestLine({topCpu: null, topMemory: null})], ['—', '—']));
 
+// The card's "heaviest" row is four labels (each half's name and value) and a separator; '' hides a label.
+const NO_HEAVIEST_LABELS = {cpuName: '', cpuValue: '', separator: '', memoryName: '', memoryValue: ''};
+test('heaviestRowTexts: two different apps give each half its name and value, with the separator between them', () =>
+    assertEqual(formatModule.heaviestRowTexts({topCpu: {groupKey: 'app:chromium', name: 'Chromium', cpuPercent: 31},
+        topMemory: {groupKey: 'unit:herdr-server', name: 'herdr agents', memoryBytes: 15.7 * GIB}}),
+    {cpuName: 'Chromium', cpuValue: '31%', separator: '·', memoryName: 'herdr agents', memoryValue: '15.7 GiB'}));
+test('heaviestRowTexts: names are whole, never cut to a character count (the card ellipsizes them by width)', () =>
+    assertEqual(formatModule.heaviestRowTexts({topCpu: null,
+        topMemory: {groupKey: 'a', name: 'a-very-long-application-name', memoryBytes: 2 * GIB}}).memoryName,
+    'a-very-long-application-name'));
+test('heaviestRowTexts: one group topping both halves shows its name once, with both values', () =>
+    assertEqual(formatModule.heaviestRowTexts({
+        topCpu: {groupKey: 'unit:herdr-server', name: 'herdr agents', cpuPercent: 31},
+        topMemory: {groupKey: 'unit:herdr-server', name: 'herdr agents', memoryBytes: 15.7 * GIB},
+    }), {cpuName: 'herdr agents', cpuValue: '31%', separator: '·', memoryName: '', memoryValue: '15.7 GiB'}));
+test('heaviestRowTexts: an idle CPU half shows "idle" with an empty value, and never collapses', () =>
+    assertEqual(formatModule.heaviestRowTexts({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 0.6},
+        topMemory: {groupKey: 'app:x', name: 'X', memoryBytes: GIB}}),
+    {cpuName: 'idle', cpuValue: '', separator: '·', memoryName: 'X', memoryValue: '1.0 GiB'}));
+test('heaviestRowTexts: one ranking alone shows just that half, with no separator', () =>
+    assertEqual([
+        formatModule.heaviestRowTexts({topCpu: {name: 'Chromium', cpuPercent: 31}, topMemory: null}),
+        formatModule.heaviestRowTexts({topCpu: null, topMemory: {name: 'Chromium', memoryBytes: GIB}}),
+    ], [
+        {...NO_HEAVIEST_LABELS, cpuName: 'Chromium', cpuValue: '31%'},
+        {...NO_HEAVIEST_LABELS, memoryName: 'Chromium', memoryValue: '1.0 GiB'},
+    ]));
+test('heaviestRowTexts: no data is one em dash', () =>
+    assertEqual([formatModule.heaviestRowTexts(null), formatModule.heaviestRowTexts({topCpu: null, topMemory: null})],
+        [{...NO_HEAVIEST_LABELS, cpuName: '—'}, {...NO_HEAVIEST_LABELS, cpuName: '—'}]));
+
 test('hoverLabel with cpu and memory', () =>
     assertEqual(hoverLabel(FULL_SNAPSHOT, '14:02'), 'cpu 23% · mem 16.4 of 30.3 GiB'));
 test('hoverLabel without a snapshot says since when, never stale numbers', () =>
@@ -192,7 +225,9 @@ test('cardText with every part: the mockup\'s labels and rows, from the same for
         cpuValue: '23%', cpuClusterSuffix: 'P 41 · E 6', memoryValue: '16.4 of 30.3 GiB',
         swapValue: '1.6 GiB (0.4 in RAM)',
         waitingOnMeters: [{label: 'CPU', band: 1}, {label: 'mem', band: 0}, {label: 'io', band: 0}],
-        heaviestValue: 'Chromium 31% · herdr agents 15.7 GiB',
+        heaviestRow: {
+            cpuName: 'Chromium', cpuValue: '31%', separator: '·', memoryName: 'herdr agents', memoryValue: '15.7 GiB',
+        },
     };
     assertEqual(pickFields(cardText(CARD_SNAPSHOT, '14:02'), Object.keys(expected)), expected);
 });

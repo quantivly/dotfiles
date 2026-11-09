@@ -2,8 +2,10 @@
 // (service/, the systemd user unit resource-pulse.service, outside the shell) through one PulseClient, which follows it
 // on the session bus; this file only draws. The card sits in the layout manager's background group (above the
 // wallpaper, below every window), at the top right of the primary monitor's work area, and follows that work area as
-// monitors and panels change. Only the card shows apps, and the overview hides it, so the client asks the service for
-// its detail watch (the faster app scan) only while the overview is hidden (lib/wiring.js isDetailWatchWanted).
+// monitors and panels change. Only the card shows apps, so the client asks the service for its detail watch (the faster
+// app scan) only while the card can be seen (lib/wiring.js isDetailWatchWanted): the overview hides it, and so does a
+// window covering it, which is most of the day. While one does, the card is frozen as well: it records each snapshot
+// and repaints nothing until the reveal, which repaints it at once (lib/visibility.js decides what covers it).
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
@@ -19,8 +21,8 @@
 //   failure there shows "no data" and is retried or logged by the client, never thrown.
 // - a synchronous failure tears down whatever was built and rethrows, so the shell logs it once and reports the
 //   extension as ERROR (which `gnome-extensions info` shows).
-// - disable() works at any point, and twice in a row. It disconnects every signal before destroying anything, so no
-//   handler runs against a half-destroyed card.
+// - disable() works at any point, and twice in a row. It disconnects every signal (the covered check's too) and removes
+//   its client listener before destroying anything, so no handler runs against a half-destroyed card.
 // - each teardown step runs under its own guard (lib/teardown.js), card first: a step that throws is logged and
 //   the rest still run, so one failure can neither leave a frozen card drawn as live nor mask the error enable()
 //   is already rethrowing, and the fields are cleared first, so a later enable() starts clean.
@@ -37,14 +39,20 @@ import {PulseIndicator} from './indicator.js';
 import {PulseClient} from './pulseClient.js';
 import {RateLimitedLogger, describeErrorWithStack} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
+import {doRectsOverlap, isCardCovered, windowCountsForCover} from './lib/visibility.js';
 import {isDetailWatchWanted} from './lib/wiring.js';
 
 /** The panel box the indicator goes in. */
 const PANEL_BOX = 'right';
 /** Where the indicator goes when the system menu cannot be found. */
 const FALLBACK_PANEL_INDEX = 0;
-/** The desktop card counts as visible (outside the overview) until a window covering it is tracked. */
-const IS_CARD_VISIBLE_UNTIL_COVER_TRACKED = true;
+/** The desktop card counts as visible until the first covered check, which runs as soon as it is placed. */
+const IS_CARD_VISIBLE_BEFORE_COVER_CHECK = true;
+/**
+ * The window types that can cover the card: ordinary windows and dialogs. Never ding's desktop window, which spans the
+ * whole screen, a dock or a popup.
+ */
+const COVERING_WINDOW_TYPES = new Set([Meta.WindowType.NORMAL, Meta.WindowType.DIALOG]);
 /** The dropdown counts as closed until the indicator has one. */
 const IS_DROPDOWN_OPEN_UNTIL_DROPDOWN_EXISTS = false;
 
@@ -71,6 +79,9 @@ export default class ResourcePulseExtension extends Extension {
         this._indicator = null;
         this._card = null;
         this._cardPlacementLaterId = null;
+        this._cardCoverListenerId = null;
+        this._isOverviewVisible = false;
+        this._isCardVisible = IS_CARD_VISIBLE_BEFORE_COVER_CHECK;
         // Both limiters are kept across enable() and disable(), so a failure that repeats on every enable (every
         // unlock and blank) is still logged at most once per 10 minutes. The extension's own failures (a teardown
         // step that threw) leave it broken: errors. The client's (StartUnit refused, a call timed out, a payload it
@@ -81,9 +92,9 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Creates the client, holding a detail watch only while the overview is hidden; puts the indicator just left of
-     * the system menu; puts the card on the desktop and keeps it placed; then starts the client, which asks systemd
-     * for the service and follows it on the bus, all after enable() returns.
+     * Creates the client, holding a detail watch only while the card can be seen; puts the indicator just left of the
+     * system menu; puts the card on the desktop, keeps it placed and freezes it while a window covers it; then starts
+     * the client, which asks systemd for the service and follows it on the bus, all after enable() returns.
      *
      * @returns {void}
      * @throws {Error} Whatever a synchronous step threw, after tearing down everything built so far.
@@ -97,6 +108,7 @@ export default class ResourcePulseExtension extends Extension {
             this._indicator = new PulseIndicator(this._client);
             Main.panel.addToStatusArea(this.uuid, this._indicator, systemMenuPanelIndex(), PANEL_BOX);
             this._addCard();
+            this._followCardCover();
             this._client.start();
         } catch (error) {
             this._tearDown();
@@ -115,7 +127,7 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Holds the client's detail watch only while the overview is hidden. The watch makes the service scan apps at the
+     * Releases the client's detail watch while the overview is showing. The watch makes the service scan apps at the
      * watched cadence, which feeds only the card's "heaviest" line, and the overview hides the card (it hides the
      * window group the card lives in). 'showing' comes as the overview starts to open and 'hidden' once it has fully
      * closed, so the watch is released for the whole time the card cannot be seen; enabled while the overview is
@@ -125,23 +137,34 @@ export default class ResourcePulseExtension extends Extension {
      */
     _followOverviewWithDetailWatch() {
         Main.overview.connectObject(
-            'showing', () => this._syncDetailWatch(true),
-            'hidden', () => this._syncDetailWatch(false),
+            'showing', () => this._onOverviewVisibilityChanged(true),
+            'hidden', () => this._onOverviewVisibilityChanged(false),
             this);
-        this._syncDetailWatch(Main.overview.visible);
+        this._onOverviewVisibilityChanged(Main.overview.visible);
     }
 
     /**
-     * Tells the client whether a detail watch is wanted (lib/wiring.js isDetailWatchWanted), if there is a client.
+     * Records whether the overview is showing, and updates the detail watch.
      *
      * @param {boolean} isOverviewVisible - True while the overview is showing or opening.
      * @returns {void}
      */
-    _syncDetailWatch(isOverviewVisible) {
+    _onOverviewVisibilityChanged(isOverviewVisible) {
+        this._isOverviewVisible = isOverviewVisible;
+        this._syncDetailWatch();
+    }
+
+    /**
+     * Tells the client whether a detail watch is wanted (lib/wiring.js isDetailWatchWanted), from whether the card is
+     * covered and whether the overview is showing, if there is a client. The client sends only a change.
+     *
+     * @returns {void}
+     */
+    _syncDetailWatch() {
         const isWanted = isDetailWatchWanted({
-            isCardVisible: IS_CARD_VISIBLE_UNTIL_COVER_TRACKED,
+            isCardVisible: this._isCardVisible,
             isDropdownOpen: IS_DROPDOWN_OPEN_UNTIL_DROPDOWN_EXISTS,
-            isOverviewVisible,
+            isOverviewVisible: this._isOverviewVisible,
         });
         this._client?.setDetailWatchWanted(isWanted);
     }
@@ -164,12 +187,119 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Moves the card to the primary monitor's work area, if there is a card.
+     * Moves the card to the primary monitor's work area, if there is a card, and checks whether a window covers it
+     * there.
      *
      * @returns {void}
      */
     _placeCard() {
         this._card?.placeOnPrimaryMonitor();
+        this._syncCardCover();
+    }
+
+    /**
+     * Keeps the card frozen, and the detail watch released, while a window covers it (_syncCardCover). It checks:
+     * - on every client update (every Sample, about every 2 s), which catches whatever no signal below reports, such
+     *   as a window moved over the card from the keyboard;
+     * - on every restack (a window raised, opened or closed), and when the primary monitor enters or leaves fullscreen;
+     * - on a minimize, an unminimize, a maximize, unmaximize or tile (size-changed), the end of a drag (grab-op-end)
+     *   and a workspace switch, so moving a window off the card reveals it at once;
+     * - when "show desktop" (Super+D) is toggled, which hides windows without minimizing them;
+     * - whenever the card is placed (_placeCard), which already checked once in _addCard.
+     *
+     * @returns {void}
+     */
+    _followCardCover() {
+        const syncCardCover = () => this._syncCardCover();
+        global.display.connectObject(
+            'restacked', syncCardCover,
+            'in-fullscreen-changed', syncCardCover,
+            'grab-op-end', syncCardCover,
+            this);
+        global.window_manager.connectObject(
+            'minimize', syncCardCover,
+            'unminimize', syncCardCover,
+            'size-changed', syncCardCover,
+            'switch-workspace', syncCardCover,
+            this);
+        global.workspace_manager.connectObject('showing-desktop-changed', syncCardCover, this);
+        this._cardCoverListenerId = this._client.addListener(syncCardCover);
+    }
+
+    /**
+     * Freezes the card while a window covers it and unfreezes it, repainting it at once, when none does; then updates
+     * the detail watch, wanted only while the card can be seen. Does nothing without a card.
+     *
+     * @returns {void}
+     */
+    _syncCardCover() {
+        if (this._card === null)
+            return;
+        const isCovered = this._isCardCovered();
+        this._card.setFrozen(isCovered);
+        this._isCardVisible = !isCovered;
+        this._syncDetailWatch();
+    }
+
+    /**
+     * Says whether the card is covered (lib/visibility.js isCardCovered): the primary monitor is fullscreen, or one
+     * window that can cover it contains its whole rectangle. With no monitor at all it counts as visible.
+     *
+     * @returns {boolean} True when covered.
+     */
+    _isCardCovered() {
+        const {primaryMonitor} = Main.layoutManager;
+        if (!primaryMonitor)
+            return false;
+        return isCardCovered({
+            isPrimaryMonitorInFullscreen: primaryMonitor.inFullscreen,
+            cardRect: this._cardRectOnStage(),
+            windowRects: this._coveringWindowRects(primaryMonitor),
+        });
+    }
+
+    /**
+     * The card's rectangle in stage coordinates, read now: the card moves on monitor and work-area changes. It is
+     * where the card is placed, from get_position() and get_size(), which give the placed position and the preferred
+     * size until the next allocation, rather than get_transformed_position(), which gives the last allocation's and
+     * so the old place right after a placement (and nothing useful before the first, at every enable). The card's
+     * parent, the background group, sits at the stage's origin: placeOnPrimaryMonitor already places the card at
+     * work-area coordinates, which are the stage's.
+     *
+     * @returns {{x: number, y: number, width: number, height: number}} The rectangle, in logical pixels.
+     */
+    _cardRectOnStage() {
+        const [x, y] = this._card.get_position();
+        const [width, height] = this._card.get_size();
+        return {x, y, width, height};
+    }
+
+    /**
+     * The frame rectangles of the windows that can cover the card (lib/visibility.js windowCountsForCover): normal
+     * and dialog windows, not minimized, showing on their workspace, on the active workspace or on all of them, and
+     * overlapping the primary monitor. Frame rects are in stage (logical) coordinates, as the card's rectangle is.
+     *
+     * @param {{x: number, y: number, width: number, height: number}} primaryMonitor - The primary monitor's geometry.
+     * @returns {Array<{x: number, y: number, width: number, height: number}>} The rectangles.
+     */
+    _coveringWindowRects(primaryMonitor) {
+        const activeWorkspace = global.workspace_manager.get_active_workspace();
+        const coveringWindowRects = [];
+        for (const metaWindow of global.display.list_all_windows()) {
+            const frameRect = metaWindow.get_frame_rect();
+            const isOnActiveWorkspace = metaWindow.is_on_all_workspaces() ||
+                metaWindow.get_workspace() === activeWorkspace;
+            const countsForCover = windowCountsForCover({
+                isNormalOrDialog: COVERING_WINDOW_TYPES.has(metaWindow.get_window_type()),
+                isMinimized: metaWindow.minimized,
+                isShowing: metaWindow.showing_on_its_workspace(),
+                isOnActiveWorkspace,
+                overlapsPrimaryMonitor: doRectsOverlap(frameRect, primaryMonitor),
+            });
+            if (countsForCover)
+                coveringWindowRects.push(frameRect);
+        }
+        return coveringWindowRects;
     }
 
     /**
@@ -204,9 +334,10 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Undoes enable(), whatever it got to, and never throws: clears every field; then disconnects from the overview,
-     * the layout manager, the display and the card, and removes a pending card placement; then destroys the card
-     * (which also takes it out of the background group), the indicator and the client. Each step runs under its own
-     * guard (lib/teardown.js runEveryStep): one that throws is logged, rate-limited, and the rest still run.
+     * the layout manager, the display, the window manager, the workspace manager and the card, removes the covered
+     * check's client listener, and removes a pending card placement; then destroys the card (which also takes it out
+     * of the background group), the indicator and the client. Each step runs under its own guard (lib/teardown.js
+     * runEveryStep): one that throws is logged, rate-limited, and the rest still run.
      *
      * @returns {void}
      */
@@ -214,15 +345,25 @@ export default class ResourcePulseExtension extends Extension {
         const card = this._card;
         const indicator = this._indicator;
         const client = this._client;
+        const cardCoverListenerId = this._cardCoverListenerId;
         // Cleared first: whatever a step below throws, no later enable() or disable() finds a half-destroyed part.
         this._card = null;
         this._indicator = null;
         this._client = null;
+        this._cardCoverListenerId = null;
+        this._isOverviewVisible = false;
+        this._isCardVisible = IS_CARD_VISIBLE_BEFORE_COVER_CHECK;
         runEveryStep([
             {name: 'disconnect from the overview', run: () => Main.overview.disconnectObject(this)},
             {name: 'disconnect from the layout manager', run: () => Main.layoutManager.disconnectObject(this)},
             {name: 'disconnect from the display', run: () => global.display.disconnectObject(this)},
+            {name: 'disconnect from the window manager', run: () => global.window_manager.disconnectObject(this)},
+            {name: 'disconnect from the workspace manager', run: () => global.workspace_manager.disconnectObject(this)},
             {name: 'disconnect from the card', run: () => card?.disconnectObject(this)},
+            {name: 'remove the covered check\'s client listener', run: () => {
+                if (cardCoverListenerId !== null)
+                    client?.removeListener(cardCoverListenerId);
+            }},
             {name: 'cancel the pending card placement', run: () => this._cancelCardPlacement()},
             // The card first: it is the most visible part, and one left behind would show frozen numbers as live.
             {name: 'destroy the card', run: () => card?.destroy()},
