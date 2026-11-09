@@ -1321,6 +1321,71 @@ cpu_percent_exit=$?
 check "cost: --cpu-percent is Δ(utime+stime) / (CLK_TCK × window) × 100, over the window it was given" \
   "exit=$cpu_percent_exit percent=$cpu_percent_output slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
   "exit=0 percent=18.00 slept=$COST_WINDOW_SECONDS "
+
+# --service measures the sampler service the same way, found by its unit's
+# MainPID: a systemctl stub answers that one property and records the call,
+# behind the barrier, so no real user manager is ever asked. The fake root
+# holds a gnome-shell too, named by GNOME_SHELL_PID, which --service must never
+# measure. The service's stat moves from utime 10 / stime 5 to 40 / 20: 45 ticks
+# over 2 s at 250 Hz is 9.00% of one core (its neighbours move by other amounts).
+SERVICE_PROC_ROOT="$WIRING_TMP/proc-service"
+FAKE_SERVICE_PID=5151
+FAKE_SERVICE_RSS_KIB=52000
+SERVICE_UNIT_NAME="resource-pulse.service"
+make_fake_proc "$SERVICE_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+make_fake_proc "$SERVICE_PROC_ROOT" "$FAKE_SERVICE_PID" gjs "$FAKE_SERVICE_RSS_KIB"
+printf '%s (gjs) S 1 1 1 0 -1 0 0 0 0 3 10 5 7 9 20 0 1 0 1 0 0\n' "$FAKE_SERVICE_PID" \
+  >"$SERVICE_PROC_ROOT/$FAKE_SERVICE_PID/stat"
+COST_SERVICE_STAT_AFTER="$WIRING_TMP/cost-service-stat-after"
+printf '%s (gjs) S 1 1 1 0 -1 0 0 0 5 40 40 20 57 99 20 0 1 0 1 0 0\n' "$FAKE_SERVICE_PID" >"$COST_SERVICE_STAT_AFTER"
+COST_SYSTEMCTL_STUB_BIN="$WIRING_TMP/cost-systemctl-bin"
+COST_SYSTEMCTL_CALLS="$WIRING_TMP/cost-systemctl-calls"
+# shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
+install_stub "$COST_SYSTEMCTL_STUB_BIN" systemctl '#!/usr/bin/env bash
+printf "%s\n" "$*" >>"$COST_SYSTEMCTL_CALLS"
+[[ "$*" == "--user show -p MainPID --value resource-pulse.service" ]] \
+  || { printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64; }
+printf "%s\n" "$COST_SERVICE_MAIN_PID"
+exit "${COST_SYSTEMCTL_EXIT:-0}"'
+# cost_service_run <MainPID answer> <args...> [-- with COST_SYSTEMCTL_EXIT in the
+# caller's environment]; leaves COST_OUTPUT, COST_EXIT and the systemctl calls.
+cost_service_run() {
+  local main_pid_answer="$1"
+  shift
+  : >"$COST_SYSTEMCTL_CALLS"
+  : >"$COST_SLEEP_CALLS"
+  COST_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$COST_STUB_BIN:$COST_SYSTEMCTL_STUB_BIN:$PATH" \
+    GNOME_SHELL_PID=4242 PROC_ROOT="$SERVICE_PROC_ROOT" COST_SYSTEMCTL_CALLS="$COST_SYSTEMCTL_CALLS" \
+    COST_SERVICE_MAIN_PID="$main_pid_answer" COST_SLEEP_CALLS="$COST_SLEEP_CALLS" \
+    COST_STAT_AFTER="$COST_SERVICE_STAT_AFTER" COST_STAT_PATH="$SERVICE_PROC_ROOT/$FAKE_SERVICE_PID/stat" \
+    bash "$COST_SCRIPT" "$@" 2>&1)"
+  COST_EXIT=$?
+}
+SERVICE_MAIN_PID_CALL="--user show -p MainPID --value $SERVICE_UNIT_NAME;"
+cost_service_run "$FAKE_SERVICE_PID" --service --rss-kib
+check "cost: --service --rss-kib prints the service's VmRSS, found by its unit's MainPID, never gnome-shell's" \
+  "exit=$COST_EXIT rss=$COST_OUTPUT calls=[$(tr '\n' ';' <"$COST_SYSTEMCTL_CALLS")]" \
+  "exit=0 rss=$FAKE_SERVICE_RSS_KIB calls=[$SERVICE_MAIN_PID_CALL]"
+cost_service_run "$FAKE_SERVICE_PID" --service --cpu-percent "$COST_WINDOW_SECONDS"
+check "cost: --service --cpu-percent measures the service's own stat over the window, as for gnome-shell" \
+  "exit=$COST_EXIT percent=$COST_OUTPUT slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
+  "exit=0 percent=9.00 slept=$COST_WINDOW_SECONDS "
+cost_unmeasurable_summary=""
+cost_service_run 0 --service --rss-kib
+cost_unmeasurable_summary+="not-running=$COST_EXIT/$(grep -c -F 'is not running' <<<"$COST_OUTPUT")"
+cost_service_run '' --service --rss-kib
+cost_unmeasurable_summary+=" empty=$COST_EXIT/$(grep -c -F 'MainPID is not a number' <<<"$COST_OUTPUT")"
+COST_SYSTEMCTL_EXIT=1 cost_service_run "$FAKE_SERVICE_PID" --service --rss-kib
+cost_unmeasurable_summary+=" no-manager=$COST_EXIT/$(grep -c -F 'systemctl --user show' <<<"$COST_OUTPUT")"
+check "cost: --service exits 2 and says why when the service is not running, its MainPID is unreadable, or systemctl fails" \
+  "$cost_unmeasurable_summary" "not-running=2/1 empty=2/1 no-manager=2/1"
+cost_service_usage_summary=""
+cost_service_run "$FAKE_SERVICE_PID" --service --rss-check 50000
+cost_service_usage_summary+="rss-check=$COST_EXIT/$(grep -c -F -- '--service --rss-kib' <<<"$COST_OUTPUT")"
+cost_service_run "$FAKE_SERVICE_PID" --service
+cost_service_usage_summary+=" alone=$COST_EXIT/$(grep -c -F 'usage:' <<<"$COST_OUTPUT")"
+check "cost: --service --rss-check is refused (the service's RSS budget is absolute), and --service alone is a usage error" \
+  "$cost_service_usage_summary calls=$(wc -l <"$COST_SYSTEMCTL_CALLS")" "rss-check=2/1 alone=2/1 calls=0"
 # Spelled by pieces so this row's own source is not what it finds in the script.
 FORBIDDEN_READS_PATTERN="cmd""line|env""iron\\b|pgre""p|\\bps -"
 check "cost: the script never reads an argument list or environment, or runs ps" \
@@ -1885,7 +1950,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=440
+EXPECTED_ROWS=444
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

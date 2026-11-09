@@ -3,35 +3,49 @@
 # scripts/resource-pulse-cost.sh
 # ==============================
 #
-# Measure what the Resource Pulse extension costs the shell it runs in. The
-# extension lives inside gnome-shell, so its cost is gnome-shell's: take a
-# reading with the extension off, another with it on, and compare.
+# Measure what Resource Pulse costs. It has two parts, and each is measured on
+# its own:
+#   - the extension, which only draws, lives inside gnome-shell, so its cost is
+#     gnome-shell's: take a reading with the extension off, another with it on,
+#     and compare;
+#   - the sampler service (resource-pulse.service) is a process of its own:
+#     --service measures it directly, the same way.
 #
 # Usage:
-#   scripts/resource-pulse-cost.sh --cpu-percent <seconds>   gnome-shell CPU over a window,
-#                                                            as a % of ONE core
-#   scripts/resource-pulse-cost.sh --rss-kib                 gnome-shell resident memory, KiB
+#   scripts/resource-pulse-cost.sh [--service] --cpu-percent <seconds>
+#       CPU over a window, as a % of ONE core
+#   scripts/resource-pulse-cost.sh [--service] --rss-kib
+#       resident memory, KiB
 #   scripts/resource-pulse-cost.sh --rss-check <baseline_kib>
-#       exit 0 when resident memory grew by at most RSS_GROWTH_TOLERANCE_MIB since the
-#       baseline, 1 otherwise; prints both numbers either way
+#       gnome-shell only: exit 0 when its resident memory grew by at most
+#       RSS_GROWTH_TOLERANCE_MIB since the baseline, 1 otherwise; prints both
+#       numbers either way. The service's RSS budget is absolute, not a growth
+#       (at most SERVICE_RSS_BUDGET_MIB): read it with --service --rss-kib.
 #
 # Finding gnome-shell: the one process of this user whose comm is "gnome-shell".
 # GNOME_SHELL_PID names it outright. More than one candidate, or none, is exit 2:
 # a guess would measure the wrong process and look like a result.
+# Finding the service: its unit's MainPID, from
+# `systemctl --user show -p MainPID --value resource-pulse.service`. MainPID 0
+# (not running) is exit 2.
 #
 # Reads only <proc root>/<pid>/comm, /stat and /status: no argument list, no
 # environment and no process-listing tool, all of which print what other
 # processes were started with and so end up in a transcript.
 #
 # Environment: PROC_ROOT (default /proc, overridable for the test fixture),
-#              GNOME_SHELL_PID.
+#              GNOME_SHELL_PID (never consulted with --service).
 # Exit: 0 ok, 1 --rss-check failed, 2 could not measure or bad usage.
 
 set -uo pipefail
 
 readonly PROC_ROOT="${PROC_ROOT:-/proc}"
 readonly SHELL_COMM="gnome-shell"
+readonly SERVICE_UNIT="resource-pulse.service"
+readonly SERVICE_FLAG="--service"
 readonly RSS_GROWTH_TOLERANCE_MIB=64
+# The design's budget for the service's resident memory (docs/GNOME_CONFIGURATION_GUIDE.md).
+readonly SERVICE_RSS_BUDGET_MIB=64
 readonly KIB_PER_MIB=1024
 readonly EXIT_BAD_USAGE_OR_NO_MEASUREMENT=2
 
@@ -71,6 +85,33 @@ find_gnome_shell_pid() {
 }
 
 #######################################
+# Print the pid of the sampler service: its unit's MainPID. Die when systemctl
+# cannot answer, or the unit has no running main process (MainPID 0).
+#######################################
+find_service_pid() {
+    local main_pid
+    main_pid="$(systemctl --user show -p MainPID --value "$SERVICE_UNIT")" \
+        || die "systemctl --user show $SERVICE_UNIT failed: is a user manager running?"
+    [[ "$main_pid" =~ ^[0-9]+$ ]] || die "$SERVICE_UNIT's MainPID is not a number: '$main_pid'"
+    (( main_pid > 0 )) \
+        || die "$SERVICE_UNIT is not running (MainPID 0): its extension starts it, or: systemctl --user start $SERVICE_UNIT"
+    printf '%s' "$main_pid"
+}
+
+#######################################
+# Print the pid of what is measured: the sampler service, or gnome-shell.
+# Arguments:
+#   $1 - "service" or "gnome-shell"
+#######################################
+find_measured_pid() {
+    if [[ "$1" == service ]]; then
+        find_service_pid
+    else
+        find_gnome_shell_pid
+    fi
+}
+
+#######################################
 # Print the resident set size of a process in KiB, from its status file.
 # Arguments:
 #   $1 - pid
@@ -107,7 +148,7 @@ read_cpu_ticks() {
 }
 
 #######################################
-# Print gnome-shell's CPU use over a window as a percent of one core.
+# Print a process's CPU use over a window as a percent of one core.
 # Arguments:
 #   $1 - pid
 #   $2 - window length in seconds (positive integer)
@@ -140,21 +181,28 @@ check_rss_growth() {
 }
 
 main() {
-    local mode="${1:-}" gnome_shell_pid
+    local measured="gnome-shell" mode measured_pid
+    if [[ "${1:-}" == "$SERVICE_FLAG" ]]; then
+        measured="service"
+        shift
+    fi
+    mode="${1:-}"
     case "$mode" in
         --cpu-percent)
-            [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || die "usage: --cpu-percent <whole seconds>"
-            gnome_shell_pid="$(find_gnome_shell_pid)" || exit $?
-            measure_cpu_percent "$gnome_shell_pid" "$2" ;;
+            [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || die "usage: [$SERVICE_FLAG] --cpu-percent <whole seconds>"
+            measured_pid="$(find_measured_pid "$measured")" || exit $?
+            measure_cpu_percent "$measured_pid" "$2" ;;
         --rss-kib)
-            gnome_shell_pid="$(find_gnome_shell_pid)" || exit $?
-            read_rss_kib "$gnome_shell_pid" || exit $?
+            measured_pid="$(find_measured_pid "$measured")" || exit $?
+            read_rss_kib "$measured_pid" || exit $?
             printf '\n' ;;
         --rss-check)
+            [[ "$measured" == gnome-shell ]] || die "--rss-check is gnome-shell's growth tripwire; the service's" \
+                "budget is absolute: $SERVICE_FLAG --rss-kib must read at most $(( SERVICE_RSS_BUDGET_MIB * KIB_PER_MIB ))"
             [[ -n "${2:-}" ]] || die "usage: --rss-check <baseline_kib>"
-            gnome_shell_pid="$(find_gnome_shell_pid)" || exit $?
-            check_rss_growth "$gnome_shell_pid" "$2" ;;
-        *) die "usage: $0 --cpu-percent <seconds> | --rss-kib | --rss-check <baseline_kib>" ;;
+            measured_pid="$(find_gnome_shell_pid)" || exit $?
+            check_rss_growth "$measured_pid" "$2" ;;
+        *) die "usage: $0 [$SERVICE_FLAG] --cpu-percent <seconds> | [$SERVICE_FLAG] --rss-kib | --rss-check <baseline_kib>" ;;
     esac
 }
 

@@ -186,7 +186,7 @@ longer scan interval (`APP_SCAN_INTERVAL_SECONDS`), never a shorter history.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (440 checks) runs the `gjs -m` unit tests of the pure modules
+`scripts/test-resource-pulse.sh` (444 checks) runs the `gjs -m` unit tests of the pure modules
 against fixtures, parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 exercises `genable_extension` and the cost script against a stateful `gsettings` stub. It is
 hermetic: it never touches the real session.
