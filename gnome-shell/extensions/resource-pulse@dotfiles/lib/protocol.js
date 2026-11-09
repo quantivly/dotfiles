@@ -34,7 +34,7 @@ export const SAMPLE_SIGNAL_NAME = 'Sample';
 export const SAMPLE_SIGNAL_SIGNATURE = '(s)';
 /**
  * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side and a proxy on the client side:
- * - GetState() → s: the state JSON (buildStatePayload), for a client that has just connected;
+ * - GetState() → s: the state JSON (buildStatePayload), for a client that has just connected, and for gnome-status;
  * - WatchDetail() and UnwatchDetail(): a caller holds a detail watch while its card is visible or its dropdown open;
  *   the service counts them per caller and drops a caller's watches when its connection closes;
  * - Sample(s): the sample JSON (buildSamplePayload), once per publish.
@@ -77,17 +77,24 @@ const TOP_MEMORY_VALUE_FIELD = 'memoryBytes';
 /**
  * The JSON GetState returns: everything a client needs to draw from scratch.
  *
+ * latestSampledAtUsec is written before the snapshot on purpose: gnome-status reads it out of gdbus's text with a
+ * pattern and takes the first match, which is then always this top-level field.
+ *
  * @param {object} state - The service's state.
  * @param {object|null} state.snapshot - The latest snapshot (service/sampler.js's Snapshot), or null before the first.
  * @param {{cpu: Array<number|null>, memory: Array<number|null>}} state.histories - Both histories, oldest first.
  * @param {number} state.serviceStartedAtUsec - Real time the service started, in microseconds.
+ * @param {number|null} [state.latestSampledAtUsec] - Real time of the latest publish (its Sample's sampledAtUsec), in
+ *     microseconds; null before the first. Real time, unlike the snapshot's monotonic takenAtUsec, so a shell outside
+ *     the service can tell the age of the last sample.
  * @param {number} state.sequence - The sequence of the latest Sample sent; 0 before the first.
  * @returns {string} The JSON, with `protocol` set to PROTOCOL_VERSION.
  */
-export function buildStatePayload({snapshot, histories, serviceStartedAtUsec, sequence}) {
+export function buildStatePayload({snapshot, histories, serviceStartedAtUsec, latestSampledAtUsec = null, sequence}) {
     return JSON.stringify({
         protocol: PROTOCOL_VERSION,
         serviceStartedAtUsec,
+        latestSampledAtUsec,
         sequence,
         snapshot,
         histories: {cpu: histories.cpu, memory: histories.memory},
@@ -110,11 +117,13 @@ export function buildSamplePayload({snapshot, appendedHistory, sequence, sampled
 }
 
 /**
- * Reads GetState's JSON, skew-tolerantly (see the file header).
+ * Reads GetState's JSON, skew-tolerantly (see the file header). latestSampledAtUsec is optional: a service from before
+ * it existed sends none, which reads as null like any other missing field.
  *
  * @param {*} text - The JSON text.
  * @returns {{protocol: number|null, snapshot: object|null, histories: Histories, serviceStartedAtUsec: number|null,
- *     sequence: number|null}|null} The state, or null for text that is not a JSON object.
+ *     latestSampledAtUsec: number|null, sequence: number|null}|null} The state, or null for text that is not a JSON
+ *     object.
  */
 export function parseStatePayload(text) {
     const payload = parseJsonObject(text);
@@ -125,6 +134,7 @@ export function parseStatePayload(text) {
         snapshot: parseSnapshot(payload.snapshot),
         histories: parseHistories(payload.histories),
         serviceStartedAtUsec: finiteNumberOrNull(payload.serviceStartedAtUsec),
+        latestSampledAtUsec: finiteNumberOrNull(payload.latestSampledAtUsec),
         sequence: countOrNull(payload.sequence),
     };
 }

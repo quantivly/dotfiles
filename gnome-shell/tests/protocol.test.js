@@ -20,6 +20,8 @@ const FIXTURE_TICK_SPACING_USEC = 6_000_000;
 const FIXTURE_CLOCK_LABEL = '14:02';
 const SERVICE_STARTED_AT_USEC = 1_794_000_000_000_000;
 const SAMPLED_AT_USEC = 1_794_000_002_000_000;
+/** Real time of the latest publish, as GetState reports it: a little after SAMPLED_AT_USEC, so the two never mix. */
+const LATEST_SAMPLED_AT_USEC = 1_794_000_004_000_000;
 const SEQUENCE = 7;
 
 /** A snapshot with every field set, in the Snapshot typedef's order (service/sampler.js). */
@@ -48,7 +50,7 @@ const APPENDED_HISTORY = {cpu: 0.5, memory: null};
 function fullStatePayload() {
     return buildStatePayload({
         snapshot: FULL_SNAPSHOT, histories: HISTORIES, serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
-        sequence: SEQUENCE,
+        latestSampledAtUsec: LATEST_SAMPLED_AT_USEC, sequence: SEQUENCE,
     });
 }
 
@@ -142,19 +144,33 @@ test('protocol: a state payload round-trips, with protocol 1', () => {
         snapshot: FULL_SNAPSHOT,
         histories: HISTORIES,
         serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
+        latestSampledAtUsec: LATEST_SAMPLED_AT_USEC,
         sequence: SEQUENCE,
     });
 });
 
-test('protocol: a state payload before the first sample round-trips with a null snapshot, sequence 0', () => {
-    const payload = buildStatePayload({
-        snapshot: null, histories: {cpu: [], memory: []}, serviceStartedAtUsec: SERVICE_STARTED_AT_USEC, sequence: 0,
+test('protocol: a state payload before the first sample round-trips with a null snapshot and sample time, sequence 0',
+    () => {
+        const payload = buildStatePayload({
+            snapshot: null, histories: {cpu: [], memory: []}, serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
+            latestSampledAtUsec: null, sequence: 0,
+        });
+        assertEqual(parseStatePayload(payload), {
+            protocol: 1, snapshot: null, histories: {cpu: [], memory: []},
+            serviceStartedAtUsec: SERVICE_STARTED_AT_USEC, latestSampledAtUsec: null, sequence: 0,
+        });
     });
-    assertEqual(parseStatePayload(payload), {
-        protocol: 1, snapshot: null, histories: {cpu: [], memory: []}, serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
-        sequence: 0,
+
+test('protocol: GetState\'s latestSampledAtUsec comes before the snapshot, so a shell finds the top-level one first',
+    () => {
+        // gnome-status reads it out of gdbus's text with a pattern, taking the first match; a nested field of the
+        // same name in a later service could only come after it.
+        const payload = fullStatePayload();
+        const latestSampledAtOffset = payload.indexOf('"latestSampledAtUsec":');
+        const snapshotOffset = payload.indexOf('"snapshot":');
+        assertEqual({isPresent: latestSampledAtOffset >= 0, isBeforeSnapshot: latestSampledAtOffset < snapshotOffset},
+            {isPresent: true, isBeforeSnapshot: true});
     });
-});
 
 test('protocol: a sample payload round-trips', () => {
     assertEqual(parseSamplePayload(fullSamplePayload()), {
@@ -231,8 +247,26 @@ test('protocol skew: a mistyped field is null for that field only (a history val
         },
         histories: {cpu: [0.25, null, 0.5], memory: null},
         serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
+        latestSampledAtUsec: LATEST_SAMPLED_AT_USEC,
         sequence: null,
     });
+});
+
+test('protocol skew: a state payload without latestSampledAtUsec (an older service), or with one that is not a ' +
+    'finite number, reads it as null and every other field intact', () => {
+    const editedLatestSampledAtValues = {absent: undefined, text: 'soon', flag: true, list: [1]};
+    const parsedStates = Object.fromEntries(Object.entries(editedLatestSampledAtValues).map(([caseName, value]) => {
+        const statePayload = editedPayload(fullStatePayload(), payloadObject => {
+            if (value === undefined)
+                delete payloadObject.latestSampledAtUsec;
+            else
+                payloadObject.latestSampledAtUsec = value;
+        });
+        return [caseName, parseStatePayload(statePayload)];
+    }));
+    const expectedState = {...parseStatePayload(fullStatePayload()), latestSampledAtUsec: null};
+    assertEqual(parsedStates, Object.fromEntries(Object.keys(editedLatestSampledAtValues).map(caseName =>
+        [caseName, expectedState])));
 });
 
 test('protocol skew: an app entry without a groupKey is null, so two such entries never read as one app', () => {
@@ -359,7 +393,8 @@ test('protocol skew: a missing snapshot, histories or appendedHistory gives null
     assertEqual({state: parseStatePayload(stateWithoutParts), sample: parseSamplePayload(sampleWithoutParts)}, {
         state: {
             protocol: 1, snapshot: null, histories: {cpu: null, memory: null},
-            serviceStartedAtUsec: SERVICE_STARTED_AT_USEC, sequence: SEQUENCE,
+            serviceStartedAtUsec: SERVICE_STARTED_AT_USEC, latestSampledAtUsec: LATEST_SAMPLED_AT_USEC,
+            sequence: SEQUENCE,
         },
         sample: {snapshot: null, appendedHistory: null, sequence: SEQUENCE, sampledAtUsec: SAMPLED_AT_USEC},
     });

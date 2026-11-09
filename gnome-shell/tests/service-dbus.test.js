@@ -33,6 +33,8 @@ const SAMPLE_SIGNAL_TIMEOUT_MS = 2000;
 const POLL_INTERVAL_MS = 20;
 const SERVICE_STARTED_AT_USEC = 1_794_000_000_000_000;
 const SAMPLED_AT_USEC = 1_794_000_002_000_000;
+/** How much later a second publish happens, in real microseconds. */
+const LATER_PUBLISH_OFFSET_USEC = 2_000_000;
 const STATE_REPLY_TYPE = new GLib.VariantType('(s)');
 const SAMPLE_SIGNAL_NAME = 'Sample';
 const GET_STATE_METHOD = 'GetState';
@@ -164,16 +166,18 @@ export function openPrivateBusConnection() {
  * every connection the row opened whatever happens.
  *
  * @param {(fixture: object) => Promise<void>} body - The row; gets {sampler, service, serviceName, openClient}.
+ * @param {object} [options] - The service's clock.
+ * @param {() => number} [options.nowRealUsec] - Real time now, in microseconds; SAMPLED_AT_USEC by default.
  * @returns {Promise<void>}
  */
-async function withExportedService(body) {
+async function withExportedService(body, {nowRealUsec = () => SAMPLED_AT_USEC} = {}) {
     const sampler = new FakeSampler();
     const serviceConnection = openPrivateBusConnection();
     const clientConnections = [];
     let service = null;
     try {
         service = new ResourcePulseDBusService(sampler, serviceConnection,
-            {serviceStartedAtUsec: SERVICE_STARTED_AT_USEC, nowRealUsec: () => SAMPLED_AT_USEC});
+            {serviceStartedAtUsec: SERVICE_STARTED_AT_USEC, nowRealUsec});
         await body({
             sampler,
             service,
@@ -280,6 +284,7 @@ test('service D-Bus: before any sample GetState answers protocol 1, sequence 0, 
             snapshot: null,
             histories: {cpu: [0.25, null], memory: [0.5, 0.6]},
             serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
+            latestSampledAtUsec: null,
             sequence: 0,
         });
     }));
@@ -307,10 +312,26 @@ test('service D-Bus: each publish sends one Sample (sequence from 1; a reveal ap
                 snapshot: REVEAL_SNAPSHOT,
                 histories: {cpu: [0.5], memory: [0.25]},
                 serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
+                latestSampledAtUsec: SAMPLED_AT_USEC,
                 sequence: 2,
             },
         });
     }));
+
+test('service D-Bus: GetState\'s latestSampledAtUsec is the real time of the latest publish, a reveal\'s included',
+    () => {
+        const publishRealTimesUsec = [SAMPLED_AT_USEC, SAMPLED_AT_USEC + LATER_PUBLISH_OFFSET_USEC];
+        const remainingRealTimesUsec = [...publishRealTimesUsec];
+        return withExportedService(async ({sampler, serviceName, openClient}) => {
+            const clientConnection = openClient();
+            sampler.publish(TICK_SNAPSHOT, TICK_APPENDED_HISTORY);
+            const afterTick = (await fetchState(clientConnection, serviceName)).latestSampledAtUsec;
+            sampler.publish(REVEAL_SNAPSHOT, null);
+            const afterReveal = (await fetchState(clientConnection, serviceName)).latestSampledAtUsec;
+            assertEqual({afterTick, afterReveal},
+                {afterTick: publishRealTimesUsec[0], afterReveal: publishRealTimesUsec[1]});
+        }, {nowRealUsec: () => remainingRealTimesUsec.shift()});
+    });
 
 test('service D-Bus: a caller that closes its connection holding a watch loses it: setDetailWatched(false) in 2 s',
     () => withExportedService(async ({sampler, serviceName, openClient}) => {

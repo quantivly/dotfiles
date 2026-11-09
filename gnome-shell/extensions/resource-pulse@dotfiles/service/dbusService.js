@@ -1,5 +1,6 @@
 // The sampler service's face on the session bus: lib/protocol.js's interface, exported for one ServiceSampler.
-// - GetState() answers the latest snapshot, both histories, the service's start time and the current sequence.
+// - GetState() answers the latest snapshot, both histories, the service's start time, the real time of the latest
+//   publish and the current sequence.
 // - Every sampler publish becomes one Sample signal, numbered from 1 for this service run.
 // - WatchDetail() / UnwatchDetail() are counted per caller (its unique bus name). A caller's watches all drop when its
 //   name vanishes, so a shell that crashes or disables the extension cannot leave a watch held. The sampler hears
@@ -51,6 +52,8 @@ export class ResourcePulseDBusService {
         this._nowRealUsec = nowRealUsec;
         this._errorLog = new RateLimitedLogger({nowUsec, write: logWriter});
         this._sequence = 0;
+        /** Real time of the latest publish, in microseconds (its Sample's sampledAtUsec); null before the first. */
+        this._latestSampledAtUsec = null;
         this._watchCountBySender = new Map();
         this._nameWatcherIdBySender = new Map();
         this._isDetailWatchedForSampler = false;
@@ -99,7 +102,8 @@ export class ResourcePulseDBusService {
     }
 
     /**
-     * GetState's JSON: the sampler's latest snapshot and both histories, the start time and the current sequence.
+     * GetState's JSON: the sampler's latest snapshot and both histories, the start time, the real time of the latest
+     * publish and the current sequence.
      *
      * @returns {string} The JSON (lib/protocol.js's buildStatePayload).
      */
@@ -108,13 +112,14 @@ export class ResourcePulseDBusService {
             snapshot: this._sampler.latestSnapshot,
             histories: {cpu: this._sampler.cpuHistory.values(), memory: this._sampler.memoryHistory.values()},
             serviceStartedAtUsec: this._serviceStartedAtUsec,
+            latestSampledAtUsec: this._latestSampledAtUsec,
             sequence: this._sequence,
         });
     }
 
     /**
-     * Sends one Sample for one sampler publish. Runs as a sampler listener, which logs a throw (a closed connection)
-     * and carries on; the sequence still moves on, so a client sees the gap.
+     * Sends one Sample for one sampler publish, and records its real time for GetState. Runs as a sampler listener,
+     * which logs a throw (a closed connection) and carries on; the sequence still moves on, so a client sees the gap.
      *
      * @param {object} snapshot - The snapshot published.
      * @param {{cpu: number|null, memory: number|null}|null} appendedHistory - What the publish appended; null for a
@@ -123,9 +128,9 @@ export class ResourcePulseDBusService {
      */
     _emitSample(snapshot, appendedHistory) {
         this._sequence += 1;
-        const samplePayload = buildSamplePayload({
-            snapshot, appendedHistory, sequence: this._sequence, sampledAtUsec: this._nowRealUsec(),
-        });
+        const sampledAtUsec = this._nowRealUsec();
+        this._latestSampledAtUsec = sampledAtUsec;
+        const samplePayload = buildSamplePayload({snapshot, appendedHistory, sequence: this._sequence, sampledAtUsec});
         const sampleParameters = new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, [samplePayload]);
         this._exportedObject.emit_signal(SAMPLE_SIGNAL_NAME, sampleParameters);
     }
