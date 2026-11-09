@@ -53,7 +53,7 @@ ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
 # Built at runtime so no token-shaped literal sits in the repo for a scanner to flag.
 FAKE_TOK="sk-ant-""oat01-FIXTUREtokenNOTREAL0123456789abcdef"
-MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo '
+MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo |claude-settings-render.sh --apply'
 
 # ---------------------------------------------------------------------------------------------
 # Stubs. Each logs "<tool> <args>" to $HOME/stub/calls.
@@ -201,6 +201,53 @@ STUB
     chmod +x "$b"/* "$1/stub/go/bin/go"
 }
 
+# A seed repo's ./install: it refuses on its fail flag, logs that it ran, then does dotbot's link
+# step in miniature for the `~/target: source` lines of its own install.conf.yaml. A regular file at
+# a target is first moved aside under dotbot's backup name (install.conf.yaml's `backup: true`;
+# dotbot/src/dotbot/plugins/link.py, _backup: <path>.dotbot-backup.<YYYYMMDD-HHMMSS>, local time).
+write_install_stub() {   # $1 = the file, $2 = its fail flag, $3 = its install-order word, $4 = its ran log
+    {
+        printf '#!/usr/bin/env bash\nFAIL_FLAG=%q ORDER_WORD=%q RAN_LOG=%q\n' "$2" "$3" "$4"
+        cat <<'STUB'
+[[ -e "$HOME/stub/$FAIL_FLAG" ]] && exit 1
+echo "$ORDER_WORD" >>"$HOME/stub/install-order"
+echo ran >>"$HOME/stub/$RAN_LOG"
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
+while IFS=$'\t' read -r target source; do
+    live="$HOME/${target#\~/}"
+    mkdir -p "$(dirname "$live")"
+    [[ -e "$live" && ! -L "$live" ]] && mv "$live" "$live.dotbot-backup.$(date +%Y%m%d-%H%M%S)"
+    ln -sfn "$PWD/$source" "$live"
+done < <(awk '/^ +~\// { sub(/^ +/, ""); i = index($0, ": "); print substr($0, 1, i - 1) "\t" substr($0, i + 2) }' install.conf.yaml)
+STUB
+    } >"$1"
+    chmod +x "$1"
+}
+
+# The settings renderer: --check exits $HOME/stub/render-rc (0 when there is none) and at 2 says
+# why on stderr, as the real one does; --apply renders, so the next --check is level. Two flags
+# break --apply: render-apply-fails (it cannot write: exit 2, with its reason) and
+# render-apply-no-op (exit 0, the file left as it was).
+write_render_stub() {   # $1 = the file
+    cat >"$1" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "claude-settings-render.sh $*" >>"$S/calls"
+case "$1" in
+    --check)
+        rc="$(cat "$S/render-rc" 2>/dev/null || echo 0)"
+        [[ "$rc" == 2 ]] && echo "claude-settings-render: settings.json is a symlink" >&2
+        exit "$rc" ;;
+    --apply)
+        if [[ -e "$S/render-apply-fails" ]]; then
+            echo "claude-settings-render: could not back up settings.json" >&2
+            exit 2
+        fi
+        [[ -e "$S/render-apply-no-op" ]] || echo 0 >"$S/render-rc" ;;
+esac
+STUB
+    chmod +x "$1"
+}
+
 # ---------------------------------------------------------------------------------------------
 # A LEVEL dev, per case: C = case dir, H = its $HOME, GH = its fake GitHub.
 # ---------------------------------------------------------------------------------------------
@@ -223,13 +270,17 @@ new_case() {
     mkdir -p "$H/.claude/skills/herdr"; echo old >"$H/.claude/skills/herdr/SKILL.md"
     : >"$H/stub/calls"
 
-    # dotfiles: origin with an install script and the linear-key plugin; dev at origin/main.
+    # dotfiles: origin with an install script, two declared links, the linear-key plugin, the
+    # settings renderer (a stub) and the REAL link checker, all tracked; dev at origin/main.
     local w="$C/seed-dotfiles"
     git init -q -b main "$w"
-    mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin"
+    mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin" "$w/config" "$w/scripts"
     # install-order is shared with dotfiles-local's stub, so a row can read which ran first.
-    # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
-    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails" ]] && exit 1\necho public >>"$HOME/stub/install-order"\necho ran >>"$HOME/stub/install-ran"\n' >"$w/install"
+    write_install_stub "$w/install" install-fails public install-ran
+    printf -- '- link:\n    ~/.x: config/x\n    ~/.config/fixture/y.conf: config/y.conf\n' >"$w/install.conf.yaml"
+    echo x >"$w/config/x"; echo y >"$w/config/y.conf"
+    cp "$DOTFILES/scripts/check-links.sh" "$w/scripts/check-links.sh"
+    write_render_stub "$w/scripts/claude-settings-render.sh"
     echo '{"name":"linear-key","version":"1.0.0"}' >"$w/claude/plugins/linear-key/.claude-plugin/plugin.json"
     echo '{"name":"dotfiles","plugins":[{"name":"linear-key"}]}' >"$w/claude/plugins/.claude-plugin/marketplace.json"
     echo one >"$w/a.txt"
@@ -240,12 +291,11 @@ new_case() {
     git -C "$H/.dotfiles" rev-parse HEAD >"$H/.local/state/host-sync/installed-head"
 
     # dotfiles-local, the private overlay, with the host profile `p` marked: an install stub of the
-    # same shape, a manifest declaring two links (Task 6's rows use them) and the profile itself;
-    # cloned and installed, as a level host has it.
+    # same shape, a manifest declaring two links and the profile itself; cloned and installed, as a
+    # level host has it.
     w="$C/seed-dotfiles-local"
     git init -q -b main "$w"; mkdir -p "$w/hosts" "$w/claude" "$w/config"
-    # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
-    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails-local" ]] && exit 1\necho local >>"$HOME/stub/install-order"\necho ran >>"$HOME/stub/local-install-ran"\n' >"$w/install"
+    write_install_stub "$w/install" install-fails-local local local-install-ran
     printf -- '- link:\n    ~/.claude/CLAUDE.md: claude/CLAUDE.md\n    ~/.config/overlay/note.txt: config/note.txt\n' >"$w/install.conf.yaml"
     echo '# the overlay instructions' >"$w/claude/CLAUDE.md"; echo note >"$w/config/note.txt"
     echo '{"tenants":["quantivly"]}' >"$w/hosts/p.json"
@@ -254,6 +304,11 @@ new_case() {
     git clone -q "$GH/ZviBaratz/dotfiles-local.git" "$H/.dotfiles-local"
     git -C "$H/.dotfiles-local" rev-parse HEAD >"$H/.local/state/host-sync/installed-head-dotfiles-local"
     echo p >"$H/.config/claude-host-profile"
+    # A level host has run both ./installs, so every declared link is in place. Their logs are
+    # cleared, so a row reads only what the run under test did.
+    { (cd "$H/.dotfiles" && HOME="$H" bash ./install) && (cd "$H/.dotfiles-local" && HOME="$H" bash ./install); } ||
+        fatal "the fixture's ./install stubs could not link the declared links"
+    rm -f "$H/stub/install-order" "$H/stub/install-ran" "$H/stub/local-install-ran"
 
     # timer armed. ./install links both units on every host (plain files stand in for the links);
     # only host-sync.timer is enabled, which puts its link in the .wants directory.
@@ -487,6 +542,7 @@ jq '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z" | del(.dotfiles)' "$H/.c
 jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true | .enabledPlugins["linear@claude-plugins-official"] = true' \
     "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
 rm -rf "$H/.local/state/host-sync" "$H/.config/host-sync/armed"; touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
+echo 1 >"$H/stub/render-rc"; rm "$H/.x"   # settings and a link, each one gate from its apply path
 # Every path under $HOME with its size, mode and mtime, less the stub log and any path given.
 snapshot() {   # $@ = further paths to leave out
     local leave_out=(-path "$H/stub") path
@@ -497,6 +553,8 @@ before="$(snapshot)"
 run_level --check --clone beta=quantivly/beta
 check "a fully drifted --check exits 1" "$RC" 1
 check "--check changes no file, directory or mode under \$HOME" "$(diff <(echo "$before") <(snapshot) | head -n 5)" ""
+check "a fully drifted --check calls nothing mutating and runs no ./install" \
+    "$(mutations)/$(present "$H/stub/install-ran")/$(present "$H/stub/local-install-ran")" 0/gone/gone
 
 echo "== dotfiles"
 new_case
@@ -824,6 +882,169 @@ mapfile -t F < <(facts | grep -v -e '^--herdr' -e "^$HV\$" -e "^$ARCH\$" -e "^$H
 run --apply "${F[@]}"
 has   "no laptop facts (the timer): herdr is only reported" "$OUT" "version parity is laptop-driven"
 hasnt "no laptop facts: no restart" "$(calls)" "systemctl --user restart"
+
+echo "== settings and links"
+# The rows' glyph and area, as row() prints them, so a needle also pins the glyph.
+SETTINGS_OK="$(printf '✓ %-14s ' settings)"; SETTINGS_DRIFT="$(printf '✗ %-14s ' settings)"
+SETTINGS_OPER="$(printf '⚠ %-14s ' settings)"; SETTINGS_INFO="$(printf '· %-14s ' settings)"
+LINKS_OK="$(printf '✓ %-14s ' links)"; LINKS_DRIFT="$(printf '✗ %-14s ' links)"; LINKS_OPER="$(printf '⚠ %-14s ' links)"
+LINKS_AREA="$(printf '%-14s ' links)"
+renderer_calls() { grep '^claude-settings-render.sh' "$H/stub/calls" | paste -sd'|'; }
+ran_count() { if [[ -e "$H/stub/$1" ]]; then wc -l <"$H/stub/$1"; else echo 0; fi; }   # $1 = a stub's ran log
+# What a second --apply may change besides the stub log: the state dir, and the fetch bookkeeping
+# every --apply leaves in both checkouts (FETCH_HEAD, the objects dir's mtime).
+leave_out_for_second_apply() {
+    printf '%s\n' "$H/.local/state/host-sync" "$H/.dotfiles/.git/FETCH_HEAD" "$H/.dotfiles/.git/objects" \
+        "$H/.dotfiles-local/.git/FETCH_HEAD" "$H/.dotfiles-local/.git/objects"
+}
+
+new_case
+run_level --check
+has   "settings: level → ✓" "$OUT" "${SETTINGS_OK}settings.json renders to itself (profile p)"
+check "settings: level → ✓: the renderer is called once, with --check" "$(renderer_calls)" "claude-settings-render.sh --check"
+has   "links: level → one ✓ per repo: dotfiles" "$OUT" "${LINKS_OK}dotfiles: 2 declared links in place"
+has   "links: level → one ✓ per repo: dotfiles-local" "$OUT" "${LINKS_OK}dotfiles-local: 2 declared links in place"
+
+new_case
+rm "$H/.config/claude-host-profile"
+run_level --apply
+has   "settings: no marker → · and the renderer is not called: the · row" "$OUT" \
+    "${SETTINGS_INFO}no host profile; settings.json is not rendered here"
+check "settings: no marker → · and the renderer is not called: not even by --apply" "$(renderer_calls)" ""
+
+new_case
+echo 1 >"$H/stub/render-rc"
+run_level --check
+has   "settings: drift → ✗ in --check, --apply renders then re-checks: the ✗ row" "$OUT" \
+    "${SETTINGS_DRIFT}settings.json differs from its render"
+check "settings: drift → ✗ in --check, --apply renders then re-checks: --check renders nothing, exit 1" \
+    "$(renderer_calls)/$RC" "claude-settings-render.sh --check/1"
+reset_calls; run_level --apply
+check "settings: drift → ✗ in --check, --apply renders then re-checks: --check, --apply, --check" "$(renderer_calls)" \
+    "claude-settings-render.sh --check|claude-settings-render.sh --apply|claude-settings-render.sh --check"
+has   "settings: drift → ✗ in --check, --apply renders then re-checks: the ✓ row" "$OUT" "${SETTINGS_OK}rendered (profile p)"
+check "settings: drift → ✗ in --check, --apply renders then re-checks: exit 0" "$RC" 0
+
+new_case
+echo 1 >"$H/stub/render-rc"; touch "$H/stub/render-apply-no-op"
+run_level --apply
+has   "settings: an --apply that leaves drift is ✗" "$OUT" \
+    "${SETTINGS_DRIFT}settings.json still differs from its render after claude-settings-render --apply"
+echo 1 >"$H/stub/render-rc"; touch "$H/stub/render-apply-fails"
+reset_calls; run_level --apply
+has   "settings: an --apply that cannot run → ⚠ with its first line, not re-checked" "$OUT" \
+    "${SETTINGS_OPER}claude-settings-render could not run: claude-settings-render: could not back up settings.json"
+check "settings: an --apply that cannot run → ⚠ with its first line, not re-checked: the calls" "$(renderer_calls)" \
+    "claude-settings-render.sh --check|claude-settings-render.sh --apply"
+
+new_case
+echo 2 >"$H/stub/render-rc"
+run_level --apply
+has   "settings: a renderer that cannot run → ⚠ with its first line, no --apply" "$OUT" \
+    "${SETTINGS_OPER}claude-settings-render could not run: claude-settings-render: settings.json is a symlink"
+check "settings: a renderer that cannot run → ⚠ with its first line, no --apply: only --check, exit 0" \
+    "$(renderer_calls)/$RC" "claude-settings-render.sh --check/0"
+
+new_case
+rm "$H/.dotfiles/scripts/claude-settings-render.sh"
+run_level --check
+has   "settings: a renderer that is not there → ⚠ could not run (exit 127)" "$OUT" \
+    "${SETTINGS_OPER}claude-settings-render could not run (exit 127)"
+
+new_case
+rm -rf "$H/.dotfiles-local"
+run_level --check
+check "links: dotfiles-local absent → no dotfiles-local links row: the public one's only" "$(area_rows links)" 1
+hasnt "links: dotfiles-local absent → no dotfiles-local links row" "$OUT" "${LINKS_AREA}dotfiles-local:"
+
+new_case
+rm "$H/.x"
+run_level --check
+has   "links: a missing link is drift; --apply runs that repo's ./install and re-checks: the ✗ row" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: 1 link(s) to fix: ~/.x"
+check "links: a missing link is drift; --apply runs that repo's ./install and re-checks: --check runs no ./install, exit 1" \
+    "$(ran_count install-ran)/$(present "$H/.x")/$RC" 0/gone/1
+run_level --apply
+check "links: a missing link is drift; --apply runs that repo's ./install and re-checks: that repo's ./install, once" \
+    "$(ran_count install-ran)/$(ran_count local-install-ran)" 1/0
+check "links: a missing link is drift; --apply runs that repo's ./install and re-checks: the link" \
+    "$(readlink "$H/.x")" "$H/.dotfiles/config/x"
+has   "links: a missing link is drift; --apply runs that repo's ./install and re-checks: the ✓ row" "$OUT" \
+    "${LINKS_OK}dotfiles: 1 link(s) relinked"
+check "links: a missing link is drift; --apply runs that repo's ./install and re-checks: exit 0" "$RC" 0
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"
+run_level --apply
+check "links: a second --apply after a relink runs no ./install, nothing mutating" \
+    "$(ran_count install-ran)/$(mutations)" 1/0
+check "links: a second --apply after a relink changes no file" \
+    "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)" ""
+
+new_case
+rm "$H/.x"; cp "$H/.dotfiles/config/x" "$H/.x"
+run_level --check
+has   "links: a regular file with identical content is drift ./install fixes: the ✗ row" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: 1 link(s) to fix: ~/.x"
+run_level --apply
+check "links: a regular file with identical content is drift ./install fixes: relinked" "$(readlink "$H/.x")" "$H/.dotfiles/config/x"
+
+# An older backup is already beside it, from some earlier relink: the row names this run's.
+new_case
+rm "$H/.x"; echo edited >"$H/.x"; echo older >"$H/.x.dotbot-backup.20200101-000000"
+run_level --check
+has   "links: a regular file with other content is relinked and its backup named: the ✗ row" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: ~/.x is a regular file whose content differs from the repo; ./install backs it up beside it and relinks"
+run_level --apply
+backups=("$H"/.x.dotbot-backup.*); newest_backup="${backups[-1]}"
+check "links: a regular file with other content is relinked and its backup named: the link" "$(readlink "$H/.x")" "$H/.dotfiles/config/x"
+check "links: a regular file with other content is relinked and its backup named: a new backup, with the old content" \
+    "${#backups[@]}/$(cat "$newest_backup")" 2/edited
+has   "links: a regular file with other content is relinked and its backup named: the ✓ row names the newest" "$OUT" \
+    "${LINKS_OK}dotfiles: 1 link(s) relinked; the old ~/.x is kept as ~${newest_backup#"$H"}"
+
+new_case
+rm "$H/.dotfiles/config/y.conf"
+run_level --apply
+has   "links: a source missing from the checkout is a person's step: ⚠ naming the source" "$OUT" \
+    "${LINKS_OPER}dotfiles: config/y.conf is declared but not in the checkout"
+check "links: a source missing from the checkout is a person's step: ./install not run for it alone, exit 0" \
+    "$(ran_count install-ran)/$RC" 0/0
+
+new_case
+rm "$H/.dotfiles/install.conf.yaml"
+run_level --apply
+has   "links: a checker that cannot run → ⚠ (exit 2)" "$OUT" "${LINKS_OPER}dotfiles: check-links could not run (exit 2)"
+has   "links: a checker that cannot run → ⚠ (exit 2): its reason on the line below" "$OUT" \
+    "$(printf '\n        ')COULD NOT RUN: $H/.dotfiles/install.conf.yaml is missing or unreadable"
+check "links: a checker that cannot run → ⚠ (exit 2): no ./install, exit 0" "$(ran_count install-ran)/$RC" 0/0
+rm "$H/.dotfiles/scripts/check-links.sh"
+run_level --check
+has   "links: a checker that is not there → ⚠ (exit 127)" "$OUT" "${LINKS_OPER}dotfiles: check-links could not run (exit 127)"
+
+# A state added to the checker after host-sync: exit 1 with nothing this script can classify.
+new_case
+printf '#!/bin/sh\nprintf "a-new-state\\t~/.x\\tconfig/x\\n"\nexit 1\n' >"$H/.dotfiles/scripts/check-links.sh"
+run_level --check
+has   "links: a fault in a state host-sync does not know is ⚠, never ✓" "$OUT" \
+    "${LINKS_OPER}dotfiles: check-links reports a fault in a state host-sync does not know (exit 1)"
+
+new_case
+rm "$H/.x"; ln -sfn "$C/elsewhere" "$H/.config/fixture/y.conf"; rm "$H/.claude/CLAUDE.md"
+run_level --check
+has   "links: several faults in one repo are one ✗ row" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: 2 link(s) to fix: ~/.x, ~/.config/fixture/y.conf"
+run_level --apply
+check "links: ./install runs once per repo per run even with several faults" \
+    "$(ran_count install-ran)/$(ran_count local-install-ran)" 1/1
+has   "links: ./install runs once per repo per run even with several faults: both relinked" "$OUT" \
+    "${LINKS_OK}dotfiles: 2 link(s) relinked"
+
+new_case
+rm "$H/.x"; touch "$H/stub/install-fails"
+run_level --apply
+has   "links: an ./install that leaves a link out of place is ✗, naming its log" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: still 1 to fix after ./install (~/.x); log: ~/.local/state/host-sync/install-links-dotfiles.log"
+check "links: an ./install that leaves a link out of place is ✗, naming its log: exit 1" "$RC" 1
 
 echo "== plugins"
 new_case
@@ -1846,7 +2067,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=441
+EXPECTED_ROWS=487
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

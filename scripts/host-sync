@@ -64,6 +64,8 @@
 #   - write agents.slice. Its cap is set on dev with `systemctl --user
 #     set-property` (drop-ins under ~/.config/systemd/user.control/), and the
 #     effective values are shown as information.
+#   - add a source a checkout's install.conf.yaml declares but does not carry.
+#     Every other link out of place is drift that repo's ./install fixes.
 #
 # THE HOST PROFILE (shared-configuration design, H1). ~/.config/claude-host-profile, the
 # settings renderer's marker, names this host's profile, and the private overlay's
@@ -72,7 +74,9 @@
 # overlay, and is then kept on origin/main exactly as ~/.dotfiles is. Without it, no overlay row
 # runs. The ~/quantivly clones are skipped only when the tenants are known and leave out the work
 # tenant: a host whose overlay is not cloned yet goes on fetching them. Where clauth manages the
-# Claude accounts (~/.clauth), the long-lived-token rows do not apply (H9).
+# Claude accounts (~/.clauth), the long-lived-token rows do not apply (H9). With a profile,
+# settings.json is the renderer's (scripts/claude-settings-render.sh); on every host, the links both
+# checkouts declare are checked by scripts/check-links.sh (H8).
 #
 # Usage (the controlling host, usually the laptop):
 #   host-sync --host <ssh alias> [--check]     report drift on <host>; changes nothing (default)
@@ -176,6 +180,21 @@ PROFILE_NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 CLAUTH_DIR="$HOME/.clauth"
 GIT_NET_TIMEOUT_SECONDS=300
 CLONE_TIMEOUT_SECONDS=300
+# How long a sibling script (the settings renderer, the link checker) may run before its row says
+# it could not run (exit 124).
+SIBLING_TIMEOUT_SECONDS=120
+# scripts/check-links.sh's states, by who acts on them: the ones in place, the drift the repo's
+# ./install fixes, and a source the manifest names that is not in the checkout, which only a
+# person can fix. Any other first field on its output is not an entry.
+LINK_STATES_IN_PLACE=(ok conditional-absent)
+LINK_STATES_TO_FIX=(missing wrong-target regular-identical regular-differs)
+LINK_STATES_FOR_A_PERSON=(source-missing)
+# The one whose content is not the repo's: ./install backs it up, and the row names that backup.
+LINK_STATE_REGULAR_DIFFERS="regular-differs"
+# dotbot's name for the backup of a regular file it replaces with a link (install.conf.yaml's
+# `backup: true`): <path>.dotbot-backup.<YYYYMMDD-HHMMSS>, local time
+# (dotbot/src/dotbot/plugins/link.py, _backup). The names sort in the order they were made.
+DOTBOT_BACKUP_INFIX=".dotbot-backup."
 SAFE_DIR_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 HOST_ALIAS_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'   # an ssh alias, never an option or a path
 SAFE_REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
@@ -530,6 +549,35 @@ disarmed_marker_shown() {
 # A path under $HOME as ~/…, as the rows print it; any other path as it is.
 tilde_path() {
     if [[ "$1" == "$HOME"/* ]]; then printf '~%s' "${1#"$HOME"}"; else printf '%s' "$1"; fi
+}
+# A manifest's target as a path: a leading ~/, $HOME/ or ${HOME}/ expanded, as dotbot expands it.
+expand_home_path() {
+    local path="$1" prefix
+    # shellcheck disable=SC2016,SC2088  # the manifest's literal ~ and $HOME, matched as text, deliberately
+    local home_prefixes=('~/' '$HOME/' '${HOME}/')
+    for prefix in "${home_prefixes[@]}"; do
+        if [[ "$path" == "$prefix"* ]]; then
+            printf '%s/%s' "$HOME" "${path#"$prefix"}"
+            return
+        fi
+    done
+    printf '%s' "$path"
+}
+# stdin to stdout through the checkout's redactor, or unchanged on a checkout that predates it.
+redact_stream() {
+    local redactor="$DOTFILES/scripts/redact-secrets.sh"
+    if [[ -x "$redactor" ]]; then "$redactor"; else cat; fi
+}
+list_has() {   # $1 = a word, $2… = a list; 0 when the list holds the word
+    local word="$1" item
+    shift
+    for item in "$@"; do [[ "$item" == "$word" ]] && return 0; done
+    return 1
+}
+join_comma() {   # $@ = items, printed as "a, b, c"
+    local joined
+    joined="$(printf '%s, ' "$@")"
+    printf '%s' "${joined%, }"
 }
 
 # host-sync.timer's is-enabled and is-active, into TIMER_ENABLED and TIMER_ACTIVE.
@@ -953,6 +1001,180 @@ here_draft() {
     fi
 }
 
+# settings.json is the settings renderer's output (shared-configuration design, D2), on a host with
+# a profile marker only (H1). The renderer decides: --check exits 0 level, 1 drift, 2 could not run;
+# any other status (127 on a host whose checkout predates it, 124 a timeout) is a could-not-run too,
+# never ✓ or ✗. Its stdout, a diff of the declared keys, is never printed.
+here_settings() {
+    local rc
+    if [[ -z "$PROFILE" ]]; then
+        row info settings "no host profile; settings.json is not rendered here"
+        return 0
+    fi
+    run_renderer --check; rc=$?
+    case "$rc" in
+        0) row ok settings "settings.json renders to itself (profile $PROFILE)"; return 0 ;;
+        1) ;;
+        *) renderer_could_not_run_row "$rc"; return 0 ;;
+    esac
+    if [[ "$MODE" != apply ]]; then
+        row drift settings "settings.json differs from its render"
+        return 0
+    fi
+    run_renderer --apply; rc=$?
+    (( rc == 0 )) || { renderer_could_not_run_row "$rc"; return 0; }
+    run_renderer --check; rc=$?
+    case "$rc" in
+        0) row ok settings "rendered (profile $PROFILE)" ;;
+        1) row drift settings "settings.json still differs from its render after claude-settings-render --apply" ;;
+        *) renderer_could_not_run_row "$rc" ;;
+    esac
+}
+# $1 = --check | --apply. Returns the renderer's status, and sets RENDER_ERROR_LINE to the first
+# line of its stderr, redacted: the unredacted text never reaches a variable.
+run_renderer() {
+    RENDER_ERROR_LINE="$(timeout "$SIBLING_TIMEOUT_SECONDS" "$DOTFILES/scripts/claude-settings-render.sh" "$1" \
+        2>&1 >/dev/null </dev/null | redact_stream | sed -n 1p; exit "${PIPESTATUS[0]}")"
+}
+renderer_could_not_run_row() {   # $1 = the renderer's status
+    if [[ "$1" == 2 && -n "$RENDER_ERROR_LINE" ]]; then
+        row oper settings "claude-settings-render could not run: $RENDER_ERROR_LINE"
+    else
+        row oper settings "claude-settings-render could not run (exit $1)"
+    fi
+}
+
+# Every link each checkout's install.conf.yaml declares is in place (H8): ~/.dotfiles always, and
+# ~/.dotfiles-local when it is there. One checker for both, the public checkout's own: a host whose
+# checkout predates it gets ⚠ (exit 127). A link that is missing, points elsewhere or is a regular
+# file is drift that repo's ./install fixes, run once per repo per run; dotbot backs a regular file
+# up beside it before relinking (`backup: true`), and the row names that backup when its content
+# was not the repo's. A source the manifest names that is not in the checkout is a person's step.
+here_links() {
+    links_of_checkout dotfiles "$DOTFILES"
+    [[ -d "$DOTFILES_LOCAL" ]] && links_of_checkout dotfiles-local "$DOTFILES_LOCAL"
+    return 0
+}
+links_of_checkout() {   # $1 = the repo's name in the rows, $2 = its checkout
+    local label="$1" dir="$2" rc source
+    run_link_checker "$dir"; rc=$?
+    if (( rc != 0 && rc != 1 )); then
+        links_could_not_run_row "$label" "$rc"
+        return
+    fi
+    classify_link_states
+    if unknown_link_fault "$rc"; then
+        unknown_link_fault_row "$label"
+        return
+    fi
+    for source in ${LINK_SOURCES_FOR_A_PERSON[@]+"${LINK_SOURCES_FOR_A_PERSON[@]}"}; do
+        row oper links "$label: $source is declared but not in the checkout"
+    done
+    if (( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} == 0 )); then
+        (( ${#LINK_SOURCES_FOR_A_PERSON[@]} )) || row ok links "$label: $LINKS_DECLARED declared links in place"
+        return
+    fi
+    if [[ "$MODE" == apply ]]; then
+        relink_checkout "$label" "$dir"
+    else
+        report_links_to_fix "$label"
+    fi
+}
+# $1 = a checkout. Returns check-links' status (127 when it is absent, 124 a timeout) and sets
+# LINK_CHECK_OUTPUT to what it printed: its --tsv lines, or on a could-not-run its reason.
+run_link_checker() {
+    local dir="$1"
+    LINK_CHECK_OUTPUT="$(timeout "$SIBLING_TIMEOUT_SECONDS" "$DOTFILES/scripts/check-links.sh" --tsv \
+        --root "$dir" --config "$dir/install.conf.yaml" </dev/null 2>&1)"
+}
+# The row for a checker that could not run, and its reason, redacted, on the line below it.
+links_could_not_run_row() {   # $1 = the repo's name, $2 = check-links' status
+    local reason
+    row oper links "$1: check-links could not run (exit $2)"
+    reason="$(printf '%s\n' "$LINK_CHECK_OUTPUT" | sed -n 1p | redact_stream)"
+    # check-links marks that line ✗; under a ⚠ row the glyph would read as a second, drifted row.
+    reason="${reason#✗ }"
+    [[ -n "$reason" ]] && printf '        %s\n' "$reason"
+    return 0
+}
+# Sort LINK_CHECK_OUTPUT's lines by who acts on them, into LINKS_DECLARED (every entry, the
+# conditional-absent included), LINK_TARGETS_TO_FIX and LINK_TARGETS_DIFFERING (targets, as ~/…) and
+# LINK_SOURCES_FOR_A_PERSON (sources, as the manifest names them).
+classify_link_states() {
+    local state target source shown
+    LINKS_DECLARED=0; LINK_TARGETS_TO_FIX=(); LINK_TARGETS_DIFFERING=(); LINK_SOURCES_FOR_A_PERSON=()
+    while IFS=$'\t' read -r state target source; do
+        shown="$(tilde_path "$(expand_home_path "$target")")"
+        if list_has "$state" "${LINK_STATES_TO_FIX[@]}"; then
+            if [[ "$state" == "$LINK_STATE_REGULAR_DIFFERS" ]]; then
+                LINK_TARGETS_DIFFERING+=("$shown")
+            else
+                LINK_TARGETS_TO_FIX+=("$shown")
+            fi
+        elif list_has "$state" "${LINK_STATES_FOR_A_PERSON[@]}"; then
+            LINK_SOURCES_FOR_A_PERSON+=("$source")
+        elif ! list_has "$state" "${LINK_STATES_IN_PLACE[@]}"; then
+            continue
+        fi
+        LINKS_DECLARED=$((LINKS_DECLARED + 1))
+    done <<<"$LINK_CHECK_OUTPUT"
+}
+# check-links exited 1, yet no line names a fault this script knows (a state added to the checker
+# after it): never read as level. $1 = check-links' status.
+unknown_link_fault() {
+    local faults_known=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} + ${#LINK_SOURCES_FOR_A_PERSON[@]} ))
+    (( $1 == 1 && faults_known == 0 ))
+}
+unknown_link_fault_row() {   # $1 = the repo's name
+    row oper links "$1: check-links reports a fault in a state host-sync does not know (exit 1)"
+}
+report_links_to_fix() {   # $1 = the repo's name; --check's ✗ rows
+    local target
+    if (( ${#LINK_TARGETS_TO_FIX[@]} )); then
+        row drift links "$1: ${#LINK_TARGETS_TO_FIX[@]} link(s) to fix: $(join_comma "${LINK_TARGETS_TO_FIX[@]}")"
+    fi
+    for target in ${LINK_TARGETS_DIFFERING[@]+"${LINK_TARGETS_DIFFERING[@]}"}; do
+        row drift links "$1: $target is a regular file whose content differs from the repo; ./install backs it up beside it and relinks"
+    done
+}
+# --apply: the repo's ./install, once, then the checker again. $1 = the repo's name, $2 = its checkout.
+relink_checkout() {
+    local label="$1" dir="$2" log="$STATE/install-links-$1.log" rc fixed left still
+    local differing=(${LINK_TARGETS_DIFFERING[@]+"${LINK_TARGETS_DIFFERING[@]}"})
+    fixed=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
+    (cd "$dir" && bash ./install </dev/null) >"$log" 2>&1
+    run_link_checker "$dir"; rc=$?
+    if (( rc != 0 && rc != 1 )); then
+        links_could_not_run_row "$label" "$rc"
+        return
+    fi
+    classify_link_states
+    if unknown_link_fault "$rc"; then
+        unknown_link_fault_row "$label"
+        return
+    fi
+    left=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
+    if (( left == 0 )); then
+        row ok links "$label: $fixed link(s) relinked$(backups_kept ${differing[@]+"${differing[@]}"})"
+        return
+    fi
+    still="$(join_comma ${LINK_TARGETS_TO_FIX[@]+"${LINK_TARGETS_TO_FIX[@]}"} ${LINK_TARGETS_DIFFERING[@]+"${LINK_TARGETS_DIFFERING[@]}"})"
+    row drift links "$label: still $left to fix after ./install ($still); log: $(tilde_path "$log")"
+}
+# "; the old ~/.x is kept as ~/.x.dotbot-backup.<stamp>" for each target ($@, as ~/…) whose
+# backup dotbot left beside it: the newest by name, since the names sort by their stamp.
+backups_kept() {
+    local target candidate newest
+    for target in "$@"; do
+        newest=""
+        for candidate in "$(expand_home_path "$target")$DOTBOT_BACKUP_INFIX"*; do
+            [[ -e "$candidate" ]] && newest="$candidate"
+        done
+        [[ -n "$newest" ]] && printf '; the old %s is kept as %s' "$target" "$(tilde_path "$newest")"
+    done
+    return 0
+}
+
 # Not `.enabledPlugins[$p] // "absent"`: jq's // treats false as missing, so a plugin just set to
 # false read back as "absent" and every disable reported failure (dev, 2026-10-14).
 plugin_enabled() {
@@ -1331,7 +1553,8 @@ here_rows() {
     # the renderer refuses (exit 2) a host with a profile marker and no overlay; the profile is
     # read again after that clone. dotfiles' ./install links the timer's units and the dotfiles
     # marketplace's plugin, so the checkouts go before both; linear-key is enabled before linear
-    # is disabled.
+    # is disabled. settings and links come after both checkouts have fast-forwarded and installed,
+    # so the render reads the overlay's current fragments and the links its current manifest.
     read_profile
     clone_overlay
     here_dotfiles
@@ -1343,6 +1566,8 @@ here_rows() {
     here_agent
     here_herdr
     here_draft
+    here_settings
+    here_links
     here_plugins
     here_mcp
     here_clones
