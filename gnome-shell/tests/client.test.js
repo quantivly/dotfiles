@@ -632,10 +632,14 @@ test('client: WatchDetail and UnwatchDetail go out only when the wanted flag cha
     client.setDetailWatchWanted(true);
     client.setDetailWatchWanted(false);
     proxy.setNameOwner(OWNER);
+    // An UnwatchDetail releases the watch for good: destroy() right after it sends no second one.
+    client.setDetailWatchWanted(true);
+    client.setDetailWatchWanted(false);
     client.destroy();
     const callShapes = new Set(proxy.calls.map(call => `${call.timeoutMs}/${typeof call.callback}`));
     assertEqual({calledMethodNames: proxy.calledMethodNames, callShapes: [...callShapes]}, {
-        calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL, GET_STATE],
+        calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL, GET_STATE,
+            WATCH_DETAIL, UNWATCH_DETAIL],
         callShapes: [`${constantsModule.DBUS_CALL_TIMEOUT_MS}/function`],
     });
 });
@@ -713,21 +717,22 @@ test('client: a GetState that fails is logged and leaves no data, and the next S
     });
 });
 
-test('client: every start() asks systemd to start the service again, but connects and follows the service once; ' +
-    'only the latest StartUnit\'s answer counts', () => {
+test('client: every start() asks systemd to start the service again, from a first attempt (a 5 s retry), but connects ' +
+    'and follows the service once; only the latest StartUnit\'s answer counts', () => {
     const {client, timeouts, serviceStarter, proxyFactory, logged} = makeClientFixture({nameOwner: null});
     client.start();
     serviceStarter.fail(FIRST_ATTEMPT_INDEX);
     const pendingAfterSupersededFailure = timeouts.pendingIntervalsSeconds();
-    serviceStarter.succeed();
+    const loggedAfterSupersededFailure = logged.length;
+    serviceStarter.fail();
     assertEqual({
         attemptConnections: serviceStarter.attempts.map(attempt => attempt.connection),
         proxyRequestCount: proxyFactory.requests.length, proxyConnection: proxyFactory.requests[0].connection,
-        pendingAfterSupersededFailure, pending: timeouts.pendingIntervalsSeconds(), loggedLineCount: logged.length,
+        pendingAfterSupersededFailure, loggedAfterSupersededFailure, pending: timeouts.pendingIntervalsSeconds(),
     }, {
         attemptConnections: [FAKE_CONNECTION, FAKE_CONNECTION], proxyRequestCount: 1, proxyConnection: FAKE_CONNECTION,
-        pendingAfterSupersededFailure: [SAMPLE_INTERVAL_SECONDS], pending: [SAMPLE_INTERVAL_SECONDS],
-        loggedLineCount: 0,
+        pendingAfterSupersededFailure: [SAMPLE_INTERVAL_SECONDS], loggedAfterSupersededFailure: 0,
+        pending: [SAMPLE_INTERVAL_SECONDS, 5],
     });
 });
 
