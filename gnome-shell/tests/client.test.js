@@ -614,8 +614,9 @@ test('client: a Sample from another version (an unknown field, swap missing) not
     });
 });
 
-test('client: WatchDetail and UnwatchDetail go out only when the wanted flag changes, with an owner, and the watch ' +
-    'is asserted again to each new owner; every call is asynchronous with DBUS_CALL_TIMEOUT_MS', () => {
+test('client: WatchDetail and UnwatchDetail go out only when the wanted flag changes, with an owner; the watch is ' +
+    'asserted again to each new owner, and leaves with an old one; every call is asynchronous with ' +
+    'DBUS_CALL_TIMEOUT_MS', () => {
     const {client, proxyFactory, proxy} = makeClientFixture({isProxyDelivered: false});
     client.setDetailWatchWanted(true);
     proxyFactory.deliver(proxy);
@@ -625,15 +626,16 @@ test('client: WatchDetail and UnwatchDetail go out only when the wanted flag cha
     client.setDetailWatchWanted(true);
     proxy.setNameOwner(null);
     proxy.setNameOwner(NEXT_OWNER);
-    client.setDetailWatchWanted(false);
+    // NEXT_OWNER holds the watch now; leaving takes it along, so nothing is left for destroy() to release.
     proxy.setNameOwner(null);
+    client.setDetailWatchWanted(false);
     client.setDetailWatchWanted(true);
     client.setDetailWatchWanted(false);
     proxy.setNameOwner(OWNER);
+    client.destroy();
     const callShapes = new Set(proxy.calls.map(call => `${call.timeoutMs}/${typeof call.callback}`));
     assertEqual({calledMethodNames: proxy.calledMethodNames, callShapes: [...callShapes]}, {
-        calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL,
-            UNWATCH_DETAIL, GET_STATE],
+        calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL, GET_STATE],
         callShapes: [`${constantsModule.DBUS_CALL_TIMEOUT_MS}/function`],
     });
 });

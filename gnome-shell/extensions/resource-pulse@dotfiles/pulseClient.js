@@ -302,8 +302,9 @@ export class PulseClient {
         this._lastAppliedSequence = null;
         this._lastFreshDataAtUsec = null;
         this._isDetailWatchWanted = false;
-        // The owner a WatchDetail went to that no UnwatchDetail has followed; null while no watch is held.
-        this._detailWatchOwner = null;
+        // True from a WatchDetail sent to the current owner until an UnwatchDetail follows or that owner leaves (its
+        // watches leave with it).
+        this._isDetailWatchHeld = false;
         this._latestSnapshot = null;
         this._lastGoodClockLabel = null;
         this._cpuHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
@@ -589,7 +590,7 @@ export class PulseClient {
      */
     _onServiceVanished() {
         this._nameOwner = null;
-        this._detailWatchOwner = null;
+        this._isDetailWatchHeld = false;
         // An answer still on its way comes from the owner that left.
         this._stateRequestNumber++;
         this._isStateRequestInFlight = false;
@@ -832,7 +833,7 @@ export class PulseClient {
      * @returns {void}
      */
     _sendWatchDetail() {
-        this._detailWatchOwner = this._nameOwner;
+        this._isDetailWatchHeld = true;
         this._callService(WATCH_DETAIL_METHOD_NAME, this._cancellable,
             error => this._logWatchCallFailure(WATCH_DETAIL_METHOD_NAME, error));
     }
@@ -845,10 +846,9 @@ export class PulseClient {
      * @returns {void}
      */
     _sendUnwatchDetail(cancellable) {
-        const isWatchHeldByOwner = this._detailWatchOwner !== null && this._detailWatchOwner === this._nameOwner;
-        this._detailWatchOwner = null;
-        if (!isWatchHeldByOwner)
+        if (!this._isDetailWatchHeld)
             return;
+        this._isDetailWatchHeld = false;
         this._callService(UNWATCH_DETAIL_METHOD_NAME, cancellable,
             error => this._logWatchCallFailure(UNWATCH_DETAIL_METHOD_NAME, error));
     }
