@@ -1,0 +1,310 @@
+// What the sampler service (service/) and the extension's client say to each other on the session bus: the names,
+// the interface, and the JSON in its two strings. Pure: no Gio and no Shell import, so both sides load it, and it runs
+// under plain gjs.
+//
+// Version skew is the normal state: after a deploy the service restarts with new code, while the shell keeps the
+// extension it loaded at login. So within ResourcePulse1 the JSON is additive only, and the parsers here are the
+// reader's half of that promise:
+// - a field the reader does not know is ignored, at any depth;
+// - a field that is missing, or not of its type, is null for that field alone, so only its own row shows no data;
+// - text that is not JSON, or JSON that is not an object, parses to null as a whole.
+// A breaking change needs a new interface, ResourcePulse2, served beside this one.
+
+/** The `protocol` field of GetState's JSON. Within ResourcePulse1 it stays 1: changes there are additive. */
+export const PROTOCOL_VERSION = 1;
+/** The well-known session bus name the service owns. */
+export const RESOURCE_PULSE_BUS_NAME = 'io.github.quantivly.dotfiles.ResourcePulse1';
+/** The D-Bus interface; it carries the same name as the bus name. */
+export const RESOURCE_PULSE_INTERFACE_NAME = RESOURCE_PULSE_BUS_NAME;
+/** Where the service exports its one object. */
+export const RESOURCE_PULSE_OBJECT_PATH = '/io/github/quantivly/dotfiles/ResourcePulse1';
+/**
+ * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side and a proxy on the client side:
+ * - GetState() → s: the state JSON (buildStatePayload), for a client that has just connected;
+ * - WatchDetail() and UnwatchDetail(): a caller holds a detail watch while its card is visible or its dropdown open;
+ *   the service counts them per caller and drops a caller's watches when its connection closes;
+ * - Sample(s): the sample JSON (buildSamplePayload), once per publish.
+ */
+export const RESOURCE_PULSE_INTERFACE_XML = `<node>
+  <interface name="${RESOURCE_PULSE_INTERFACE_NAME}">
+    <method name="GetState">
+      <arg name="state" type="s" direction="out"/>
+    </method>
+    <method name="WatchDetail"/>
+    <method name="UnwatchDetail"/>
+    <signal name="Sample">
+      <arg name="sample" type="s"/>
+    </signal>
+  </interface>
+</node>`;
+
+// The fields each part of a snapshot or sample is read with, in the order the parsed result lists them.
+const CPU_CLUSTER_FIELDS = ['performancePercent', 'efficiencyPercent'];
+const MEMORY_FIELDS = ['usedBytes', 'totalBytes'];
+const SWAP_FIELDS = ['zramUsedBytes', 'zramRamBytes', 'diskBytes'];
+const PRESSURE_FIELDS = ['cpu', 'memory', 'io'];
+const APPENDED_HISTORY_FIELDS = ['cpu', 'memory'];
+const TOP_CPU_VALUE_FIELD = 'cpuPercent';
+const TOP_MEMORY_VALUE_FIELD = 'memoryBytes';
+
+/**
+ * @typedef {object} Histories
+ * @property {Array<number|null>|null} cpu - CPU busy fractions 0–1, null for a gap, oldest first (up to
+ *     CARD_HISTORY_SAMPLES); null as a whole when the payload has none.
+ * @property {Array<number|null>|null} memory - Memory used fractions, in the same shape.
+ */
+
+/**
+ * @typedef {object} AppendedHistory
+ * @property {number|null} cpu - The CPU busy fraction one fast tick appended; null for a gap.
+ * @property {number|null} memory - The memory used fraction it appended; null for a gap.
+ */
+
+/**
+ * The JSON GetState returns: everything a client needs to draw from scratch.
+ *
+ * @param {object} state - The service's state.
+ * @param {object|null} state.snapshot - The latest snapshot (service/sampler.js's Snapshot), or null before the first.
+ * @param {{cpu: Array<number|null>, memory: Array<number|null>}} state.histories - Both histories, oldest first.
+ * @param {number} state.serviceStartedAtUsec - Real time the service started, in microseconds.
+ * @param {number} state.sequence - The sequence of the latest Sample sent; 0 before the first.
+ * @returns {string} The JSON, with `protocol` set to PROTOCOL_VERSION.
+ */
+export function buildStatePayload({snapshot, histories, serviceStartedAtUsec, sequence}) {
+    return JSON.stringify({
+        protocol: PROTOCOL_VERSION,
+        serviceStartedAtUsec,
+        sequence,
+        snapshot,
+        histories: {cpu: histories.cpu, memory: histories.memory},
+    });
+}
+
+/**
+ * The JSON of one Sample signal.
+ *
+ * @param {object} sample - One publish.
+ * @param {object} sample.snapshot - The snapshot published.
+ * @param {AppendedHistory|null} sample.appendedHistory - What a fast tick appended to the histories; null for a
+ *     publish that appended nothing (a watch start's reveal), which the client must not append.
+ * @param {number} sample.sequence - 1 for the service run's first Sample, one more for each after it.
+ * @param {number} sample.sampledAtUsec - Real time of the publish, in microseconds.
+ * @returns {string} The JSON.
+ */
+export function buildSamplePayload({snapshot, appendedHistory, sequence, sampledAtUsec}) {
+    return JSON.stringify({sequence, sampledAtUsec, snapshot, appendedHistory});
+}
+
+/**
+ * Reads GetState's JSON, skew-tolerantly (see the file header).
+ *
+ * @param {*} text - The JSON text.
+ * @returns {{protocol: number|null, snapshot: object|null, histories: Histories, serviceStartedAtUsec: number|null,
+ *     sequence: number|null}|null} The state, or null for text that is not a JSON object.
+ */
+export function parseStatePayload(text) {
+    const payload = parseJsonObject(text);
+    if (payload === null)
+        return null;
+    return {
+        protocol: countOrNull(payload.protocol),
+        snapshot: parseSnapshot(payload.snapshot),
+        histories: parseHistories(payload.histories),
+        serviceStartedAtUsec: finiteNumberOrNull(payload.serviceStartedAtUsec),
+        sequence: countOrNull(payload.sequence),
+    };
+}
+
+/**
+ * Reads a Sample's JSON, skew-tolerantly (see the file header).
+ *
+ * @param {*} text - The JSON text.
+ * @returns {{snapshot: object|null, appendedHistory: AppendedHistory|null, sequence: number|null,
+ *     sampledAtUsec: number|null}|null} The sample, or null for text that is not a JSON object. A missing or
+ *     mistyped appendedHistory is null, like a reveal's: the client appends nothing for it.
+ */
+export function parseSamplePayload(text) {
+    const payload = parseJsonObject(text);
+    if (payload === null)
+        return null;
+    return {
+        snapshot: parseSnapshot(payload.snapshot),
+        appendedHistory: parseAppendedHistory(payload.appendedHistory),
+        sequence: countOrNull(payload.sequence),
+        sampledAtUsec: finiteNumberOrNull(payload.sampledAtUsec),
+    };
+}
+
+/**
+ * Parses JSON text whose top level must be an object.
+ *
+ * @param {*} text - The text.
+ * @returns {object|null} The object; null for a non-string, invalid JSON, or JSON that is not an object.
+ */
+function parseJsonObject(text) {
+    if (typeof text !== 'string')
+        return null;
+    let value;
+    try {
+        value = JSON.parse(text);
+    } catch (error) {
+        if (error instanceof SyntaxError)
+            return null;
+        throw error;
+    }
+    return isPlainObject(value) ? value : null;
+}
+
+/**
+ * Says whether a parsed JSON value is an object (not null, not an array).
+ *
+ * @param {*} value - The value.
+ * @returns {boolean} True for an object.
+ */
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * @param {*} value - A parsed JSON value.
+ * @returns {number|null} The value when it is a finite number; null otherwise.
+ */
+function finiteNumberOrNull(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * @param {*} value - A parsed JSON value.
+ * @returns {number|null} The value when it is a whole number of zero or more; null otherwise.
+ */
+function countOrNull(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * @param {*} value - A parsed JSON value.
+ * @returns {string|null} The value when it is a string; null otherwise.
+ */
+function stringOrNull(value) {
+    return typeof value === 'string' ? value : null;
+}
+
+/**
+ * @param {*} value - A parsed JSON value.
+ * @returns {boolean|null} The value when it is a boolean; null otherwise.
+ */
+function booleanOrNull(value) {
+    return typeof value === 'boolean' ? value : null;
+}
+
+/**
+ * Reads an object whose every listed field must be a finite number, as one value: memory or swap is no use in part.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @param {string[]} fieldNames - The fields, in the order the result lists them.
+ * @returns {object|null} Those fields; null unless the value is an object holding a finite number in each.
+ */
+function parseAllNumbers(value, fieldNames) {
+    if (!isPlainObject(value) || !fieldNames.every(fieldName => finiteNumberOrNull(value[fieldName]) !== null))
+        return null;
+    return Object.fromEntries(fieldNames.map(fieldName => [fieldName, value[fieldName]]));
+}
+
+/**
+ * Reads an object whose listed fields are each a number or null, field by field.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @param {string[]} fieldNames - The fields, in the order the result lists them.
+ * @returns {object|null} Each field as a finite number or null; null unless the value is an object.
+ */
+function parseEachNumber(value, fieldNames) {
+    if (!isPlainObject(value))
+        return null;
+    return Object.fromEntries(fieldNames.map(fieldName => [fieldName, finiteNumberOrNull(value[fieldName])]));
+}
+
+/**
+ * Reads one entry of an app ranking: a group key, a name and a value, all needed to show it.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @param {string} valueFieldName - 'cpuPercent' or 'memoryBytes'.
+ * @returns {object|null} {groupKey, name, <valueFieldName>}; null unless all three are of their types.
+ */
+function parseRankedApp(value, valueFieldName) {
+    if (!isPlainObject(value))
+        return null;
+    const groupKey = stringOrNull(value.groupKey);
+    const name = stringOrNull(value.name);
+    const rankedValue = finiteNumberOrNull(value[valueFieldName]);
+    if (groupKey === null || name === null || rankedValue === null)
+        return null;
+    return {groupKey, name, [valueFieldName]: rankedValue};
+}
+
+/**
+ * Reads an app ranking.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @returns {{topCpu: object|null, topMemory: object|null}|null} Each half on its own; null unless an object.
+ */
+function parseAppRanking(value) {
+    if (!isPlainObject(value))
+        return null;
+    return {
+        topCpu: parseRankedApp(value.topCpu, TOP_CPU_VALUE_FIELD),
+        topMemory: parseRankedApp(value.topMemory, TOP_MEMORY_VALUE_FIELD),
+    };
+}
+
+/**
+ * Reads a snapshot (service/sampler.js's Snapshot) field by field, in that typedef's order.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @returns {object|null} The snapshot, each field of its type or null; null unless the value is an object.
+ */
+function parseSnapshot(value) {
+    if (!isPlainObject(value))
+        return null;
+    return {
+        takenAtUsec: finiteNumberOrNull(value.takenAtUsec),
+        takenAtClockLabel: stringOrNull(value.takenAtClockLabel),
+        cpuBusyPercent: finiteNumberOrNull(value.cpuBusyPercent),
+        cpuClusters: parseEachNumber(value.cpuClusters, CPU_CLUSTER_FIELDS),
+        memory: parseAllNumbers(value.memory, MEMORY_FIELDS),
+        swap: parseAllNumbers(value.swap, SWAP_FIELDS),
+        pressureAvg10: parseEachNumber(value.pressureAvg10, PRESSURE_FIELDS),
+        apps: parseAppRanking(value.apps),
+        isComplete: booleanOrNull(value.isComplete),
+    };
+}
+
+/**
+ * Reads one history: a list of fractions, where anything not a number is a gap, so the list keeps its length.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @returns {Array<number|null>|null} The values, oldest first; null unless the value is an array.
+ */
+function parseHistoryValues(value) {
+    return Array.isArray(value) ? value.map(finiteNumberOrNull) : null;
+}
+
+/**
+ * Reads both histories.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @returns {Histories} Both, always an object; each null when missing or not a list.
+ */
+function parseHistories(value) {
+    const histories = isPlainObject(value) ? value : {};
+    return {cpu: parseHistoryValues(histories.cpu), memory: parseHistoryValues(histories.memory)};
+}
+
+/**
+ * Reads what one Sample appended.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @returns {AppendedHistory|null} Each fraction or a gap; null (append nothing) unless the value is an object.
+ */
+function parseAppendedHistory(value) {
+    return parseEachNumber(value, APPENDED_HISTORY_FIELDS);
+}

@@ -9,6 +9,7 @@ import './math.test.js';
 import './apps.test.js';
 import './format.test.js';
 import './cadence.test.js';
+import './protocol.test.js';
 import './sampler.test.js';
 import './service-sampler.test.js';
 import './graph.test.js';

@@ -16,11 +16,17 @@
 # say what GNOME 50 needs. Those rows read the files, and a missing file makes
 # them FAIL, never pass.
 #
-# "Could not run" is exit 2, never a pass: a missing gjs, zsh, find or timeout, or a
-# missing tally line (an import error prints none) is fatal. The suite asserts
-# its own row total.
+# The sampler service's D-Bus rows (gnome-shell/tests/run-private-bus.js) and
+# its entry point run inside `dbus-run-session`, on a private bus of this run,
+# and refuse to run on any other: never on the live session bus. The service's
+# install step runs against a systemctl stub, never the live user manager.
 #
-# Requires: bash, gjs, zsh (for gnome-status), find, timeout. No network, no root.
+# "Could not run" is exit 2, never a pass: a missing gjs, zsh, find, timeout or
+# dbus-run-session, or a missing tally line (an import error prints none) is
+# fatal. The suite asserts its own row total.
+#
+# Requires: bash, gjs, zsh (for gnome-status), find, timeout, dbus-run-session
+# (Ubuntu: dbus-daemon). No network, no root.
 #
 # Usage: scripts/test-resource-pulse.sh
 #   RESOURCE_PULSE_EXT_DIR=<dir> points the file rows at a copy of the
@@ -42,7 +48,7 @@ fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
 [[ -r "$RUNNER" ]] || fatal "cannot read $RUNNER"
 [[ -d "$EXT_DIR" ]] || fatal "no extension directory at $EXT_DIR"
-for required_tool in gjs zsh find timeout; do
+for required_tool in gjs zsh find timeout dbus-run-session; do
   command -v "$required_tool" >/dev/null || fatal "$required_tool is required"
 done
 
@@ -409,6 +415,396 @@ check "install.conf.yaml links the extension directory" \
   "$(grep -c -x -F "    ~/.local/share/gnome-shell/extensions/$EXTENSION_UUID: gnome-shell/extensions/$EXTENSION_UUID" "$DOTFILES/install.conf.yaml")" 1
 check "the template carries a commented genable_extension line" \
   "$(grep -c -x -F "# genable_extension $EXTENSION_UUID" "$DOTFILES/examples/gnome-settings.local.template")" 1
+
+# ---------------------------------------------------------------------------
+# The sampler service: its D-Bus face, its entry point, its unit and its
+# install step.
+#
+# Every row that needs a message bus runs inside `dbus-run-session` on a bus of
+# its own (on_private_bus): a path socket in a 0700 directory of this run, and no
+# service directory, so nothing on it can be activated. Each program run there
+# refuses to start unless DBUS_SESSION_BUS_ADDRESS is that socket, and all of it
+# runs behind LIVE_SETTINGS_BARRIER, so even a program that ignored the address
+# would find no live bus to fall back to.
+# ---------------------------------------------------------------------------
+SERVICE_MAIN_PATH="$EXT_DIR/service/main.js"
+RESOURCE_PULSE_BUS_NAME='io.github.quantivly.dotfiles.ResourcePulse1'
+RESOURCE_PULSE_OBJECT_PATH='/io/github/quantivly/dotfiles/ResourcePulse1'
+PRIVATE_BUS_DIR="$WIRING_TMP/private-bus"
+PRIVATE_BUS_CONFIG="$WIRING_TMP/private-bus.conf"
+PRIVATE_BUS_RUNNER="$DOTFILES/gnome-shell/tests/run-private-bus.js"
+PRIVATE_BUS_TIMEOUT_SECONDS=150
+if ! mkdir -p "$PRIVATE_BUS_DIR" || ! chmod 700 "$PRIVATE_BUS_DIR"; then
+  fatal "cannot create the private bus directory $PRIVATE_BUS_DIR"
+fi
+cat >"$PRIVATE_BUS_CONFIG" <<BUS_CONFIG || fatal "cannot write $PRIVATE_BUS_CONFIG"
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:dir=$PRIVATE_BUS_DIR</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+BUS_CONFIG
+# on_private_bus <command...> runs a command on its own private bus, behind the
+# barrier. GIO_USE_VFS=local keeps GIO from even asking that bus for gvfs.
+on_private_bus() {
+  env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" GIO_USE_VFS=local \
+    timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" dbus-run-session --config-file="$PRIVATE_BUS_CONFIG" -- "$@"
+}
+
+printf '\nthe service D-Bus layer on a private bus (gnome-shell/tests/run-private-bus.js)\n'
+PRIVATE_BUS_JS_OUTPUT="$(on_private_bus gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
+PRIVATE_BUS_JS_EXIT=$?
+printf '%s\n' "$PRIVATE_BUS_JS_OUTPUT"
+PRIVATE_BUS_TALLY_LINE=""
+while IFS= read -r line; do
+  if [[ "$line" =~ $TALLY_PATTERN ]]; then
+    PRIVATE_BUS_TALLY_LINE="$line"
+    PRIVATE_BUS_JS_PASS="${BASH_REMATCH[1]}"
+    PRIVATE_BUS_JS_FAIL="${BASH_REMATCH[2]}"
+  fi
+done <<<"$PRIVATE_BUS_JS_OUTPUT"
+[[ -n "$PRIVATE_BUS_TALLY_LINE" ]] \
+  || fatal "no JS-TALLY line from the private-bus rows (exit $PRIVATE_BUS_JS_EXIT): they did not run"
+PASS=$((PASS + PRIVATE_BUS_JS_PASS))
+FAIL=$((FAIL + PRIVATE_BUS_JS_FAIL))
+if (( PRIVATE_BUS_JS_EXIT != 0 && PRIVATE_BUS_JS_FAIL == 0 )); then
+  bad "the private-bus runner exited $PRIVATE_BUS_JS_EXIT with no failing row"
+fi
+
+printf '\nservice/main.js on a private bus (the real sampler, reading this machine'"'"'s /proc and /sys)\n'
+# Asks the service for its state until it has published a sample, for up to
+# its last argument's seconds, and prints what it found on one line.
+# shellcheck disable=SC2016  # JavaScript source: $ and backticks are gjs's, not bash's.
+SERVICE_STATE_PROBE_JS='
+const {Gio, GLib} = imports.gi;
+const [busName, objectPath, interfaceName, waitSecondsText] = ARGV;
+const RETRY_INTERVAL_USEC = 100000;
+const CALL_TIMEOUT_MS = 2000;
+const USEC_PER_SECOND = 1000000;
+const deadlineUsec = GLib.get_monotonic_time() + Number(waitSecondsText) * USEC_PER_SECOND;
+const connection = Gio.bus_get_sync(Gio.BusType.SESSION, null);
+let verdict = "no answer";
+while (GLib.get_monotonic_time() < deadlineUsec) {
+    try {
+        const reply = connection.call_sync(busName, objectPath, interfaceName, "GetState", null,
+            new GLib.VariantType("(s)"), Gio.DBusCallFlags.NO_AUTO_START, CALL_TIMEOUT_MS, null);
+        const state = JSON.parse(reply.deepUnpack()[0]);
+        const hasSample = state.sequence >= 1;
+        const sampleText = hasSample ? "yes" : "no";
+        const memoryText = state.snapshot?.memory ? "yes" : "no";
+        verdict = `protocol=${state.protocol} sample=${sampleText} memory=${memoryText}`;
+        if (hasSample)
+            break;
+    } catch (error) {
+        verdict = `no answer: ${error.message}`;
+    }
+    GLib.usleep(RETRY_INTERVAL_USEC);
+}
+print(verdict);
+'
+SERVICE_LOG="$WIRING_TMP/service.log"
+: >"$SERVICE_LOG"
+# The driver starts one service, probes it, starts a second one (which must
+# find the name taken), probes the first again, then sends it SIGTERM and waits
+# at most 10 s. Every wait is bounded, so a service that ignores SIGTERM ends
+# the row as "hung" rather than hanging the suite.
+# shellcheck disable=SC2016  # The driver's own source: its variables expand when it runs.
+SERVICE_DRIVER_OUTPUT="$(on_private_bus bash -c '
+set -u
+service_main="$1" service_log="$2" state_probe="$3" bus_name="$4" object_path="$5"
+[[ "${DBUS_SESSION_BUS_ADDRESS:-}" == "unix:path=$RESOURCE_PULSE_TEST_BUS_DIR/"* ]] \
+  || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
+# still_running <pid>: the process exists and is not a zombie (the state after the last ") " of its stat).
+still_running() {
+  local stat_line process_state
+  read -r stat_line 2>/dev/null <"/proc/$1/stat" || return 1
+  process_state="${stat_line##*) }"
+  [[ "${process_state%% *}" != Z ]]
+}
+gjs -m "$service_main" >>"$service_log" 2>&1 &
+first_pid=$!
+printf "first=%s\n" "$(gjs -c "$state_probe" "$bus_name" "$object_path" "$bus_name" 30)"
+timeout 30 gjs -m "$service_main" >>"$service_log" 2>&1
+printf "second-exit=%s\n" "$?"
+printf "after-second=%s\n" "$(gjs -c "$state_probe" "$bus_name" "$object_path" "$bus_name" 5)"
+kill -TERM "$first_pid" 2>/dev/null
+for (( attempt = 0; attempt < 100; attempt++ )); do
+  still_running "$first_pid" || break
+  sleep 0.1
+done
+if still_running "$first_pid"; then
+  kill -KILL "$first_pid"
+  wait "$first_pid"
+  printf "first-exit=hung\n"
+else
+  wait "$first_pid"
+  printf "first-exit=%s\n" "$?"
+fi
+' service-driver "$SERVICE_MAIN_PATH" "$SERVICE_LOG" "$SERVICE_STATE_PROBE_JS" "$RESOURCE_PULSE_BUS_NAME" \
+  "$RESOURCE_PULSE_OBJECT_PATH" 2>&1)"
+service_first=""; service_second_exit=""; service_after_second=""; service_first_exit=""
+while IFS= read -r driver_line; do
+  case "$driver_line" in
+    first=*)        service_first="${driver_line#first=}" ;;
+    second-exit=*)  service_second_exit="${driver_line#second-exit=}" ;;
+    after-second=*) service_after_second="${driver_line#after-second=}" ;;
+    first-exit=*)   service_first_exit="${driver_line#first-exit=}" ;;
+  esac
+done <<<"$SERVICE_DRIVER_OUTPUT"
+service_first_summary="$service_first first-exit=$service_first_exit"
+SERVICE_FIRST_EXPECTED="protocol=1 sample=yes memory=yes first-exit=0"
+check "service/main.js owns the name, answers GetState with protocol 1 and a sample, and exits 0 on SIGTERM" \
+  "$service_first_summary" "$SERVICE_FIRST_EXPECTED"
+check "a second service/main.js finds the name taken and exits 1, while the first keeps serving" \
+  "second-exit=$service_second_exit after-second=$service_after_second" \
+  "second-exit=1 after-second=protocol=1 sample=yes memory=yes"
+# Warnings of gjs and GLib themselves only (a deprecated API, a misused call,
+# an uncaught error): the service's own lines are Gjs-Console-*, and a read
+# this runner's kernel refuses may well log one of those.
+ENGINE_WARNING_PATTERN='(Gjs|GLib|GLib-GIO|GLib-GObject)-(WARNING|CRITICAL)|JS ERROR|Unhandled promise rejection'
+check "service/main.js logged no gjs or GLib warning, critical or uncaught error" \
+  "$(grep -c -E "$ENGINE_WARNING_PATTERN" "$SERVICE_LOG")" 0
+if [[ "$service_first_summary" != "$SERVICE_FIRST_EXPECTED" ]]; then
+  printf '    (driver said: %s)\n' "$SERVICE_DRIVER_OUTPUT"
+  sed 's/^/    service log: /' "$SERVICE_LOG"
+fi
+
+printf '\nthe unit (systemd/resource-pulse.service)\n'
+SERVICE_UNIT="$DOTFILES/systemd/resource-pulse.service"
+SERVICE_MAIN_RELATIVE_PATH='gnome-shell/extensions/resource-pulse@dotfiles/service/main.js'
+UNIT_DOTFILES_PREFIX='%h/.dotfiles/'
+UNIT_INTERPRETER='/usr/bin/gjs -m'
+EXPECTED_UNIT_SETTINGS=(
+  '[Unit]Description=<set>'
+  '[Unit]PartOf=graphical-session.target'
+  '[Service]Type=dbus'
+  "[Service]BusName=$RESOURCE_PULSE_BUS_NAME"
+  "[Service]ExecStart=$UNIT_INTERPRETER $UNIT_DOTFILES_PREFIX$SERVICE_MAIN_RELATIVE_PATH"
+  '[Service]Restart=on-failure'
+  '[Service]RestartSec=5'
+  '[Service]Slice=background.slice'
+  '[Service]Nice=10'
+  '[Service]CPUQuota=10%'
+  '[Service]MemoryHigh=96M'
+  '[Service]MemoryMax=128M'
+)
+# Each setting is read as "[Section]Key=value", comments and blank lines aside;
+# a Description's text is not pinned, only that it is set.
+unit_sections=""; unit_section=""; unit_settings=(); unit_exec_start=""
+if [[ -r "$SERVICE_UNIT" ]]; then
+  while IFS= read -r unit_line || [[ -n "$unit_line" ]]; do
+    case "$unit_line" in
+      ''|'#'*|';'*) ;;
+      '['*']') unit_section="$unit_line"; unit_sections+="$unit_line " ;;
+      Description=?*) unit_settings+=("${unit_section}Description=<set>") ;;
+      *)
+        unit_settings+=("$unit_section$unit_line")
+        [[ "$unit_line" == ExecStart=* ]] && unit_exec_start="${unit_line#ExecStart=}"
+        ;;
+    esac
+  done <"$SERVICE_UNIT"
+else
+  unit_sections="cannot read $SERVICE_UNIT"
+fi
+check "the unit has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
+  "$unit_sections" "[Unit] [Service] "
+sorted_settings() { printf '%s\n' "$@" | LC_ALL=C sort | tr '\n' '|'; }
+check "the unit's settings are exactly the design's: Type=dbus on its bus name, PartOf, Restart, slice, Nice and caps" \
+  "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_UNIT_SETTINGS[@]}")"
+# The ExecStart above is pinned as text; this row resolves it: the script it
+# names under ~/.dotfiles must be this checkout's service/main.js.
+unit_exec_script="${unit_exec_start#"$UNIT_INTERPRETER "}"
+unit_exec_script_in_checkout="$DOTFILES/${unit_exec_script#"$UNIT_DOTFILES_PREFIX"}"
+unit_exec_resolution="unresolved"
+if [[ "$unit_exec_script" == "$UNIT_DOTFILES_PREFIX"* && -f "$unit_exec_script_in_checkout" \
+  && "$unit_exec_script_in_checkout" -ef "$DOTFILES/$SERVICE_MAIN_RELATIVE_PATH" ]]; then
+  unit_exec_resolution="service/main.js"
+fi
+check "the unit's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own service/main.js" \
+  "${unit_exec_start%% "$UNIT_DOTFILES_PREFIX"*}|$unit_exec_resolution" "$UNIT_INTERPRETER|service/main.js"
+# verify checks that ExecStart's command exists, and ~/.dotfiles is not this
+# checkout on a runner, so it verifies a copy pointed at this checkout: the same
+# unit text with a command that exists. The rows above pin the real path.
+# --user mode refuses to start with no XDG_RUNTIME_DIR ("Failed to lookup
+# RuntimeDirectory path", measured), which a CI runner need not have, so it runs
+# behind the barrier, whose private runtime dir is all it needs. It still exits
+# 1 for an unknown key and for a missing command (both measured).
+if command -v systemd-analyze >/dev/null 2>&1; then
+  UNIT_COPY_DIR="$WIRING_TMP/unit-copy"
+  mkdir -p "$UNIT_COPY_DIR" || fatal "cannot create $UNIT_COPY_DIR"
+  sed -e "/^ExecStart=/s#$UNIT_DOTFILES_PREFIX#$DOTFILES/#" "$SERVICE_UNIT" >"$UNIT_COPY_DIR/resource-pulse.service" 2>/dev/null
+  unit_verify_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" systemd-analyze --user verify --man=no \
+    --recursive-errors=no "$UNIT_COPY_DIR/resource-pulse.service" 2>&1)"
+  unit_verify_exit=$?
+  check "systemd-analyze --user verify accepts the unit (ExecStart pointed at this checkout) and says nothing of it" \
+    "$unit_verify_exit:[$(grep -F 'resource-pulse' <<<"$unit_verify_output")]" "0:[]"
+elif [[ -n "${CI:-}" ]]; then
+  # CI is where this row is meant to run, so a runner without the tool is a failure, never a skip.
+  bad "systemd-analyze --user verify accepts the unit — systemd-analyze is missing on CI"
+else
+  ok "systemd-analyze absent here; CI verifies the unit"
+fi
+
+printf '\nthe service'"'"'s install wiring\n'
+check "install.conf.yaml links the service unit" \
+  "$(grep -c -x -F '    ~/.config/systemd/user/resource-pulse.service: systemd/resource-pulse.service' \
+    "$DOTFILES/install.conf.yaml")" 1
+# Linked and started by the extension, never enabled: no line of ./install or of
+# its config (comments aside) may enable it.
+if [[ -r "$DOTFILES/install" && -r "$DOTFILES/install.conf.yaml" ]]; then
+  service_enabling_lines="$(cat "$DOTFILES/install" "$DOTFILES/install.conf.yaml" | grep -v '^[[:space:]]*#' \
+    | grep -c 'enable.*resource-pulse')"
+else
+  service_enabling_lines="install or install.conf.yaml is unreadable"
+fi
+check "install.conf.yaml runs the refresh step, and nothing in ./install or its config enables the unit" \
+  "refresh=$(grep -c -x -F '        bash scripts/resource-pulse-service-refresh.sh' "$DOTFILES/install.conf.yaml") enabling=$service_enabling_lines" \
+  "refresh=1 enabling=0"
+
+printf '\nresource-pulse-service-refresh.sh (systemctl stub; never the live user manager)\n'
+# Every row runs the script against a recording systemctl stub first on PATH,
+# behind the barrier (a dead bus and a private runtime dir, so a real
+# systemctl --user could reach no manager), over a fixture extension directory
+# whose files carry chosen mtimes. The stub answers only the exact calls the
+# script makes; any other call is an error the row sees.
+REFRESH_SCRIPT="$DOTFILES/scripts/resource-pulse-service-refresh.sh"
+REFRESH_STUB_BIN="$WIRING_TMP/refresh-bin"
+REFRESH_NO_SYSTEMCTL_BIN="$WIRING_TMP/refresh-no-systemctl-bin"
+REFRESH_CALLS="$WIRING_TMP/refresh-systemctl-calls"
+REFRESH_EXTENSION_DIR="$WIRING_TMP/refresh-extension"
+UNIT_STARTED_AT_EPOCH=1700000100
+BEFORE_START_EPOCH=1700000000
+AFTER_START_EPOCH=1700000200
+mkdir -p "$REFRESH_NO_SYSTEMCTL_BIN" || fatal "cannot create $REFRESH_NO_SYSTEMCTL_BIN"
+# shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
+install_stub "$REFRESH_STUB_BIN" systemctl '#!/usr/bin/env bash
+# Records each call, and answers from the REFRESH_STUB_* variables.
+printf "%s\n" "$*" >>"$REFRESH_CALLS"
+case "$*" in
+  "--user show-environment") exit "$REFRESH_STUB_MANAGER_EXIT" ;;
+  "--user daemon-reload") exit "$REFRESH_STUB_RELOAD_EXIT" ;;
+  "--user show resource-pulse.service -p ActiveState --value")
+    printf "%s\n" "$REFRESH_STUB_ACTIVE_STATE"
+    exit "${REFRESH_STUB_STATE_EXIT:-0}" ;;
+  "--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix")
+    printf "%s\n" "$REFRESH_STUB_STARTED_AT" ;;
+  "--user try-restart resource-pulse.service") exit "$REFRESH_STUB_RESTART_EXIT" ;;
+  *) printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64 ;;
+esac'
+# reset_refresh_extension <service/ mtime> <lib/ mtime> <outside mtime>: a
+# fixture extension directory whose files under service/, under lib/ and outside
+# both carry those epoch mtimes ('' leaves that part out).
+reset_refresh_extension() {
+  rm -rf "$REFRESH_EXTENSION_DIR"
+  mkdir -p "$REFRESH_EXTENSION_DIR" || fatal "cannot create $REFRESH_EXTENSION_DIR"
+  if [[ -n "$1" ]]; then
+    mkdir -p "$REFRESH_EXTENSION_DIR/service"
+    : >"$REFRESH_EXTENSION_DIR/service/main.js"
+    touch -d "@$1" "$REFRESH_EXTENSION_DIR/service/main.js" || fatal "touch -d @$1 failed"
+  fi
+  if [[ -n "$2" ]]; then
+    mkdir -p "$REFRESH_EXTENSION_DIR/lib"
+    : >"$REFRESH_EXTENSION_DIR/lib/protocol.js"
+    touch -d "@$2" "$REFRESH_EXTENSION_DIR/lib/protocol.js" || fatal "touch -d @$2 failed"
+  fi
+  : >"$REFRESH_EXTENSION_DIR/extension.js"
+  : >"$REFRESH_EXTENSION_DIR/stylesheet.css"
+  touch -d "@$3" "$REFRESH_EXTENSION_DIR/extension.js" "$REFRESH_EXTENSION_DIR/stylesheet.css" \
+    || fatal "touch -d @$3 failed"
+}
+# run_refresh <manager exit> <reload exit> <ActiveState> <ActiveEnterTimestamp> <try-restart exit> [stub bin]
+# prints "exit=<n> calls=[<call>;...] output=[<stdout+stderr>]".
+run_refresh() {
+  local refresh_output refresh_exit stub_bin="${6:-$REFRESH_STUB_BIN}"
+  : >"$REFRESH_CALLS"
+  refresh_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$stub_bin:$PATH" REFRESH_CALLS="$REFRESH_CALLS" \
+    REFRESH_STUB_MANAGER_EXIT="$1" REFRESH_STUB_RELOAD_EXIT="$2" REFRESH_STUB_ACTIVE_STATE="$3" \
+    REFRESH_STUB_STARTED_AT="$4" REFRESH_STUB_RESTART_EXIT="$5" \
+    RESOURCE_PULSE_EXTENSION_DIR="$REFRESH_EXTENSION_DIR" "$BASH" "$REFRESH_SCRIPT" 2>&1)"
+  refresh_exit=$?
+  printf 'exit=%s calls=[%s] output=[%s]' "$refresh_exit" "$(tr '\n' ';' <"$REFRESH_CALLS")" "$refresh_output"
+}
+STARTED_AT="@$UNIT_STARTED_AT_EPOCH"
+CALLS_UP_TO_STATE='--user show-environment;--user daemon-reload;--user show resource-pulse.service -p ActiveState --value;'
+CALLS_UP_TO_START_TIME="$CALLS_UP_TO_STATE--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix;"
+CALLS_WITH_RESTART="$CALLS_UP_TO_START_TIME--user try-restart resource-pulse.service;"
+
+reset_refresh_extension "$AFTER_START_EPOCH" "$AFTER_START_EPOCH" "$AFTER_START_EPOCH"
+check "refresh: no user manager (a server) is silent and exits 0, asking nothing more" \
+  "$(run_refresh 1 0 active "$STARTED_AT" 0)" "exit=0 calls=[--user show-environment;] output=[]"
+# Without systemctl on PATH at all (a container): the script is run by bash's own path, so PATH can be empty of tools.
+no_systemctl_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$REFRESH_NO_SYSTEMCTL_BIN" \
+  RESOURCE_PULSE_EXTENSION_DIR="$REFRESH_EXTENSION_DIR" "$BASH" "$REFRESH_SCRIPT" 2>&1)"
+no_systemctl_exit=$?
+check "refresh: no systemctl at all (a container) is silent and exits 0" \
+  "exit=$no_systemctl_exit output=[$no_systemctl_output]" "exit=0 output=[]"
+refresh_not_active_summary=""
+for refresh_active_state in inactive failed activating; do
+  refresh_not_active_summary+="$refresh_active_state:$(run_refresh 0 0 "$refresh_active_state" "$STARTED_AT" 0) "
+done
+check "refresh: a unit not active (inactive, failed, activating) is reloaded for, then left alone, silently" \
+  "$refresh_not_active_summary" \
+  "inactive:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] failed:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] activating:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] "
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+check "refresh: an active unit with nothing under service/ or lib/ changed since it started is left alone, silently" \
+  "$(run_refresh 0 0 active "$STARTED_AT" 0)" "exit=0 calls=[$CALLS_UP_TO_START_TIME] output=[]"
+reset_refresh_extension "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+service_changed_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+reset_refresh_extension "$BEFORE_START_EPOCH" "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH"
+lib_changed_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+check "refresh: a file under service/ or lib/ newer than the unit's start try-restarts it, after the reload, and says so" \
+  "service:${service_changed_summary%% output=*} $(grep -c -F 'restarted' <<<"$service_changed_summary") lib:${lib_changed_summary%% output=*} $(grep -c -F 'restarted' <<<"$lib_changed_summary")" \
+  "service:exit=0 calls=[$CALLS_WITH_RESTART] 1 lib:exit=0 calls=[$CALLS_WITH_RESTART] 1"
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$AFTER_START_EPOCH"
+check "refresh: a change outside service/ and lib/ (the drawing side) never restarts it, so the histories survive" \
+  "$(run_refresh 0 0 active "$STARTED_AT" 0)" "exit=0 calls=[$CALLS_UP_TO_START_TIME] output=[]"
+reset_refresh_extension "$UNIT_STARTED_AT_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+same_second_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+reset_refresh_extension "$((UNIT_STARTED_AT_EPOCH + 1))" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+next_second_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+check "refresh: a file last changed exactly at the unit's start is not newer; one second later is" \
+  "same:${same_second_summary%% output=*} next:${next_second_summary%% output=*}" \
+  "same:exit=0 calls=[$CALLS_UP_TO_START_TIME] next:exit=0 calls=[$CALLS_WITH_RESTART]"
+reset_refresh_extension "$AFTER_START_EPOCH" "$AFTER_START_EPOCH" "$AFTER_START_EPOCH"
+reload_failed_summary="$(run_refresh 0 1 active "$STARTED_AT" 0)"
+check "refresh: a failed daemon-reload warns, exits 1 and restarts nothing" \
+  "${reload_failed_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$reload_failed_summary")" \
+  "exit=1 calls=[--user show-environment;--user daemon-reload;] warned=1"
+# A state that cannot be read must not pass for "not active", which is silent.
+state_unreadable_summary="$(REFRESH_STUB_STATE_EXIT=1 run_refresh 0 0 active "$STARTED_AT" 0)"
+check "refresh: a state it cannot read warns, exits 1 and restarts nothing" \
+  "${state_unreadable_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$state_unreadable_summary")" \
+  "exit=1 calls=[$CALLS_UP_TO_STATE] warned=1"
+unreadable_start_summary=""
+UNREADABLE_START_TIMES=('' 'n/a' '@' '@12x')
+for unreadable_started_at in "${UNREADABLE_START_TIMES[@]}"; do
+  unreadable_summary="$(run_refresh 0 0 active "$unreadable_started_at" 0)"
+  unreadable_start_summary+="${unreadable_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$unreadable_summary") "
+done
+expected_unreadable_start_summary=""
+for _ in "${UNREADABLE_START_TIMES[@]}"; do
+  expected_unreadable_start_summary+="exit=1 calls=[$CALLS_UP_TO_START_TIME] warned=1 "
+done
+check "refresh: an active unit whose start time cannot be read warns, exits 1 and restarts nothing" \
+  "$unreadable_start_summary" "$expected_unreadable_start_summary"
+restart_failed_summary="$(run_refresh 0 0 active "$STARTED_AT" 1)"
+check "refresh: a failed try-restart warns and exits 1" \
+  "${restart_failed_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$restart_failed_summary")" \
+  "exit=1 calls=[$CALLS_WITH_RESTART] warned=1"
+# service/ missing while lib/ holds a newer file: find lists the newer file AND
+# fails, and a partial answer must never decide a restart.
+reset_refresh_extension '' "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH"
+unlistable_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
+check "refresh: a watched directory that cannot be searched warns, exits 1 and restarts nothing" \
+  "${unlistable_summary%% output=*} warned=$(grep -c -F '⚠' <<<"$unlistable_summary")" \
+  "exit=1 calls=[$CALLS_UP_TO_START_TIME] warned=1"
 
 printf '\nresource-pulse-cost.sh (fake PROC_ROOT)\n'
 # make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry.
@@ -1039,7 +1435,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=352
+EXPECTED_ROWS=393
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
