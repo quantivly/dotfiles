@@ -5,9 +5,10 @@
 // monitors and panels change. Only the card shows apps, so the client asks the service for its detail watch (the faster
 // app scan) only while the card can be seen (lib/wiring.js isDetailWatchWanted): the overview hides it, and so does a
 // window covering it, which is most of the day. While one does, the card is frozen as well: it records each snapshot
-// and repaints nothing until the reveal, which repaints it at once (lib/visibility.js decides what covers it). Every
-// trigger of that check is coalesced into one check before the next frame, and while the card is frozen a timer
-// re-checks it too, since no Sample may come to (the service may be down).
+// and repaints nothing until the reveal, which repaints it at once (lib/visibility.js decides what covers it). The
+// window-manager and display signals that trigger that check come in bursts, so they are coalesced into one check
+// before the next frame; every Sample checks at once, and so, while the card is frozen, does a timer, since no Sample
+// may come (the service may be down). Neither of those schedules a frame: the shell's budget is under 0.1% of a core.
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
@@ -216,17 +217,18 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Keeps the card frozen, and the detail watch released, while a window covers it (_syncCardCover). Each trigger
-     * queues one coalesced check before the next frame (_queueCardCoverCheck):
-     * - every client update (every Sample, about every 2 s), which catches what no signal below reports, such as a
-     *   window moved over the card from the keyboard, and, while the card is frozen, a timer every
-     *   SAMPLE_INTERVAL_SECONDS (_syncCoverRecheckTimer), since no Sample comes while the service is down;
-     * - every restack (a window raised, opened or closed), and the primary monitor entering or leaving fullscreen;
-     * - a minimize, an unminimize, a maximize, unmaximize or tile (size-changed), the end of a drag (grab-op-end) and a
-     *   workspace switch, so moving a window off the card reveals it at once;
-     * - "show desktop" (Super+D) being toggled, which hides windows without minimizing them.
-     * The card's placement (_placeCard, which already checked once in _addCard) and the overview closing
-     * (_onOverviewHidden) check at once.
+     * Keeps the card frozen, and the detail watch released, while a window covers it (_syncCardCover).
+     * - The window-manager and display signals come in bursts (a restack can come several times in one frame), so each
+     *   queues one coalesced check before the next frame (_queueCardCoverCheck): every restack (a window raised,
+     *   opened or closed), the primary monitor entering or leaving fullscreen, a minimize, an unminimize, a maximize,
+     *   unmaximize or tile (size-changed), the end of a drag (grab-op-end), a workspace switch, and "show desktop"
+     *   (Super+D) being toggled, which hides windows without minimizing them.
+     * - Every client update (a Sample, about every 2 s) checks at once, with no later: it comes at most once a tick,
+     *   and a later would schedule a frame each time, even under a covered card. It catches what no signal reports,
+     *   such as a window moved over the card from the keyboard. While the card is frozen a timer does the same every
+     *   SAMPLE_INTERVAL_SECONDS (_syncCoverRecheckTimer), since no Sample comes while the service is down.
+     * - The card's placement (_placeCard, which already checked once in _addCard) and the overview closing
+     *   (_onOverviewHidden) check at once too.
      *
      * @returns {void}
      */
@@ -244,12 +246,12 @@ export default class ResourcePulseExtension extends Extension {
             'switch-workspace', queueCardCoverCheck,
             this);
         global.workspace_manager.connectObject('showing-desktop-changed', queueCardCoverCheck, this);
-        this._cardCoverListenerId = this._client.addListener(queueCardCoverCheck);
+        this._cardCoverListenerId = this._client.addListener(() => this._syncCardCover());
     }
 
     /**
-     * Checks the cover before the next frame, once however many triggers come before then (a restack can come several
-     * times in one frame), in a BEFORE_REDRAW later as _queueCardPlacement does.
+     * Checks the cover before the next frame, once however many window-manager and display signals come before then
+     * (a restack can come several times in one frame), in a BEFORE_REDRAW later as _queueCardPlacement does.
      *
      * @returns {void}
      */
@@ -311,17 +313,19 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * The re-check timer: queues a cover check. It never throws out of the callback, which would end the GLib source
-     * behind the id the extension keeps; a failure is logged, rate-limited.
+     * The re-check timer: checks the cover at once, with no later, so a covered card schedules no frame. A reveal
+     * removes this very source from inside it (_syncCoverRecheckTimer), which GLib allows; the value returned after
+     * that is ignored. It never throws out of the callback, which would end the source behind the id the extension
+     * keeps; a failure is logged, rate-limited.
      *
      * @returns {boolean} GLib.SOURCE_CONTINUE, always.
      */
     _onCoverRecheckTimeout() {
         try {
-            this._queueCardCoverCheck();
+            this._syncCardCover();
         } catch (error) {
             const errorText = describeErrorWithStack(error);
-            this._errorLog.log(`could not queue a cover check: ${errorText}`);
+            this._errorLog.log(`could not check the cover: ${errorText}`);
         }
         return GLib.SOURCE_CONTINUE;
     }

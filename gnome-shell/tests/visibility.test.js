@@ -646,19 +646,20 @@ test('extension.js: _syncCardCover() freezes a covered card, records whether it 
     assertEqual(statements.map(statement => statementCount(syncBody, statement)), [1, 1, 1, 1, 1]);
 });
 
-test('extension.js: every cover trigger queues the one coalesced cover check: each signal\'s handler, the client ' +
-    'listener and the re-check timer', () => {
+test('extension.js: the bursty window-manager and display triggers queue the one coalesced cover check, while the ' +
+    'client listener and the frozen re-check timer, at most once a tick, check at once with no later', () => {
     const extensionSource = readExtensionFile('extension.js');
     const followBody = declarationBody(extensionSource, '_followCardCover() {');
+    const timeoutBody = declarationBody(extensionSource, '_onCoverRecheckTimeout() {');
     const coverSignalHandlers = connectedSignalHandlers(followBody)
         .filter(signalHandler => COVER_SIGNAL_RECEIVERS.has(signalHandler.split(' ')[0]));
     assertEqual({
         coverSignalHandlers,
         queuesTheCheck: statementCount(followBody, 'const queueCardCoverCheck = () => this._queueCardCoverCheck();'),
-        clientListener: statementCount(followBody,
-            'this._cardCoverListenerId = this._client.addListener(queueCardCoverCheck);'),
-        timerQueuesTheCheck: statementCount(declarationBody(extensionSource, '_onCoverRecheckTimeout() {'),
-            'this._queueCardCoverCheck();'),
+        clientListenerChecksAtOnce: statementCount(followBody,
+            'this._cardCoverListenerId = this._client.addListener(() => this._syncCardCover());'),
+        timerChecksAtOnce: statementCount(timeoutBody, 'this._syncCardCover();'),
+        timerLinesQueuingALater: trimmedLines(timeoutBody).filter(line => line.includes('_queueCardCoverCheck')).length,
     }, {
         coverSignalHandlers: [
             'global.display restacked: queueCardCoverCheck',
@@ -671,8 +672,9 @@ test('extension.js: every cover trigger queues the one coalesced cover check: ea
             'global.workspace_manager showing-desktop-changed: queueCardCoverCheck',
         ],
         queuesTheCheck: 1,
-        clientListener: 1,
-        timerQueuesTheCheck: 1,
+        clientListenerChecksAtOnce: 1,
+        timerChecksAtOnce: 1,
+        timerLinesQueuingALater: 0,
     });
 });
 
