@@ -43,9 +43,9 @@ import {cardPosition} from './lib/layout.js';
 
 const CARD_STYLE_CLASS = 'resource-pulse-card';
 /**
- * The card's fixed width (the previous release's min-width). A class of this release only: GNOME re-reads the
- * stylesheet on every enable but the code only at login, so the previous release's code, which never sets it, may meet
- * this stylesheet until then.
+ * The card's fixed width, sized to its widest rows (measured in gnome-shell/tests/visibility.test.js). A class of this
+ * release only: GNOME re-reads the stylesheet on every enable but the code only at login, so the previous release's
+ * code, which never sets it, may meet this stylesheet until then.
  */
 const FIXED_WIDTH_STYLE_CLASS = 'rp-card-fixed';
 /** The "heaviest" line's names, values and separator, spaced about a word apart. */

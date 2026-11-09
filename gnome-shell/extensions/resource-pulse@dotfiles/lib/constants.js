@@ -62,8 +62,6 @@ export const PRESSURE_BAND_THRESHOLDS_PERCENT = [10, 25, 50];
 export const PERFORMANCE_CAPACITY_RATIO = 0.9;
 /** Microseconds before the same error message may be logged again (10 minutes). */
 export const ERROR_LOG_REPEAT_INTERVAL_USEC = 600_000_000;
-/** Longest app name shown before truncation, in characters. */
-export const APP_NAME_MAX_CHARS = 18;
 /** Distance of the desktop card from the screen edge, in pixels. */
 export const CARD_MARGIN_PX = 24;
 /** Desktop IDs of the system monitors a click may open, in order of preference. */

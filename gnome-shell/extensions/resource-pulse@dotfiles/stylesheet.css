@@ -84,12 +84,14 @@
 /* Added in the service release. Every class above stays as it was: GNOME re-reads this file on every enable but the
    code only at login, so the previous release's code may meet this stylesheet until the next login. */
 
-/* The card's fixed width: the previous release's min-width, now also its width and max-width, so the left edge never
-   moves. Only the "heaviest" names give way to it (they ellipsize); no number is ever cut. */
+/* The card's fixed width, so its left edge never moves: its widest rows plus a small margin, measured with Pango in
+   this font (gnome-shell/tests/visibility.test.js). The widest is "no data since HH:MM" in the CPU row, about 25.8em
+   with the graph; a 100+ GiB memory line comes next. Only the "heaviest" names give way to it (they ellipsize); no
+   number is ever cut. It overrides .resource-pulse-card's min-width, which stays for the previous release's code. */
 .rp-card-fixed {
-  min-width: 25em;
-  width: 25em;
-  max-width: 25em;
+  min-width: 26.5em;
+  width: 26.5em;
+  max-width: 26.5em;
 }
 
 /* The "heaviest" line's names, values and separator, about a word apart, as one line of text would be. */

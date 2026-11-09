@@ -26,7 +26,9 @@
 # fatal. The suite asserts its own row total.
 #
 # Requires: bash, gjs, zsh (for gnome-status), find, timeout, dbus-run-session
-# (Ubuntu: dbus-daemon). No network, no root.
+# (Ubuntu: dbus-daemon), and for the card-width row the Pango typelibs
+# (gir1.2-pango-1.0) and the card's font, Ubuntu Sans (fonts-ubuntu): without
+# them that row fails, never passes. No network, no root.
 #
 # Usage: scripts/test-resource-pulse.sh
 #   RESOURCE_PULSE_EXT_DIR=<dir> points the file rows at a copy of the
@@ -290,7 +292,9 @@ check "indicator.js re-places a shown hover label when its width or the display 
 # the nested shell for the card and the hover label). Both placements on a
 # width change go through a BEFORE_REDRAW later instead, which teardown removes:
 # the extension in a guarded step of _tearDown (the step itself is counted,
-# not just the remove() it calls), the indicator inside _onDestroy.
+# not just the remove() it calls), the indicator inside _onDestroy. extension.js
+# has a second later, the coalesced cover check, pinned by its own row in
+# gnome-shell/tests/visibility.test.js.
 deferred_placement_summary=""
 for glue_file in extension.js indicator.js; do
   glue_path="$EXT_DIR/$glue_file"
@@ -302,7 +306,7 @@ teardown_cancels_placement="$(grep -c -F "{name: 'cancel the pending card placem
 on_destroy_removes_later="$(sed -n '/^    _onDestroy() {/,/^    }/p' "$EXT_DIR/indicator.js" 2>/dev/null | grep -c -F 'get_laters().remove(')"
 check "a width change moves the card and the hover label in a BEFORE_REDRAW later, never during allocation" \
   "$deferred_placement_summary| teardown-step=$teardown_cancels_placement on-destroy=$on_destroy_removes_later" \
-  "extension.js:1/1/1 indicator.js:1/1/1 | teardown-step=1 on-destroy=1"
+  "extension.js:2/2/1 indicator.js:1/1/1 | teardown-step=1 on-destroy=1"
 
 # metadata.json, parsed as JSON by gjs (never grepped). Each field is printed
 # on its own prefixed line, so an unreadable or malformed file prints none and
@@ -1612,7 +1616,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=417
+EXPECTED_ROWS=419
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

@@ -574,10 +574,12 @@ jobs:
       # the sampler service's D-Bus rows and its main.js run on a private bus of
       # their own, never on a session bus the runner may have. systemd-analyze,
       # which verifies the service unit, ships with systemd on ubuntu-latest.
-      - name: Install gjs, zsh and dbus-daemon
+      # The card-width row measures the card's text with Pango (gjs does not
+      # pull its typelibs in) in the card's own font, Ubuntu Sans.
+      - name: Install gjs, zsh, dbus-daemon, Pango's typelibs and Ubuntu Sans
         uses: ./.github/actions/apt-install
         with:
-          packages: gjs zsh dbus-daemon
+          packages: gjs zsh dbus-daemon gir1.2-pango-1.0 fonts-ubuntu
 
       - name: Run the Resource Pulse state table
         run: ./scripts/test-resource-pulse.sh

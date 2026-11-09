@@ -1,12 +1,11 @@
 // Every string the top-bar label and the desktop card show, and the bands of the card's drawn pressure meters.
 // Pure functions; the Shell glue only calls these.
-import {APP_NAME_MAX_CHARS, BYTES_PER_GIBIBYTE, CPU_IDLE_LABEL, CPU_IDLE_THRESHOLD_PERCENT} from './constants.js';
+import {BYTES_PER_GIBIBYTE, CPU_IDLE_LABEL, CPU_IDLE_THRESHOLD_PERCENT} from './constants.js';
 import {pressureBand} from './pressure.js';
 
 const NO_DATA_TEXT = 'no data';
 const NO_SWAP_TEXT = 'none';
 const SEPARATOR = ' · ';
-const ELLIPSIS = '…';
 const EM_DASH = '—';
 /** Between the two halves of the card's "heaviest" row, each its own label in a spaced box: a bare dot. */
 const HEAVIEST_HALVES_SEPARATOR = '·';
@@ -124,19 +123,6 @@ export function waitingOnMeters(pressureAvg10) {
 }
 
 /**
- * Shortens a name to at most maxChars characters.
- *
- * @param {string} name - Name to shorten.
- * @param {number} maxChars - Longest result, in characters.
- * @returns {string} The name, or its first maxChars − 1 characters plus '…'.
- */
-export function ellipsize(name, maxChars) {
-    if (name.length <= maxChars)
-        return name;
-    return name.slice(0, maxChars - 1) + ELLIPSIS;
-}
-
-/**
  * Splits the app ranking into the two halves of "heaviest", and says whether they are one group.
  *
  * @param {{topCpu: {groupKey?: string, name: string, cpuPercent: number}|null,
@@ -163,39 +149,6 @@ export function heaviestParts(apps) {
 }
 
 /**
- * Writes one half of "heaviest": its name, ellipsized, then its value when it has one.
- *
- * @param {{name: string, valueText: string}} half - from heaviestParts.
- * @returns {string} For example 'Chromium 31%', or 'idle'.
- */
-function halfText(half) {
-    const name = ellipsize(half.name, APP_NAME_MAX_CHARS);
-    return half.valueText === '' ? name : `${name} ${half.valueText}`;
-}
-
-/**
- * Describes the heaviest apps on one line.
- *
- * @param {{topCpu: {groupKey?: string, name: string, cpuPercent: number}|null,
- *     topMemory: {groupKey?: string, name: string, memoryBytes: number}|null}|null} apps - App ranking.
- * @returns {string} 'Chromium 31% · herdr agents 15.7 GiB', 'herdr agents 31% · 15.7 GiB' when one group tops
- *     both, 'idle · Chromium 2.0 GiB' when the CPU is idle, one half alone when the other is missing, or '—' with
- *     no data.
- */
-export function heaviestLine(apps) {
-    const {cpuHalf, memoryHalf, isCollapsed} = heaviestParts(apps);
-    if (cpuHalf === null && memoryHalf === null)
-        return EM_DASH;
-    if (cpuHalf === null)
-        return halfText(memoryHalf);
-    if (memoryHalf === null)
-        return halfText(cpuHalf);
-    if (isCollapsed)
-        return `${halfText(cpuHalf)}${SEPARATOR}${memoryHalf.valueText}`;
-    return `${halfText(cpuHalf)}${SEPARATOR}${halfText(memoryHalf)}`;
-}
-
-/**
  * @typedef {object} HeaviestRowTexts
  * @property {string} cpuName - The CPU half's name, whole: the card ellipsizes it by width. '' hides it.
  * @property {string} cpuValue - Its percent; '' for an idle CPU half, or with no CPU half.
@@ -207,8 +160,8 @@ export function heaviestLine(apps) {
 
 /**
  * The texts of the desktop card's "heaviest" row: a name label and a value label for each half, and a separator
- * between them. Each label with '' is hidden. Names are never cut to a character count, as heaviestLine cuts them: the
- * card's name labels ellipsize by width, so the values beside them never are.
+ * between them. Each label with '' is hidden. Names are never cut to a character count: the card's name labels
+ * ellipsize by width, so the values beside them never are.
  *
  * @param {{topCpu: {groupKey?: string, name: string, cpuPercent: number}|null,
  *     topMemory: {groupKey?: string, name: string, memoryBytes: number}|null}|null} apps - App ranking.

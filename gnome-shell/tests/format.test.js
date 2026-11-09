@@ -1,7 +1,7 @@
 import {test, assertEqual} from './harness.js';
 import {
     formatGibibytes, formatWholePercent, memoryLine, swapLine, swapAmount, clusterSuffix, waitingOnMeters,
-    ellipsize, heaviestLine, heaviestParts, hoverLabel, cardText,
+    heaviestParts, hoverLabel, cardText,
 } from '../extensions/resource-pulse@dotfiles/lib/format.js';
 // The heaviest row's parts, read through the namespace, so a missing export fails its rows rather than the whole run.
 import * as formatModule from '../extensions/resource-pulse@dotfiles/lib/format.js';
@@ -123,21 +123,6 @@ test('waitingOnMeters: a null avg10 is no data (band null) while the others stil
     assertEqual(waitingOnMeters({cpu: null, memory: 60, io: 30}),
         [{label: 'CPU', band: null}, {label: 'mem', band: 3}, {label: 'io', band: 2}]));
 
-test('ellipsize leaves a name of exactly maxChars alone', () =>
-    assertEqual(ellipsize('a'.repeat(18), 18), 'a'.repeat(18)));
-test('ellipsize cuts a 25-character name to 17 characters plus …', () =>
-    assertEqual(ellipsize('abcdefghijklmnopqrstuvwxy', 18), 'abcdefghijklmnopq…'));
-
-test('heaviestLine: two different apps', () =>
-    assertEqual(heaviestLine({topCpu: {name: 'Chromium', cpuPercent: 31},
-        topMemory: {name: 'herdr agents', memoryBytes: 15.7 * GIB}}), 'Chromium 31% · herdr agents 15.7 GiB'));
-test('heaviestLine collapses when one app tops both', () =>
-    assertEqual(heaviestLine({topCpu: {groupKey: 'unit:herdr-server', name: 'herdr agents', cpuPercent: 31},
-        topMemory: {groupKey: 'unit:herdr-server', name: 'herdr agents', memoryBytes: 15.7 * GIB}}), 'herdr agents 31% · 15.7 GiB'));
-test('heaviestLine ellipsizes a long name, and names "kernel" in the CPU half as it is', () =>
-    assertEqual(heaviestLine({topCpu: {groupKey: 'pseudo:kernel', name: 'kernel', cpuPercent: 5},
-        topMemory: {groupKey: 'a', name: 'a-very-long-application-name', memoryBytes: 2 * GIB}}),
-    'kernel 5% · a-very-long-appli… 2.0 GiB'));
 test('heaviestParts: docker.service (CPU) and docker-x.scope (memory) share a name, not a group, so they do not collapse',
     () => {
         const parts = heaviestParts({topCpu: {groupKey: 'unit:docker', name: 'docker', cpuPercent: 20},
@@ -148,24 +133,12 @@ test('heaviestParts: docker.service (CPU) and docker-x.scope (memory) share a na
 test('heaviestParts: the same groupKey on both halves collapses', () =>
     assertEqual(heaviestParts({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 20},
         topMemory: {groupKey: 'app:x', name: 'X', memoryBytes: GIB}}).isCollapsed, true));
-test('heaviestLine: different groups with one name are two halves', () =>
-    assertEqual(heaviestLine({topCpu: {groupKey: 'unit:docker', name: 'docker', cpuPercent: 20},
-        topMemory: {groupKey: 'docker:docker', name: 'docker', memoryBytes: GIB}}), 'docker 20% · docker 1.0 GiB'));
 test('heaviestParts: a top CPU entry at 0.6% is idle, at 1.0% it keeps its name and percent', () => {
     const memory = {groupKey: 'app:m', name: 'M', memoryBytes: GIB};
     const idle = heaviestParts({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 0.6}, topMemory: memory});
     const busy = heaviestParts({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 1.0}, topMemory: memory});
     assertEqual([idle.cpuHalf, busy.cpuHalf], [{name: 'idle', valueText: ''}, {name: 'X', valueText: '1%'}]);
 });
-test('heaviestLine: an idle CPU half reads "idle", and an idle half never collapses with the same group', () =>
-    assertEqual(heaviestLine({topCpu: {groupKey: 'app:x', name: 'X', cpuPercent: 0.6},
-        topMemory: {groupKey: 'app:x', name: 'X', memoryBytes: GIB}}), 'idle · X 1.0 GiB'));
-test('heaviestLine with only one ranking shows just that half', () =>
-    assertEqual([heaviestLine({topCpu: {name: 'Chromium', cpuPercent: 31}, topMemory: null}),
-        heaviestLine({topCpu: null, topMemory: {name: 'Chromium', memoryBytes: GIB}})],
-    ['Chromium 31%', 'Chromium 1.0 GiB']));
-test('heaviestLine with no data is an em dash', () =>
-    assertEqual([heaviestLine(null), heaviestLine({topCpu: null, topMemory: null})], ['—', '—']));
 
 // The card's "heaviest" row is four labels (each half's name and value) and a separator; '' hides a label.
 const NO_HEAVIEST_LABELS = {cpuName: '', cpuValue: '', separator: '', memoryName: '', memoryValue: ''};

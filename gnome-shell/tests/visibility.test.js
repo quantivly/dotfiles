@@ -1,12 +1,16 @@
 // The desktop card while windows cover it: lib/visibility.js, which decides whether one window covers the card, and
 // lib/cardRepaint.js, which decides what the card repaints (nothing while it is frozen, everything at once on the
-// reveal, and a meter or the memory bar only when the value it draws changed). card.js, stylesheet.css and
-// extension.js are Shell glue that plain gjs cannot run, so the last rows read their sources for the rules the glue
-// must keep: only app names ellipsize, the stylesheet keeps every class the previous release's code sets, the card has
-// a fixed width, and every signal the covered check follows is disconnected on teardown.
+// reveal, and a meter or the memory bar only when what it draws changed). card.js, stylesheet.css and extension.js are
+// Shell glue that plain gjs cannot run, so the last rows read their sources for the rules the glue must keep: only app
+// names ellipsize, the stylesheet keeps every class the previous release's code sets, the card's fixed width fits its
+// widest rows (measured with Pango, in the card's font), and extension.js wires the covered check and tears it down.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
+import {
+    CARD_CPU_GRAPH_WIDTH_PX, CARD_MEMORY_BAR_WIDTH_PX, PRESSURE_METER_WIDTH_PX,
+} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
+import {cardText} from '../extensions/resource-pulse@dotfiles/lib/format.js';
 // Read through the namespaces, so a missing export fails its rows rather than the whole run.
 import * as visibilityModule from '../extensions/resource-pulse@dotfiles/lib/visibility.js';
 import * as cardRepaintModule from '../extensions/resource-pulse@dotfiles/lib/cardRepaint.js';
@@ -52,6 +56,11 @@ const NO_DATA_SNAPSHOT = {
 };
 const MEMORY_FRACTION = 0.54;
 const HIGHER_MEMORY_FRACTION = 0.61;
+// The memory bar redraws only when its filled width, in whole pixels of CARD_MEMORY_BAR_WIDTH_PX, changes: these
+// fractions fill 81 px, 81.49 px (still 81 once rounded) and 81.51 px (82).
+const WHOLE_PIXEL_FILL_PX = 81;
+const SAME_PIXEL_FILL_PX = 81.49;
+const NEXT_PIXEL_FILL_PX = 81.51;
 const CLOCK_LABEL = '14:02';
 const LATER_CLOCK_LABEL = '14:05';
 const ALL_METER_INDEXES = [0, 1, 2];
@@ -66,10 +75,40 @@ const V1_STYLESHEET_CLASS_NAMES = [
     'resource-pulse-card-cpu-figure', 'resource-pulse-card-details', 'resource-pulse-card-detail-row',
     'resource-pulse-card-pressure-meters', 'resource-pulse-card-pressure-group',
 ];
-/** The previous release's card width: its .resource-pulse-card min-width. */
-const V1_CARD_MIN_WIDTH = '25em';
 const CARD_CLASS_NAME = 'resource-pulse-card';
 const FIXED_WIDTH_CLASS_NAME = 'rp-card-fixed';
+
+// The card's text, as GNOME on Ubuntu draws it: the card's own font family at the shell's 11 pt font-name
+// ("Ubuntu Sans 11"), at 96 dpi with no text scaling, with tabular digits.
+const CARD_FONT_FAMILY = 'Ubuntu Sans';
+const SHELL_FONT_SIZE_PT = 11;
+const FONT_RESOLUTION_DPI = 96;
+const POINTS_PER_INCH = 72;
+const EM_PX = SHELL_FONT_SIZE_PT * FONT_RESOLUTION_DPI / POINTS_PER_INCH;
+const TABULAR_DIGITS_FEATURE = 'tnum';
+/** Room the widest row leaves inside the fixed width, for any difference between Pango here and St on screen. */
+const CARD_WIDTH_MARGIN_PX = 8;
+/** How much of each long app name the widest "heaviest" row still shows before its ellipsis. */
+const HEAVIEST_NAME_SHOWN_CHARS = 10;
+const ELLIPSIS = '…';
+/** A CSS length the width row reads from the stylesheet: a number and px or em. */
+const CSS_LENGTH_PATTERN = /^([\d.]+)(px|em)$/;
+const CSS_FIRST_FONT_FAMILY_PATTERN = /^\s*"([^"]+)"/;
+const BOLD_FONT_WEIGHT = 'bold';
+// The widest values each row of the card can show.
+const LATEST_CLOCK_LABEL = '23:58';
+const FULL_CPU_SNAPSHOT = {
+    ...SNAPSHOT, cpuBusyPercent: 100, cpuClusters: {performancePercent: 100, efficiencyPercent: 100},
+};
+const LARGE_MACHINE_SNAPSHOT = {
+    ...SNAPSHOT,
+    memory: {usedBytes: 123.4 * GIB, totalBytes: 125.6 * GIB},
+    swap: {zramUsedBytes: 123.4 * GIB, zramRamBytes: 12.3 * GIB, diskBytes: 123.4 * GIB},
+    apps: {
+        topCpu: {groupKey: 'app:code', name: 'Visual Studio Code', cpuPercent: 100},
+        topMemory: {groupKey: 'unit:calendar', name: 'gnome-shell-calendar-server', memoryBytes: 123.4 * GIB},
+    },
+};
 
 const CSS_COMMENT_PATTERN = /\/\*[\s\S]*?\*\//g;
 /** One CSS rule: its selector list, then its declarations. */
@@ -85,6 +124,10 @@ const QUOTED_SIGNAL_NAME_PATTERN = /'([\w:-]+)'/g;
 const DISCONNECT_OBJECT_PATTERN = /([\w.]+)\??\.disconnectObject\(this\)/g;
 /** extension.js names its card this._card, and its teardown reads it into a local, card. */
 const OWN_FIELD_PREFIX_PATTERN = /^this\._/;
+/** One `'signal', handler` pair of a connectObject call, the handler up to the next comma. */
+const SIGNAL_HANDLER_PAIR_PATTERN = /'([\w:-]+)',\s*([^,]+?)\s*,/g;
+/** The receivers the covered check connects to in _followCardCover. */
+const COVER_SIGNAL_RECEIVERS = new Set(['global.display', 'global.window_manager', 'global.workspace_manager']);
 
 /**
  * Reads a file of the extension as text (tests may block).
@@ -115,6 +158,35 @@ function declarationBody(sourceText, declarationLine) {
     const closingLine = `${' '.repeat(indent)}}`;
     const endIndex = lines.findIndex((line, lineIndex) => lineIndex > startIndex && line === closingLine);
     return lines.slice(startIndex, endIndex < 0 ? undefined : endIndex + 1).join('\n');
+}
+
+/**
+ * The trimmed lines of a declaration body, for rows that look for one statement.
+ *
+ * @param {string} bodyText - What declarationBody returned.
+ * @returns {string[]} Its lines, trimmed.
+ */
+const trimmedLines = bodyText => bodyText.split('\n').map(line => line.trim());
+
+/**
+ * How many lines of a body are exactly a statement.
+ *
+ * @param {string} bodyText - What declarationBody returned.
+ * @param {string} statement - The statement, trimmed.
+ * @returns {number} Its count.
+ */
+const statementCount = (bodyText, statement) => trimmedLines(bodyText).filter(line => line === statement).length;
+
+/**
+ * The handler of each signal that a source text's connectObject calls connect.
+ *
+ * @param {string} sourceText - A body, or a whole file.
+ * @returns {string[]} '<receiver> <signal>: <handler>' for each pair, in order.
+ */
+function connectedSignalHandlers(sourceText) {
+    return [...sourceText.matchAll(CONNECT_OBJECT_PATTERN)].flatMap(([, receiver, connectArguments]) =>
+        [...connectArguments.matchAll(SIGNAL_HANDLER_PAIR_PATTERN)]
+            .map(([, signalName, handler]) => `${receiver} ${signalName}: ${handler}`));
 }
 
 /**
@@ -224,24 +296,27 @@ test('visibility: a card with no area yet is never covered, even under a maximiz
         visibilityModule.isRectFullyCovered({...CARD_RECT, height: 0}, [MAXIMIZED_WINDOW_RECT]),
     ], [false, false]));
 
-test('visibility: a window counts for cover only when it is a normal or dialog window, not minimized, showing, on ' +
-    'the active workspace and over the primary monitor', () => {
-    const countingWindow = {
-        isNormalOrDialog: true, isMinimized: false, isShowing: true, isOnActiveWorkspace: true,
-        overlapsPrimaryMonitor: true,
-    };
-    const countsWithOneChanged = Object.keys(countingWindow).map(conditionName => {
-        const changedWindow = {...countingWindow, [conditionName]: !countingWindow[conditionName]};
-        return `${conditionName}: ${visibilityModule.windowCountsForCover(changedWindow)}`;
+test('visibility: a window can cover the card only when it is a normal or dialog window, not minimized, showing ' +
+    'and on the active workspace (its frame is read only then, for the overlap with the primary monitor)', () => {
+    const coveringWindow = {isNormalOrDialog: true, isMinimized: false, isShowing: true, isOnActiveWorkspace: true};
+    const canCoverWithOneChanged = Object.keys(coveringWindow).map(conditionName => {
+        const changedWindow = {...coveringWindow, [conditionName]: !coveringWindow[conditionName]};
+        return `${conditionName}: ${visibilityModule.canWindowCoverCard(changedWindow)}`;
     });
-    assertEqual([visibilityModule.windowCountsForCover(countingWindow), ...countsWithOneChanged], [
+    assertEqual([visibilityModule.canWindowCoverCard(coveringWindow), ...canCoverWithOneChanged], [
         true,
         'isNormalOrDialog: false',
         'isMinimized: false',
         'isShowing: false',
         'isOnActiveWorkspace: false',
-        'overlapsPrimaryMonitor: false',
     ]);
+});
+
+test('visibility: covering the card starts the cover re-check timer, a reveal stops it, and otherwise it is left ' +
+    'as it is', () => {
+    const timerChanges = [[true, false], [true, true], [false, true], [false, false]].map(
+        ([isCovered, isTimerRunning]) => visibilityModule.coverRecheckTimerChange({isCovered, isTimerRunning}));
+    assertEqual(timerChanges, ['start', 'none', 'stop', 'none']);
 });
 
 test('visibility: rectangles overlap only when they share area: touching along an edge or at a corner is not ' +
@@ -290,6 +365,23 @@ test('card repaint: a meter or the memory bar repaints only when the value it dr
             memoryFraction: MEMORY_FRACTION},
         {cpuValue: '23%', changedMeterIndexes: [], isMemoryBarChanged: true, memoryFraction: HIGHER_MEMORY_FRACTION},
     ]);
+});
+
+test('card repaint: data after no data repaints all three meters and the memory bar', () => {
+    const planner = new cardRepaintModule.CardRepaintPlanner();
+    planner.show(shownState(NO_DATA_SNAPSHOT, null));
+    const dataPlan = summarizeRepaintPlan(planner.show(shownState(SNAPSHOT, MEMORY_FRACTION)));
+    assertEqual([dataPlan?.changedMeterIndexes, dataPlan?.isMemoryBarChanged], [ALL_METER_INDEXES, true]);
+});
+
+test('card repaint: the memory bar repaints only when its filled width changes by a whole pixel', () => {
+    const fractionFilling = fillPx => fillPx / CARD_MEMORY_BAR_WIDTH_PX;
+    const planner = new cardRepaintModule.CardRepaintPlanner();
+    planner.show(shownState(SNAPSHOT, fractionFilling(WHOLE_PIXEL_FILL_PX)));
+    assertEqual([
+        planner.show(shownState(SNAPSHOT, fractionFilling(SAME_PIXEL_FILL_PX))),
+        planner.show(shownState(SNAPSHOT, fractionFilling(NEXT_PIXEL_FILL_PX))),
+    ].map(repaintPlan => repaintPlan?.isMemoryBarChanged), [false, true]);
 });
 
 test('card repaint: while frozen a snapshot is only recorded; unfreezing renders at once from the latest one, with ' +
@@ -378,24 +470,111 @@ test('stylesheet.css keeps a rule for every class the previous release set (styl
     assertEqual(V1_STYLESHEET_CLASS_NAMES.filter(className => !selectedClassNames.has(className)), []);
 });
 
-test('the card has a fixed width: rp-card-fixed pins its min-width, width and max-width to the previous release\'s ' +
-    '25em, and card.js puts that class on the card', () => {
+/**
+ * Converts a CSS length the card's stylesheet uses to pixels.
+ *
+ * @param {string|undefined} cssLength - For example '12px' or '1.3em'.
+ * @param {number} emPx - One em, in pixels.
+ * @returns {number} The length in pixels.
+ * @throws {Error} For a length this row does not read, or none.
+ */
+function cssLengthPx(cssLength, emPx) {
+    const lengthMatch = CSS_LENGTH_PATTERN.exec(cssLength ?? '');
+    if (lengthMatch === null)
+        throw new Error(`cannot read the CSS length '${cssLength}'`);
+    const [, amountText, unit] = lengthMatch;
+    return unit === 'em' ? Number(amountText) * emPx : Number(amountText);
+}
+
+test('the card\'s fixed width fits its widest rows plus a small margin, measured with Pango in its font: "no data ' +
+    'since", a full CPU line, a 100+ GiB memory line, the widest swap line, "waiting on", and "heaviest" with both ' +
+    'names cut short', async () => {
+    const {default: Pango} = await import('gi://Pango?version=1.0');
+    const {default: PangoCairo} = await import('gi://PangoCairo?version=1.0');
     const rules = stylesheetRules(readExtensionFile('stylesheet.css'));
-    const fixedWidthDeclarations = declarationsOfClass(rules, FIXED_WIDTH_CLASS_NAME);
-    const cardSource = readExtensionFile('card.js');
+    const style = className => declarationsOfClass(rules, className);
+    const fixedWidth = style(FIXED_WIDTH_CLASS_NAME);
+    const fontFamily = CSS_FIRST_FONT_FAMILY_PATTERN.exec(style(CARD_CLASS_NAME)['font-family'] ?? '')?.[1];
+    const pangoContext = PangoCairo.FontMap.get_default().create_context();
+    PangoCairo.context_set_resolution(pangoContext, FONT_RESOLUTION_DPI);
+    const fontDescriptionOf = (sizeEm, fontWeight) => {
+        const fontDescription = Pango.FontDescription.from_string(fontFamily ?? CARD_FONT_FAMILY);
+        fontDescription.set_size(Math.round(SHELL_FONT_SIZE_PT * sizeEm * Pango.SCALE));
+        fontDescription.set_weight(fontWeight === BOLD_FONT_WEIGHT ? Pango.Weight.BOLD : Pango.Weight.NORMAL);
+        return fontDescription;
+    };
+    const textPx = (text, sizeEm = 1, fontWeight = undefined) => {
+        const layout = Pango.Layout.new(pangoContext);
+        layout.set_font_description(fontDescriptionOf(sizeEm, fontWeight));
+        const attributes = new Pango.AttrList();
+        attributes.insert(Pango.attr_font_features_new(TABULAR_DIGITS_FEATURE));
+        layout.set_attributes(attributes);
+        layout.set_text(text, -1);
+        const [, logicalRect] = layout.get_pixel_extents();
+        return logicalRect.width;
+    };
+    const figureStyle = style('resource-pulse-card-figure');
+    const figurePx = text => textPx(text, cssLengthPx(figureStyle['font-size'], 1), figureStyle['font-weight']);
+    const suffixPx = text => textPx(text, cssLengthPx(style('resource-pulse-card-suffix')['font-size'], 1));
+    const spacingPx = className => cssLengthPx(style(className).spacing, EM_PX);
+    const gridColumnSpacingPx = cssLengthPx(style('resource-pulse-card-meters')['spacing-columns'], EM_PX);
+    const detailRowSpacingPx = spacingPx('resource-pulse-card-detail-row');
+    const heaviestPartsSpacingPx = spacingPx('rp-card-heaviest-parts');
+
+    const noDataText = cardText(NO_DATA_SNAPSHOT, LATEST_CLOCK_LABEL);
+    const fullCpuText = cardText(FULL_CPU_SNAPSHOT, LATEST_CLOCK_LABEL);
+    const largeMachineText = cardText(LARGE_MACHINE_SNAPSHOT, LATEST_CLOCK_LABEL);
+    const labelColumnPx = Math.max(...[noDataText.cpuLabel, noDataText.memoryLabel, noDataText.swapLabel].map(
+        label => textPx(label)));
+    const fullCpuFigurePx = figurePx(fullCpuText.cpuValue) + spacingPx('resource-pulse-card-cpu-figure') +
+        suffixPx(fullCpuText.cpuClusterSuffix);
+    const gridRowPx = valuePx => labelColumnPx + gridColumnSpacingPx + valuePx + gridColumnSpacingPx +
+        CARD_CPU_GRAPH_WIDTH_PX;
+    const pressureMetersPx = noDataText.waitingOnMeters
+        .map(({label}) => textPx(label) + spacingPx('resource-pulse-card-pressure-group') + PRESSURE_METER_WIDTH_PX)
+        .reduce((sumPx, meterPx) => sumPx + meterPx, 0) +
+        (noDataText.waitingOnMeters.length - 1) * spacingPx('resource-pulse-card-pressure-meters');
+    const {heaviestRow} = largeMachineText;
+    const shortenedName = name => `${name.slice(0, HEAVIEST_NAME_SHOWN_CHARS)}${ELLIPSIS}`;
+    const heaviestPartTexts = [shortenedName(heaviestRow.cpuName), heaviestRow.cpuValue, heaviestRow.separator,
+        shortenedName(heaviestRow.memoryName), heaviestRow.memoryValue];
+    const heaviestPartsPx = heaviestPartTexts.map(partText => textPx(partText))
+        .reduce((sumPx, partPx) => sumPx + partPx, 0) + (heaviestPartTexts.length - 1) * heaviestPartsSpacingPx;
+    const rowWidthsPx = {
+        'no data since': gridRowPx(figurePx(noDataText.cpuValue)),
+        'full CPU': gridRowPx(fullCpuFigurePx),
+        '100+ GiB memory': gridRowPx(figurePx(largeMachineText.memoryValue)),
+        'widest swap': labelColumnPx + gridColumnSpacingPx + textPx(largeMachineText.swapValue),
+        'waiting on': textPx(noDataText.waitingOnLabel) + detailRowSpacingPx + pressureMetersPx,
+        'heaviest': textPx(largeMachineText.heaviestLabel) + detailRowSpacingPx + heaviestPartsPx,
+    };
+    const [widestRowName, widestRowPx] = Object.entries(rowWidthsPx)
+        .reduce((widest, row) => (row[1] > widest[1] ? row : widest));
+    const contentWidthPx = cssLengthPx(fixedWidth.width, EM_PX);
+    const neededWidthPx = widestRowPx + CARD_WIDTH_MARGIN_PX;
+    const loadedFamily = pangoContext.load_font(fontDescriptionOf(1)).describe().get_family();
     assertEqual({
-        fixedWidth: [
-            fixedWidthDeclarations['min-width'], fixedWidthDeclarations.width, fixedWidthDeclarations['max-width'],
-        ],
-        cardMinWidth: declarationsOfClass(rules, CARD_CLASS_NAME)['min-width'],
-        cardJsNamesTheClass: cardSource.includes(`const FIXED_WIDTH_STYLE_CLASS = '${FIXED_WIDTH_CLASS_NAME}';`),
-        cardJsSetsIt: cardSource.includes('style_class: `${CARD_STYLE_CLASS} ${FIXED_WIDTH_STYLE_CLASS}`,'),
+        loadedFamily,
+        isFixed: fixedWidth['min-width'] === fixedWidth.width && fixedWidth['max-width'] === fixedWidth.width,
+        fitsWithMargin: neededWidthPx <= contentWidthPx,
+        isAtMostOneEmWider: contentWidthPx <= neededWidthPx + EM_PX,
+        keepsTheV1MinWidthRule: style(CARD_CLASS_NAME)['min-width'] !== undefined,
     }, {
-        fixedWidth: [V1_CARD_MIN_WIDTH, V1_CARD_MIN_WIDTH, V1_CARD_MIN_WIDTH],
-        cardMinWidth: V1_CARD_MIN_WIDTH,
-        cardJsNamesTheClass: true,
-        cardJsSetsIt: true,
-    });
+        loadedFamily: CARD_FONT_FAMILY,
+        isFixed: true,
+        fitsWithMargin: true,
+        isAtMostOneEmWider: true,
+        keepsTheV1MinWidthRule: true,
+    }, `widest row "${widestRowName}" is ${widestRowPx} px, plus ${CARD_WIDTH_MARGIN_PX} px margin; ` +
+        `rp-card-fixed is ${fixedWidth.width} = ${contentWidthPx.toFixed(1)} px; rows ${JSON.stringify(rowWidthsPx)}`);
+});
+
+test('card.js puts the fixed-width class on the card', () => {
+    const cardSource = readExtensionFile('card.js');
+    assertEqual([
+        cardSource.includes(`const FIXED_WIDTH_STYLE_CLASS = '${FIXED_WIDTH_CLASS_NAME}';`),
+        cardSource.includes('style_class: `${CARD_STYLE_CLASS} ${FIXED_WIDTH_STYLE_CLASS}`,'),
+    ], [true, true]);
 });
 
 test('extension.js checks the cover on a restack, a fullscreen change, a minimize, an unminimize, a size change, ' +
@@ -435,4 +614,110 @@ test('extension.js checks the cover on a restack, a fullscreen change, a minimiz
         clientListenersAdded: 1,
         clientListenersRemovedOnTeardown: 1,
     });
+});
+
+test('extension.js: enable() follows the cover right after adding the card, before starting the client', () => {
+    const enableBody = declarationBody(readExtensionFile('extension.js'), 'enable() {');
+    const stepStatements = ['this._addCard();', 'this._followCardCover();', 'this._client.start();'];
+    const stepLineIndexes = stepStatements.map(statement => trimmedLines(enableBody).indexOf(statement));
+    assertEqual({
+        counts: stepStatements.map(statement => statementCount(enableBody, statement)),
+        areConsecutive: stepLineIndexes.every((lineIndex, stepIndex) =>
+            stepIndex === 0 || lineIndex === stepLineIndexes[stepIndex - 1] + 1),
+    }, {counts: [1, 1, 1], areConsecutive: true});
+});
+
+test('extension.js: _placeCard() checks the cover right after placing the card', () => {
+    const placeCardBody = trimmedLines(declarationBody(readExtensionFile('extension.js'), '_placeCard() {'));
+    const placeLineIndex = placeCardBody.indexOf('this._card?.placeOnPrimaryMonitor();');
+    assertEqual([placeLineIndex >= 0, placeCardBody[placeLineIndex + 1]], [true, 'this._syncCardCover();']);
+});
+
+test('extension.js: _syncCardCover() freezes a covered card, records whether it can be seen, and updates the ' +
+    're-check timer and the detail watch', () => {
+    const syncBody = declarationBody(readExtensionFile('extension.js'), '_syncCardCover() {');
+    const statements = [
+        'const isCovered = this._isCardCovered();',
+        'this._card.setFrozen(isCovered);',
+        'this._isCardVisible = !isCovered;',
+        'this._syncCoverRecheckTimer(isCovered);',
+        'this._syncDetailWatch();',
+    ];
+    assertEqual(statements.map(statement => statementCount(syncBody, statement)), [1, 1, 1, 1, 1]);
+});
+
+test('extension.js: every cover trigger queues the one coalesced cover check: each signal\'s handler, the client ' +
+    'listener and the re-check timer', () => {
+    const extensionSource = readExtensionFile('extension.js');
+    const followBody = declarationBody(extensionSource, '_followCardCover() {');
+    const coverSignalHandlers = connectedSignalHandlers(followBody)
+        .filter(signalHandler => COVER_SIGNAL_RECEIVERS.has(signalHandler.split(' ')[0]));
+    assertEqual({
+        coverSignalHandlers,
+        queuesTheCheck: statementCount(followBody, 'const queueCardCoverCheck = () => this._queueCardCoverCheck();'),
+        clientListener: statementCount(followBody,
+            'this._cardCoverListenerId = this._client.addListener(queueCardCoverCheck);'),
+        timerQueuesTheCheck: statementCount(declarationBody(extensionSource, '_onCoverRecheckTimeout() {'),
+            'this._queueCardCoverCheck();'),
+    }, {
+        coverSignalHandlers: [
+            'global.display restacked: queueCardCoverCheck',
+            'global.display in-fullscreen-changed: queueCardCoverCheck',
+            'global.display grab-op-end: queueCardCoverCheck',
+            'global.window_manager minimize: queueCardCoverCheck',
+            'global.window_manager unminimize: queueCardCoverCheck',
+            'global.window_manager size-changed: queueCardCoverCheck',
+            'global.window_manager switch-workspace: queueCardCoverCheck',
+            'global.workspace_manager showing-desktop-changed: queueCardCoverCheck',
+        ],
+        queuesTheCheck: 1,
+        clientListener: 1,
+        timerQueuesTheCheck: 1,
+    });
+});
+
+test('extension.js: the cover check is coalesced into one BEFORE_REDRAW later that runs the cover sync, and ' +
+    'teardown cancels it', () => {
+    const extensionSource = readExtensionFile('extension.js');
+    const queueBody = declarationBody(extensionSource, '_queueCardCoverCheck() {');
+    assertEqual({
+        returnsWhileQueued: statementCount(queueBody, 'if (this._cardCoverCheckLaterId !== null)'),
+        addsABeforeRedrawLater: queueBody.includes('global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW,'),
+        runsTheCoverSync: statementCount(queueBody, 'this._syncCardCover();'),
+        cancelRemovesIt: statementCount(declarationBody(extensionSource, '_cancelCardCoverCheck() {'),
+            'global.compositor.get_laters().remove(laterId);'),
+        teardownCancels: statementCount(declarationBody(extensionSource, '_tearDown() {'),
+            '{name: \'cancel the pending cover check\', run: () => this._cancelCardCoverCheck()},'),
+    }, {
+        returnsWhileQueued: 1, addsABeforeRedrawLater: true, runsTheCoverSync: 1, cancelRemovesIt: 1,
+        teardownCancels: 1,
+    });
+});
+
+test('extension.js: while the card is frozen a timer re-checks the cover every SAMPLE_INTERVAL_SECONDS, and the ' +
+    'reveal and teardown remove it', () => {
+    const extensionSource = readExtensionFile('extension.js');
+    const timerBody = declarationBody(extensionSource, '_syncCoverRecheckTimer(isCovered) {');
+    assertEqual({
+        decides: timerBody.includes('coverRecheckTimerChange({isCovered, isTimerRunning:'),
+        starts: timerBody.includes('GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAMPLE_INTERVAL_SECONDS,'),
+        stops: statementCount(timerBody, 'this._removeCoverRecheckTimer();'),
+        removeRemovesTheSource: statementCount(declarationBody(extensionSource, '_removeCoverRecheckTimer() {'),
+            'GLib.source_remove(sourceId);'),
+        keepsRunning: statementCount(declarationBody(extensionSource, '_onCoverRecheckTimeout() {'),
+            'return GLib.SOURCE_CONTINUE;'),
+        teardownRemoves: statementCount(declarationBody(extensionSource, '_tearDown() {'),
+            '{name: \'remove the cover re-check timer\', run: () => this._removeCoverRecheckTimer()},'),
+    }, {decides: true, starts: true, stops: 1, removeRemovesTheSource: 1, keepsRunning: 1, teardownRemoves: 1});
+});
+
+test('extension.js: when the overview has closed, the cover is checked again', () => {
+    const extensionSource = readExtensionFile('extension.js');
+    const followOverviewBody = declarationBody(extensionSource, '_followOverviewWithDetailWatch() {');
+    const overviewHandlers = connectedSignalHandlers(followOverviewBody);
+    assertEqual({
+        hiddenHandler: overviewHandlers.filter(signalHandler => signalHandler.startsWith('Main.overview hidden:')),
+        hiddenChecksTheCover: statementCount(declarationBody(extensionSource, '_onOverviewHidden() {'),
+            'this._syncCardCover();'),
+    }, {hiddenHandler: ['Main.overview hidden: () => this._onOverviewHidden()'], hiddenChecksTheCover: 1});
 });
