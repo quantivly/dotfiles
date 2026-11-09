@@ -65,6 +65,15 @@
 #     set-property` (drop-ins under ~/.config/systemd/user.control/), and the
 #     effective values are shown as information.
 #
+# THE HOST PROFILE (shared-configuration design, H1). ~/.config/claude-host-profile, the
+# settings renderer's marker, names this host's profile, and the private overlay's
+# hosts/<profile>.json lists its tenants. With the marker, the overlay (~/.dotfiles-local) is
+# cloned BEFORE the public ./install, which renders settings from it and refuses a marker with no
+# overlay, and is then kept on origin/main exactly as ~/.dotfiles is. Without it, no overlay row
+# runs. The ~/quantivly clones are skipped only when the tenants are known and leave out the work
+# tenant: a host whose overlay is not cloned yet goes on fetching them. Where clauth manages the
+# Claude accounts (~/.clauth), the long-lived-token rows do not apply (H9).
+#
 # Usage (the controlling host, usually the laptop):
 #   host-sync --host <ssh alias> [--check]     report drift on <host>; changes nothing (default)
 #   host-sync --host <ssh alias> --apply       bring <host> level, then report; arms its timer
@@ -74,22 +83,27 @@
 #
 # Exit: 0 nothing for host-sync to fix (⚠ operator steps may still be listed)
 #       1 drift remains (in --check: what --apply would fix; in --apply: a fix failed)
-#       2 could not run (dev unreachable, another run holds the lock, not armed, killed)
+#       2 could not run (the host unreachable, another run holds the lock, not armed, killed)
 #       64 usage
 #
 # Rows: ✓ level · ✗ drift --apply fixes · ⚠ needs a person · · information
 #
 # Test overrides (scripts/test-host-sync.sh): HOST_SYNC_GITHUB_BASE, HOST_SYNC_NPM_URL,
-# HOST_SYNC_HERDR_RELEASES, HOST_SYNC_DOTFILES_REMOTE, HOST_SYNC_NO_SCOPE=1 (skip the
-# systemd-run wrapper), HOST_SYNC_SSH (the ssh command), HOST_SYNC_PROC (/proc),
-# HOST_SYNC_TOKEN_WARN_D.
+# HOST_SYNC_HERDR_RELEASES, HOST_SYNC_DOTFILES_REMOTE, HOST_SYNC_DOTFILES_LOCAL_REMOTE (the
+# laptop's ls-remote of the overlay), HOST_SYNC_DOTFILES_LOCAL_REPO (its owner/repo, cloned from
+# HOST_SYNC_GITHUB_BASE), CLAUDE_SETTINGS_RENDER_MARKER (the renderer's own name for the profile
+# marker), HOST_SYNC_NO_SCOPE=1 (skip the systemd-run wrapper), HOST_SYNC_SSH (the ssh command),
+# HOST_SYNC_PROC (/proc), HOST_SYNC_TOKEN_WARN_D.
 
 set -uo pipefail
 
 # --- what "level" means for the work tenant ---------------------------------------------------
 
 WORK_ORG="quantivly"                 # ~/quantivly clones of this org are synced
+WORK_TENANT="quantivly"              # the profile tenant those clones serve
 DRAFT_REPO="ZviBaratz/herdr-draft"
+# The private overlay: owner/repo, cloned from GITHUB_BASE with the host's own git credentials.
+DOTFILES_LOCAL_REPO="${HOST_SYNC_DOTFILES_LOCAL_REPO:-ZviBaratz/dotfiles-local}"
 DRAFT_ID="zvibaratz.draft"
 
 # `claude plugin marketplace add` sources, by marketplace name. The dotfiles one is the
@@ -151,10 +165,22 @@ TIMER_UNIT="host-sync.timer"
 LEGACY_TIMER_UNIT="dev-sync.timer"
 USER_UNIT_DIR="$HOME/.config/systemd/user"
 WANTS_DIR="$USER_UNIT_DIR/default.target.wants"
+# The private overlay's checkout, on the host and on the laptop alike.
+DOTFILES_LOCAL="$HOME/.dotfiles-local"
+# The host profile's marker: the settings renderer's, read through its own override, so one
+# variable moves every script that reads it. Its first line names the profile; the name rule is
+# the renderer's, verbatim.
+PROFILE_MARKER="${CLAUDE_SETTINGS_RENDER_MARKER:-$HOME/.config/claude-host-profile}"
+PROFILE_NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+# Where clauth manages the Claude accounts (claude-oauth-store and zshrc.company read the same dir).
+CLAUTH_DIR="$HOME/.clauth"
+GIT_NET_TIMEOUT_SECONDS=300
+CLONE_TIMEOUT_SECONDS=300
 SAFE_DIR_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 HOST_ALIAS_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'   # an ssh alias, never an option or a path
 SAFE_REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
 SHA_RE='^[0-9a-f]{40}$'
+COUNT_RE='^[0-9]+$'
 VER_RE='^[0-9]+(\.[0-9]+)+$'
 TOKEN_LINE_RE='^CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat[0-9]+-[A-Za-z0-9_-]+$'
 # A seat's name, in the seat layout (token.env a link to seats/<seat>.env). A CONSTANT, never read
@@ -187,54 +213,153 @@ row() {   # $1 = ok|drift|oper|info, $2 = area, $3 = message
     printf '  %s %-14s %s\n' "$g" "$2" "$3"
 }
 short() { printf '%s' "${1:0:7}"; }
-git_net() { GIT_TERMINAL_PROMPT=0 timeout 300 git "$@" </dev/null; }
+# git against a remote: never prompts for a credential, reads no stdin, gives up after $1 seconds.
+git_net_within() { local seconds="$1"; shift; GIT_TERMINAL_PROMPT=0 timeout "$seconds" git "$@" </dev/null; }
+git_net() { git_net_within "$GIT_NET_TIMEOUT_SECONDS" "$@"; }
 ver_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" == "$1" ]]; }
 json_get() { jq -r "$2" "$1" 2>/dev/null; }
 
-here_dotfiles() {
-    local d="$DOTFILES" branch head target src old n overlap
+# ----------------------------------------------------------------------------------------------
+# The host profile, and the checkouts this host keeps on origin/main
+# ----------------------------------------------------------------------------------------------
+
+# Read the host profile: the marker's first line names it, and the overlay's hosts/<name>.json
+# lists its tenants. Sets PROFILE (the name, only once it passes the renderer's rule),
+# PROFILE_FILE, TENANTS, TENANTS_KNOWN (1 only once that file was read) and PROFILE_FAULT (why the
+# marker or the file cannot be used). No marker leaves all of them empty. The marker's content is
+# never printed: a name is shown only once it has passed the rule.
+read_profile() {
+    local name=""
+    PROFILE=""; PROFILE_FILE=""; PROFILE_FAULT=""; TENANTS=(); TENANTS_KNOWN=0
+    [[ -f "$PROFILE_MARKER" ]] || return 0
+    if [[ ! -r "$PROFILE_MARKER" ]]; then
+        PROFILE_FAULT="the marker $(tilde_path "$PROFILE_MARKER") is not readable by $(id -un)"
+        return 0
+    fi
+    IFS= read -r name <"$PROFILE_MARKER"
+    if [[ ! "$name" =~ $PROFILE_NAME_RE ]]; then
+        PROFILE_FAULT="the marker holds an unusable profile name (the renderer's rule: letters, digits, dots, dashes)"
+        return 0
+    fi
+    PROFILE="$name"
+    PROFILE_FILE="$DOTFILES_LOCAL/hosts/$PROFILE.json"
+    [[ -d "$DOTFILES_LOCAL" ]] || return 0   # tenants unknown until the overlay is cloned
+    if [[ ! -e "$PROFILE_FILE" ]]; then
+        PROFILE_FAULT="no hosts/$PROFILE.json in $(tilde_path "$DOTFILES_LOCAL")"
+        return 0
+    fi
+    if ! jq -e '.tenants | type == "array" and all(type == "string")' "$PROFILE_FILE" >/dev/null 2>&1; then
+        PROFILE_FAULT="hosts/$PROFILE.json in $(tilde_path "$DOTFILES_LOCAL") cannot be read, or has no .tenants list of names"
+        return 0
+    fi
+    mapfile -t TENANTS < <(jq -r '.tenants[]' "$PROFILE_FILE" 2>/dev/null)
+    TENANTS_KNOWN=1
+}
+has_tenant() {   # $1 = a tenant name; 0 when the host profile lists it
+    local tenant
+    for tenant in ${TENANTS[@]+"${TENANTS[@]}"}; do
+        [[ "$tenant" == "$1" ]] && return 0
+    done
+    return 1
+}
+# True only when the tenants are KNOWN and $1 is not among them. A host whose profile cannot be
+# read yet keeps every tenant-gated row: its work clones go on being fetched.
+tenants_exclude() { (( TENANTS_KNOWN )) && ! has_tenant "$1"; }
+
+# The overlay's clone, and only that: with a profile named and no ~/.dotfiles-local. It runs before
+# the public ./install, which renders settings from the overlay and refuses (exit 2) a marker with
+# no overlay, and the profile is read again after it, so this same run knows the tenants.
+clone_overlay() {
+    [[ -n "$PROFILE" && ! -d "$DOTFILES_LOCAL" ]] || return 0
+    if [[ "$MODE" != apply ]]; then
+        row drift dotfiles-local "not cloned (origin would be $DOTFILES_LOCAL_REPO)"
+        return
+    fi
+    if git_net_within "$CLONE_TIMEOUT_SECONDS" clone --quiet "$GITHUB_BASE/$DOTFILES_LOCAL_REPO.git" "$DOTFILES_LOCAL" \
+        >/dev/null 2>&1; then
+        row ok dotfiles-local "cloned from $DOTFILES_LOCAL_REPO"
+        read_profile
+    else
+        row drift dotfiles-local "git clone $DOTFILES_LOCAL_REPO failed"
+    fi
+}
+
+here_dotfiles() { sync_checkout dotfiles "$DOTFILES" installed-head; }
+
+# The overlay is managed only on a host with a profile marker (H1), usable or not, once it exists.
+here_dotfiles_local() {
+    [[ -n "$PROFILE" || -n "$PROFILE_FAULT" ]] && [[ -d "$DOTFILES_LOCAL" ]] || return 0
+    sync_checkout dotfiles-local "$DOTFILES_LOCAL" installed-head-dotfiles-local
+}
+
+here_profile() {
+    local tenants_shown
+    if [[ -n "$PROFILE_FAULT" ]]; then
+        row oper profile "$PROFILE_FAULT"
+    elif [[ -z "$PROFILE" ]]; then
+        row info profile "no host profile marker ($(tilde_path "$PROFILE_MARKER")); dotfiles-local, settings, memory stores and retire are not managed here"
+    elif (( TENANTS_KNOWN )); then
+        tenants_shown="$(printf '%s, ' ${TENANTS[@]+"${TENANTS[@]}"})"
+        row info profile "$PROFILE (tenants: ${tenants_shown%, })"
+    else
+        row info profile "$PROFILE: $(tilde_path "$DOTFILES_LOCAL") is not cloned yet, so its tenants are unknown until --apply clones it"
+    fi
+}
+
+# Keep a checkout on origin/main: fetch (in --apply), fast-forward, refuse local edits that
+# origin/main also changes, then ./install once per commit. It never clones.
+# $1 = the row's area, also the name the laptop's facts are keyed by (dotfiles | dotfiles-local),
+# $2 = the checkout, $3 = its install stamp's file name under $STATE.
+sync_checkout() {
+    local label="$1" d="$2" stamp_name="$3" branch head target src old n="" overlap
+    local laptop_sha="" laptop_behind="" fix="move it aside, and --apply clones it again"
+    [[ "$label" == dotfiles ]] && fix="bootstrap it (scripts/server-bootstrap.sh)"
     if ! git -C "$d" rev-parse --git-dir >/dev/null 2>&1; then
-        row oper dotfiles "$DOTFILES is not a git checkout; bootstrap it (scripts/server-bootstrap.sh)"
+        row oper "$label" "$d is not a git checkout; $fix"
         return
     fi
     branch="$(git -C "$d" symbolic-ref --quiet --short HEAD 2>/dev/null)" || branch="(detached)"
     if [[ "$branch" != main ]]; then
-        row oper dotfiles "on '$branch', not main; host-sync only moves main, so it has not touched it"
+        row oper "$label" "on '$branch', not main; host-sync only moves main, so it has not touched it"
         return
     fi
+    case "$label" in
+        dotfiles) laptop_sha="$ARG_DOTFILES_SHA"; laptop_behind="$ARG_DOTFILES_BEHIND" ;;
+        dotfiles-local) laptop_sha="$ARG_DOTFILES_LOCAL_SHA"; laptop_behind="$ARG_DOTFILES_LOCAL_BEHIND" ;;
+    esac
 
     if [[ "$MODE" == apply ]]; then
         if ! git_net -C "$d" fetch --quiet origin main; then
-            row drift dotfiles "git fetch origin main failed"
+            row drift "$label" "git fetch origin main failed"
             return
         fi
         target="$(git -C "$d" rev-parse origin/main)"; src="origin/main"
-    elif [[ -n "$ARG_DOTFILES_SHA" ]]; then
-        target="$ARG_DOTFILES_SHA"; src="origin/main"
+    elif [[ -n "$laptop_sha" ]]; then
+        target="$laptop_sha"; src="origin/main"
     else
         target="$(git -C "$d" rev-parse --verify --quiet origin/main)"
-        src="origin/main as of dev's last fetch"
+        src="origin/main as of this host's last fetch"
     fi
     head="$(git -C "$d" rev-parse HEAD)"; old="$head"
 
     if [[ "$head" != "$target" ]]; then
         if ! git -C "$d" cat-file -e "$target^{commit}" 2>/dev/null; then
-            # Check mode with a laptop-supplied target dev has not fetched: no ancestry to ask.
-            n="${ARG_DOTFILES_BEHIND:-?}"
-            row drift dotfiles "$n commits behind $src ($(short "$head") → $(short "$target"))"
+            # Check mode with a laptop-supplied target this host has not fetched: no ancestry to ask.
+            n="${laptop_behind:-?}"
+            row drift "$label" "$n commits behind $src ($(short "$head") → $(short "$target"))"
             return
         fi
         if git -C "$d" merge-base --is-ancestor "$target" "$head"; then
-            row oper dotfiles "$(short "$head") is AHEAD of $src: unpushed commits on this host, not touched"
+            row oper "$label" "$(short "$head") is AHEAD of $src: unpushed commits on this host, not touched"
             return
         fi
         if ! git -C "$d" merge-base --is-ancestor "$head" "$target"; then
-            row oper dotfiles "diverged from $src; not fast-forwardable, resolve by hand"
+            row oper "$label" "diverged from $src; not fast-forwardable, resolve by hand"
             return
         fi
         n="$(git -C "$d" rev-list --count "$head..$target")"
         if [[ "$MODE" != apply ]]; then
-            row drift dotfiles "$n commits behind $src ($(short "$head") → $(short "$target"))"
+            row drift "$label" "$n commits behind $src ($(short "$head") → $(short "$target"))"
             return
         fi
         # Local edits only block the merge when origin/main changes the same path; the
@@ -244,41 +369,43 @@ here_dotfiles() {
             <({ git -C "$d" diff --name-only HEAD; git -C "$d" ls-files --others --exclude-standard; } | sort -u) \
             <(git -C "$d" diff --name-only "$head" "$target" | sort -u) | tr '\n' ' ')"
         if [[ -n "$overlap" ]]; then
-            row oper dotfiles "local edits to ${overlap% } that origin/main also changes; not merged"
+            row oper "$label" "local edits to ${overlap% } that origin/main also changes; not merged"
             return
         fi
         if ! git -C "$d" merge --ff-only --quiet "$target" </dev/null >/dev/null 2>&1; then
-            row drift dotfiles "git merge --ff-only $(short "$target") failed"
+            row drift "$label" "git merge --ff-only $(short "$target") failed"
             return
         fi
         head="$target"
     fi
+    install_checkout "$label" "$d" "$STATE/$stamp_name" "$old" "$head" "$n"
+}
 
-    # ./install is part of deploying (CLAUDE.md, "The checkout IS the deployment"), and it is
-    # what links this script's own timer. A stamp records the commit it last ran for, so a
-    # level checkout does not re-run it.
-    if [[ "$(cat "$STATE/installed-head" 2>/dev/null)" == "$head" ]]; then
-        if [[ "$old" != "$head" ]]; then
-            row ok dotfiles "fast-forwarded $n commits ($(short "$old") → $(short "$head")), installed"
-        else
-            row ok dotfiles "main at $(short "$head"), installed"
-        fi
+# The install half of sync_checkout. ./install is part of deploying (CLAUDE.md, "The checkout IS
+# the deployment"); dotfiles' is what links this script's own timer. A stamp records the commit it
+# last ran for, so a level checkout does not re-run it. Every ./install runs with stdin closed: the
+# public one prompts on a tty.
+# $1 = area, $2 = checkout, $3 = stamp file, $4 = HEAD before this run, $5 = HEAD now,
+# $6 = the commits fast-forwarded.
+install_checkout() {
+    local label="$1" d="$2" stamp="$3" old="$4" head="$5" n="$6" level_text log_name="install.log"
+    [[ "$label" == dotfiles ]] || log_name="install-$label.log"
+    level_text="main at $(short "$head"), installed"
+    [[ "$old" != "$head" ]] && level_text="fast-forwarded $n commits ($(short "$old") → $(short "$head")), installed"
+    if [[ "$(cat "$stamp" 2>/dev/null)" == "$head" ]]; then
+        row ok "$label" "$level_text"
         return
     fi
     if [[ "$MODE" != apply ]]; then
-        row drift dotfiles "main at $(short "$head"), but ./install has not run for it"
+        row drift "$label" "main at $(short "$head"), but ./install has not run for it"
         return
     fi
-    if (cd "$d" && bash ./install) >"$STATE/install.log" 2>&1 </dev/null; then
-        printf '%s\n' "$head" >"$STATE/installed-head"
-        if [[ "$old" != "$head" ]]; then
-            row ok dotfiles "fast-forwarded $n commits ($(short "$old") → $(short "$head")), installed"
-        else
-            row ok dotfiles "main at $(short "$head"), installed"
-        fi
+    if (cd "$d" && bash ./install) >"$STATE/$log_name" 2>&1 </dev/null; then
+        printf '%s\n' "$head" >"$stamp"
+        row ok "$label" "$level_text"
     else
-        row drift dotfiles "./install failed at $(short "$head"); log: ~/.local/state/host-sync/install.log"
-        tail -n 5 "$STATE/install.log" | sed 's/^/        /'
+        row drift "$label" "./install failed at $(short "$head"); log: ~/.local/state/host-sync/$log_name"
+        tail -n 5 "$STATE/$log_name" | sed 's/^/        /'
     fi
 }
 
@@ -400,7 +527,10 @@ disarmed_marker_shown() {
     if [[ -e "$MARKER_DIR/disarmed" ]]; then tilde_path "$MARKER_DIR/disarmed"
     else tilde_path "$LEGACY_MARKER_DIR/disarmed"; fi
 }
-tilde_path() { printf '~%s' "${1#"$HOME"}"; }
+# A path under $HOME as ~/…, as the rows print it; any other path as it is.
+tilde_path() {
+    if [[ "$1" == "$HOME"/* ]]; then printf '~%s' "${1#"$HOME"}"; else printf '%s' "$1"; fi
+}
 
 # host-sync.timer's is-enabled and is-active, into TIMER_ENABLED and TIMER_ACTIVE.
 read_timer_state() {
@@ -527,6 +657,12 @@ here_login_back() {
 
 here_auth() {
     local st logged method mode created then_s age left n w
+    # clauth rotates per-account logins and refuses a stored long-lived token (H9), so nothing below
+    # applies there, and `claude auth status` is not asked.
+    if [[ -d "$CLAUTH_DIR" ]]; then
+        row info auth "accounts are managed by clauth on this host; the long-lived-token rows do not apply"
+        return 0
+    fi
     st="$(cd "$HOME" && timeout 60 "$CLAUDE" auth status --json 2>/dev/null </dev/null |
         jq -r '"\(.loggedIn) \(.authMethod)"' 2>/dev/null)"
     read -r logged method <<<"$st"
@@ -648,13 +784,13 @@ here_agent() {
         return
     fi
     if [[ ! -S "$link" ]]; then
-        row info agent "~/.ssh/ssh_auth_sock dangles (→ $(readlink "$link")); the next shell relinks it to dev's own agent"
+        row info agent "~/.ssh/ssh_auth_sock dangles (→ $(readlink "$link")); the next shell relinks it to this host's own agent"
         return
     fi
     agent_link_forwarded; rc=$?; t="$AGENT_TARGET"
     if (( rc == 0 )); then
         # Never probed: asking a forwarded agent is the hang this row exists for.
-        row oper agent "~/.ssh/ssh_auth_sock → an agent FORWARDED from the laptop ($t): any process here can use its keys, and new panes' ssh-add waits on it. Set ForwardAgent no for dev and end that ssh; the next shell relinks to dev's own agent"
+        row oper agent "~/.ssh/ssh_auth_sock → an agent FORWARDED from the laptop ($t): any process here can use its keys, and new panes' ssh-add waits on it. Set ForwardAgent no for this host and end that ssh; the next shell relinks to this host's own agent"
         return
     fi
     row ok agent "~/.ssh/ssh_auth_sock → $t, a local agent"
@@ -1059,6 +1195,8 @@ fetch_age_h() {   # hours since $1 was last fetched; 99999 if never
 
 here_clones() {
     local root="$HOME/$WORK_ORG" pair dir repo p have age n=0 stale=() failed=() oldest="" oldest_age=-1
+    # A profile known to leave out the work tenant has no ~/quantivly to keep; unknown tenants do not skip.
+    tenants_exclude "$WORK_TENANT" && return 0
     # --check writes nothing, not even the directory.
     [[ -d "$root" || "$MODE" != apply ]] || mkdir -p "$root"
 
@@ -1189,9 +1327,16 @@ here_rows() {
     [[ -n "$ARG_CLAUDE$ARG_DOTFILES_SHA" ]] ||
         printf '  (no laptop facts: targets are origin/main, Claude Code latest, herdr-draft main)\n'
 
-    # Order matters: ./install links the timer's units and the dotfiles marketplace's
-    # plugin, so dotfiles go first; linear-key is enabled before linear is disabled.
+    # Order matters. The overlay is cloned first: dotfiles' ./install renders settings from it, and
+    # the renderer refuses (exit 2) a host with a profile marker and no overlay; the profile is
+    # read again after that clone. dotfiles' ./install links the timer's units and the dotfiles
+    # marketplace's plugin, so the checkouts go before both; linear-key is enabled before linear
+    # is disabled.
+    read_profile
+    clone_overlay
     here_dotfiles
+    here_dotfiles_local
+    here_profile
     here_timer
     here_claude
     here_auth
@@ -1229,7 +1374,7 @@ laptop_facts() {   # fills FACTS; notes go to stderr
 
     v="$("$HOME/.local/bin/claude" --version 2>/dev/null </dev/null | awk 'NR==1{print $1}')"
     if [[ "$v" =~ $VER_RE ]]; then FACTS+=(--claude-version "$v")
-    else echo "host-sync: no Claude Code version on this machine; dev will target latest" >&2; fi
+    else echo "host-sync: no Claude Code version on this machine; the host will target latest" >&2; fi
 
     v="$("$HOME/.local/bin/herdr" --version 2>/dev/null | awk 'NR==1{print $2}')"
     if [[ "$v" =~ $VER_RE ]]; then
@@ -1241,6 +1386,12 @@ laptop_facts() {   # fills FACTS; notes go to stderr
     local remote="${HOST_SYNC_DOTFILES_REMOTE:-origin}"
     v="$(git_net -C "$SELF_REPO" ls-remote "$remote" refs/heads/main 2>/dev/null | cut -f1)"
     [[ "$v" =~ $SHA_RE ]] && FACTS+=(--dotfiles-sha "$v")
+    # The overlay's main, when this machine has the checkout (.git is a file in a worktree).
+    if [[ -e "$DOTFILES_LOCAL/.git" ]]; then
+        local overlay_remote="${HOST_SYNC_DOTFILES_LOCAL_REMOTE:-origin}"
+        v="$(git_net -C "$DOTFILES_LOCAL" ls-remote "$overlay_remote" refs/heads/main 2>/dev/null | cut -f1)"
+        [[ "$v" =~ $SHA_RE ]] && FACTS+=(--dotfiles-local-sha "$v")
+    fi
 
     root="$HOME/$WORK_ORG"
     for d in "$root"/*/; do
@@ -1253,6 +1404,27 @@ laptop_facts() {   # fills FACTS; notes go to stderr
         [[ "${d##*/}" =~ $SAFE_DIR_RE && "$repo" =~ $SAFE_REPO_RE ]] || continue
         FACTS+=(--clone "${d##*/}=$repo")
     done
+}
+
+# Append --dotfiles-behind and --dotfiles-local-behind to FACTS: how far the host's heads ($1 for
+# ~/.dotfiles, $2 for ~/.dotfiles-local) are behind the mains the facts carry. Counted here, from
+# this machine's own checkouts, because the host may not have fetched those commits and check mode
+# will not fetch. A count needs both commits here; without them the fact is left out and the
+# host's row says "?".
+add_behind_facts() {
+    local dotfiles_head="$1" overlay_head="$2" i dotfiles_behind="" overlay_behind=""
+    for (( i = 0; i < ${#FACTS[@]}; i++ )); do
+        case "${FACTS[i]}" in
+            --dotfiles-sha)
+                [[ "$dotfiles_head" =~ $SHA_RE ]] &&
+                    dotfiles_behind="$(git -C "$SELF_REPO" rev-list --count "$dotfiles_head..${FACTS[i+1]}" 2>/dev/null)" ;;
+            --dotfiles-local-sha)
+                [[ "$overlay_head" =~ $SHA_RE ]] &&
+                    overlay_behind="$(git -C "$DOTFILES_LOCAL" rev-list --count "$overlay_head..${FACTS[i+1]}" 2>/dev/null)" ;;
+        esac
+    done
+    [[ "$dotfiles_behind" =~ $COUNT_RE ]] && FACTS+=(--dotfiles-behind "$dotfiles_behind")
+    [[ "$overlay_behind" =~ $COUNT_RE ]] && FACTS+=(--dotfiles-local-behind "$overlay_behind")
 }
 
 laptop_main() {
@@ -1286,23 +1458,20 @@ laptop_main() {
     # ForwardAgent=no whatever ssh_config says: a forwarded agent's socket on dev is usable by any
     # process there while the run is open, and every child would inherit it.
     local ssh_cmd="${HOST_SYNC_SSH:-ssh -o BatchMode=yes -o ConnectTimeout=30 -o ForwardAgent=no}"
-    local dotfiles_head behind="" remote_args
-    # A behind COUNT needs both commits; dev may not have fetched the target and check mode
-    # will not fetch, so count here, from this checkout's objects, when it has both.
-    dotfiles_head="$($ssh_cmd "$host" 'git -C ~/.dotfiles rev-parse HEAD' 2>/dev/null </dev/null)"
+    local host_heads dotfiles_head="" overlay_head="" remote_args
+    # Both of the host's heads in one round trip, one line each. Every line is a sha or "none", so
+    # a host with no ~/.dotfiles never shifts ~/.dotfiles-local's head into the first line.
+    local heads_probe='git -C ~/.dotfiles rev-parse --verify --quiet HEAD 2>/dev/null || echo none;'
+    heads_probe+=' git -C ~/.dotfiles-local rev-parse --verify --quiet HEAD 2>/dev/null || echo none'
+    host_heads="$($ssh_cmd "$host" "$heads_probe" 2>/dev/null </dev/null)"
+    { IFS= read -r dotfiles_head; IFS= read -r overlay_head; } <<<"$host_heads"
     if [[ ! "$dotfiles_head" =~ $SHA_RE ]]; then
         if ! $ssh_cmd "$host" true </dev/null; then
             echo "host-sync: cannot reach '$host' over ssh (SSM ProxyCommand failed: run dev-link-doctor)" >&2
             return 2
         fi
     fi
-    local i
-    for (( i = 0; i < ${#FACTS[@]}; i++ )); do
-        if [[ "${FACTS[i]}" == --dotfiles-sha && "$dotfiles_head" =~ $SHA_RE ]]; then
-            behind="$(git -C "$SELF_REPO" rev-list --count "$dotfiles_head..${FACTS[i+1]}" 2>/dev/null)"
-        fi
-    done
-    [[ "$behind" =~ ^[0-9]+$ ]] && FACTS+=(--dotfiles-behind "$behind")
+    add_behind_facts "$dotfiles_head" "$overlay_head"
     [[ "$mode" == apply ]] && FACTS+=(--arm)
 
     # Every fact is already filtered where laptop_facts gathers it, so this cannot fire today
@@ -1330,6 +1499,7 @@ laptop_main() {
 main() {
     MODE="check"; ARM=0; NO_MCP=0
     ARG_CLAUDE=""; ARG_HERDR=""; ARG_HERDR_SHA=""; ARG_HERDR_ARCH=""; ARG_DOTFILES_SHA=""; ARG_DOTFILES_BEHIND=""
+    ARG_DOTFILES_LOCAL_SHA=""; ARG_DOTFILES_LOCAL_BEHIND=""
     ARG_CLONES=()
     if [[ "${1:-}" != --here ]]; then
         SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -1350,6 +1520,8 @@ main() {
             --herdr-arch) ARG_HERDR_ARCH="${2:-}"; shift ;;
             --dotfiles-sha) ARG_DOTFILES_SHA="${2:-}"; shift ;;
             --dotfiles-behind) ARG_DOTFILES_BEHIND="${2:-}"; shift ;;
+            --dotfiles-local-sha) ARG_DOTFILES_LOCAL_SHA="${2:-}"; shift ;;
+            --dotfiles-local-behind) ARG_DOTFILES_LOCAL_BEHIND="${2:-}"; shift ;;
             --clone) ARG_CLONES+=("${2:-}"); shift ;;
             *) echo "host-sync: unknown option $1" >&2; return 64 ;;
         esac
@@ -1358,6 +1530,11 @@ main() {
     # Validate everything that arrives over the wire before any of it reaches a command.
     [[ -z "$ARG_CLAUDE" || "$ARG_CLAUDE" =~ $VER_RE ]] || { echo "host-sync: bad --claude-version" >&2; return 64; }
     [[ -z "$ARG_DOTFILES_SHA" || "$ARG_DOTFILES_SHA" =~ $SHA_RE ]] || { echo "host-sync: bad --dotfiles-sha" >&2; return 64; }
+    [[ -z "$ARG_DOTFILES_BEHIND" || "$ARG_DOTFILES_BEHIND" =~ $COUNT_RE ]] || { echo "host-sync: bad --dotfiles-behind" >&2; return 64; }
+    [[ -z "$ARG_DOTFILES_LOCAL_SHA" || "$ARG_DOTFILES_LOCAL_SHA" =~ $SHA_RE ]] ||
+        { echo "host-sync: bad --dotfiles-local-sha" >&2; return 64; }
+    [[ -z "$ARG_DOTFILES_LOCAL_BEHIND" || "$ARG_DOTFILES_LOCAL_BEHIND" =~ $COUNT_RE ]] ||
+        { echo "host-sync: bad --dotfiles-local-behind" >&2; return 64; }
     [[ -z "$ARG_HERDR" || "$ARG_HERDR" =~ $VER_RE ]] || { echo "host-sync: bad --herdr-version" >&2; return 64; }
     [[ -z "$ARG_HERDR_SHA" || "$ARG_HERDR_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "host-sync: bad --herdr-sha256" >&2; return 64; }
     [[ -z "$ARG_HERDR_ARCH" || "$ARG_HERDR_ARCH" =~ ^[a-z0-9_]+$ ]] || { echo "host-sync: bad --herdr-arch" >&2; return 64; }

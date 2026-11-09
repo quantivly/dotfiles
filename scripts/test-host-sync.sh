@@ -43,6 +43,9 @@ fi
 
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# The profile marker's override (the settings renderer's name) and the overlay's: a row sets what
+# it means to, so a caller's own (a real ~/.config/claude-host-profile, a real remote) never reaches one.
+unset CLAUDE_SETTINGS_RENDER_MARKER HOST_SYNC_DOTFILES_LOCAL_REPO HOST_SYNC_DOTFILES_LOCAL_REMOTE
 
 V_LAPTOP="2.1.296"
 HV="0.9.1"            # the laptop's herdr
@@ -224,8 +227,9 @@ new_case() {
     local w="$C/seed-dotfiles"
     git init -q -b main "$w"
     mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin"
+    # install-order is shared with dotfiles-local's stub, so a row can read which ran first.
     # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
-    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails" ]] && exit 1\necho ran >>"$HOME/stub/install-ran"\n' >"$w/install"
+    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails" ]] && exit 1\necho public >>"$HOME/stub/install-order"\necho ran >>"$HOME/stub/install-ran"\n' >"$w/install"
     echo '{"name":"linear-key","version":"1.0.0"}' >"$w/claude/plugins/linear-key/.claude-plugin/plugin.json"
     echo '{"name":"dotfiles","plugins":[{"name":"linear-key"}]}' >"$w/claude/plugins/.claude-plugin/marketplace.json"
     echo one >"$w/a.txt"
@@ -234,6 +238,22 @@ new_case() {
     git clone -q "$GH/quantivly/dotfiles.git" "$H/.dotfiles"
     mkdir -p "$H/.local/state/host-sync"
     git -C "$H/.dotfiles" rev-parse HEAD >"$H/.local/state/host-sync/installed-head"
+
+    # dotfiles-local, the private overlay, with the host profile `p` marked: an install stub of the
+    # same shape, a manifest declaring two links (Task 6's rows use them) and the profile itself;
+    # cloned and installed, as a level host has it.
+    w="$C/seed-dotfiles-local"
+    git init -q -b main "$w"; mkdir -p "$w/hosts" "$w/claude" "$w/config"
+    # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
+    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails-local" ]] && exit 1\necho local >>"$HOME/stub/install-order"\necho ran >>"$HOME/stub/local-install-ran"\n' >"$w/install"
+    printf -- '- link:\n    ~/.claude/CLAUDE.md: claude/CLAUDE.md\n    ~/.config/overlay/note.txt: config/note.txt\n' >"$w/install.conf.yaml"
+    echo '# the overlay instructions' >"$w/claude/CLAUDE.md"; echo note >"$w/config/note.txt"
+    echo '{"tenants":["quantivly"]}' >"$w/hosts/p.json"
+    git -C "$w" add -A; git -C "$w" commit -q -m init
+    mkdir -p "$GH/ZviBaratz"; git clone -q --bare "$w" "$GH/ZviBaratz/dotfiles-local.git"; rm -rf "$w"
+    git clone -q "$GH/ZviBaratz/dotfiles-local.git" "$H/.dotfiles-local"
+    git -C "$H/.dotfiles-local" rev-parse HEAD >"$H/.local/state/host-sync/installed-head-dotfiles-local"
+    echo p >"$H/.config/claude-host-profile"
 
     # timer armed. ./install links both units on every host (plain files stand in for the links);
     # only host-sync.timer is enabled, which puts its link in the .wants directory.
@@ -378,6 +398,7 @@ run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
     OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
         HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
+        CLAUDE_SETTINGS_RENDER_MARKER="$H/.config/claude-host-profile" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash ${XTRACE:+-x} "$SUT" --here "$@" 2>&1 3>"$C/xtrace")"
     RC=$?
 }
@@ -386,9 +407,28 @@ calls() { cat "$H/stub/calls"; }
 mutations() { grep -cE "$MUTATING" "$H/stub/calls"; }
 reset_calls() { : >"$H/stub/calls"; }
 head_of() { git -C "$1" rev-parse HEAD; }
-push_origin() {   # add a commit to dotfiles' origin: $1 = file, $2 = content
-    local w="$C/push"; rm -rf "$w"; git clone -q "$GH/quantivly/dotfiles.git" "$w"
-    echo "$2" >"$w/$1"; git -C "$w" add -A; git -C "$w" commit -q -m "$1"; git -C "$w" push -q origin main
+push_to() {   # add a commit to a fixture origin: $1 = owner/repo, $2 = file, $3 = content
+    local w="$C/push"; rm -rf "$w"; git clone -q "$GH/$1.git" "$w"
+    echo "$3" >"$w/$2"; git -C "$w" add -A; git -C "$w" commit -q -m "$2"; git -C "$w" push -q origin main
+}
+push_origin() { push_to quantivly/dotfiles "$@"; }   # add a commit to dotfiles' origin: $1 = file, $2 = content
+overlay_main() { git --git-dir="$GH/ZviBaratz/dotfiles-local.git" rev-parse main; }
+# How many rows of $OUT are in area $1, whatever their glyph: row() pads the area to 14.
+area_rows() {
+    local line glyph prefix n=0 prefixes=()
+    for glyph in ✓ ✗ ⚠ ·; do prefixes+=("$(printf '  %s %-14s ' "$glyph" "$1")"); done
+    while IFS= read -r line; do
+        for prefix in "${prefixes[@]}"; do [[ "$line" == "$prefix"* ]] && n=$((n + 1)); done
+    done <<<"$OUT"
+    echo "$n"
+}
+line_of() {   # the number of the first line of $OUT that holds $1; 0 when none does
+    local line n=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        [[ "$line" == *"$1"* ]] && { echo "$n"; return; }
+    done <<<"$OUT"
+    echo 0
 }
 
 CASE=0
@@ -505,6 +545,115 @@ run_level --apply
 check "./install failing: exit 1" "$RC" 1
 has   "./install failing: ✗ names the log" "$OUT" "./install failed"
 check "./install failing: no stamp is written" "$([[ -e "$H/.local/state/host-sync/installed-head" ]] && echo yes || echo no)" no
+
+echo "== the host profile and the private overlay (dotfiles-local)"
+# The rows' glyph and area, as row() prints them, so a needle also pins the glyph.
+PROFILE_INFO="$(printf '· %-14s ' profile)"; PROFILE_OPER="$(printf '⚠ %-14s ' profile)"
+OVERLAY_OK="$(printf '✓ %-14s ' dotfiles-local)"; OVERLAY_DRIFT="$(printf '✗ %-14s ' dotfiles-local)"
+OVERLAY_OPER="$(printf '⚠ %-14s ' dotfiles-local)"
+new_case
+run_level --check
+has   "level: the profile row names the profile and its tenants" "$OUT" "${PROFILE_INFO}p (tenants: quantivly)"
+
+new_case
+rm "$H/.config/claude-host-profile"
+run_level --check
+has   "no marker: the overlay rows are skipped" "$OUT" \
+    "${PROFILE_INFO}no host profile marker (~/.config/claude-host-profile); dotfiles-local, settings, memory stores and retire are not managed here"
+check "no marker: the overlay rows are skipped: no dotfiles-local row, exit 0" "$(area_rows dotfiles-local)/$RC" 0/0
+check "no profile: the work clones row still runs" "$(area_rows clones)" 1
+
+new_case
+echo ../x >"$H/.config/claude-host-profile"; rm -rf "$H/.dotfiles-local"
+run_level --check
+has   "a marker with an unusable name is a person's step" "$OUT" \
+    "${PROFILE_OPER}the marker holds an unusable profile name (the renderer's rule: letters, digits, dots, dashes)"
+run_level --apply
+check "a marker with an unusable name: no clone attempted in --apply" "$(present "$H/.dotfiles-local")/$(area_rows dotfiles-local)" gone/0
+
+new_case
+rm "$H/.dotfiles-local/hosts/p.json"
+run_level --check
+has   "marker names a profile dotfiles-local lacks" "$OUT" "${PROFILE_OPER}no hosts/p.json in ~/.dotfiles-local"
+echo '{"tenant":"quantivly"}' >"$H/.dotfiles-local/hosts/p.json"
+run_level --check
+has   "a profile file with no .tenants list is a person's step" \
+    "$OUT" "${PROFILE_OPER}hosts/p.json in ~/.dotfiles-local cannot be read, or has no .tenants list of names"
+check "a profile file with no .tenants list: the work clones still run" "$(area_rows clones)" 1
+chmod 000 "$H/.config/claude-host-profile"
+run_level --check
+has   "an unreadable marker is a person's step, named" "$OUT" "${PROFILE_OPER}the marker ~/.config/claude-host-profile is not readable by"
+
+new_case
+rm -rf "$H/.dotfiles-local"
+run_level --check
+has   "dotfiles-local absent: --check ✗, nothing cloned" "$OUT" "${OVERLAY_DRIFT}not cloned (origin would be ZviBaratz/dotfiles-local)"
+check "dotfiles-local absent: --check ✗, nothing cloned: exit 1, still absent" "$RC/$(present "$H/.dotfiles-local")" 1/gone
+has   "dotfiles-local absent: the profile row says its tenants are unknown" "$OUT" \
+    "${PROFILE_INFO}p: ~/.dotfiles-local is not cloned yet, so its tenants are unknown until --apply clones it"
+check "profile named but overlay missing: the work clones row still runs" "$(area_rows clones)" 1
+
+# Step 7's first minute: a marker written by hand on a host with no overlay yet. The public
+# ./install renders settings, and the renderer refuses a marker with no overlay, so the overlay
+# must be cloned before that install runs, and its profile read in the same run.
+new_case
+# A host that never had the overlay has no stamp for it, and a stale public one.
+rm -rf "$H/.dotfiles-local" "$H/.local/state/host-sync/installed-head-dotfiles-local"
+printf '%040d\n' 0 >"$H/.local/state/host-sync/installed-head"
+run_level --apply
+check "marker before the overlay: the overlay is cloned before the public ./install: a clone on main" \
+    "$(git -C "$H/.dotfiles-local" symbolic-ref --short HEAD 2>/dev/null)" main
+check "marker before the overlay: the overlay is cloned before the public ./install: public, then local" \
+    "$(paste -sd' ' "$H/stub/install-order" 2>/dev/null)" "public local"
+clone_at="$(line_of "${OVERLAY_OK}cloned from ZviBaratz/dotfiles-local")"; public_at="$(line_of "$(printf '✓ %-14s ' dotfiles)")"
+check "marker before the overlay: the overlay is cloned before the public ./install: its ✓ row before the dotfiles row" \
+    "$(( clone_at > 0 && clone_at < public_at ))" 1
+has   "marker before the overlay: the profile is read after the clone" "$OUT" "${PROFILE_INFO}p (tenants: quantivly)"
+
+new_case
+echo '{"tenants":["personal"]}' >"$H/.dotfiles-local/hosts/p.json"
+run_level --check
+check "profile without quantivly: the work clones row is skipped" "$(( $(area_rows clone) + $(area_rows clones) ))" 0
+rm -rf "$H/quantivly"
+run_level --apply
+check "profile without quantivly: --apply does not create ~/quantivly" "$(present "$H/quantivly")" gone
+
+# The laptop's facts carry dotfiles-local's main and how far behind it the host is, like dotfiles'.
+new_case
+push_to ZviBaratz/dotfiles-local c.txt two
+run_level --check --dotfiles-local-sha "$(overlay_main)" --dotfiles-local-behind 1
+has   "dotfiles-local behind: --check ✗ with the laptop's count" "$OUT" "${OVERLAY_DRIFT}1 commits behind origin/main"
+run_level --apply
+check "dotfiles-local behind: --apply fast-forwards to its origin's main" "$(head_of "$H/.dotfiles-local")" "$(overlay_main)"
+check "dotfiles-local behind: --apply runs its ./install once, and only its own" \
+    "$(paste -sd' ' "$H/stub/install-order" 2>/dev/null)/$( { wc -l <"$H/stub/local-install-ran"; } 2>/dev/null)" local/1
+check "dotfiles-local behind: the stamp records the new HEAD" \
+    "$(cat "$H/.local/state/host-sync/installed-head-dotfiles-local")" "$(head_of "$H/.dotfiles-local")"
+
+new_case
+git -C "$H/.dotfiles-local" checkout -q -b feature; push_to ZviBaratz/dotfiles-local c.txt x
+run_level --apply
+has   "dotfiles-local off main: not touched" "$OUT" "${OVERLAY_OPER}on 'feature', not main"
+check "dotfiles-local off main: not touched: still on the branch" "$(git -C "$H/.dotfiles-local" symbolic-ref --short HEAD)" feature
+
+new_case
+push_to ZviBaratz/dotfiles-local claude/CLAUDE.md upstream; echo local >"$H/.dotfiles-local/claude/CLAUDE.md"
+before="$(head_of "$H/.dotfiles-local")"
+run_level --apply
+has   "dotfiles-local with an overlapping local edit: not merged" "$OUT" \
+    "${OVERLAY_OPER}local edits to claude/CLAUDE.md that origin/main also changes; not merged"
+check "dotfiles-local with an overlapping local edit: not merged: HEAD is not moved" "$(head_of "$H/.dotfiles-local")" "$before"
+
+# Validated before any of it reaches a command, and a good value still passes.
+new_case
+run --check --dotfiles-local-sha "$(printf 'g%.0s' {1..40})"; bad_rc="$RC"
+run_level --check --dotfiles-local-sha "$(overlay_main)"
+check "a bad --dotfiles-local-sha over the wire is refused (64); a good one is not" "$bad_rc/$RC" 64/0
+run --check --dotfiles-local-behind '1;x'; bad_rc="$RC"
+run_level --check --dotfiles-local-sha "$(overlay_main)" --dotfiles-local-behind 0
+check "a bad --dotfiles-local-behind over the wire is refused (64); a count is not" "$bad_rc/$RC" 64/0
+run --check --dotfiles-behind '1;x'
+check "a bad --dotfiles-behind over the wire is refused (64)" "$RC" 64
 
 echo "== claude"
 new_case
@@ -849,9 +998,10 @@ check "legacy: dev-sync.timer is stopped and its .wants link removed: the link" 
 check "legacy: dev-sync.timer is stopped and its .wants link removed: daemon-reload after it" "$(reload_after_stop)" after
 check "legacy: the unit link of dev-sync.timer is left" "$(present "$H/.config/systemd/user/dev-sync.timer")" present
 has   "legacy: ✓ says the arming moved" "$OUT" "${TIMER_OK}arming moved from dev-sync.timer to host-sync.timer"
-# Left out besides the state dir: every --apply fetches origin main into the checkout, and git's
+# Left out besides the state dir: every --apply fetches origin main into both checkouts, and git's
 # own bookkeeping for that (FETCH_HEAD, the objects dir's mtime) is not a change to the host.
-SECOND_APPLY_LEAVE_OUT=("$H/.local/state/host-sync" "$H/.dotfiles/.git/FETCH_HEAD" "$H/.dotfiles/.git/objects")
+SECOND_APPLY_LEAVE_OUT=("$H/.local/state/host-sync" "$H/.dotfiles/.git/FETCH_HEAD" "$H/.dotfiles/.git/objects"
+    "$H/.dotfiles-local/.git/FETCH_HEAD" "$H/.dotfiles-local/.git/objects")
 reset_calls; before="$(snapshot "${SECOND_APPLY_LEAVE_OUT[@]}")"
 run_level --apply
 check "legacy: a second --apply calls nothing mutating" "$(mutations)" 0
@@ -1021,6 +1171,26 @@ env -u HOST_SYNC_SSH HOME="$L" PATH="$C/sshbin:/usr/local/bin:/usr/bin:/bin" HOS
 check "host-sync's ssh never forwards an agent (-o ForwardAgent=no)" \
     "$(grep -c -e '-o ForwardAgent=no' "$C/ssh-argv" 2>/dev/null | awk '{print ($1 > 0)}')" 1
 has   "the remote run killed: says so" "$OUT" "ended with status 137"
+# dotfiles-local on the laptop: its main's sha is a fact, and how far the host is behind it is
+# counted from the laptop's own objects, off the second line of the one ssh probe for both heads.
+push_to ZviBaratz/dotfiles-local c.txt laptop
+git clone -q "$GH/ZviBaratz/dotfiles-local.git" "$L/.dotfiles-local"
+overlay_facts() {   # what the laptop would send, as --print-facts prints it
+    HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" \
+        HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_DOTFILES_LOCAL_REMOTE="file://$GH/ZviBaratz/dotfiles-local.git" \
+        bash "$SUT" --host dev --print-facts 2>&1
+}
+has   "facts: the laptop sends dotfiles-local's main sha when it has the checkout" "$(overlay_facts)" \
+    "--dotfiles-local-sha $(overlay_main)"
+E2E="$(HOME="$L" PATH="/usr/local/bin:/usr/bin:/bin" HOST_SYNC_SSH="$C/fakessh" HOST_SYNC_NO_SCOPE=1 \
+    HOST_SYNC_DOTFILES_REMOTE="file://$GH/quantivly/dotfiles.git" HOST_SYNC_GITHUB_BASE="file://$GH" \
+    HOST_SYNC_DOTFILES_LOCAL_REMOTE="file://$GH/ZviBaratz/dotfiles-local.git" \
+    HOST_SYNC_NPM_URL="file://$C/npm.json" bash "$SUT" --host dev --check 2>&1)"
+has   "end to end --check: the laptop counts how far dotfiles-local is behind" "$E2E" \
+    "$(printf '✗ %-14s ' dotfiles-local)1 commits behind origin/main"
+rm -rf "$L/.dotfiles-local"
+hasnt "facts: the laptop sends dotfiles-local's main sha when it has the checkout: without it, none" "$(overlay_facts)" \
+    "--dotfiles-local-sha"
 
 echo "== --host is required, and the dev-sync wrapper"
 # Every row runs under the fixture HOME with the local remotes, so none reaches the network or an agent.
@@ -1037,6 +1207,11 @@ OUT="$(env -u SSH_AUTH_SOCK "${WRAPPER_ENV[@]}" HOST_SYNC_SSH="$C/wrapper-ssh" b
 check "host-sync with neither --host nor --here: usage (64)" "$RC" 64
 has   "host-sync with neither --host nor --here: says --host is required" "$OUT" "--host <ssh alias> is required"
 check "host-sync with neither --host nor --here: ssh is never run" "$(cat "$C/wrapper-ssh-hosts")" ""
+# An alias that ssh would read as an option: refused before any ssh call.
+: >"$C/wrapper-ssh-hosts"
+env -u SSH_AUTH_SOCK "${WRAPPER_ENV[@]}" HOST_SYNC_SSH="$C/wrapper-ssh" bash "$SUT" --host -oProxyCommand=x --check \
+    >/dev/null 2>&1 </dev/null; RC=$?
+check "an unsafe --host alias is refused (64) without an ssh call" "$RC/$(cat "$C/wrapper-ssh-hosts")" "64/"
 OUT="$(env -u SSH_AUTH_SOCK "${WRAPPER_ENV[@]}" bash "$SUT" --help 2>&1 </dev/null)"; RC=$?
 check "host-sync --help: exit 0" "$RC" 0
 has   "host-sync --help: prints the usage" "$OUT" "--print-facts"
@@ -1141,6 +1316,14 @@ new_case
 rm -rf "$C/proc"
 run_level --check
 has   "no Claude process: information only" "$OUT" "no Claude process running"
+
+new_case
+mkdir "$H/.clauth"
+run_level --check
+has   "clauth host: the auth rows do not apply" "$OUT" \
+    "$(printf '· %-14s ' auth)accounts are managed by clauth on this host; the long-lived-token rows do not apply"
+hasnt "clauth host: the auth rows do not apply: no claude auth call" "$(calls)" "claude auth"
+check "clauth host: the auth rows do not apply: no other auth row" "$(area_rows auth)" 1
 
 echo "== token.env as a link to a seat (the layout PR B adopts; dev's token.env is still a file)"
 new_case
@@ -1614,7 +1797,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=392
+EXPECTED_ROWS=430
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
