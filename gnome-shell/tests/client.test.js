@@ -736,13 +736,14 @@ test('client: every start() asks systemd to start the service again, from a firs
     });
 });
 
-test('client: no data is published once however many reasons follow: a stall, then a restarted sequence, then the ' +
-    'owner leaving', () => {
+test('client: no data is published once however many reasons follow: a stall, then a sequence that does not move on ' +
+    '(a new run that counted back up to the last one drawn), then the owner leaving', () => {
     const fixture = makeLiveClientFixture();
     const {clock, timeouts, proxy, notifications} = fixture;
     clock.nowUsec += LONG_WAIT_USEC;
     timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-    emitSample(proxy, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4}, sequence: 1});
+    emitSample(proxy, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4},
+        sequence: STATE_SEQUENCE});
     proxy.setNameOwner(null);
     assertEqual({notifications, histories: historiesOf(fixture), stateCallCount: proxy.callsOf(GET_STATE).length}, {
         notifications: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT],
