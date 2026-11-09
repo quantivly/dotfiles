@@ -32,9 +32,13 @@
 # and the start limit in [Unit] stops that after 5 starts in 300 s, so a service
 # that always crashes costs a few runs, then sits failed where
 # `systemctl --user --failed` shows it. Without the limit it would never get
-# there: one start per 5 s never reaches systemd's default of 5 in 10 s. Once the
-# 300 s window has passed, the extension's next StartUnit starts it again: its
-# start retries back off to one every 5 min, and every enable() sends one.
+# there: one start per 5 s never reaches systemd's default of 5 in 10 s. Then
+# nothing starts it until the extension's next enable() (after a lock, a blank or
+# a login): the extension's start retries end once the service has appeared on
+# the bus, so they never revive one that ran and then failed. That enable()'s
+# StartUnit starts it again once the 300 s window has passed; inside the window
+# the start limit keeps systemd from running it, so that one chain retries after
+# 5 s, 30 s, then every 5 min until the service appears.
 #
 # Watch it:  journalctl --user -u resource-pulse.service -e
 #
