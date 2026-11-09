@@ -36,6 +36,9 @@ const SAMPLE_SIGNAL = 'Sample';
 const NAME_OWNER_NOTIFY_SIGNAL = 'notify::g-name-owner';
 const PROXY_SIGNAL = 'g-signal';
 const NO_DATA_TEXT = 'no data';
+/** Array.at's index of the last element. */
+const LATEST_ATTEMPT_INDEX = -1;
+const FIRST_ATTEMPT_INDEX = 0;
 
 /** The snapshot GetState answers: every field set. */
 const STATE_SNAPSHOT = {
@@ -65,6 +68,18 @@ const REVEAL_SNAPSHOT = {
 /** What a restarted service answers GetState with: a history of its own, numbered from 1 again. */
 const RESTARTED_SNAPSHOT = {...STATE_SNAPSHOT, takenAtUsec: 4_000_000, takenAtClockLabel: '14:05', cpuBusyPercent: 9};
 const RESTARTED_HISTORIES = {cpu: [0.09], memory: [0.4]};
+/** What the service publishes when its sample threw: a time and a label, but no numbers. */
+const SERVICE_NO_DATA_SNAPSHOT = {
+    takenAtUsec: 124_000_000,
+    takenAtClockLabel: '14:04',
+    cpuBusyPercent: null,
+    cpuClusters: null,
+    memory: null,
+    swap: null,
+    pressureAvg10: {cpu: null, memory: null, io: null},
+    apps: null,
+    isComplete: false,
+};
 /** What the client publishes when it has no fresh data: every number null, no ranking. */
 const NO_DATA_SNAPSHOT = {
     takenAtUsec: null,
@@ -310,18 +325,21 @@ class FakeServiceStarter {
             this.attempts.push({connection, cancellable, onAnswered});
     }
 
-    /** @returns {void} */
-    succeed() {
-        this.attempts.at(-1).onAnswered(null);
+    /**
+     * @param {number} [attemptIndex] - Which attempt answers; the latest by default.
+     * @returns {void}
+     */
+    succeed(attemptIndex = LATEST_ATTEMPT_INDEX) {
+        this.attempts.at(attemptIndex).onAnswered(null);
     }
 
     /**
-     * @param {Error} [error] - The failure; by default systemd's name not being on the bus.
+     * @param {number} [attemptIndex] - Which attempt fails; the latest by default.
      * @returns {void}
      */
-    fail(error = new GLib.Error(Gio.DBusError, Gio.DBusError.SERVICE_UNKNOWN,
-        'The name org.freedesktop.systemd1 was not provided by any .service files')) {
-        this.attempts.at(-1).onAnswered(error);
+    fail(attemptIndex = LATEST_ATTEMPT_INDEX) {
+        this.attempts.at(attemptIndex).onAnswered(new GLib.Error(Gio.DBusError, Gio.DBusError.SERVICE_UNKNOWN,
+            'The name org.freedesktop.systemd1 was not provided by any .service files'));
     }
 }
 
@@ -410,6 +428,8 @@ test('client: before the first state it draws nothing, not even a Sample: no sna
             sequence: STATE_SEQUENCE + 1});
         clock.nowUsec += LONG_WAIT_USEC;
         timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+        // A staleness check while no state is held must not let later Samples through either.
+        emitSample(proxy, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 2});
         assertEqual({
             latestSnapshot: client.latestSnapshot, histories: historiesOf({client}),
             lastGoodClockLabel: client.lastGoodClockLabel, notificationCount: notifications.length,
@@ -691,17 +711,76 @@ test('client: a GetState that fails is logged and leaves no data, and the next S
     });
 });
 
-test('client: every start() asks systemd to start the service again, but connects and follows the service once', () => {
-    const {client, timeouts, serviceStarter, proxyFactory} = makeClientFixture();
-    serviceStarter.succeed();
+test('client: every start() asks systemd to start the service again, but connects and follows the service once; ' +
+    'only the latest StartUnit\'s answer counts', () => {
+    const {client, timeouts, serviceStarter, proxyFactory, logged} = makeClientFixture({nameOwner: null});
     client.start();
+    serviceStarter.fail(FIRST_ATTEMPT_INDEX);
+    const pendingAfterSupersededFailure = timeouts.pendingIntervalsSeconds();
+    serviceStarter.succeed();
     assertEqual({
         attemptConnections: serviceStarter.attempts.map(attempt => attempt.connection),
         proxyRequestCount: proxyFactory.requests.length, proxyConnection: proxyFactory.requests[0].connection,
-        pending: timeouts.pendingIntervalsSeconds(),
+        pendingAfterSupersededFailure, pending: timeouts.pendingIntervalsSeconds(), loggedLineCount: logged.length,
     }, {
         attemptConnections: [FAKE_CONNECTION, FAKE_CONNECTION], proxyRequestCount: 1, proxyConnection: FAKE_CONNECTION,
-        pending: [SAMPLE_INTERVAL_SECONDS],
+        pendingAfterSupersededFailure: [SAMPLE_INTERVAL_SECONDS], pending: [SAMPLE_INTERVAL_SECONDS],
+        loggedLineCount: 0,
+    });
+});
+
+test('client: no data is published once however many reasons follow: a stall, then a restarted sequence, then the ' +
+    'owner leaving', () => {
+    const fixture = makeLiveClientFixture();
+    const {clock, timeouts, proxy, notifications} = fixture;
+    clock.nowUsec += LONG_WAIT_USEC;
+    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+    emitSample(proxy, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4}, sequence: 1});
+    proxy.setNameOwner(null);
+    assertEqual({notifications, histories: historiesOf(fixture), stateCallCount: proxy.callsOf(GET_STATE).length}, {
+        notifications: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT],
+        histories: {cpu: [...STATE_HISTORIES.cpu, null], memory: [...STATE_HISTORIES.memory, null]},
+        stateCallCount: 2,
+    });
+});
+
+test('client: "no data since" moves only with a snapshot that has numbers and a time: not with the service\'s own ' +
+    'no-data snapshot, nor with a snapshot that lacks its label', () => {
+    const fixture = makeLiveClientFixture();
+    emitSample(fixture.proxy, {snapshot: SERVICE_NO_DATA_SNAPSHOT, appendedHistory: {cpu: null, memory: null},
+        sequence: STATE_SEQUENCE + 1});
+    const labelAfterServiceNoData = fixture.client.lastGoodClockLabel;
+    emitSample(fixture.proxy, {snapshot: {...TICK_SNAPSHOT, takenAtClockLabel: undefined},
+        appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 2});
+    assertEqual({
+        labelAfterServiceNoData, labelAfterUnlabelled: fixture.client.lastGoodClockLabel,
+        latestCpuBusyPercent: fixture.client.latestSnapshot.cpuBusyPercent,
+    }, {labelAfterServiceNoData: '14:02', labelAfterUnlabelled: '14:02', latestCpuBusyPercent: 50});
+});
+
+test('client: a GetState answer from an owner that has since left is dropped; the new owner\'s state is drawn', () => {
+    const fixture = makeClientFixture();
+    const {proxy, notifications} = fixture;
+    proxy.setNameOwner(null);
+    proxy.setNameOwner(NEXT_OWNER);
+    answerState(proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    const notificationsAfterOldAnswer = [...notifications];
+    answerState(proxy, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 1});
+    assertEqual({notificationsAfterOldAnswer, notifications, histories: historiesOf(fixture)},
+        {notificationsAfterOldAnswer: [], notifications: [RESTARTED_SNAPSHOT], histories: RESTARTED_HISTORIES});
+});
+
+test('client: a direct change of owner reads as the old one leaving and the new one arriving: no data once, then ' +
+    'the new owner\'s state', () => {
+    const fixture = makeLiveClientFixture();
+    const {proxy, notifications} = fixture;
+    proxy.setNameOwner(NEXT_OWNER);
+    const notificationsBeforeState = [...notifications];
+    answerState(proxy, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 1});
+    assertEqual({notificationsBeforeState, notifications, stateCallCount: proxy.callsOf(GET_STATE).length}, {
+        notificationsBeforeState: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT],
+        notifications: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT, RESTARTED_SNAPSHOT],
+        stateCallCount: 2,
     });
 });
 

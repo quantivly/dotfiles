@@ -259,8 +259,9 @@ printf '%s\n' "import {ServiceSampler} from './service/sampler.js';" >"$SERVICE_
 printf '%s\n' "const serviceModule = await import('../service/main.js');" >"$SERVICE_IMPORT_FIXTURE_DIR/lib/loader.js"
 printf '%s\n' '// The service (service/sampler.js) publishes these.' "import {PROTOCOL_VERSION} from './lib/protocol.js';" \
   >"$SERVICE_IMPORT_FIXTURE_DIR/card.js"
+# service/ may import itself, even by a path that leaves and re-enters it.
 printf '%s\n' "import {ServiceSampler} from './sampler.js';" "import {RingBuffer} from '../lib/history.js';" \
-  >"$SERVICE_IMPORT_FIXTURE_DIR/service/main.js"
+  "import {ResourcePulseDBusService} from '../service/dbusService.js';" >"$SERVICE_IMPORT_FIXTURE_DIR/service/main.js"
 check "the service/ import scan finds a static and a dynamic import of service/, and neither a comment nor service/'s own" \
   "$(service_imports_in "$SERVICE_IMPORT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" "extension.js lib/loader.js "
 
@@ -1607,7 +1608,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=382
+EXPECTED_ROWS=386
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

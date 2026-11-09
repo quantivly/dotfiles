@@ -446,21 +446,18 @@ export class PulseClient {
     }
 
     /**
-     * Handles systemd's answer to a StartUnit. A success ends the retries. A failure is logged and retried after
-     * nextStartRetryDelaySeconds, unless the service is on the bus anyway (then there is nothing left to start, and a
-     * retry could restart it after someone stopped it on purpose).
+     * Handles systemd's answer to the latest StartUnit (an answer to an older one is ignored). A success ends the
+     * retries: none is pending while an attempt is in flight, and none is scheduled after it. A failure is logged and
+     * retried after nextStartRetryDelaySeconds, unless the service is on the bus anyway (then there is nothing left to
+     * start, and a retry could restart it after someone stopped it on purpose).
      *
      * @param {{attemptNumber: number}} startAttempt - The attempt answered.
      * @param {Error|null} error - Null for a success.
      * @returns {void}
      */
     _onServiceStartAnswered(startAttempt, error) {
-        if (this._isDestroyed || startAttempt !== this._latestStartAttempt)
+        if (this._isDestroyed || startAttempt !== this._latestStartAttempt || error === null)
             return;
-        if (error === null) {
-            this._cancelStartRetry();
-            return;
-        }
         const errorText = describeError(error);
         this._errorLog.log(`StartUnit ${RESOURCE_PULSE_UNIT_NAME} failed: ${errorText}`, START_UNIT_FAILURE_LOG_KEY);
         if (this._nameOwner !== null)
