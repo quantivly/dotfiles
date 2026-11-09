@@ -429,6 +429,35 @@ win. H5–H8 are recorded with DO-895, the plan's second PR.
 - **(H10) `host-sync` requires `--host <alias>` or `--here`;** `scripts/dev-sync` stays one release
   as a wrapper that supplies `--host dev`.
 
+**Amended 2026-11-09 (DO-895):** four amendments, from the same plan. Where they differ from the text
+above, they win. With them, "the memory repo synced within the last hour (D7)" in D8 now reads "each
+checked-out store synced within its threshold, as `claude-memory-sync.sh --status` reports it against
+the table's `stale_after_minutes`".
+
+- **(H5) Stale is structural.** An entry under `~/.claude/skills`, `~/.claude/hooks` or
+  `~/.claude/agents` is declared when it is a symlink that resolves to an existing path under the
+  resolved `~/.dotfiles/` or `~/.dotfiles-local/`; generated when it is `skills/herdr`,
+  `skills/spawn` or `hooks/herdr-agent-state.sh`; Claude Code's own when it is `skills/synced` or any
+  dot-entry under `skills/`; anything else (a regular file or directory, a dangling link, a link
+  elsewhere) is stale. `--apply` moves stale entries to
+  `~/.local/state/host-sync/retired/<UTC stamp>/<kind>/<name>` and never deletes; it does so only on
+  a host with a profile marker. On dev this rule yields exactly the audit's dispositions (`audit.md`
+  §3–§5, A1): the 15 agents and `review-pr`.
+- **(H6) Store checkouts are clones made by `host-sync --apply`:** `git clone <the table's remote,
+  verbatim> ~/.local/share/claude-memory/<store>` for each store whose `tenants` meets the profile's,
+  with the host's own git credentials (a host that `--apply` runs on has one GitHub account; the
+  laptop is never applied). A checked-out store that serves none of the host's tenants is reported,
+  never removed. On an armed host with at least one served store checked out, `--apply` enables
+  `claude-memory-sync.timer`; the host-sync arming is that decision.
+- **(H7) git ≥ 2.40 is a host requirement of the memory sync** (`--attr-source`); `host-sync` reports
+  an older git as a person's step.
+- **(H8) One link checker for both repos.** `scripts/check-links.sh` is ported from dotfiles-local
+  into the public repo with `--root`, `--config` and `--tsv`; `host-sync` runs it against both
+  checkouts. Dotbot's `backup: true` is the safety net: a declared link that is a regular file is
+  drift the repo's `./install` fixes, and when its content differs from the repo the row names the
+  backup dotbot leaves beside it. A source missing from the checkout is a person's step. The private
+  copy is replaced by the public one in step 7's dotfiles-local PR.
+
 ### D9. The doctor says whether the live config is the declared one
 
 `claude-doctor` gains a "config" section on every host: every declared link is a symlink

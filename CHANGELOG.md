@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/host-sync` keeps a host's declared Claude Code configuration level, not only its tools
+  (DO-895).** The second half of step 6 of the shared-configuration design
+  (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, D8, amendments H5-H8). New
+  rows, each gated as `docs/CLAUDE_SETUP.md`, "Keeping a host level", tabulates: `settings`
+  (`claude-settings-render.sh --check` on a host with a profile marker; `--apply` renders); `links`
+  (every link either checkout's `install.conf.yaml` declares; `--apply` runs that repo's `./install`
+  once per run, and the row names the backup dotbot leaves of a regular file whose content
+  differed); `marketplace` and `plugin` (the declaration is the live `settings.json`: marketplaces
+  added and refreshed, missing plugins installed, `linear-key` updated, nothing ever enabled or
+  disabled, every call with `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`); `skill` (the herdr and spawn skills
+  regenerated from this host's own binaries); `memory` (git 2.40 or later, the stores that serve the
+  profile's tenants cloned from the table's remote as spelled, the link script's `--check` and the
+  sync's `--status`, and the memory timer armed with the host); and `retire` (stale entries under
+  `~/.claude`'s skills, hooks and agents moved to `~/.local/state/host-sync/retired/<stamp>/`, never
+  deleted, and only with a marker). The link checker is ported from the private overlay as the
+  public `scripts/check-links.sh`, with `--tsv`, `--root` and `--config`, and a check that could not
+  run is now exit 2 rather than 1 (state table `scripts/test-check-links.sh`, 69 rows, CI
+  `check-links-test`). `claude-memory-sync.sh` fetches with `--prune`, so a branch deleted on origin
+  leaves the store's remote-tracking refs too. `scripts/test-host-sync.sh` goes from 441 to 643 rows,
+  `scripts/test-claude-memory-sync.sh` from 109 to 111.
+
 - **Resource Pulse, an opt-in GNOME Shell 50 extension: a top-bar CPU/memory indicator and a desktop
   card that adds swap, pressure and the heaviest apps, fed by a sampler service outside the shell.**
   Lives in `gnome-shell/extensions/resource-pulse@dotfiles/`; `./install` links it for
