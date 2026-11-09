@@ -1242,11 +1242,23 @@ edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.team = {source: {source:
 run_level --check
 has   "a marketplace entry that names no repo, url or path: ⚠, never added" "$OUT" \
     "${MARKET_OPER}team: its extraKnownMarketplaces entry names no repo, url or path; not added"
+run_level --apply
+hasnt "a marketplace entry that names no repo, url or path: --apply adds nothing" "$(calls)" "claude plugin marketplace add"
+# A settings.json of the wrong shape is one ⚠ and nothing else: no marketplace or plugin row is
+# judged from it, and --apply adds nothing. Each object key is broken in its own case, so each half
+# of the shape check has a row of its own; only the array-shaped marketplaces have a source to add.
+SHAPE_OPER="${PLUGINS_OPER}the live ~/.claude/settings.json is not an object with object enabledPlugins and extraKnownMarketplaces; plugins are not judged"
 new_case
 edit_json "$SETTINGS_JSON_REL" '.enabledPlugins = ["slack@claude-plugins-official"]'
-run_level --check
-has   "a settings.json whose enabledPlugins is not an object: ⚠, no plugin judged" "$OUT" \
-    "${PLUGINS_OPER}the live ~/.claude/settings.json is not an object with object enabledPlugins and extraKnownMarketplaces; plugins are not judged"
+run_level --apply
+has   "a settings.json whose enabledPlugins is not an object: ⚠, no plugin judged" "$OUT" "$SHAPE_OPER"
+check "a settings.json whose enabledPlugins is not an object: --apply judges no marketplace and no plugin" \
+    "$(area_rows marketplace) marketplace, $(area_rows plugin) plugin rows" "0 marketplace, 0 plugin rows"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces = [{source: {source: "github", repo: "example/team"}}]'
+run_level --apply
+has   "a settings.json whose extraKnownMarketplaces is not an object: ⚠" "$OUT" "$SHAPE_OPER"
+hasnt "a settings.json whose extraKnownMarketplaces is not an object: --apply adds nothing" "$(calls)" "claude plugin marketplace add"
 new_case
 echo '{"name":"linear-key","version":"1.1.0"}' >"$H/.dotfiles/claude/plugins/linear-key/.claude-plugin/plugin.json"
 run_level --check
@@ -2201,7 +2213,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=505
+EXPECTED_ROWS=509
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
