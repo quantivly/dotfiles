@@ -303,15 +303,17 @@ shorter history. Before the service existed the sampling ran inside gnome-shell,
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (639 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (662 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
-runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the
-Shell glue, enforces the no-blocking and `metadata.json` rules, and covers `genable_extension`,
-`gnome-status`, the unit and its install step, the cost script and the nested harness against stubs.
-It never touches the live session, but it is **not fully hermetic**: the `service/main.js` rows sample
-this machine's real `/proc` and `/sys`. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
+runs the service's D-Bus face, the client against it, the real `service/main.js`, the cockpit's D-Bus
+face, and the real `service/cockpit.js` (under a temp home, with no system bus, and a fake herdr for
+`FocusSession`). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
+covers `genable_extension`, `gnome-status`, the unit and its install step, the cost script and the
+nested harness against stubs. It never touches the live session, but it is **not fully hermetic**: the
+`service/main.js` rows sample this machine's real `/proc` and `/sys`, and the `service/cockpit.js` rows
+its real mount and route tables. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
 (package `dbus-daemon`) and `gdbus` (`libglib2.0-bin`): without any of them it stops with exit 2. The
 card-width row also needs Pango's typelibs (`gir1.2-pango-1.0`) and the card's font, Ubuntu Sans
 (`fonts-ubuntu`): without them that row fails. Neither is ever a pass.

@@ -1282,6 +1282,348 @@ if [[ "$service_first_summary" != "$SERVICE_FIRST_EXPECTED" ]]; then
   sed 's/^/    service log: /' "$SERVICE_LOG"
 fi
 
+printf '\nservice/cockpit.js on a private bus (the real sources, under a home of this run and no system bus)\n'
+# The cockpit's entry point runs twice, each time under a HOME, XDG_CONFIG_HOME
+# and XDG_STATE_HOME of this run: the config home holds the shipped template as
+# resource-pulse/cockpit.json, the state home no hspawn registry, the home no
+# ~/.ssh. DBUS_SYSTEM_BUS_ADDRESS names a socket that does not exist, so
+# NetworkManager and UPower are absent, as on a runner with no system bus at
+# all. The first run has no herdr socket; the second has a fake herdr at
+# <config home>/herdr/herdr.sock, so FocusSession never reaches the live herdr.
+COCKPIT_MAIN_PATH="$EXT_DIR/service/cockpit.js"
+COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
+COCKPIT_OBJECT_PATH='/io/github/quantivly/dotfiles/Cockpit1'
+COCKPIT_CONFIG_TEMPLATE="$DOTFILES/examples/resource-pulse-cockpit.json.template"
+COCKPIT_CONFIG_RELATIVE_PATH='resource-pulse/cockpit.json'
+COCKPIT_NO_SYSTEM_BUS="unix:path=$WIRING_TMP/cockpit-no-system-bus"
+COCKPIT_RUN_DIR="$WIRING_TMP/cockpit"
+COCKPIT_SERVE_LOG="$COCKPIT_RUN_DIR/cockpit-serve.log"
+COCKPIT_FOCUS_LOG="$COCKPIT_RUN_DIR/cockpit-focus.log"
+COCKPIT_HERDR_REQUEST_LOG="$COCKPIT_RUN_DIR/herdr-requests.log"
+COCKPIT_FAKE_HERDR_LOG="$COCKPIT_RUN_DIR/fake-herdr.log"
+for cockpit_run_name in serve focus; do
+  for cockpit_home_kind in home config state; do
+    mkdir -p "$COCKPIT_RUN_DIR/$cockpit_run_name-$cockpit_home_kind" \
+      || fatal "cannot create $COCKPIT_RUN_DIR/$cockpit_run_name-$cockpit_home_kind"
+  done
+  cockpit_config_path="$COCKPIT_RUN_DIR/$cockpit_run_name-config/$COCKPIT_CONFIG_RELATIVE_PATH"
+  if ! mkdir -p "$(dirname "$cockpit_config_path")" || ! cp "$COCKPIT_CONFIG_TEMPLATE" "$cockpit_config_path"; then
+    fatal "cannot place the config template at $cockpit_config_path"
+  fi
+done
+mkdir -p "$COCKPIT_RUN_DIR/focus-config/herdr" || fatal "cannot create the fake herdr's directory"
+: >"$COCKPIT_SERVE_LOG"; : >"$COCKPIT_FOCUS_LOG"; : >"$COCKPIT_HERDR_REQUEST_LOG"; : >"$COCKPIT_FAKE_HERDR_LOG"
+# Decodes a gdbus call's reply (GLib.Variant text, as gdbus prints it, holding
+# one JSON string). For `reply` it prints the JSON compactly (FocusSession's);
+# for `state` it prints the GetState fields named after the text, as
+# <name>=<value> separated by spaces, in the order asked.
+# shellcheck disable=SC2016  # JavaScript source: $ and backticks are gjs's, not bash's.
+COCKPIT_REPLY_DECODER_JS='
+const {GLib} = imports.gi;
+const [replyKind, gdbusReplyText, ...fieldNames] = ARGV;
+const SOURCE_NAMES = ["sessions", "network", "mounts"];
+const SINGLE_STRING_TYPE = new GLib.VariantType("(s)");
+function kindOf(value) {
+    if (value === null || value === undefined)
+        return "null";
+    return Array.isArray(value) ? "list" : typeof value;
+}
+function stateFieldTexts(state) {
+    const sources = state.sources ?? {};
+    const sessions = sources.sessions ?? {};
+    const uplink = sources.network?.uplink ?? {};
+    const sourceKinds = SOURCE_NAMES.map(sourceName => kindOf(sources[sourceName]));
+    const uplinkValues = [uplink.kind, uplink.connectivity, uplink.wifiEnabled].map(String);
+    const intervals = SOURCE_NAMES.map(sourceName => String(sources[sourceName]?.intervalSeconds));
+    const groupCount = state.layout?.groups?.length;
+    return {
+        protocol: String(state.protocol),
+        sources: sourceKinds.join("/"),
+        layout: kindOf(state.layout),
+        groups: String(groupCount ?? "none"),
+        configError: JSON.stringify(state.configError ?? null),
+        published: String(state.latestPublishedAtUsec),
+        herdrRunning: String(sessions.herdrRunning),
+        sessionRows: String(sessions.rows?.length),
+        mounts: kindOf(sources.mounts),
+        mountsRows: kindOf(sources.mounts?.rows),
+        uplink: uplinkValues.join("/"),
+        intervals: intervals.join("/"),
+    };
+}
+let decoded;
+try {
+    const [replyJson] = GLib.Variant.parse(SINGLE_STRING_TYPE, gdbusReplyText, null, null).deepUnpack();
+    const reply = JSON.parse(replyJson);
+    if (replyKind === "reply") {
+        decoded = JSON.stringify(reply);
+    } else {
+        const fieldTexts = stateFieldTexts(reply);
+        decoded = fieldNames.map(fieldName => `${fieldName}=${fieldTexts[fieldName]}`).join(" ");
+    }
+} catch (error) {
+    decoded = `unreadable reply: ${error.message}`;
+}
+print(decoded);
+'
+# A fake herdr on <socket path>, speaking herdr's framing (one JSON request
+# line {id, method, params}, one reply line, then close: see
+# service/herdrSocket.js). It logs each request as `<method> <params JSON>` to
+# <request log>. Its snapshot holds four claude panes: w1:p1; w1:p2, whose
+# pane.focus it rejects as herdr does a pane that is gone; p3, in no
+# workspace; and one with no pane at all, whose row id is its session id.
+# shellcheck disable=SC2016  # JavaScript source: $ and backticks are gjs's, not bash's.
+COCKPIT_FAKE_HERDR_JS='
+const {Gio, GLib} = imports.gi;
+const [socketPath, requestLogPath] = ARGV;
+const PANE_HERDR_REJECTS = "p2";
+const SNAPSHOT = {
+    workspaces: [{workspace_id: "w1", label: "alpha"}],
+    agents: [
+        {agent: "claude", agent_status: "working", workspace_id: "w1", pane_id: "p1", agent_session: {value: "s1"}},
+        {agent: "claude", agent_status: "idle", workspace_id: "w1", pane_id: PANE_HERDR_REJECTS,
+            agent_session: {value: "s2"}},
+        {agent: "claude", agent_status: "idle", pane_id: "p3", cwd: "/work/beta", agent_session: {value: "s3"}},
+        {agent: "claude", agent_status: "idle", cwd: "/work/gamma", agent_session: {value: "s4"}},
+    ],
+};
+const requestLines = [];
+function answerFor(method, params) {
+    switch (method) {
+    case "session.snapshot":
+        return {result: {type: "session_snapshot", snapshot: SNAPSHOT}};
+    case "pane.process_info":
+        return {result: {type: "pane_process_info", process_info: {pane_id: params.pane_id, foreground_processes: []}}};
+    case "workspace.focus":
+        return {result: {type: "ok"}};
+    case "pane.focus":
+        if (params.pane_id === PANE_HERDR_REJECTS)
+            return {error: {code: "pane_not_found", message: "pane not found"}};
+        return {result: {type: "ok"}};
+    default:
+        return {error: {code: "invalid_request", message: "unknown method"}};
+    }
+}
+function replyTextFor(requestLine) {
+    const request = JSON.parse(requestLine);
+    const params = request.params ?? {};
+    requestLines.push(`${request.method} ${JSON.stringify(params)}`);
+    GLib.file_set_contents(requestLogPath, `${requestLines.join("\n")}\n`);
+    return JSON.stringify({id: request.id, ...answerFor(request.method, params)});
+}
+const socketService = new Gio.SocketService();
+socketService.add_address(Gio.UnixSocketAddress.new(socketPath), Gio.SocketType.STREAM, Gio.SocketProtocol.DEFAULT,
+    null);
+socketService.connect("incoming", (_service, connection) => {
+    const lineReader = new Gio.DataInputStream({base_stream: connection.get_input_stream()});
+    lineReader.read_line_async(GLib.PRIORITY_DEFAULT, null, (_stream, readResult) => {
+        let replyText = "";
+        try {
+            const [requestLine] = lineReader.read_line_finish_utf8(readResult);
+            replyText = replyTextFor(requestLine);
+        } catch (error) {
+            printerr(`fake herdr: cannot answer: ${error.message}`);
+        }
+        const replyBytes = new GLib.Bytes(new TextEncoder().encode(`${replyText}\n`));
+        connection.get_output_stream().write_bytes_async(replyBytes, GLib.PRIORITY_DEFAULT, null,
+            (outputStream, writeResult) => {
+                try {
+                    if (outputStream.write_bytes_finish(writeResult) !== replyBytes.get_size())
+                        printerr("fake herdr: a reply went out in part");
+                } catch (error) {
+                    printerr(`fake herdr: cannot reply: ${error.message}`);
+                }
+                connection.close(null);
+            });
+    });
+    return true;
+});
+socketService.start();
+new GLib.MainLoop(null, false).run();
+'
+# The driver. The serve run: owns the name, answers GetState, a second copy
+# exits 1, then the config is rewritten unchanged (GetState's latest publish
+# time read around it), overwritten with "{", deleted and renamed back into
+# place, each followed by GetState for up to 3 s; then SIGTERM. The focus run: a fake herdr first, then the service, then one
+# FocusSession per kind of row, each followed by the focus requests the fake
+# herdr saw for it; then SIGTERM. Every wait is bounded.
+# shellcheck disable=SC2016  # The driver's own source: its variables expand when it runs.
+COCKPIT_DRIVER_OUTPUT="$(on_private_bus bash -c '
+set -u
+cockpit_main="$1" decoder_js="$2" fake_herdr_js="$3" bus_name="$4" object_path="$5" run_dir="$6"
+config_template="$7" config_relative_path="$8" no_system_bus="$9"
+serve_log="${10}" focus_log="${11}" request_log="${12}" fake_herdr_log="${13}"
+is_private_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "${RESOURCE_PULSE_TEST_BUS_DIR:-}" \
+  || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
+USEC_PER_SECOND=1000000
+FOCUS_REQUEST_PATTERN="^(workspace|pane)\.focus "
+PUBLISHED_TIME_PATTERN="^published=[0-9]+$"
+# still_running <pid>: the process exists and is not a zombie (the state after the last ") " of its stat).
+still_running() {
+  local stat_line process_state
+  read -r stat_line 2>/dev/null <"/proc/$1/stat" || return 1
+  process_state="${stat_line##*) }"
+  [[ "${process_state%% *}" != Z ]]
+}
+now_usec() { printf "%s" "${EPOCHREALTIME/./}"; }
+# publish_verdict <reading before> <reading after>: two "published=" readings
+# compared: unchanged, moved, or unreadable when either is not a time (two
+# failed probes would otherwise compare equal).
+publish_verdict() {
+  if [[ ! "$1" =~ $PUBLISHED_TIME_PATTERN || ! "$2" =~ $PUBLISHED_TIME_PATTERN ]]; then
+    printf "unreadable"
+  elif [[ "$1" == "$2" ]]; then
+    printf "unchanged"
+  else
+    printf "moved"
+  fi
+}
+# probe_state <seconds> <needle> <field...>: asks GetState through gdbus until
+# the decoded fields hold <needle>, for at most <seconds>; prints the last
+# decoding, or "no answer" when gdbus never answered.
+probe_state() {
+  local wait_seconds="$1" needle="$2" deadline_usec decoded="no answer" reply
+  shift 2
+  deadline_usec=$(( $(now_usec) + wait_seconds * USEC_PER_SECOND ))
+  while :; do
+    if reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
+        --method "$bus_name.GetState" --timeout 2 2>/dev/null)"; then
+      decoded="$(gjs -c "$decoder_js" state "$reply" "$@")"
+      [[ "$decoded" == *"$needle"* ]] && break
+    fi
+    (( $(now_usec) >= deadline_usec )) && break
+    sleep 0.1
+  done
+  printf "%s" "$decoded"
+}
+# stop_process <label> <pid>: SIGTERM, then at most 10 s; prints <label>=<exit status>, or hung.
+stop_process() {
+  local label="$1" pid="$2" attempt
+  kill -TERM "$pid" 2>/dev/null
+  for (( attempt = 0; attempt < 100; attempt++ )); do
+    still_running "$pid" || break
+    sleep 0.1
+  done
+  if still_running "$pid"; then
+    kill -KILL "$pid"
+    wait "$pid"
+    printf "%s=hung\n" "$label"
+  else
+    wait "$pid"
+    printf "%s=%s\n" "$label" "$?"
+  fi
+}
+# focus_session <id>: one FocusSession through gdbus; prints the reply and the
+# focus requests the fake herdr saw for it, joined by |.
+focus_session() {
+  local session_id="$1" requests_before reply decoded requests
+  requests_before="$(grep -c -E "$FOCUS_REQUEST_PATTERN" "$request_log")"
+  if reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
+      --method "$bus_name.FocusSession" "\"$session_id\"" --timeout 5 2>&1)"; then
+    decoded="$(gjs -c "$decoder_js" reply "$reply")"
+  else
+    decoded="D-Bus error: ${reply%%$'"'"'\n'"'"'*}"
+  fi
+  requests="$(grep -E "$FOCUS_REQUEST_PATTERN" "$request_log" | tail -n "+$(( requests_before + 1 ))" | tr "\n" "|")"
+  printf "focus %s=reply=%s requests=[%s]\n" "$session_id" "$decoded" "${requests%|}"
+}
+
+serve_config="$run_dir/serve-config/$config_relative_path"
+serve_environment=(env HOME="$run_dir/serve-home" XDG_CONFIG_HOME="$run_dir/serve-config"
+  XDG_STATE_HOME="$run_dir/serve-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+"${serve_environment[@]}" gjs -m "$cockpit_main" >>"$serve_log" 2>&1 &
+serve_pid=$!
+printf "served=%s\n" "$(probe_state 15 "sources=object/object/object" \
+  protocol sources groups configError herdrRunning mountsRows)"
+printf "no-system-bus=%s\n" "$(probe_state 2 "uplink=" uplink intervals)"
+"${serve_environment[@]}" timeout 30 gjs -m "$cockpit_main" >>"$serve_log" 2>&1
+printf "second-exit=%s\n" "$?"
+printf "after-second=%s\n" "$(probe_state 5 "protocol=1" protocol)"
+published_before="$(probe_state 2 "published=" published)"
+cp -- "$config_template" "$serve_config"
+sleep 1
+published_after_same_text="$(probe_state 2 "published=" published)"
+printf "{" >"$serve_config"
+printf "malformed=%s\n" "$(probe_state 3 "layout=null" layout configError mounts)"
+published_after_new_text="$(probe_state 2 "published=" published)"
+printf "config-publishes=same-text=%s new-text=%s\n" \
+  "$(publish_verdict "$published_before" "$published_after_same_text")" \
+  "$(publish_verdict "$published_after_same_text" "$published_after_new_text")"
+rm -f -- "$serve_config"
+printf "deleted=%s\n" "$(probe_state 3 "configError=\"missing\"" layout configError mounts)"
+cp -- "$config_template" "$serve_config.new" && mv -- "$serve_config.new" "$serve_config"
+printf "renamed-in=%s\n" "$(probe_state 3 "groups=3" layout groups configError)"
+stop_process serve-exit "$serve_pid"
+
+herdr_socket="$run_dir/focus-config/herdr/herdr.sock"
+gjs -c "$fake_herdr_js" "$herdr_socket" "$request_log" >>"$fake_herdr_log" 2>&1 &
+fake_herdr_pid=$!
+for (( attempt = 0; attempt < 50; attempt++ )); do
+  [[ -S "$herdr_socket" ]] && break
+  sleep 0.1
+done
+focus_environment=(env HOME="$run_dir/focus-home" XDG_CONFIG_HOME="$run_dir/focus-config"
+  XDG_STATE_HOME="$run_dir/focus-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+"${focus_environment[@]}" gjs -m "$cockpit_main" >>"$focus_log" 2>&1 &
+focus_pid=$!
+printf "focus-ready=%s\n" "$(probe_state 15 "sessionRows=4" herdrRunning sessionRows)"
+for session_id in w1:p1 p3 w1:p2 w1:p9 s4; do
+  focus_session "$session_id"
+done
+stop_process focus-exit "$focus_pid"
+kill -TERM "$fake_herdr_pid" 2>/dev/null
+wait "$fake_herdr_pid" 2>/dev/null
+' cockpit-driver "$COCKPIT_MAIN_PATH" "$COCKPIT_REPLY_DECODER_JS" "$COCKPIT_FAKE_HERDR_JS" "$COCKPIT_BUS_NAME" \
+  "$COCKPIT_OBJECT_PATH" "$COCKPIT_RUN_DIR" "$COCKPIT_CONFIG_TEMPLATE" "$COCKPIT_CONFIG_RELATIVE_PATH" \
+  "$COCKPIT_NO_SYSTEM_BUS" "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_HERDR_REQUEST_LOG" \
+  "$COCKPIT_FAKE_HERDR_LOG" 2>&1)"
+declare -A cockpit_driver_said=()
+while IFS= read -r driver_line; do
+  [[ "$driver_line" == *=* ]] && cockpit_driver_said["${driver_line%%=*}"]="${driver_line#*=}"
+done <<<"$COCKPIT_DRIVER_OUTPUT"
+cockpit_fail_count_before=$FAIL
+check "service/cockpit.js owns Cockpit1 within 15 s and its GetState says protocol 1, the template's three groups, herdr not running and a list of mount rows" \
+  "${cockpit_driver_said[served]-}" "protocol=1 sources=object/object/object groups=3 configError=null herdrRunning=false mountsRows=list"
+check "with no system bus it serves all the same: no uplink known, and every cadence off battery (sessions 60 s unwatched, network 10 s, mounts 30 s)" \
+  "${cockpit_driver_said[no-system-bus]-}" "uplink=null/null/null intervals=60/10/30"
+check "a second service/cockpit.js finds the name taken and exits 1, while the first keeps serving" \
+  "second-exit=${cockpit_driver_said[second-exit]-} after-second=${cockpit_driver_said[after-second]-}" \
+  "second-exit=1 after-second=protocol=1"
+check "the config rewritten with the same text publishes nothing, and with a new text publishes (GetState's latest publish time)" \
+  "${cockpit_driver_said[config-publishes]-}" "same-text=unchanged new-text=moved"
+check "the config overwritten with '{' reads within 3 s as no layout and the parse error, and the sources keep serving" \
+  "${cockpit_driver_said[malformed]-}" 'layout=null configError="config: expected a JSON object" mounts=object'
+check "the config deleted reads within 3 s as no layout and the error missing, and the sources keep serving" \
+  "${cockpit_driver_said[deleted]-}" 'layout=null configError="missing" mounts=object'
+check "the config renamed back into place (an atomic editor's save) reads within 3 s as the layout again" \
+  "${cockpit_driver_said[renamed-in]-}" "layout=object groups=3 configError=null"
+check "SIGTERM ends service/cockpit.js with exit 0, in both runs" \
+  "serve=${cockpit_driver_said[serve-exit]-} focus=${cockpit_driver_said[focus-exit]-}" "serve=0 focus=0"
+check "service/cockpit.js logged its serving line once, with the protocol" \
+  "$(grep -c -F "cockpit: serving $COCKPIT_BUS_NAME (protocol 1)" "$COCKPIT_SERVE_LOG")" 1
+check "service/cockpit.js logged no gjs or GLib warning, critical or uncaught error, in either run" \
+  "$(cat "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" | grep -c -E "$ENGINE_WARNING_PATTERN")" 0
+check "FocusSession focuses the row's own workspace, then its pane, over the herdr socket: focused true, windowPid null" \
+  "ready=${cockpit_driver_said[focus-ready]-} ${cockpit_driver_said[focus w1:p1]-}" \
+  'ready=herdrRunning=true sessionRows=4 reply={"focused":true,"windowPid":null,"error":null} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p1"}]'
+check "FocusSession on a row in no workspace sends pane.focus alone" \
+  "${cockpit_driver_said[focus p3]-}" \
+  'reply={"focused":true,"windowPid":null,"error":null} requests=[pane.focus {"pane_id":"p3"}]'
+# A herdr rejection is an answer, not a fault: the cockpit replies with it
+# itself, so the D-Bus face's fault line never appears for it.
+check "a herdr rejection of pane.focus answers focused false with herdr's error, not a D-Bus error, and is not logged as a fault" \
+  "${cockpit_driver_said[focus w1:p2]-} faults=$(grep -c -F 'cockpit: FocusSession failed' "$COCKPIT_FOCUS_LOG")" \
+  'reply={"focused":false,"windowPid":null,"error":"herdr: pane_not_found: pane not found"} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p2"}] faults=0'
+check "an unknown id, and a row with no pane, answer focused false with the cockpit's error and ask herdr nothing" \
+  "unknown: ${cockpit_driver_said[focus w1:p9]-} no-pane: ${cockpit_driver_said[focus s4]-}" \
+  'unknown: reply={"focused":false,"windowPid":null,"error":"cockpit: unknown session id"} requests=[] no-pane: reply={"focused":false,"windowPid":null,"error":"cockpit: the session has no herdr pane"} requests=[]'
+if (( FAIL > cockpit_fail_count_before )); then
+  printf '    (driver said: %s)\n' "$COCKPIT_DRIVER_OUTPUT"
+  sed 's/^/    serve log: /' "$COCKPIT_SERVE_LOG"
+  sed 's/^/    focus log: /' "$COCKPIT_FOCUS_LOG"
+  sed 's/^/    fake herdr log: /' "$COCKPIT_FAKE_HERDR_LOG"
+fi
+
 printf '\nthe unit (systemd/resource-pulse.service)\n'
 SERVICE_UNIT="$DOTFILES/systemd/resource-pulse.service"
 SERVICE_MAIN_RELATIVE_PATH='gnome-shell/extensions/resource-pulse@dotfiles/service/main.js'
@@ -2476,7 +2818,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=639
+EXPECTED_ROWS=662
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
