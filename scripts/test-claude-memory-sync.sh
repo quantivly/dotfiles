@@ -1859,12 +1859,13 @@ check "host name: an unusable marker line falls back to hostname -s" \
 
 # A pin: a read with no readability test before it puts the shell's "Permission denied" on stderr.
 # Mode 000 does not stop root, so under root (act runs so) the precondition below fails and the table
-# is could-not-run, exit 2, as the root check at the top already makes it.
+# is could-not-run, exit 2, as the root check at the top already makes it. LC_ALL=C, here and in the
+# next row: the needle is the shell's English message, and a translated one would pass the mutant.
 host_name_scene "$MARKER_HOST"
 chmod 000 "$FIXTURE_PROFILE_MARKER" || fatal "could not make the profile marker unreadable"
 [[ ! -r "$FIXTURE_PROFILE_MARKER" ]] \
     || fatal "the profile marker is still readable at mode 000: the unreadable-marker row would assert nothing"
-FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
+LC_ALL=C FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
 check "host name: an unreadable marker falls back to hostname -s, silently" \
     "$RC|$(contains "$OUT" 'Permission denied')|$(head_subject "$ALPHA_DIR")" "0|no|$STUB_SHORT_HOST: 1 files"
 
@@ -1873,7 +1874,7 @@ check "host name: an unreadable marker falls back to hostname -s, silently" \
 host_name_scene "$MARKER_HOST"
 rm -f "$FIXTURE_PROFILE_MARKER" || fatal "could not remove the profile marker file"
 mkdir "$FIXTURE_PROFILE_MARKER" || fatal "could not put a directory at the profile marker's path"
-FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
+LC_ALL=C FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
 check "host name: a marker that is a directory falls back to hostname -s, silently" \
     "$RC|$(contains "$OUT" 'Is a directory')|$(head_subject "$ALPHA_DIR")" "0|no|$STUB_SHORT_HOST: 1 files"
 

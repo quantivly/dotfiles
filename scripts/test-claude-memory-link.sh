@@ -2470,12 +2470,13 @@ check "host name: an unusable marker line falls back to hostname -s" \
 
 # A pin: a read with no readability test before it puts the shell's "Permission denied" on stderr.
 # Mode 000 does not stop root, so under root (act runs so) the precondition below fails and the table
-# is could-not-run, exit 2, as the root check at the top already makes it.
+# is could-not-run, exit 2, as the root check at the top already makes it. LC_ALL=C, here and in the
+# next row: the needle is the shell's English message, and a translated one would pass the mutant.
 host_name_scene unreadable-marker "$MARKER_HOST"
 chmod 000 "$FIXTURE_PROFILE_MARKER" || fatal "could not make the profile marker unreadable"
 [[ ! -r "$FIXTURE_PROFILE_MARKER" ]] \
     || fatal "the profile marker is still readable at mode 000: the unreadable-marker row would assert nothing"
-FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+LC_ALL=C FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
 check "host name: an unreadable marker falls back to hostname -s, silently" \
     "$RC|$(contains "$OUT" 'Permission denied')|$(conflict_copy_names)" "0|no|topic.conflict-$STUB_SHORT_HOST.md "
 
@@ -2484,7 +2485,7 @@ check "host name: an unreadable marker falls back to hostname -s, silently" \
 host_name_scene marker-is-directory "$MARKER_HOST"
 rm -f "$FIXTURE_PROFILE_MARKER" || fatal "could not remove the profile marker file"
 mkdir "$FIXTURE_PROFILE_MARKER" || fatal "could not put a directory at the profile marker's path"
-FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+LC_ALL=C FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
 check "host name: a marker that is a directory falls back to hostname -s, silently" \
     "$RC|$(contains "$OUT" 'Is a directory')|$(conflict_copy_names)" "0|no|topic.conflict-$STUB_SHORT_HOST.md "
 
@@ -2694,8 +2695,45 @@ check "stray: a stray whose own key holds memory shows as unmapped" \
     "0|$(row_line "$stray_key" UNMAPPED '' '' '')
 claude-memory-link: 0 linked, 0 to fix, 1 unmapped, 0 without a store|$STRAY_NOTE"
 
+# A real checkout whose git directory sits behind a directory this user cannot search: -e answers
+# "nothing there" for a git directory that is there, so its absence is not known and the checkout is
+# not skipped. It stays exit 2, as it was before the skip existed (final review, I2). Mode 000 does not
+# stop root, so under root (act runs so) the precondition below fails and the table is could-not-run,
+# exit 2, as the root check at the top already makes it.
+LOCKED_PARENT="$HOME/locked-git-dirs"
+LOCKED_GIT_DIR="$LOCKED_PARENT/locked-repo.git"
+LOCKED_CHECKOUT="$HOME/code/locked-repo"
+reset_scene
+mkdir -p "$LOCKED_PARENT" || fatal "could not create the parent of locked-repo's git dir"
+git init -q --separate-git-dir="$LOCKED_GIT_DIR" "$LOCKED_CHECKOUT" || fatal "could not make locked-repo"
+git -C "$LOCKED_CHECKOUT" remote add origin "git@github.com:$FIXTURE_OWNER/locked-repo.git" \
+    || fatal "could not add an origin to locked-repo"
+chmod 000 "$LOCKED_PARENT" || fatal "could not make the parent of locked-repo's git dir unsearchable"
+[[ ! -x "$LOCKED_PARENT" && ! -e "$LOCKED_GIT_DIR" ]] \
+    || fatal "locked-repo's git dir can still be examined at mode 000: the locked-parent row would assert nothing"
+run_sut_stderr_apart --check
+chmod 755 "$LOCKED_PARENT"
+check "stray: a gitfile whose target cannot be examined is not skipped" \
+    "$RC|$OUT|$SUT_STDERR" "2||claude-memory-link: git could not read the origin of $LOCKED_CHECKOUT (exit 128)"
+
+# A pin: it passes before this change and after. The skip is for a checkout_globs match only: a
+# plain_dirs entry whose .git names a missing git directory is still exit 2, as docs/CLAUDE_SETUP.md
+# and the spec's M11 say. It catches the skip applied inside add_candidate, which a plain_dirs entry
+# and every listed submodule pass through too.
+PLAIN_STRAY_DIR="$HOME/notes"
+PLAIN_STRAY_GIT_DIR="$HOME/.git/modules/notes"
+reset_scene
+set_plain_dirs '["notes"]'
+mkdir -p "$PLAIN_STRAY_DIR" || fatal "could not create the plain stray directory"
+printf 'gitdir: %s\n' "$PLAIN_STRAY_GIT_DIR" > "$PLAIN_STRAY_DIR/.git" || fatal "could not write the plain stray's gitfile"
+[[ ! -e "$PLAIN_STRAY_GIT_DIR" ]] \
+    || fatal "the plain stray's gitfile names a git directory that exists: the row would assert nothing"
+run_sut_stderr_apart --check
+check "stray: a plain_dirs entry whose .git names a missing git directory is still exit 2" \
+    "$RC|$OUT|$SUT_STDERR" "2||claude-memory-link: git could not read the origin of $PLAIN_STRAY_DIR (exit 128)"
+
 printf '\n'
-EXPECTED_ROWS=221
+EXPECTED_ROWS=223
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

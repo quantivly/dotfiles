@@ -52,7 +52,10 @@
 #                                             the host. A checkout_globs match is skipped with one
 #                                             line on stderr, once a run however many globs reach
 #                                             it; anywhere else it is still exit 2. Only a regular
-#                                             .git file, and only a path with nothing at it
+#                                             .git file, and only a path KNOWN to have nothing at
+#                                             it: the deepest part of it that exists is a directory
+#                                             this user may search. Behind one it may not, -e cannot
+#                                             tell, and that is still exit 2
 #   <super>/.git/modules/<name>               a submodule (<name> may hold /): a second key, from
 #                                             that git dir, where sessions in a worktree of the
 #                                             submodule key; both keys share one store directory
@@ -492,9 +495,22 @@ store_dir_of_candidate() {
     printf '%s/%s' "$store" "$relative_dir"
 }
 
+# absence_is_known PATH — true when a test that finds nothing at PATH can be believed: the deepest
+# part of PATH that exists is a directory this user may search. Behind one it may not, -e and -L
+# answer "nothing there" for whatever is there, so that is "cannot tell", never "does not exist".
+absence_is_known() {
+    local existing_ancestor=$1
+    while [[ -n "$existing_ancestor" ]] && path_is_free "$existing_ancestor"; do
+        existing_ancestor=${existing_ancestor%/*}
+    done
+    # Stripping the last component of /name leaves the empty string, which is the root.
+    existing_ancestor=${existing_ancestor:-/}
+    [[ -d "$existing_ancestor" && -x "$existing_ancestor" ]]
+}
+
 # classify_directory DIR — set CHECKOUT_KIND and SUBMODULE_GIT_DIR from DIR's .git entry.
-# missing-git-dir is a regular .git file whose gitdir: line names nothing, except a worktree's, which
-# stays worktree.
+# missing-git-dir is a regular .git file whose gitdir: line names nothing, as far as this user can
+# tell (absence_is_known), except a worktree's, which stays worktree.
 classify_directory() {
     local dir=$1 dot_git="$1/.git" gitfile_text git_dir
     CHECKOUT_KIND=plain
@@ -514,7 +530,7 @@ classify_directory() {
     git_dir=$(lexically_normal_path "$git_dir")
     if [[ "$git_dir" =~ $WORKTREE_GIT_DIR_RE ]]; then
         CHECKOUT_KIND=worktree
-    elif is_regular_file "$dot_git" && path_is_free "$git_dir"; then
+    elif is_regular_file "$dot_git" && path_is_free "$git_dir" && absence_is_known "$git_dir"; then
         CHECKOUT_KIND=missing-git-dir
     elif [[ "$git_dir" == *"$SUBMODULE_GIT_DIR_INFIX"?* ]]; then
         CHECKOUT_KIND=submodule
