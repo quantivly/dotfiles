@@ -3230,10 +3230,12 @@ no_out   "...and is not called a tombstone"   "a tombstone, not an account dir"
 # run the picker there, so its pools pick nothing, and one ✗ per member that has
 # no profile store (every one, on such a machine) was noise about nothing. The
 # checks that a launch refuses on WITH or without clauth still run.
+# TWO tenants, each with its own pool, so a note printed once per pool shows as two.
 NO_CLAUTH_POOLS='typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL
-CLAUDE_TENANT_POOL=( w "a b" )
+CLAUDE_TENANT_POOL=( w "a b" v "d" )
 CLAUDE_TENANT_SPILL=( w "c" )
 CLAUDE_TENANT_DEFAULT=w'
+NO_CLAUTH_NOTE="clauth is not installed — the pools pick no account on this machine; pool checks skipped"
 # pools_section_of_output — the doctor's "Pools" section, up to the next header.
 pools_section_of_output() {
     printf '%s\n' "$OUT" | sed -n '/^--- Pools ---$/,/^--- Linear ---$/p'
@@ -3241,11 +3243,20 @@ pools_section_of_output() {
 
 new_home nc1; write_cred; mk_tenants "$NO_CLAUTH_POOLS"
 WITH_CLAUTH=0 run_doctor
-want_out "no clauth, a tenant table with pools and spill seats: one note" \
-         "clauth is not installed — the pools pick no account on this machine"
+POOLS_SECTION="$(pools_section_of_output)"
+# EXACTLY one note, counted in the section like the ✗ lines below: a note printed
+# per pool (two here) or not at all fails. A section that was not found fails too.
+ONE_NOTE_ROW_NAME="no clauth, a tenant table with pools and spill seats: one note"
+POOLS_NOTE_LINES="$(printf '%s\n' "$POOLS_SECTION" | grep -c -F "$NO_CLAUTH_NOTE" || true)"
+if [[ "$POOLS_SECTION" != *"--- Pools ---"* ]]; then
+    bad "$ONE_NOTE_ROW_NAME — the section is not in the output"
+elif [[ "$POOLS_NOTE_LINES" == 1 ]]; then
+    ok "$ONE_NOTE_ROW_NAME"
+else
+    bad "$ONE_NOTE_ROW_NAME — found $POOLS_NOTE_LINES of '$NO_CLAUTH_NOTE'"
+fi
 # Every ✗ in the section, not one needle: the member lines AND the
 # "spill for … (nostore)" lines. A section that was not found is not a clean one.
-POOLS_SECTION="$(pools_section_of_output)"
 POOLS_FAIL_LINES="$(printf '%s\n' "$POOLS_SECTION" | grep -c '^[[:space:]]*✗' || true)"
 if [[ "$POOLS_SECTION" != *"--- Pools ---"* ]]; then
     bad "...and the Pools section prints no ✗ — the section is not in the output"
@@ -3271,17 +3282,28 @@ WITH_CLAUTH=0 run_doctor
 want_out "no clauth, a tenant table that parses and fails when run is still a ✗" \
          "did not run cleanly — pool checks NOT RUN"
 
+# PIN: the same, for the finish check. The table parses, writes nothing to stderr
+# and exits before the reader prints its completion marker. Catches the early
+# return moved between the run check and the "did not finish" check, which the two
+# rows above do not: a launch refuses this table with or without clauth too.
+new_home nc4; write_cred
+mk_tenants "$NO_CLAUTH_POOLS
+exit 0"
+WITH_CLAUTH=0 run_doctor
+want_out "no clauth, a tenant table that never finishes is still a ✗" \
+         "did not finish — pool checks NOT RUN"
+
 # PIN: the same table as nc1 with clauth installed. Catches a return that fires
 # whether or not clauth is there, and a note printed where the members are checked.
-new_home nc4; write_cred; mk_tenants "$NO_CLAUTH_POOLS"
+new_home nc5; write_cred; mk_tenants "$NO_CLAUTH_POOLS"
 WITH_CLAUTH=1 run_doctor
-NC4_ROW="clauth installed, a member with no profile store is still a ✗, and there is no note"
+CLAUTH_INSTALLED_ROW_NAME="clauth installed, a member with no profile store is still a ✗, and there is no note"
 if [[ "$OUT" != *"which has no clauth profile store"* ]]; then
-    bad "$NC4_ROW — expected output to contain 'which has no clauth profile store'"
+    bad "$CLAUTH_INSTALLED_ROW_NAME — expected output to contain 'which has no clauth profile store'"
 elif [[ "$OUT" == *"clauth is not installed"* ]]; then
-    bad "$NC4_ROW — output must NOT contain 'clauth is not installed'"
+    bad "$CLAUTH_INSTALLED_ROW_NAME — output must NOT contain 'clauth is not installed'"
 else
-    ok "$NC4_ROW"
+    ok "$CLAUTH_INSTALLED_ROW_NAME"
 fi
 
 #-----------------------------------------------------------------------------
@@ -4144,7 +4166,7 @@ no_out "timer: stores with no origin are no ⚠: nothing has anywhere to sync to
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=608
+EXPECTED_ROWS=609
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

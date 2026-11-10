@@ -794,6 +794,14 @@ _claude_plugins_disabled() {
 #     Those are the pool-shaped checks of _claude_tenant_table_ok in zshrc.herdr;
 #     the route-syntax checks stay there, with the launcher that applies them.
 #
+# Most of these run ONLY WHERE CLAUTH IS INSTALLED (`whence -p clauth`, DO-897):
+# the member, settings and organisation checks, the pool-shaped table checks (a
+# tenant with no members, a member the picker rejects) and the plugin MCP
+# sign-ins. claude() and hspawn run no picker without clauth, so the section
+# prints one note in their place. The duplicate-account check and the table's
+# read, parse and run checks happen either way: a launch refuses a table that
+# fails those with or without clauth.
+#
 # A separate function because claude-doctor is one long scope in which every
 # `local` is shared. The table is read FRESH from the file, the way a launch reads
 # it (claude-tenants-check): this shell's own copy dates from whenever it started.
@@ -910,7 +918,7 @@ _claude_doctor_pools() {
   # above: a launch refuses a table that cannot be read or run with or without
   # clauth. PATH, not `command -v`: zshrc.herdr defines a clauth FUNCTION.
   if ! whence -p clauth >/dev/null 2>&1; then
-    _doctor_note "clauth is not installed — the pools pick no account on this machine; member checks skipped"
+    _doctor_note "clauth is not installed — the pools pick no account on this machine; pool checks skipped"
     return 0
   fi
 

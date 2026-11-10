@@ -182,11 +182,16 @@ switch. What its findings mean:
 | `N Claude processes ... no lock` | the race is likely at this concurrency | `hreap` and close what you are done with |
 | `configured on BOTH` | duplicate service | §2.3 |
 | `pool '<t>': '<b>' differs from '<a>' in …` | in-place `clauth switch <sid>` between them is refused, in the journal only | make the two `config.toml` files agree (§5, step 3) |
-| `pool '<t>' names '<n>', a compat symlink` / `a retired name` / `which has no clauth profile store` | the picker drops that name without a word. Reported only where clauth is installed; a machine without it runs no picker and gets a single note instead | put the real profile's name in the pool, or remove it |
+| `pool '<t>' names '<n>', a compat symlink` / `a retired name` / `which has no clauth profile store` | the picker drops that name without a word | put the real profile's name in the pool, or remove it |
 | `profiles '<a>', '<b>' are logged in to the SAME account` | two names for one seat | `clauth delete` the newer one, and drop it from its pool |
 | `'<b>' is in a different organisation` / `a claude_max account in a pool of team seats` | the login went to the browser's claude.ai account, not the seat | `clauth login <b>` again with the browser on the right account |
 | `'<b>' is not signed in to plugin:…, which another member uses` | that seat never signed in to a plugin server its pool uses | `scripts/claude-seat mcp <b>`, or `claude-as <b>`, then `/mcp` |
 | `'<b>' has broken plugin MCP sign-ins: …` | a token blanked by a lost write, or one with no refresh token | `scripts/claude-seat mcp <b>`, then §2.4 |
+
+The `differs from`, member (`compat symlink`, `retired name`, `no clauth profile
+store`), organisation and plugin sign-in rows are reported only where clauth is
+installed. A machine without it runs no picker, so its Pools section prints one
+note in their place. The `SAME account` row is checked either way.
 
 ---
 
