@@ -14,25 +14,42 @@
 //   written, deleted, moved away and renamed into place (an atomic editor's save), even while the file or its
 //   directory does not exist yet, so its directory is not watched separately. WATCH_MOVES makes a rename into place
 //   one RENAMED event; without it, it is a DELETED of the temp file and a CREATED, read again all the same. A burst
-//   of events reads the file once, CONFIG_RELOAD_DEBOUNCE_MS after the first. A file that cannot be read gives the
-//   configError COCKPIT_CONFIG_MISSING_ERROR, one that does not parse the parser's error; either way the layout is
-//   null and the sources keep serving. A read that gives the same layout and error as the one before reports nothing.
+//   of events reads the file once, WATCHED_FILE_RELOAD_DEBOUNCE_MS after the first. A file that cannot be read gives
+//   the configError COCKPIT_CONFIG_MISSING_ERROR, one that does not parse the parser's error; either way the layout
+//   is null and the sources keep serving. A read that gives the same layout and error as the one before reports
+//   nothing.
 // - FocusSession finds the row with the id it is given in the latest sessions sample, and asks herdr over its socket
 //   to focus the row's workspace (when it has one), then its pane. A failure answers a code from
-//   COCKPIT_FOCUS_ERROR_CODES (ruling R18); herdr's own message goes to the journal, never to the bus.
+//   COCKPIT_FOCUS_ERROR_CODES (ruling R18); herdr's own message goes to the journal, never to the bus. Once herdr
+//   focused the pane, the reply names the windows that may show herdr's client, which the shell (no IO of its own)
+//   then activates: herdr's API lists no clients, so the stat line of every process in /proc is read (through the
+//   sources' refusing reader) and lib/processTree.js picks the herdr clients and their parents. A /proc that cannot
+//   be read leaves the candidates read so far, none at worst, and one rate-limited journal line.
+// - Fixture mode, for the nested test harness: when COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE names a file, the process
+//   runs no source, reads no config and never asks herdr. It serves the file's `state` (layout, configError and
+//   sources), reads the file again on change as it does the config (a change publishes Changed for the layout or the
+//   sources that differ; a file that no longer reads keeps the one before, logged), and answers every FocusSession
+//   with the file's `focusReply`, whatever the id. The variable unset or empty is no fixture; cockpit.service never
+//   sets it.
 // - Every shutdown destroys the sources, never only stops them.
 // - Exit status: 0 for a signal, or for losing the name once owned (the bus connection closed: the session ended);
-//   1 when the name was never owned, or the object could not be exported.
+//   1 when the name was never owned, the object could not be exported, or the fixture could not be served at start.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GLibUnix from 'gi://GLibUnix';
 import System from 'system';
 
 import {cockpitConfigPath, parseCockpitConfig} from '../lib/cockpitConfig.js';
-import {COCKPIT_BUS_NAME, COCKPIT_FOCUS_ERROR, COCKPIT_PROTOCOL_VERSION} from '../lib/cockpitProtocol.js';
-import {COCKPIT_LOG_PREFIX, HERDR_REQUEST_TIMEOUT_MS} from '../lib/constants.js';
+import {
+    COCKPIT_BUS_NAME, COCKPIT_FOCUS_ERROR, COCKPIT_PROTOCOL_VERSION, COCKPIT_SOURCE_NAMES,
+} from '../lib/cockpitProtocol.js';
+import {
+    COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE, COCKPIT_LOG_PREFIX, HERDR_REQUEST_TIMEOUT_MS, PROC_PID_STAT_FILE_NAME,
+    PROC_ROOT_PATH,
+} from '../lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from '../lib/errorLog.js';
-import {isPlainObject, stringOrNull} from '../lib/jsonFields.js';
+import {isPlainObject, parseJsonObject, stringOrNull} from '../lib/jsonFields.js';
+import {focusWindowPidCandidates, parseProcStat} from '../lib/processTree.js';
 import {runEveryStep} from '../lib/teardown.js';
 import {COCKPIT_LAYOUT_CHANGE_NAME, CockpitDBusService} from './cockpitDbusService.js';
 import {CockpitSources} from './cockpitSources.js';
@@ -41,6 +58,7 @@ import {HERDR_ERROR_CODES, HerdrSocketClient, herdrSocketPath} from './herdrSock
 import {MountsSource} from './sources/mounts.js';
 import {NetworkSource} from './sources/network.js';
 import {SessionsSource} from './sources/sessions.js';
+import {isNotFoundError, listEntryNames, readFileRefusingSecrets} from './sources/sourceIo.js';
 
 const SIGINT_NUMBER = 2;
 const SIGTERM_NUMBER = 15;
@@ -55,13 +73,18 @@ const EXIT_STATUS_FAILURE = 1;
 const addUnixSignalSource = GLibUnix.signal_add ?? GLibUnix.signal_add_full;
 /** The configError while the config file does not exist or cannot be read. */
 const COCKPIT_CONFIG_MISSING_ERROR = 'missing';
-/** How long after the first of a burst of config file events the file is read, once, in milliseconds. */
-const CONFIG_RELOAD_DEBOUNCE_MS = 200;
 /**
- * The file monitor events after which the config is read again: every one that can change what its path holds.
+ * Why a fixture file that can be read gives nothing to serve: it is not a JSON object holding a `state` object and a
+ * `focusReply` object.
+ */
+const COCKPIT_FIXTURE_MALFORMED_ERROR = 'not a JSON object with a state object and a focusReply object';
+/** How long after the first of a burst of a watched file's events (the config's, the fixture's) it is read, once. */
+const WATCHED_FILE_RELOAD_DEBOUNCE_MS = 200;
+/**
+ * The file monitor events after which a watched file is read again: every one that can change what its path holds.
  * ATTRIBUTE_CHANGED (permissions, times) and the unmount events are left out.
  */
-const CONFIG_RELOAD_EVENTS = new Set([
+const WATCHED_FILE_RELOAD_EVENTS = new Set([
     Gio.FileMonitorEvent.CHANGED, Gio.FileMonitorEvent.CHANGES_DONE_HINT, Gio.FileMonitorEvent.CREATED,
     Gio.FileMonitorEvent.DELETED, Gio.FileMonitorEvent.MOVED_IN, Gio.FileMonitorEvent.MOVED_OUT,
     Gio.FileMonitorEvent.RENAMED,
@@ -84,9 +107,13 @@ const FOCUS_ERROR_BY_HERDR_ERROR_CODE = new Map([
     [HERDR_ERROR_CODES.MALFORMED, COCKPIT_FOCUS_ERROR.HERDR_REJECTED],
     [HERDR_ERROR_CODES.CLOSED, COCKPIT_FOCUS_ERROR.HERDR_REJECTED],
 ]);
+/** The entries of PROC_ROOT_PATH that are processes: the ones named by a pid, in decimal digits alone. */
+const PROC_PID_ENTRY_NAME_PATTERN = /^\d+$/;
 /** Template keys of this process's own log lines, so each logs once per ERROR_LOG_REPEAT_INTERVAL_USEC. */
-const CONFIG_WATCH_FAILURE_LOG_KEY = 'config watch failed';
-const CONFIG_RELOAD_FAILURE_LOG_KEY = 'config reload failed';
+const FILE_WATCH_FAILURE_LOG_KEY = 'file watch failed';
+const FILE_RELOAD_FAILURE_LOG_KEY = 'file reload failed';
+const FIXTURE_RELOAD_FAILURE_LOG_KEY = 'fixture reload failed';
+const FOCUS_WINDOW_CANDIDATES_FAILURE_LOG_KEY = 'focus window candidates failed';
 const LISTENER_FAILURE_LOG_KEY = 'listener failed';
 /** Prefix of the template key of a herdr rejection's journal line: one key per herdr code. */
 const FOCUS_FAILURE_LOG_KEY_PREFIX = 'focus failed';
@@ -112,58 +139,159 @@ function readCockpitConfigFile(configPath) {
 
 /**
  * @param {string} focusErrorCode - Why the session was not focused: a code from COCKPIT_FOCUS_ERROR_CODES.
- * @returns {{focused: boolean, windowPid: null, error: string}} FocusSession's reply for a session not focused.
+ * @returns {{focused: boolean, windowPid: null, error: string, windowPidCandidates: number[]}} FocusSession's reply
+ *     for a session not focused: no window to bring forward.
  */
 function focusFailureReply(focusErrorCode) {
-    return {focused: false, windowPid: null, error: focusErrorCode};
+    return {focused: false, windowPid: null, error: focusErrorCode, windowPidCandidates: []};
 }
 
-/** The layout config file: its latest reading, read again whenever its file monitor reports a change to it. */
-class CockpitLayoutConfig {
+/**
+ * @returns {string|null} The fixture file COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE names; null when it is unset or empty,
+ *     which is no fixture mode.
+ */
+function cockpitFixturePathOrNull() {
+    const fixturePath = GLib.getenv(COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE);
+    return fixturePath === null || fixturePath === '' ? null : fixturePath;
+}
+
+/**
+ * @typedef {object} CockpitFixtureContent
+ * @property {*} layout - The state's layout, as the file holds it.
+ * @property {*} configError - The state's config error, as the file holds it.
+ * @property {object} sourcesByName - The state's sources by name; an empty object when it has none.
+ * @property {object} focusReply - The reply every FocusSession answers.
+ * Each is served as the file holds it: the D-Bus face's builders read every field before it reaches the bus.
+ */
+
+/**
+ * Reads the fixture file fixture mode serves.
+ *
+ * @param {string} fixturePath - Path of the file.
+ * @returns {{fixture: CockpitFixtureContent|null, error: string|null}} The fixture and a null error; or a null
+ *     fixture and why: the read's error for a file that cannot be read, COCKPIT_FIXTURE_MALFORMED_ERROR for one that
+ *     holds no JSON object with a `state` object and a `focusReply` object.
+ */
+function readCockpitFixtureFile(fixturePath) {
+    let fixtureText;
+    try {
+        fixtureText = readFileToEnd(fixturePath);
+    } catch (error) {
+        if (error instanceof GLib.Error)
+            return {fixture: null, error: describeError(error)};
+        throw error;
+    }
+    const fixtureObject = parseJsonObject(fixtureText);
+    if (fixtureObject === null || !isPlainObject(fixtureObject.state) || !isPlainObject(fixtureObject.focusReply))
+        return {fixture: null, error: COCKPIT_FIXTURE_MALFORMED_ERROR};
+    const {layout = null, configError = null, sources} = fixtureObject.state;
+    const sourcesByName = isPlainObject(sources) ? sources : {};
+    return {fixture: {layout, configError, sourcesByName, focusReply: fixtureObject.focusReply}, error: null};
+}
+
+/**
+ * @param {*} left - A value.
+ * @param {*} right - Another.
+ * @returns {boolean} Whether the two have the same JSON text.
+ */
+function hasSameJsonText(left, right) {
+    return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/**
+ * What a fixture's new reading changed, as a cockpit listener names it.
+ *
+ * @param {CockpitFixtureContent} previousFixture - The reading served until now.
+ * @param {CockpitFixtureContent} fixture - The new reading.
+ * @returns {string[]} COCKPIT_LAYOUT_CHANGE_NAME when the layout or the config error differ, then each source of
+ *     COCKPIT_SOURCE_NAMES whose object differs, each compared as JSON text; empty when nothing a client is sent did
+ *     (a new focus reply alone).
+ */
+function changedFixtureNames(previousFixture, fixture) {
+    const isLayoutSame = hasSameJsonText([previousFixture.layout, previousFixture.configError],
+        [fixture.layout, fixture.configError]);
+    const layoutChangeNames = isLayoutSame ? [] : [COCKPIT_LAYOUT_CHANGE_NAME];
+    const changedSourceNames = COCKPIT_SOURCE_NAMES.filter(sourceName =>
+        !hasSameJsonText(previousFixture.sourcesByName[sourceName], fixture.sourcesByName[sourceName]));
+    return [...layoutChangeNames, ...changedSourceNames];
+}
+
+/**
+ * Reads the stat line of every process in PROC_ROOT_PATH, through the sources' refusing reader: only the entries a
+ * pid names are read. A process that exits between the listing and its read is skipped, as is a line that does not
+ * parse.
+ *
+ * @returns {{statByPid: Map<number, object>, readFailure: GLib.Error|null}} Each process read (lib/processTree.js's
+ *     ProcStat), by pid; and the first failure that was not a process exiting (the listing itself, which leaves the
+ *     map empty, or a stat that could not be read), or null.
+ */
+function readProcessStats() {
+    const statByPid = new Map();
+    let pidEntryNames;
+    try {
+        pidEntryNames = listEntryNames(PROC_ROOT_PATH).filter(entryName => PROC_PID_ENTRY_NAME_PATTERN.test(entryName));
+    } catch (error) {
+        if (!(error instanceof GLib.Error))
+            throw error;
+        return {statByPid, readFailure: error};
+    }
+    let readFailure = null;
+    for (const pidEntryName of pidEntryNames) {
+        let statText;
+        try {
+            statText = readFileRefusingSecrets(`${PROC_ROOT_PATH}/${pidEntryName}/${PROC_PID_STAT_FILE_NAME}`);
+        } catch (error) {
+            if (!(error instanceof GLib.Error))
+                throw error;
+            if (!isNotFoundError(error))
+                readFailure ??= error;
+            continue;
+        }
+        const processStat = parseProcStat(statText);
+        if (processStat !== null)
+            statByPid.set(processStat.pid, processStat);
+    }
+    return {statByPid, readFailure};
+}
+
+/**
+ * One file watched with a GFileMonitor on the file itself (see the file header for what that reports): a burst of
+ * the events that can change what its path holds calls onFileChanged once, WATCHED_FILE_RELOAD_DEBOUNCE_MS after the
+ * first. The config and the fixture each use one.
+ */
+class DebouncedFileWatch {
     /**
      * @param {object} options - The file and who hears of its changes.
-     * @param {string} options.configPath - Absolute path of the config file.
-     * @param {() => void} options.onChange - Called after a read gave a layout or an error other than the one before.
-     * @param {RateLimitedLogger} options.errorLog - Where a monitor that cannot start, or a read that throws, goes.
+     * @param {string} options.filePath - Absolute path of the file.
+     * @param {() => void} options.onFileChanged - Called after a burst of events, to read the file again; a throw is
+     *     logged.
+     * @param {RateLimitedLogger} options.errorLog - Where a monitor that cannot start, or an onFileChanged that throws,
+     *     goes.
      */
-    constructor({configPath, onChange, errorLog}) {
-        this._configPath = configPath;
-        this._onChange = onChange;
+    constructor({filePath, onFileChanged, errorLog}) {
+        this._filePath = filePath;
+        this._onFileChanged = onFileChanged;
         this._errorLog = errorLog;
-        this._reading = {layout: null, error: COCKPIT_CONFIG_MISSING_ERROR};
-        this._readingJson = JSON.stringify(this._reading);
         this._fileMonitor = null;
         this._fileMonitorHandlerId = null;
         this._reloadSourceId = null;
     }
 
-    /** @returns {object|null} The layout of the latest read; null when the file is missing or invalid. */
-    get layout() {
-        return this._reading.layout;
-    }
-
-    /** @returns {string|null} Why the latest read gave no layout; null when it gave one. */
-    get configError() {
-        return this._reading.error;
-    }
-
     /**
-     * Reads the file, then watches it. A monitor that cannot start is logged: the layout read now stays until the
-     * service restarts.
+     * Starts watching. A monitor that cannot start is logged: what was read last stays until the service restarts.
      *
      * @returns {void}
      */
     start() {
-        this._storeReading(readCockpitConfigFile(this._configPath));
         try {
-            this._fileMonitor = Gio.File.new_for_path(this._configPath)
+            this._fileMonitor = Gio.File.new_for_path(this._filePath)
                 .monitor_file(Gio.FileMonitorFlags.WATCH_MOVES, null);
         } catch (error) {
             if (!(error instanceof GLib.Error))
                 throw error;
             const errorText = describeError(error);
-            this._errorLog.log(`cannot watch ${this._configPath}, so a change needs a restart: ${errorText}`,
-                CONFIG_WATCH_FAILURE_LOG_KEY);
+            this._errorLog.log(`cannot watch ${this._filePath}, so a change needs a restart: ${errorText}`,
+                FILE_WATCH_FAILURE_LOG_KEY);
             return;
         }
         this._fileMonitorHandlerId = this._fileMonitor.connect('changed',
@@ -189,37 +317,91 @@ class CockpitLayoutConfig {
     }
 
     /**
-     * Arms one read CONFIG_RELOAD_DEBOUNCE_MS after an event that can change the file, unless one is armed already:
-     * a burst of events reads the file once.
+     * Arms one read WATCHED_FILE_RELOAD_DEBOUNCE_MS after an event that can change the file, unless one is armed
+     * already: a burst of events reads the file once.
      *
      * @param {Gio.FileMonitorEvent} eventType - What the monitor saw.
      * @returns {void}
      */
     _onFileEvent(eventType) {
-        if (!CONFIG_RELOAD_EVENTS.has(eventType) || this._reloadSourceId !== null)
+        if (!WATCHED_FILE_RELOAD_EVENTS.has(eventType) || this._reloadSourceId !== null)
             return;
-        this._reloadSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONFIG_RELOAD_DEBOUNCE_MS, () => {
+        this._reloadSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, WATCHED_FILE_RELOAD_DEBOUNCE_MS, () => {
             this._reloadSourceId = null;
-            this._reload();
+            this._runOnFileChanged();
             return GLib.SOURCE_REMOVE;
         });
     }
 
     /**
-     * Reads the file again and calls onChange when the reading differs from the one before. It runs as a GLib
-     * callback, where a throw would only be printed, so one is logged here instead.
+     * Calls onFileChanged. It runs as a GLib callback, where a throw would only be printed, so one is logged here
+     * instead.
+     *
+     * @returns {void}
+     */
+    _runOnFileChanged() {
+        try {
+            this._onFileChanged();
+        } catch (error) {
+            const errorText = describeErrorWithStack(error);
+            this._errorLog.log(`reading ${this._filePath} again failed: ${errorText}`, FILE_RELOAD_FAILURE_LOG_KEY);
+        }
+    }
+}
+
+/** The layout config file: its latest reading, read again whenever its watch reports a change to it. */
+class CockpitLayoutConfig {
+    /**
+     * @param {object} options - The file and who hears of its changes.
+     * @param {string} options.configPath - Absolute path of the config file.
+     * @param {() => void} options.onChange - Called after a read gave a layout or an error other than the one before.
+     * @param {RateLimitedLogger} options.errorLog - Where a monitor that cannot start, or a read that throws, goes.
+     */
+    constructor({configPath, onChange, errorLog}) {
+        this._configPath = configPath;
+        this._onChange = onChange;
+        this._reading = {layout: null, error: COCKPIT_CONFIG_MISSING_ERROR};
+        this._readingJson = JSON.stringify(this._reading);
+        this._fileWatch = new DebouncedFileWatch({filePath: configPath, onFileChanged: () => this._reload(), errorLog});
+    }
+
+    /** @returns {object|null} The layout of the latest read; null when the file is missing or invalid. */
+    get layout() {
+        return this._reading.layout;
+    }
+
+    /** @returns {string|null} Why the latest read gave no layout; null when it gave one. */
+    get configError() {
+        return this._reading.error;
+    }
+
+    /**
+     * Reads the file, then watches it.
+     *
+     * @returns {void}
+     */
+    start() {
+        this._storeReading(readCockpitConfigFile(this._configPath));
+        this._fileWatch.start();
+    }
+
+    /**
+     * Stops watching the file. Safe twice.
+     *
+     * @returns {void}
+     */
+    destroy() {
+        this._fileWatch.destroy();
+    }
+
+    /**
+     * Reads the file again and calls onChange when the reading differs from the one before.
      *
      * @returns {void}
      */
     _reload() {
-        try {
-            if (this._storeReading(readCockpitConfigFile(this._configPath)))
-                this._onChange();
-        } catch (error) {
-            const errorText = describeErrorWithStack(error);
-            this._errorLog.log(`reading ${this._configPath} again failed: ${errorText}`,
-                CONFIG_RELOAD_FAILURE_LOG_KEY);
-        }
+        if (this._storeReading(readCockpitConfigFile(this._configPath)))
+            this._onChange();
     }
 
     /**
@@ -237,10 +419,103 @@ class CockpitLayoutConfig {
 }
 
 /**
- * One run of the cockpit service: the sources, the layout config, the herdr client, their D-Bus face, the bus name
- * and the main loop, and their shutdown. It is the face's cockpit: it gives the layout, the config error and the
- * sources, tells its listeners of every change (a layout change as COCKPIT_LAYOUT_CHANGE_NAME), passes the watch
- * state on to the sources and focuses sessions.
+ * Fixture mode's content (see the file header): the fixture file's latest reading that could be served, read again
+ * whenever its watch reports a change to it.
+ */
+class CockpitFixture {
+    /**
+     * @param {object} options - The file and who hears of its changes.
+     * @param {string} options.fixturePath - Path of the fixture file.
+     * @param {(changedNames: string[]) => void} options.onChange - Called after a read changed the layout or a
+     *     source, with what changed (changedFixtureNames).
+     * @param {RateLimitedLogger} options.errorLog - Where a monitor that cannot start, or a read that cannot be
+     *     served, goes.
+     */
+    constructor({fixturePath, onChange, errorLog}) {
+        this._fixturePath = fixturePath;
+        this._onChange = onChange;
+        this._errorLog = errorLog;
+        /** @type {CockpitFixtureContent|null} The reading served; null until start succeeded. */
+        this._fixture = null;
+        this._fileWatch = new DebouncedFileWatch({
+            filePath: fixturePath, onFileChanged: () => this._reload(), errorLog,
+        });
+    }
+
+    /** @returns {string} Path of the fixture file. */
+    get fixturePath() {
+        return this._fixturePath;
+    }
+
+    /** @returns {*} The fixture's layout. */
+    get layout() {
+        return this._fixture.layout;
+    }
+
+    /** @returns {*} The fixture's config error. */
+    get configError() {
+        return this._fixture.configError;
+    }
+
+    /** @returns {object} The fixture's sources by name. */
+    get sourcesByName() {
+        return this._fixture.sourcesByName;
+    }
+
+    /** @returns {object} The reply every FocusSession answers. */
+    get focusReply() {
+        return this._fixture.focusReply;
+    }
+
+    /**
+     * Reads the file and, when it can be served, watches it.
+     *
+     * @returns {string|null} Why the file cannot be served (readCockpitFixtureFile's error), nothing being watched;
+     *     null once it is served and watched.
+     */
+    start() {
+        const {fixture, error} = readCockpitFixtureFile(this._fixturePath);
+        if (fixture === null)
+            return error;
+        this._fixture = fixture;
+        this._fileWatch.start();
+        return null;
+    }
+
+    /**
+     * Stops watching the file. Safe twice.
+     *
+     * @returns {void}
+     */
+    destroy() {
+        this._fileWatch.destroy();
+    }
+
+    /**
+     * Reads the file again: a reading that can be served replaces the one before, and onChange hears what changed; one
+     * that cannot is logged, and the one before stays.
+     *
+     * @returns {void}
+     */
+    _reload() {
+        const {fixture, error} = readCockpitFixtureFile(this._fixturePath);
+        if (fixture === null) {
+            this._errorLog.log(`the fixture (${this._fixturePath}) cannot be served, so the one before stays: ${error}`,
+                FIXTURE_RELOAD_FAILURE_LOG_KEY);
+            return;
+        }
+        const changedNames = changedFixtureNames(this._fixture, fixture);
+        this._fixture = fixture;
+        if (changedNames.length > 0)
+            this._onChange(changedNames);
+    }
+}
+
+/**
+ * One run of the cockpit service: the sources, the layout config, the herdr client (or, in fixture mode, the fixture
+ * alone), their D-Bus face, the bus name and the main loop, and their shutdown. It is the face's cockpit: it gives the
+ * layout, the config error and the sources, tells its listeners of every change (a layout change as
+ * COCKPIT_LAYOUT_CHANGE_NAME), passes the watch state on to the sources and focuses sessions.
  */
 class CockpitServiceProcess {
     constructor() {
@@ -252,6 +527,8 @@ class CockpitServiceProcess {
         this._herdrClient = null;
         this._sources = null;
         this._layoutConfig = null;
+        /** @type {CockpitFixture|null} What fixture mode serves; null outside it. */
+        this._fixture = null;
         this._dbusService = null;
         this._busOwnerId = null;
         this._signalSourceIds = [];
@@ -262,19 +539,22 @@ class CockpitServiceProcess {
         this._exitStatus = EXIT_STATUS_SUCCESS;
     }
 
-    /** @returns {object|null} The layout the config file gives; null when it is missing or invalid. */
+    /** @returns {object|null} The layout the config file (or the fixture) gives; null when it is missing or invalid. */
     get layout() {
-        return this._layoutConfig.layout;
+        return this._fixture !== null ? this._fixture.layout : this._layoutConfig.layout;
     }
 
-    /** @returns {string|null} Why the config file gives no layout; null when it gives one. */
+    /** @returns {string|null} Why the config file (or the fixture) gives no layout; null when it gives one. */
     get configError() {
-        return this._layoutConfig.configError;
+        return this._fixture !== null ? this._fixture.configError : this._layoutConfig.configError;
     }
 
-    /** @returns {Object<string, object|null>} Each source's latest object by name, read from the sources now. */
+    /**
+     * @returns {Object<string, object|null>} Each source's latest object by name, read from the sources (or the
+     *     fixture) now.
+     */
     get sourcesByName() {
-        return this._sources.sourcesByName;
+        return this._fixture !== null ? this._fixture.sourcesByName : this._sources.sourcesByName;
     }
 
     /**
@@ -298,27 +578,33 @@ class CockpitServiceProcess {
     }
 
     /**
-     * @param {boolean} isWatched - Whether at least one client watches the cockpit; the sources' cadence follows it.
+     * @param {boolean} isWatched - Whether at least one client watches the cockpit; the sources' cadence follows it. A
+     *     fixture has no cadence, so fixture mode ignores it.
      * @returns {void}
      */
     setWatched(isWatched) {
-        this._sources.setWatched(isWatched);
+        if (this._fixture === null)
+            this._sources.setWatched(isWatched);
     }
 
     /**
      * Brings a session's herdr pane to the front: finds the row with this id in the latest sessions sample, asks
-     * herdr to focus its workspace (when the row has one), then its pane, with the ids the row carries. The reply's
-     * windowPid is null in this plan: which window shows herdr is the drawing side's to decide.
+     * herdr to focus its workspace (when the row has one), then its pane, with the ids the row carries; then names
+     * the windows that may show herdr's client (_readFocusWindowPidCandidates), for the shell to activate. windowPid
+     * stays null: which of those windows to bring forward is the shell's to decide. In fixture mode it answers the
+     * fixture's focusReply instead, whatever the id.
      *
      * @param {string} sessionId - A session row's id.
-     * @returns {Promise<{focused: boolean, windowPid: null, error: string|null}>} focused true once herdr focused the
-     *     pane; otherwise false with a code from COCKPIT_FOCUS_ERROR_CODES: unknown-session, no-pane, or the code
-     *     FOCUS_ERROR_BY_HERDR_ERROR_CODE gives herdr's rejection, whose message is logged as
-     *     `cockpit: focus: <id>: <message>`.
+     * @returns {Promise<{focused: boolean, windowPid: null, error: string|null, windowPidCandidates: number[]}>}
+     *     focused true once herdr focused the pane, with the window candidates; otherwise false with a code from
+     *     COCKPIT_FOCUS_ERROR_CODES (unknown-session, no-pane, or the code FOCUS_ERROR_BY_HERDR_ERROR_CODE gives
+     *     herdr's rejection, whose message is logged as `cockpit: focus: <id>: <message>`) and no candidates.
      * @throws {Error} (as a rejection) A failure that is not herdr's: a fault here, which the D-Bus face answers as
      *     internal.
      */
     async focusSession(sessionId) {
+        if (this._fixture !== null)
+            return this._fixture.focusReply;
         const sessionRow = this._latestSessionRow(sessionId);
         if (sessionRow === null)
             return focusFailureReply(COCKPIT_FOCUS_ERROR.UNKNOWN_SESSION);
@@ -340,15 +626,46 @@ class CockpitServiceProcess {
             this._errorLog.log(`focus: ${sessionId}: ${herdrMessage}`, logTemplateKey);
             return focusFailureReply(focusErrorCode);
         }
-        return {focused: true, windowPid: null, error: null};
+        return {
+            focused: true, windowPid: null, error: null, windowPidCandidates: this._readFocusWindowPidCandidates(),
+        };
     }
 
     /**
-     * Runs the service until it shuts down.
+     * Runs the service until it shuts down: in fixture mode when COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE names a file,
+     * otherwise with the sources and the config.
      *
      * @returns {number} The process exit status.
      */
     run() {
+        const fixturePath = cockpitFixturePathOrNull();
+        const startFailure = fixturePath === null ? this._startSourcesAndConfig() : this._startFixture(fixturePath);
+        if (startFailure !== null) {
+            this._shutDown(startFailure, EXIT_STATUS_FAILURE);
+            return this._exitStatus;
+        }
+        for (const [signalNumber, signalName] of SHUTDOWN_SIGNAL_NAMES_BY_NUMBER) {
+            this._signalSourceIds.push(addUnixSignalSource(GLib.PRIORITY_DEFAULT, signalNumber, () => {
+                this._shutDown(`received ${signalName}`, EXIT_STATUS_SUCCESS);
+                return GLib.SOURCE_CONTINUE;
+            }));
+        }
+        this._busOwnerId = Gio.bus_own_name(Gio.BusType.SESSION, COCKPIT_BUS_NAME,
+            Gio.BusNameOwnerFlags.DO_NOT_QUEUE,
+            connection => this._onBusAcquired(connection),
+            () => this._onNameAcquired(),
+            () => this._onNameLost());
+        this._mainLoop.run();
+        return this._exitStatus;
+    }
+
+    /**
+     * Builds the herdr client, the sources and the layout config, and reads the config; the sources start once the
+     * name is owned.
+     *
+     * @returns {null} Nothing stops this start.
+     */
+    _startSourcesAndConfig() {
         const configHome = GLib.get_user_config_dir();
         this._herdrClient = new HerdrSocketClient({
             socketPath: herdrSocketPath(configHome), timeoutMs: HERDR_REQUEST_TIMEOUT_MS,
@@ -364,19 +681,43 @@ class CockpitServiceProcess {
             errorLog: this._errorLog,
         });
         this._layoutConfig.start();
-        for (const [signalNumber, signalName] of SHUTDOWN_SIGNAL_NAMES_BY_NUMBER) {
-            this._signalSourceIds.push(addUnixSignalSource(GLib.PRIORITY_DEFAULT, signalNumber, () => {
-                this._shutDown(`received ${signalName}`, EXIT_STATUS_SUCCESS);
-                return GLib.SOURCE_CONTINUE;
-            }));
+        return null;
+    }
+
+    /**
+     * Reads the fixture and watches it: fixture mode, with no source, no config and no herdr client.
+     *
+     * @param {string} fixturePath - The file COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE names.
+     * @returns {string|null} Why the fixture cannot be served, for the shutdown line; null once it is served.
+     */
+    _startFixture(fixturePath) {
+        const fixture = new CockpitFixture({
+            fixturePath,
+            onChange: changedNames => this._notifyListeners(changedNames, this._fixture.sourcesByName),
+            errorLog: this._errorLog,
+        });
+        const fixtureError = fixture.start();
+        if (fixtureError !== null)
+            return `cannot serve the fixture (${fixturePath}): ${fixtureError}`;
+        this._fixture = fixture;
+        return null;
+    }
+
+    /**
+     * Names the windows that may show herdr's client: every process's stat line (readProcessStats), handed to
+     * lib/processTree.js's focusWindowPidCandidates. A failure to read /proc is logged once per
+     * ERROR_LOG_REPEAT_INTERVAL_USEC as `cockpit: focus: window candidates: <error>` and leaves the candidates read
+     * so far, none at worst.
+     *
+     * @returns {number[]} The candidates: each herdr client's pid and its parents', without pid 1.
+     */
+    _readFocusWindowPidCandidates() {
+        const {statByPid, readFailure} = readProcessStats();
+        if (readFailure !== null) {
+            const failureText = describeError(readFailure);
+            this._errorLog.log(`focus: window candidates: ${failureText}`, FOCUS_WINDOW_CANDIDATES_FAILURE_LOG_KEY);
         }
-        this._busOwnerId = Gio.bus_own_name(Gio.BusType.SESSION, COCKPIT_BUS_NAME,
-            Gio.BusNameOwnerFlags.DO_NOT_QUEUE,
-            connection => this._onBusAcquired(connection),
-            () => this._onNameAcquired(),
-            () => this._onNameLost());
-        this._mainLoop.run();
-        return this._exitStatus;
+        return focusWindowPidCandidates(statByPid);
     }
 
     /**
@@ -424,7 +765,8 @@ class CockpitServiceProcess {
     }
 
     /**
-     * Starts the sources once the name is owned; each samples at once.
+     * Starts the sources once the name is owned; each samples at once. In fixture mode there are none, and the
+     * fixture's path is logged beside the serving line.
      *
      * @returns {void}
      */
@@ -432,8 +774,10 @@ class CockpitServiceProcess {
         if (this._isShuttingDown)
             return;
         this._hasOwnedName = true;
-        this._sources.start();
+        this._sources?.start();
         console.log(`${COCKPIT_LOG_PREFIX} serving ${COCKPIT_BUS_NAME} (protocol ${COCKPIT_PROTOCOL_VERSION})`);
+        if (this._fixture !== null)
+            console.log(`${COCKPIT_LOG_PREFIX} serving a fixture (${this._fixture.fixturePath})`);
     }
 
     /**
@@ -451,8 +795,9 @@ class CockpitServiceProcess {
     }
 
     /**
-     * Stops everything once: the signal handlers, the D-Bus face, the config watch, the sources (destroyed, never
-     * only stopped), the herdr client and the name, each whatever the others throw; then quits the main loop.
+     * Stops everything once: the signal handlers, the D-Bus face, the config and fixture watches, the sources
+     * (destroyed, never only stopped), the herdr client and the name, each whatever the others throw; then quits the
+     * main loop. Each step is safe on what a start that failed never built.
      *
      * @param {string} reason - Why, for the journal.
      * @param {number} exitStatus - The status the process will exit with.
@@ -472,6 +817,7 @@ class CockpitServiceProcess {
             {name: 'remove the signal handlers', run: () => this._removeSignalSources()},
             {name: 'destroy the D-Bus face', run: () => this._dbusService?.destroy()},
             {name: 'stop watching the config', run: () => this._layoutConfig?.destroy()},
+            {name: 'stop watching the fixture', run: () => this._fixture?.destroy()},
             {name: 'destroy the sources', run: () => this._sources?.destroy()},
             {name: 'close the herdr client', run: () => this._herdrClient?.close()},
             {name: 'release the bus name', run: () => this._releaseBusName()},

@@ -1531,6 +1531,10 @@ printf '\nservice/cockpit.js on a private bus (the real sources, under a home of
 # NetworkManager and UPower are absent, as on a runner with no system bus at
 # all. The first run has no herdr socket; the second has a fake herdr at
 # <config home>/herdr/herdr.sock, so FocusSession never reaches the live herdr.
+# Neither is in fixture mode: the first sets RESOURCE_PULSE_COCKPIT_FIXTURE
+# empty, the second unsets it. A third run sets it to a copy of
+# gnome-shell/tests/fixtures/cockpit/nested-state.json, under a config home with
+# no config and no herdr socket, so what it serves can only be the fixture's.
 COCKPIT_MAIN_PATH="$EXT_DIR/service/cockpit.js"
 COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
 COCKPIT_OBJECT_PATH='/io/github/quantivly/dotfiles/Cockpit1'
@@ -1542,6 +1546,15 @@ COCKPIT_SERVE_LOG="$COCKPIT_RUN_DIR/cockpit-serve.log"
 COCKPIT_FOCUS_LOG="$COCKPIT_RUN_DIR/cockpit-focus.log"
 COCKPIT_HERDR_REQUEST_LOG="$COCKPIT_RUN_DIR/herdr-requests.log"
 COCKPIT_FAKE_HERDR_LOG="$COCKPIT_RUN_DIR/fake-herdr.log"
+COCKPIT_FIXTURE_LOG="$COCKPIT_RUN_DIR/cockpit-fixture.log"
+COCKPIT_BAD_FIXTURE_LOG="$COCKPIT_RUN_DIR/cockpit-bad-fixture.log"
+COCKPIT_NESTED_FIXTURE="$DOTFILES/gnome-shell/tests/fixtures/cockpit/nested-state.json"
+# The fixture the third run serves, and two rewrites of it: the network source
+# changed alone (2 ssh masters become 3), then the layout alone as well (the
+# third group's caption WORK becomes LATER).
+COCKPIT_FIXTURE_PATH="$COCKPIT_RUN_DIR/cockpit-fixture.json"
+COCKPIT_FIXTURE_NETWORK_REWRITE="$COCKPIT_RUN_DIR/cockpit-fixture-network.json"
+COCKPIT_FIXTURE_LAYOUT_REWRITE="$COCKPIT_RUN_DIR/cockpit-fixture-layout.json"
 for cockpit_run_name in serve focus; do
   for cockpit_home_kind in home config state; do
     mkdir -p "$COCKPIT_RUN_DIR/$cockpit_run_name-$cockpit_home_kind" \
@@ -1553,17 +1566,38 @@ for cockpit_run_name in serve focus; do
   fi
 done
 mkdir -p "$COCKPIT_RUN_DIR/focus-config/herdr" || fatal "cannot create the fake herdr's directory"
+for cockpit_home_kind in home config state; do
+  mkdir -p "$COCKPIT_RUN_DIR/fixture-$cockpit_home_kind" || fatal "cannot create $COCKPIT_RUN_DIR/fixture-$cockpit_home_kind"
+done
+cp -- "$COCKPIT_NESTED_FIXTURE" "$COCKPIT_FIXTURE_PATH" || fatal "cannot copy $COCKPIT_NESTED_FIXTURE"
+sed 's/"sshMasterCount": 2/"sshMasterCount": 3/' "$COCKPIT_FIXTURE_PATH" >"$COCKPIT_FIXTURE_NETWORK_REWRITE" \
+  || fatal "cannot write $COCKPIT_FIXTURE_NETWORK_REWRITE"
+sed 's/"caption": "WORK"/"caption": "LATER"/' "$COCKPIT_FIXTURE_NETWORK_REWRITE" >"$COCKPIT_FIXTURE_LAYOUT_REWRITE" \
+  || fatal "cannot write $COCKPIT_FIXTURE_LAYOUT_REWRITE"
+# A rewrite that changed nothing (the fixture's text moved on) would leave the
+# rewrite rows comparing a file with itself.
+if cmp -s "$COCKPIT_FIXTURE_PATH" "$COCKPIT_FIXTURE_NETWORK_REWRITE" \
+  || cmp -s "$COCKPIT_FIXTURE_NETWORK_REWRITE" "$COCKPIT_FIXTURE_LAYOUT_REWRITE"; then
+  fatal "a rewrite of $COCKPIT_NESTED_FIXTURE changed nothing: its ssh master count or WORK caption moved"
+fi
 : >"$COCKPIT_SERVE_LOG"; : >"$COCKPIT_FOCUS_LOG"; : >"$COCKPIT_HERDR_REQUEST_LOG"; : >"$COCKPIT_FAKE_HERDR_LOG"
+: >"$COCKPIT_FIXTURE_LOG"; : >"$COCKPIT_BAD_FIXTURE_LOG"
 # Decodes a gdbus call's reply (GLib.Variant text, as gdbus prints it, holding
 # one JSON string). For `reply` it prints the JSON compactly (FocusSession's);
-# for `state` it prints the GetState fields named after the text, as
-# <name>=<value> separated by spaces, in the order asked.
+# `live-reply` does the same, but a focused reply's windowPidCandidates, read
+# from this machine's /proc, print as as-in-proc when they equal one of the
+# comma-joined lists given after the text (the driver's own reads of /proc,
+# just before and just after the call), and as themselves otherwise; for
+# `state` it prints the GetState fields named after the text, as <name>=<value>
+# separated by spaces, in the order asked.
 # shellcheck disable=SC2016  # JavaScript source: $ and backticks are gjs's, not bash's.
 COCKPIT_REPLY_DECODER_JS='
 const {GLib} = imports.gi;
 const [replyKind, gdbusReplyText, ...fieldNames] = ARGV;
+const expectedCandidateTexts = fieldNames;
 const SOURCE_NAMES = ["sessions", "network", "mounts"];
 const SINGLE_STRING_TYPE = new GLib.VariantType("(s)");
+const PROC_CANDIDATES_TAG = "as-in-proc";
 function kindOf(value) {
     if (value === null || value === undefined)
         return "null";
@@ -1577,6 +1611,7 @@ function stateFieldTexts(state) {
     const uplinkValues = [uplink.kind, uplink.connectivity, uplink.wifiEnabled].map(String);
     const intervals = SOURCE_NAMES.map(sourceName => String(sources[sourceName]?.intervalSeconds));
     const groupCount = state.layout?.groups?.length;
+    const network = sources.network ?? {};
     return {
         protocol: String(state.protocol),
         sources: sourceKinds.join("/"),
@@ -1590,13 +1625,22 @@ function stateFieldTexts(state) {
         mountsRows: kindOf(sources.mounts?.rows),
         uplink: uplinkValues.join("/"),
         intervals: intervals.join("/"),
+        captions: (state.layout?.groups ?? []).map(group => group.caption).join("/"),
+        sessionIds: (sessions.rows ?? []).map(row => row.id).join(","),
+        vpn: String(network.vpn?.isUp),
+        sshMasters: String(network.sshMasterCount),
+        mountRowCount: String(sources.mounts?.rows?.length),
     };
 }
 let decoded;
 try {
     const [replyJson] = GLib.Variant.parse(SINGLE_STRING_TYPE, gdbusReplyText, null, null).deepUnpack();
     const reply = JSON.parse(replyJson);
-    if (replyKind === "reply") {
+    const candidates = reply.windowPidCandidates;
+    if (replyKind === "live-reply" && reply.focused === true && Array.isArray(candidates) &&
+            expectedCandidateTexts.includes(candidates.join(",")))
+        reply.windowPidCandidates = PROC_CANDIDATES_TAG;
+    if (replyKind === "reply" || replyKind === "live-reply") {
         decoded = JSON.stringify(reply);
     } else {
         const fieldTexts = stateFieldTexts(reply);
@@ -1688,13 +1732,20 @@ new GLib.MainLoop(null, false).run();
 # place, each followed by GetState for up to 3 s; then SIGTERM. The focus run: a fake herdr first, then the service, then one
 # FocusSession per kind of row, each followed by the focus requests the fake
 # herdr saw for it; then the fake herdr stopped and one more FocusSession, which
-# finds herdr unreachable; then SIGTERM. Every wait is bounded.
+# finds herdr unreachable; then SIGTERM. The fixture run: GetState, two
+# FocusSessions, then the fixture renamed over twice (the network rewrite, then
+# the layout one), each followed by GetState for up to 3 s, with the Changed
+# signals watched on the bus; then SIGTERM; then a fixture that does not exist
+# and one that is not JSON, each ending the service at its start. Every wait is
+# bounded.
 # shellcheck disable=SC2016  # The driver's own source: its variables expand when it runs.
 COCKPIT_DRIVER_OUTPUT="$(on_private_bus bash -c '
 set -u
 cockpit_main="$1" decoder_js="$2" fake_herdr_js="$3" bus_name="$4" object_path="$5" run_dir="$6"
 config_template="$7" config_relative_path="$8" no_system_bus="$9"
 serve_log="${10}" focus_log="${11}" request_log="${12}" fake_herdr_log="${13}"
+fixture_path="${14}" fixture_network_rewrite="${15}" fixture_layout_rewrite="${16}" fixture_log="${17}"
+bad_fixture_log="${18}"
 is_private_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "${RESOURCE_PULSE_TEST_BUS_DIR:-}" \
   || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
 USEC_PER_SECOND=1000000
@@ -1711,6 +1762,77 @@ now_usec() { printf "%s" "${EPOCHREALTIME/./}"; }
 # that carry the key configError, which only a layout change adds.
 layout_changed_count() {
   grep -c -E 'Changed.*configError' "$1"
+}
+# changed_count <file>: the Changed signals gdbus monitor wrote to <file>.
+changed_count() {
+  grep -c -F ".Changed (" "$1"
+}
+# changed_summary <file>: what each Changed signal gdbus monitor wrote to
+# <file> names, in order, joined by |: layout when it carries configError,
+# which only a layout change adds, then each source it carries.
+changed_summary() {
+  local monitor_line changed_names summary="" source_name
+  while IFS= read -r monitor_line; do
+    [[ "$monitor_line" == *".Changed ("* ]] || continue
+    changed_names=""
+    [[ "$monitor_line" == *\"configError\"* ]] && changed_names+="+layout"
+    for source_name in sessions network mounts; do
+      [[ "$monitor_line" == *\"$source_name\":* ]] && changed_names+="+$source_name"
+    done
+    summary+="|${changed_names#+}"
+  done <"$1"
+  printf "%s" "${summary#|}"
+}
+# wait_for_changed <file> <count>: waits at most 3 s for <count> Changed
+# signals in <file>.
+wait_for_changed() {
+  local attempt
+  for (( attempt = 0; attempt < 30; attempt++ )); do
+    (( $(changed_count "$1") >= $2 )) && break
+    sleep 0.1
+  done
+}
+# proc_window_candidates: the window candidates the /proc of this machine
+# gives, read here independently of lib/processTree.js: the processes named herdr
+# with a controlling terminal, by ascending pid, each followed by its parents
+# up to pid 1 (16 processes at most, pid 1 left out), each pid once, the first
+# 64 of them, joined by commas; empty with no herdr client.
+proc_window_candidates() {
+  local stat_path stat_line process_pid process_comm client_pid chain_pid chain_depth seen_pids=" "
+  local -a stat_fields=() client_pids=() sorted_client_pids=() candidates=()
+  local -A parent_by_pid=()
+  for stat_path in /proc/[0-9]*/stat; do
+    read -r stat_line 2>/dev/null <"$stat_path" || continue
+    process_pid="${stat_line%% *}"
+    process_comm="${stat_line#*(}"
+    process_comm="${process_comm%)*}"
+    read -r -a stat_fields <<<"${stat_line##*) }"
+    parent_by_pid[$process_pid]="${stat_fields[1]}"
+    [[ "$process_comm" == herdr && "${stat_fields[4]}" != 0 ]] && client_pids+=("$process_pid")
+  done
+  (( ${#client_pids[@]} > 0 )) && mapfile -t sorted_client_pids < <(printf "%s\n" "${client_pids[@]}" | sort -n)
+  for client_pid in "${sorted_client_pids[@]}"; do
+    chain_pid="$client_pid"
+    for (( chain_depth = 0; chain_depth < 16; chain_depth++ )); do
+      [[ -n "${parent_by_pid[$chain_pid]+set}" && "$chain_pid" != 1 ]] || break
+      if [[ "$seen_pids" != *" $chain_pid "* ]]; then
+        candidates+=("$chain_pid")
+        seen_pids+="$chain_pid "
+      fi
+      chain_pid="${parent_by_pid[$chain_pid]}"
+    done
+  done
+  local IFS=,
+  printf "%s" "${candidates[*]:0:64}"
+}
+# wait_for_banner <file>: waits at most 5 s for the first line of gdbus monitor
+# (its "Monitoring signals" banner, the readiness signal) in <file>.
+wait_for_banner() {
+  local attempt
+  for (( attempt = 0; attempt < 50; attempt++ )); do
+    [[ -s "$1" ]] && break
+    sleep 0.1
+  done
 }
 # probe_state <seconds> <needle> <field...>: asks GetState through gdbus until
 # the decoded fields hold <needle>, for at most <seconds>; prints the last
@@ -1747,25 +1869,34 @@ stop_process() {
     printf "%s=%s\n" "$label" "$?"
   fi
 }
-# focus_session <id> [label]: one FocusSession through gdbus; prints, under
-# "focus <label>" (the id by default), the reply and the focus requests the fake
-# herdr saw for it, joined by |.
+# focus_session <id> [label] [decoding]: one FocusSession through gdbus;
+# prints, under "focus <label>" (the id by default), the reply as the decoding
+# <decoding> of the decoder gives it (live-reply by default) and the focus
+# requests the fake herdr saw for it, joined by |. For live-reply it also
+# prints, under "proc-candidates <label>", what /proc gave just before and just
+# after the call, for a failing row to show.
 focus_session() {
-  local session_id="$1" label="${2:-$1}" requests_before reply decoded requests
+  local session_id="$1" label="${2:-$1}" reply_decoding="${3:-live-reply}" requests_before reply decoded requests
+  local candidates_before="" candidates_after=""
   requests_before="$(grep -c -E "$FOCUS_REQUEST_PATTERN" "$request_log")"
+  [[ "$reply_decoding" == live-reply ]] && candidates_before="$(proc_window_candidates)"
   if reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
       --method "$bus_name.FocusSession" "\"$session_id\"" --timeout 5 2>&1)"; then
-    decoded="$(gjs -c "$decoder_js" reply "$reply")"
+    [[ "$reply_decoding" == live-reply ]] && candidates_after="$(proc_window_candidates)"
+    decoded="$(gjs -c "$decoder_js" "$reply_decoding" "$reply" "$candidates_before" "$candidates_after")"
   else
     decoded="D-Bus error: ${reply%%$'"'"'\n'"'"'*}"
   fi
   requests="$(grep -E "$FOCUS_REQUEST_PATTERN" "$request_log" | tail -n "+$(( requests_before + 1 ))" | tr "\n" "|")"
   printf "focus %s=reply=%s requests=[%s]\n" "$label" "$decoded" "${requests%|}"
+  [[ "$reply_decoding" == live-reply ]] \
+    && printf "proc-candidates %s=before=[%s] after=[%s]\n" "$label" "$candidates_before" "$candidates_after"
+  return 0
 }
 
 serve_config="$run_dir/serve-config/$config_relative_path"
 serve_environment=(env HOME="$run_dir/serve-home" XDG_CONFIG_HOME="$run_dir/serve-config"
-  XDG_STATE_HOME="$run_dir/serve-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+  XDG_STATE_HOME="$run_dir/serve-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus" RESOURCE_PULSE_COCKPIT_FIXTURE=)
 "${serve_environment[@]}" gjs -m "$cockpit_main" >>"$serve_log" 2>&1 &
 serve_pid=$!
 printf "served=%s\n" "$(probe_state 15 "sources=object/object/object" \
@@ -1782,11 +1913,9 @@ monitor_log="$run_dir/layout-monitor.log"
 : >"$monitor_log"
 gdbus monitor --session --dest "$bus_name" >"$monitor_log" 2>&1 &
 monitor_pid=$!
-trap '"'"'kill "$monitor_pid" 2>/dev/null'"'"' EXIT
-for (( attempt = 0; attempt < 50; attempt++ )); do
-  [[ -s "$monitor_log" ]] && break
-  sleep 0.1
-done
+fixture_monitor_pid=""
+trap '"'"'kill "$monitor_pid" ${fixture_monitor_pid:+"$fixture_monitor_pid"} 2>/dev/null'"'"' EXIT
+wait_for_banner "$monitor_log"
 cp -- "$config_template" "$serve_config"
 sleep 1
 layout_changes_after_same_text="$(layout_changed_count "$monitor_log")"
@@ -1813,8 +1942,9 @@ for (( attempt = 0; attempt < 50; attempt++ )); do
   [[ -S "$herdr_socket" ]] && break
   sleep 0.1
 done
-focus_environment=(env HOME="$run_dir/focus-home" XDG_CONFIG_HOME="$run_dir/focus-config"
-  XDG_STATE_HOME="$run_dir/focus-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+focus_environment=(env -u RESOURCE_PULSE_COCKPIT_FIXTURE HOME="$run_dir/focus-home"
+  XDG_CONFIG_HOME="$run_dir/focus-config" XDG_STATE_HOME="$run_dir/focus-state"
+  DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
 "${focus_environment[@]}" gjs -m "$cockpit_main" >>"$focus_log" 2>&1 &
 focus_pid=$!
 printf "focus-ready=%s\n" "$(probe_state 15 "sessionRows=4" herdrRunning sessionRows)"
@@ -1827,16 +1957,48 @@ kill -TERM "$fake_herdr_pid" 2>/dev/null
 wait "$fake_herdr_pid" 2>/dev/null
 focus_session w1:p1 "w1:p1 without herdr"
 stop_process focus-exit "$focus_pid"
+
+fixture_environment=(env HOME="$run_dir/fixture-home" XDG_CONFIG_HOME="$run_dir/fixture-config"
+  XDG_STATE_HOME="$run_dir/fixture-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+"${fixture_environment[@]}" RESOURCE_PULSE_COCKPIT_FIXTURE="$fixture_path" gjs -m "$cockpit_main" \
+  >>"$fixture_log" 2>&1 &
+fixture_pid=$!
+printf "fixture-served=%s\n" "$(probe_state 15 "sessionIds=w1:p1,w1:p2" \
+  groups configError herdrRunning sessionIds uplink vpn sshMasters mountRowCount intervals)"
+focus_session w1:p1 "fixture w1:p1" reply
+focus_session w1:p9 "fixture w1:p9" reply
+fixture_monitor_log="$run_dir/fixture-monitor.log"
+: >"$fixture_monitor_log"
+gdbus monitor --session --dest "$bus_name" >"$fixture_monitor_log" 2>&1 &
+fixture_monitor_pid=$!
+wait_for_banner "$fixture_monitor_log"
+cp -- "$fixture_network_rewrite" "$fixture_path.new" && mv -- "$fixture_path.new" "$fixture_path"
+printf "fixture-network-rewrite=%s\n" "$(probe_state 3 "sshMasters=3" sshMasters captions)"
+wait_for_changed "$fixture_monitor_log" 1
+cp -- "$fixture_layout_rewrite" "$fixture_path.new" && mv -- "$fixture_path.new" "$fixture_path"
+printf "fixture-layout-rewrite=%s\n" "$(probe_state 3 "captions=MACHINE/AGENTS/LATER" sshMasters captions)"
+wait_for_changed "$fixture_monitor_log" 2
+kill "$fixture_monitor_pid" 2>/dev/null
+printf "fixture-changes=%s\n" "$(changed_summary "$fixture_monitor_log")"
+stop_process fixture-exit "$fixture_pid"
+"${fixture_environment[@]}" RESOURCE_PULSE_COCKPIT_FIXTURE="$run_dir/no-such-fixture.json" \
+  timeout 30 gjs -m "$cockpit_main" >>"$bad_fixture_log" 2>&1
+printf "missing-fixture-exit=%s\n" "$?"
+printf "{" >"$run_dir/malformed-fixture.json"
+"${fixture_environment[@]}" RESOURCE_PULSE_COCKPIT_FIXTURE="$run_dir/malformed-fixture.json" \
+  timeout 30 gjs -m "$cockpit_main" >>"$bad_fixture_log" 2>&1
+printf "malformed-fixture-exit=%s\n" "$?"
 ' cockpit-driver "$COCKPIT_MAIN_PATH" "$COCKPIT_REPLY_DECODER_JS" "$COCKPIT_FAKE_HERDR_JS" "$COCKPIT_BUS_NAME" \
   "$COCKPIT_OBJECT_PATH" "$COCKPIT_RUN_DIR" "$COCKPIT_CONFIG_TEMPLATE" "$COCKPIT_CONFIG_RELATIVE_PATH" \
   "$COCKPIT_NO_SYSTEM_BUS" "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_HERDR_REQUEST_LOG" \
-  "$COCKPIT_FAKE_HERDR_LOG" 2>&1)"
+  "$COCKPIT_FAKE_HERDR_LOG" "$COCKPIT_FIXTURE_PATH" "$COCKPIT_FIXTURE_NETWORK_REWRITE" \
+  "$COCKPIT_FIXTURE_LAYOUT_REWRITE" "$COCKPIT_FIXTURE_LOG" "$COCKPIT_BAD_FIXTURE_LOG" 2>&1)"
 declare -A cockpit_driver_said=()
 while IFS= read -r driver_line; do
   [[ "$driver_line" == *=* ]] && cockpit_driver_said["${driver_line%%=*}"]="${driver_line#*=}"
 done <<<"$COCKPIT_DRIVER_OUTPUT"
 cockpit_fail_count_before=$FAIL
-check "service/cockpit.js owns Cockpit1 within 15 s and its GetState says protocol 1, the template's three groups, herdr not running and a list of mount rows" \
+check "service/cockpit.js, with RESOURCE_PULSE_COCKPIT_FIXTURE set empty (no fixture), owns Cockpit1 within 15 s and its GetState says protocol 1, the template's three groups, herdr not running and a list of mount rows" \
   "${cockpit_driver_said[served]-}" "protocol=1 sources=object/object/object groups=3 configError=null herdrRunning=false mountsRows=list"
 check "with no system bus it serves all the same: no uplink known, and every cadence off battery (sessions 60 s unwatched, network 10 s, mounts 30 s)" \
   "${cockpit_driver_said[no-system-bus]-}" "uplink=null/null/null intervals=60/10/30"
@@ -1851,35 +2013,64 @@ check "the config deleted reads within 3 s as no layout and the error missing, a
   "${cockpit_driver_said[deleted]-}" 'layout=null configError="missing" mounts=object'
 check "the config renamed back into place (an atomic editor's save) reads within 3 s as the layout again" \
   "${cockpit_driver_said[renamed-in]-}" "layout=object groups=3 configError=null"
-check "SIGTERM ends service/cockpit.js with exit 0, in both runs" \
-  "serve=${cockpit_driver_said[serve-exit]-} focus=${cockpit_driver_said[focus-exit]-}" "serve=0 focus=0"
+check "SIGTERM ends service/cockpit.js with exit 0, in all three runs" \
+  "serve=${cockpit_driver_said[serve-exit]-} focus=${cockpit_driver_said[focus-exit]-} fixture=${cockpit_driver_said[fixture-exit]-}" \
+  "serve=0 focus=0 fixture=0"
 check "service/cockpit.js logged its serving line once, with the protocol" \
   "$(grep -c -F "cockpit: serving $COCKPIT_BUS_NAME (protocol 1)" "$COCKPIT_SERVE_LOG")" 1
-check "service/cockpit.js logged no gjs or GLib warning, critical or uncaught error, in either run" \
-  "$(cat "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" | grep -c -E "$ENGINE_WARNING_PATTERN")" 0
-check "FocusSession focuses the row's own workspace, then its pane, over the herdr socket: focused true, windowPid null" \
+check "service/cockpit.js logged no gjs or GLib warning, critical or uncaught error, in any run (the fixture's and the bad fixtures' included)" \
+  "$(cat "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_FIXTURE_LOG" "$COCKPIT_BAD_FIXTURE_LOG" | grep -c -E "$ENGINE_WARNING_PATTERN")" 0
+# A focused reply's windowPidCandidates come from this machine's /proc (its
+# herdr clients and their parents), so the decoder prints them as as-in-proc
+# when they equal what the driver read from /proc itself, just before or just
+# after the call. On a machine with no herdr client in a terminal (CI) both are
+# empty, so the comparison holds without reading a chain; lib/processTree.js's
+# rows pin the chains themselves.
+check "FocusSession, with RESOURCE_PULSE_COCKPIT_FIXTURE unset, focuses the row's own workspace, then its pane, over the herdr socket: focused true, windowPid null, and the window candidates this machine's /proc gives" \
   "ready=${cockpit_driver_said[focus-ready]-} ${cockpit_driver_said[focus w1:p1]-}" \
-  'ready=herdrRunning=true sessionRows=4 reply={"focused":true,"windowPid":null,"error":null} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p1"}]'
+  'ready=herdrRunning=true sessionRows=4 reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":"as-in-proc"} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p1"}]'
 check "FocusSession on a row in no workspace sends pane.focus alone" \
   "${cockpit_driver_said[focus p3]-}" \
-  'reply={"focused":true,"windowPid":null,"error":null} requests=[pane.focus {"pane_id":"p3"}]'
+  'reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":"as-in-proc"} requests=[pane.focus {"pane_id":"p3"}]'
 # A herdr rejection is an answer, not a fault: the cockpit replies with its
 # code itself, so the D-Bus face's fault line never appears for it. herdr's own
 # text goes to the journal alone (ruling R18).
 check "a herdr rejection of pane.focus answers focused false and the code herdr-rejected, not a D-Bus error nor herdr's text, which is logged, not as a fault" \
   "${cockpit_driver_said[focus w1:p2]-} logged=$(grep -c -F 'cockpit: focus: w1:p2: herdr: pane_not_found: pane not found' "$COCKPIT_FOCUS_LOG") faults=$(grep -c -F 'cockpit: FocusSession failed' "$COCKPIT_FOCUS_LOG")" \
-  'reply={"focused":false,"windowPid":null,"error":"herdr-rejected"} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p2"}] logged=1 faults=0'
+  'reply={"focused":false,"windowPid":null,"error":"herdr-rejected","windowPidCandidates":[]} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p2"}] logged=1 faults=0'
 check "an unknown id, and a row with no pane, answer focused false with the codes unknown-session and no-pane and ask herdr nothing" \
   "unknown: ${cockpit_driver_said[focus w1:p9]-} no-pane: ${cockpit_driver_said[focus s4]-}" \
-  'unknown: reply={"focused":false,"windowPid":null,"error":"unknown-session"} requests=[] no-pane: reply={"focused":false,"windowPid":null,"error":"no-pane"} requests=[]'
+  'unknown: reply={"focused":false,"windowPid":null,"error":"unknown-session","windowPidCandidates":[]} requests=[] no-pane: reply={"focused":false,"windowPid":null,"error":"no-pane","windowPidCandidates":[]} requests=[]'
 check "with the fake herdr stopped, a row answers focused false and the code herdr-unreachable, and herdr's text goes to the journal" \
   "${cockpit_driver_said[focus w1:p1 without herdr]-} logged=$(grep -c -F 'cockpit: focus: w1:p1: herdr: ' "$COCKPIT_FOCUS_LOG")" \
-  'reply={"focused":false,"windowPid":null,"error":"herdr-unreachable"} requests=[] logged=1'
+  'reply={"focused":false,"windowPid":null,"error":"herdr-unreachable","windowPidCandidates":[]} requests=[] logged=1'
+# The fixture run's config home holds no config and no herdr socket: serving the
+# config would read as no layout and the error missing, serving the sources as
+# herdr not running, no session rows and no uplink.
+check "with RESOURCE_PULSE_COCKPIT_FIXTURE naming nested-state.json, GetState within 15 s serves the fixture's layout and sources, neither the config's nor the real sources'" \
+  "${cockpit_driver_said[fixture-served]-}" \
+  'groups=3 configError=null herdrRunning=true sessionIds=w1:p1,w1:p2 uplink=wired/full/false vpn=false sshMasters=2 mountRowCount=1 intervals=10/10/30'
+check "with the fixture, FocusSession answers its focusReply, windowPidCandidates [4242] included, for a row's id and an unknown one alike" \
+  "${cockpit_driver_said[focus fixture w1:p1]-} ${cockpit_driver_said[focus fixture w1:p9]-}" \
+  'reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":[4242]} requests=[] reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":[4242]} requests=[]'
+check "the fixture renamed over with another network source reads within 3 s as the new one, and then with another layout as the new layout" \
+  "network=${cockpit_driver_said[fixture-network-rewrite]-} layout=${cockpit_driver_said[fixture-layout-rewrite]-}" \
+  'network=sshMasters=3 captions=MACHINE/AGENTS/WORK layout=sshMasters=3 captions=MACHINE/AGENTS/LATER'
+check "each fixture rewrite publishes one Changed naming what changed: the network source alone, then the layout alone" \
+  "${cockpit_driver_said[fixture-changes]-}" 'network|layout'
+check "with the fixture, service/cockpit.js logs its serving line and the fixture's path once each" \
+  "serving=$(grep -c -F "cockpit: serving $COCKPIT_BUS_NAME (protocol 1)" "$COCKPIT_FIXTURE_LOG") fixture=$(grep -c -F "cockpit: serving a fixture ($COCKPIT_FIXTURE_PATH)" "$COCKPIT_FIXTURE_LOG")" \
+  'serving=1 fixture=1'
+check "a fixture that does not exist, or that is not JSON, ends service/cockpit.js at its start with exit 1, saying why, before it serves" \
+  "missing=${cockpit_driver_said[missing-fixture-exit]-} malformed=${cockpit_driver_said[malformed-fixture-exit]-} logged=$(grep -c -F 'cockpit: shutting down: cannot serve the fixture (' "$COCKPIT_BAD_FIXTURE_LOG") served=$(grep -c -F 'cockpit: serving' "$COCKPIT_BAD_FIXTURE_LOG")" \
+  'missing=1 malformed=1 logged=2 served=0'
 if (( FAIL > cockpit_fail_count_before )); then
   printf '    (driver said: %s)\n' "$COCKPIT_DRIVER_OUTPUT"
   sed 's/^/    serve log: /' "$COCKPIT_SERVE_LOG"
   sed 's/^/    focus log: /' "$COCKPIT_FOCUS_LOG"
   sed 's/^/    fake herdr log: /' "$COCKPIT_FAKE_HERDR_LOG"
+  sed 's/^/    fixture log: /' "$COCKPIT_FIXTURE_LOG"
+  sed 's/^/    bad fixture log: /' "$COCKPIT_BAD_FIXTURE_LOG"
 fi
 
 printf '\nthe stat-only paths (named nowhere under service/ or lib/ but their list)\n'
@@ -3431,7 +3622,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=737
+EXPECTED_ROWS=756
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

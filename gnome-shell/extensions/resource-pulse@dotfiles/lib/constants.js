@@ -188,6 +188,26 @@ export const ROUTE_FLAG_GATEWAY = 0x0002;
 export const HERDR_REQUEST_TIMEOUT_MS = 2000;
 /** herdr's API socket's path under the user's config home (XDG_CONFIG_HOME). */
 export const HERDR_SOCKET_RELATIVE_PATH = 'herdr/herdr.sock';
+/** Where the kernel lists its processes: one directory per pid, named by the pid. */
+export const PROC_ROOT_PATH = '/proc';
+/** A process's stat file, under its directory in PROC_ROOT_PATH: one line, its pid, comm, state, ppid and on. */
+export const PROC_PID_STAT_FILE_NAME = 'stat';
+/**
+ * Most entries of one process's chain of parents that lib/processTree.js follows, the process itself included: a
+ * deeper chain is cut there. A herdr client's terminal is its second or third parent.
+ */
+export const PROCESS_ANCESTOR_MAX_DEPTH = 16;
+/**
+ * Most window candidates a FocusSession reply carries (the herdr clients and their parents, ruling out pid 1); a
+ * reader drops any past it.
+ */
+export const FOCUS_WINDOW_PID_CANDIDATES_MAX = 64;
+/**
+ * The environment variable that puts the cockpit service in fixture mode: when it names a JSON file, the service
+ * serves that file's state and focus reply instead of its sources and the config. Only the nested test harness sets
+ * it; cockpit.service never does.
+ */
+export const COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE = 'RESOURCE_PULSE_COCKPIT_FIXTURE';
 /**
  * Most characters of herdr's own error text (its code and message) a rejection's message carries; the rest is cut. An
  * unknown method's message lists every method herdr has, about 2,000 characters.
