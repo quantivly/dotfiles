@@ -14,8 +14,11 @@
 // - a field that is missing, or not of its type, is null for that field alone, so only its own row shows no data;
 // - a list entry without what identifies and names it (a session row, a mount row, a layout group) is dropped, and
 //   the rest of the list kept;
+// - an id longer than COCKPIT_ID_MAX_CHARS reads as null, and a mount row whose mount point is longer than
+//   COCKPIT_PATH_MAX_CHARS is dropped;
 // - text that is not JSON, or JSON that is not an object, parses to null as a whole.
 // A breaking change needs a new interface, Cockpit2, served beside this one.
+import {COCKPIT_ID_MAX_CHARS, COCKPIT_PATH_MAX_CHARS} from './constants.js';
 import {
     booleanOrNull, countOrNull, enumOrNull, finiteNumberOrNull, isPlainObject, nonNegativeNumberOrNull, parseJsonObject,
     stringOrNull,
@@ -390,7 +393,8 @@ function parseSessionStateCounts(value) {
  * @returns {{id: string, name: string, state: string, idleSeconds: number|null, idleFromProcessAge: boolean|null,
  *     memoryBytes: number|null, workspaceId: string|null, paneId: string|null, account: string|null,
  *     contextPercent: number|null}|null} The row; null unless an object with a non-empty string id, a non-empty
- *     string name and a state from SESSION_STATES.
+ *     string name and a state from SESSION_STATES. `workspaceId` and `paneId` are null when longer than
+ *     COCKPIT_ID_MAX_CHARS.
  */
 function parseSessionRow(value) {
     if (!isPlainObject(value))
@@ -407,8 +411,8 @@ function parseSessionRow(value) {
         idleSeconds: countOrNull(value.idleSeconds),
         idleFromProcessAge: booleanOrNull(value.idleFromProcessAge),
         memoryBytes: nonNegativeNumberOrNull(value.memoryBytes),
-        workspaceId: stringOrNull(value.workspaceId),
-        paneId: stringOrNull(value.paneId),
+        workspaceId: boundedStringOrNull(value.workspaceId, COCKPIT_ID_MAX_CHARS),
+        paneId: boundedStringOrNull(value.paneId, COCKPIT_ID_MAX_CHARS),
         account: stringOrNull(value.account),
         contextPercent: nonNegativeNumberOrNull(value.contextPercent),
     };
@@ -449,13 +453,13 @@ function parseVpnTunnel(value) {
  *
  * @param {*} value - A parsed JSON value.
  * @returns {{mountPoint: string, label: string, kind: string, filesystemType: string|null, freeBytes: number|null,
- *     totalBytes: number|null}|null} The row; null unless an object with a string mount point, a string label and a
- *     kind from MOUNT_KINDS.
+ *     totalBytes: number|null}|null} The row; null unless an object with a string mount point of at most
+ *     COCKPIT_PATH_MAX_CHARS characters, a string label and a kind from MOUNT_KINDS.
  */
 function parseMountRow(value) {
     if (!isPlainObject(value))
         return null;
-    const mountPoint = stringOrNull(value.mountPoint);
+    const mountPoint = boundedStringOrNull(value.mountPoint, COCKPIT_PATH_MAX_CHARS);
     const label = stringOrNull(value.label);
     const kind = enumOrNull(value.kind, MOUNT_KINDS);
     if (mountPoint === null || label === null || kind === null)
@@ -508,6 +512,16 @@ function parseLayoutGroup(value) {
 function nonEmptyStringOrNull(value) {
     const text = stringOrNull(value);
     return text === '' ? null : text;
+}
+
+/**
+ * @param {*} value - A parsed JSON value.
+ * @param {number} maxChars - The most characters (code points, as lib/nameGuard.js counts them) the string may hold.
+ * @returns {string|null} The value when it is a string of at most maxChars characters; null otherwise.
+ */
+function boundedStringOrNull(value, maxChars) {
+    const text = stringOrNull(value);
+    return text !== null && [...text].length <= maxChars ? text : null;
 }
 
 /**

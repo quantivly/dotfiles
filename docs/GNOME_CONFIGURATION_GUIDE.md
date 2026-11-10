@@ -237,7 +237,8 @@ either way.
 
 - **An allowlist.** Every source, the layout and every reply pass through a reader in
   `lib/cockpitProtocol.js`, and each builder writes only what its reader returns. A field no reader lists
-  never leaves the service.
+  never leaves the service. The readers cap lengths too: a herdr workspace or pane id longer than 128
+  characters reads as null, and a mount whose mount point is longer than 1024 is dropped.
 - **Stat, never open.** The sources' file reader refuses, before opening it, any path holding `/.aws/`,
   `/.ssh/`, `/.credentials`, `/.zshrc.local`, `/.gitconfig.local` or `/.backup.local`
   (`STAT_ONLY_PATH_FRAGMENTS`). Those may be stat'ed, or listed when a directory: the SSH control sockets are
@@ -441,7 +442,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (696 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (698 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it

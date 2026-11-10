@@ -153,6 +153,13 @@ export const COCKPIT_NAME_MAX_CHARS = 64;
  * holds a control character or matches a secret shape.
  */
 export const COCKPIT_REDACTED_NAME = '—';
+/**
+ * Longest id, in characters, a cockpit reader passes (a session row's herdr workspace and pane ids); a longer one
+ * reads as null, so another program's runaway string cannot ride an id onto the bus.
+ */
+export const COCKPIT_ID_MAX_CHARS = 128;
+/** Longest path, in characters, a cockpit reader passes (a mount row's mount point); a longer one drops its row. */
+export const COCKPIT_PATH_MAX_CHARS = 1024;
 /** Prefix of every journal line the cockpit service writes. */
 export const COCKPIT_LOG_PREFIX = 'cockpit:';
 /** The card ids a cockpit layout config may name, in the order the cockpit draws them by default. */

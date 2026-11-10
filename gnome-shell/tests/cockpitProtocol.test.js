@@ -85,6 +85,11 @@ const UNLISTED_FIELD_NAMES = Object.values(UNLISTED_FIELD_NAME_BY_LEVEL);
 const UNLISTED_REPLY_FIELD_NAME = 'unlistedInReply';
 /** herdr's own text for a pane that is gone: what a FocusSession reply's error must never carry (ruling R18). */
 const HERDR_FREE_TEXT_ERROR = 'herdr: pane_not_found: pane not found';
+/** The readers' caps, written out rather than imported, so a changed constant fails here instead of moving with it. */
+const ID_MAX_CHARS = 128;
+const PATH_MAX_CHARS = 1024;
+/** A character outside the Basic Multilingual Plane: one code point, two UTF-16 code units. */
+const WIDE_CHARACTER = '\u{1F642}';
 
 /**
  * A copy of a state with one unlisted field planted at every object level: the state, the layout, its monitor and
@@ -238,6 +243,32 @@ test('cockpitProtocol: a layout drops an incomplete group and reads a missing mo
     assertEqual(cockpitProtocol.parseLayout({groups}),
         {monitor: {vendor: null, product: null}, groups: FULL_STATE.layout.groups});
     assertEqual(cockpitProtocol.parseLayout({monitor: FULL_STATE.layout.monitor}), null);
+});
+test('cockpitProtocol: a workspace or pane id over 128 characters reads as null, its row kept; one of 128 passes',
+    () => {
+    const [firstRow] = FULL_STATE.sources.sessions.rows;
+    const idAtCap = 'w'.repeat(ID_MAX_CHARS);
+    const wideIdAtCap = WIDE_CHARACTER.repeat(ID_MAX_CHARS);
+    const idOverCap = 'w'.repeat(ID_MAX_CHARS + 1);
+    const rows = [
+        {...firstRow, workspaceId: idOverCap, paneId: idOverCap},
+        {...firstRow, workspaceId: idAtCap, paneId: wideIdAtCap},
+    ];
+    const parsed = cockpitProtocol.parseSessionsSource({...FULL_STATE.sources.sessions, rows});
+    assertEqual(parsed.rows.map(row => [row.workspaceId, row.paneId]), [[null, null], [idAtCap, wideIdAtCap]]);
+});
+test('cockpitProtocol: a mount row whose mount point is over 1024 characters is dropped, the others kept', () => {
+    const [firstMount] = FULL_STATE.sources.mounts.rows;
+    const mountPointAtCap = `/${'m'.repeat(PATH_MAX_CHARS - 1)}`;
+    const mountPointOverCap = `/${'m'.repeat(PATH_MAX_CHARS)}`;
+    const rows = [
+        ...FULL_STATE.sources.mounts.rows,
+        {...firstMount, mountPoint: mountPointOverCap},
+        {...firstMount, mountPoint: mountPointAtCap},
+    ];
+    const parsed = cockpitProtocol.parseMountsSource({...FULL_STATE.sources.mounts, rows});
+    const keptMountPoints = [...FULL_STATE.sources.mounts.rows.map(row => row.mountPoint), mountPointAtCap];
+    assertEqual(parsed.rows.map(row => row.mountPoint), keptMountPoints);
 });
 test('cockpitProtocol: a mount row of an unlisted kind is dropped, the others kept', () => {
     const rows = [...FULL_STATE.sources.mounts.rows, {...FULL_STATE.sources.mounts.rows[0], kind: 'local'}];
