@@ -32,6 +32,8 @@ export HOME
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 # The caller's lock wait would otherwise reach every --apply; the row about it sets its own.
 unset CLAUDE_MEMORY_LOCK_WAIT_SECONDS
+# The caller's host name or profile marker would otherwise name the host; the host-name rows set their own.
+unset CLAUDE_SETTINGS_RENDER_MARKER CLAUDE_MEMORY_HOST
 GIT_CONFIG_GLOBAL="$TMPROOT/gitconfig-global"
 GIT_CONFIG_SYSTEM="$TMPROOT/gitconfig-system"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
@@ -2411,6 +2413,77 @@ chmod 755 "$replaced_dir"
 check "apply: a marker that cannot be written is exit 2, and the key stays pending" \
     "$marker_fails_result" "2|yes|pending body|0 marked, 1 unmarked"
 
+# ---------------------------------------------------------------------------------------------
+# The host name in a conflict copy: CLAUDE_MEMORY_HOST, else the profile marker's first line, else
+# hostname -s. Every row runs with the hostname stub first on PATH, and every row but the variable's
+# with CLAUDE_MEMORY_HOST empty, so a fall-through to hostname -s shows as the stub's name. The marker
+# sits in the fixture HOME, which the next scene's reset_scene removes, so the "defaults to
+# hostname -s" row below runs with no marker.
+# ---------------------------------------------------------------------------------------------
+
+printf 'host name: the profile marker names the host\n'
+# The marker's path, spelled independently of the script under test.
+FIXTURE_PROFILE_MARKER="$HOME/.config/claude-host-profile"
+OVERRIDE_PROFILE_MARKER="$TMPROOT/override-profile-marker"
+MARKER_HOST='markerhost'
+OVERRIDE_MARKER_HOST='overridehost'
+STUB_SHORT_HOST='stub-short-host'
+# Fails the host-name rule: it would climb out of the store directory.
+UNUSABLE_MARKER_LINE='../climb'
+
+write_stub hostname <<STUB
+[ "\$1" = '-s' ] || exit 9
+printf '%s\n' '$STUB_SHORT_HOST'
+STUB
+
+# host_name_scene REPO MARKER_LINE — an apply scene whose topic.md differs from the store's, so the run
+# writes one conflict copy named for the host, and whose profile marker holds MARKER_LINE.
+host_name_scene() {
+    apply_scene "$1"
+    write_file "$memory_dir/topic.md" 'replaced body'
+    write_file "$store_dir/topic.md" 'store body'
+    write_file "$FIXTURE_PROFILE_MARKER" "$2"
+}
+
+# conflict_copy_names — the name of every conflict copy in the scene's store directory, sorted, each
+# followed by a space; so one name here also says no copy carries another host's name.
+conflict_copy_names() { find "$store_dir" -name '*.conflict-*' -printf '%f\n' | LC_ALL=C sort | tr '\n' ' '; }
+
+host_name_scene marker-names-host "$MARKER_HOST"
+FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: the profile marker names the host" \
+    "$RC|$(conflict_copy_names)|$(body_of "$store_dir/topic.conflict-$MARKER_HOST.md")" \
+    "0|topic.conflict-$MARKER_HOST.md |replaced body"
+
+# A pin: a marker that outranked the variable would name the copy markerhost.
+host_name_scene variable-outranks-marker "$MARKER_HOST"
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: CLAUDE_MEMORY_HOST outranks the marker" \
+    "$RC|$(conflict_copy_names)" "0|topic.conflict-$FIXTURE_HOST.md "
+
+# A pin: a marker line taken without the host-name rule reaches the last check, which stops the run, exit 2.
+host_name_scene unusable-marker-line "$UNUSABLE_MARKER_LINE"
+FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: an unusable marker line falls back to hostname -s" \
+    "$RC|$OUT|$(conflict_copy_names)" "0|$(linked_line 0 0 1)|topic.conflict-$STUB_SHORT_HOST.md "
+
+# A pin: a read with no readability test before it puts the shell's "Permission denied" on stderr.
+# Mode 000 does not stop root, so under root (act runs so) the precondition below fails and the table
+# is could-not-run, exit 2, as the root check at the top already makes it.
+host_name_scene unreadable-marker "$MARKER_HOST"
+chmod 000 "$FIXTURE_PROFILE_MARKER" || fatal "could not make the profile marker unreadable"
+[[ ! -r "$FIXTURE_PROFILE_MARKER" ]] \
+    || fatal "the profile marker is still readable at mode 000: the unreadable-marker row would assert nothing"
+FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: an unreadable marker falls back to hostname -s, silently" \
+    "$RC|$(contains "$OUT" 'Permission denied')|$(conflict_copy_names)" "0|no|topic.conflict-$STUB_SHORT_HOST.md "
+
+host_name_scene marker-override-path "$MARKER_HOST"
+write_file "$OVERRIDE_PROFILE_MARKER" "$OVERRIDE_MARKER_HOST"
+CLAUDE_SETTINGS_RENDER_MARKER="$OVERRIDE_PROFILE_MARKER" FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: the marker override path is honoured" \
+    "$RC|$(conflict_copy_names)" "0|topic.conflict-$OVERRIDE_MARKER_HOST.md "
+
 printf 'apply: what it needs\n'
 apply_scene default-host
 write_file "$memory_dir/topic.md" 'replaced body'
@@ -2456,7 +2529,7 @@ done
 check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
 
 printf '\n'
-EXPECTED_ROWS=206
+EXPECTED_ROWS=211
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

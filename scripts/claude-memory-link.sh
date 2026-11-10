@@ -171,8 +171,10 @@
 #
 # Overrides: CLAUDE_MEMORY_PROJECTS_DIR (default ~/.claude/projects), CLAUDE_MEMORY_STORES_ROOT
 # (~/.local/share/claude-memory), CLAUDE_MEMORY_CONFIG (~/.dotfiles-local/claude/memory-stores.json),
-# CLAUDE_MEMORY_STATE_DIR (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the
-# host in a conflict copy's name), CLAUDE_MEMORY_TENANT_ROUTE (the sibling scripts/tenant-route),
+# CLAUDE_MEMORY_STATE_DIR (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (the host in a
+# conflict copy's name: else the profile marker's first line when it is a usable name, else
+# hostname -s), CLAUDE_SETTINGS_RENDER_MARKER (~/.config/claude-host-profile, the profile marker, by
+# the renderer's and host-sync's name), CLAUDE_MEMORY_TENANT_ROUTE (the sibling scripts/tenant-route),
 # CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long --apply waits for link.lock; a whole number above 0).
 
 set -uo pipefail
@@ -185,6 +187,8 @@ PROJECTS_DIR_RELATIVE='.claude/projects'
 STORES_ROOT_RELATIVE='.local/share/claude-memory'
 CONFIG_RELATIVE='.dotfiles-local/claude/memory-stores.json'
 STATE_DIR_RELATIVE='.local/state/claude-memory-sync'
+# The host's profile marker: one line naming the machine, the renderer's and host-sync's path.
+PROFILE_MARKER_RELATIVE='.config/claude-host-profile'
 TENANT_ROUTE_RELATIVE='scripts/tenant-route'
 MEMORY_ENTRY_NAME='memory'
 # A replaced real directory is memory.replaced-<stamp>; it counts as merged once it holds the marker.
@@ -235,6 +239,7 @@ PROJECTS_DIR="${CLAUDE_MEMORY_PROJECTS_DIR:-${HOME:-}/$PROJECTS_DIR_RELATIVE}"
 STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-${HOME:-}/$STORES_ROOT_RELATIVE}"
 CONFIG_PATH="${CLAUDE_MEMORY_CONFIG:-${HOME:-}/$CONFIG_RELATIVE}"
 STATE_DIR="${CLAUDE_MEMORY_STATE_DIR:-${HOME:-}/$STATE_DIR_RELATIVE}"
+PROFILE_MARKER="${CLAUDE_SETTINGS_RENDER_MARKER:-${HOME:-}/$PROFILE_MARKER_RELATIVE}"
 TENANT_ROUTE="${CLAUDE_MEMORY_TENANT_ROUTE:-$DOTFILES/$TENANT_ROUTE_RELATIVE}"
 
 MODE=''                       # check | list | apply
@@ -1153,12 +1158,34 @@ apply_all_keys() {
     fi
 }
 
+# resolve_host_name — print the host's name: CLAUDE_MEMORY_HOST when it is set and not empty, else the
+# profile marker's first line when the marker is a readable file and that line passes HOST_NAME_RE,
+# else `hostname -s`. Readability is tested before the read, so an unreadable marker puts nothing on
+# stderr; the caller still checks whichever name this prints.
+resolve_host_name() {
+    local marker_line=''
+    if [[ -n "${CLAUDE_MEMORY_HOST:-}" ]]; then
+        printf '%s\n' "$CLAUDE_MEMORY_HOST"
+        return 0
+    fi
+    if [[ -f "$PROFILE_MARKER" && -r "$PROFILE_MARKER" ]]; then
+        # read's status is not looked at: a last line with no newline still sets marker_line, and the
+        # rule below decides either way.
+        IFS= read -r marker_line < "$PROFILE_MARKER"
+        if [[ "$marker_line" =~ $HOST_NAME_RE ]]; then
+            printf '%s\n' "$marker_line"
+            return 0
+        fi
+    fi
+    hostname -s
+}
+
 # prepare_apply — settle the host name and, on a real run, wait for the lock. Everything that reads a
 # key's state happens after this, so a run that waited sees what the previous run left.
 prepare_apply() {
     local lock_path="$STATE_DIR/$LINK_LOCK_FILE_NAME" link_lock_fd flock_status
     local lock_wait_seconds="${CLAUDE_MEMORY_LOCK_WAIT_SECONDS:-$LOCK_WAIT_SECONDS_DEFAULT}"
-    HOST_NAME=${CLAUDE_MEMORY_HOST:-$(hostname -s)}
+    HOST_NAME=$(resolve_host_name)
     [[ "$HOST_NAME" =~ $HOST_NAME_RE ]] || die "host name '$HOST_NAME' cannot go in a file name"
     [[ "$lock_wait_seconds" =~ $LOCK_WAIT_SECONDS_RE ]] \
         || die "CLAUDE_MEMORY_LOCK_WAIT_SECONDS '$lock_wait_seconds' is not a whole number of seconds above 0"

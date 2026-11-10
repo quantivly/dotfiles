@@ -38,6 +38,8 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 # The account a shell routed to would otherwise reach every git call the rows log, and an unpinned run
 # would show it as its own.
 unset GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN CLAUDE_MEMORY_GIT_TOKEN
+# The caller's host name or profile marker would otherwise name the host; the host-name rows set their own.
+unset CLAUDE_SETTINGS_RENDER_MARKER CLAUDE_MEMORY_HOST
 GIT_CONFIG_GLOBAL="$TMPROOT/gitconfig-global"
 GIT_CONFIG_SYSTEM="$TMPROOT/gitconfig-system"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
@@ -1792,6 +1794,87 @@ check "status: a state dir it cannot read is exit 2 naming it, never a store rea
     "$unreadable_state_result" "2|yes|no"
 
 # ---------------------------------------------------------------------------------------------
+# The host name in a commit message and the staleness threshold: CLAUDE_MEMORY_HOST, else the profile
+# marker's first line, else hostname -s. Every row runs with the hostname stub first on PATH, and every
+# row but the variable's with CLAUDE_MEMORY_HOST empty, so a fall-through to hostname -s shows as the
+# stub's name.
+# ---------------------------------------------------------------------------------------------
+
+printf 'host name: the profile marker names the host\n'
+# The marker's path, spelled independently of the script under test.
+FIXTURE_PROFILE_MARKER="$HOME/.config/claude-host-profile"
+OVERRIDE_PROFILE_MARKER="$TMPROOT/override-profile-marker"
+MARKER_HOST='markerhost'
+OVERRIDE_MARKER_HOST='overridehost'
+STUB_SHORT_HOST='stub-short-host'
+# Fails the host-name rule: it would climb out of a directory.
+UNUSABLE_MARKER_LINE='../climb'
+# The marker host's threshold, short of the last-ok's age, and the default, past it: the store reads
+# stale only when the threshold is the marker host's.
+MARKER_HOST_THRESHOLD_MINUTES=5
+MARKER_ROW_DEFAULT_THRESHOLD_MINUTES=60
+MARKER_ROW_AGE_MINUTES=10
+# The fixture's hostname: `hostname -s` answers STUB_SHORT_HOST, any other call fails.
+HOSTNAME_STUB_DIR="$TMPROOT/hostname-stub-bin"
+mkdir -p "$HOSTNAME_STUB_DIR" || fatal "could not create the hostname stub directory"
+cat > "$HOSTNAME_STUB_DIR/hostname" <<STUB
+#!/bin/sh
+[ "\$1" = '-s' ] || exit 9
+printf '%s\n' '$STUB_SHORT_HOST'
+STUB
+chmod +x "$HOSTNAME_STUB_DIR/hostname" || fatal "could not make the hostname stub executable"
+
+# host_name_scene MARKER_LINE — a scene with one new file in the alpha store, so --apply commits it
+# under the host's name, and a profile marker holding MARKER_LINE.
+host_name_scene() {
+    reset_scene
+    write_file "$ALPHA_DIR/topic.md" 'topic body'
+    write_file "$FIXTURE_PROFILE_MARKER" "$1"
+}
+
+host_name_scene "$MARKER_HOST"
+FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
+marker_commit_result="$RC|$OUT|$(head_subject "$ALPHA_DIR")"
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+write_file "$FIXTURE_PROFILE_MARKER" "$MARKER_HOST"
+write_status_fixture "$ALPHA_STORE" ok '' "$(stamp_now_minus "$MARKER_ROW_AGE_MINUTES")"
+FIXTURE_HOST="$MARKER_HOST" set_stale_after "$MARKER_HOST_THRESHOLD_MINUTES" "$MARKER_ROW_DEFAULT_THRESHOLD_MINUTES"
+FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --status
+check "host name: the profile marker names the host" \
+    "$marker_commit_result|$RC|$OUT" \
+    "0|$ALPHA_STORE: committed 1 files|$MARKER_HOST: 1 files|0|$ALPHA_STORE${TAB}bad${TAB}last synced $MARKER_ROW_AGE_MINUTES min ago, past the $MARKER_HOST_THRESHOLD_MINUTES min threshold; last outcome ok"
+
+# A pin: a marker that outranked the variable would name the commit markerhost.
+host_name_scene "$MARKER_HOST"
+PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
+check "host name: CLAUDE_MEMORY_HOST outranks the marker" \
+    "$RC|$(head_subject "$ALPHA_DIR")" "0|$FIXTURE_HOST: 1 files"
+
+# A pin: a marker line taken without the host-name rule reaches the last check, which stops the run, exit 2.
+host_name_scene "$UNUSABLE_MARKER_LINE"
+FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
+check "host name: an unusable marker line falls back to hostname -s" \
+    "$RC|$OUT|$(head_subject "$ALPHA_DIR")" "0|$ALPHA_STORE: committed 1 files|$STUB_SHORT_HOST: 1 files"
+
+# A pin: a read with no readability test before it puts the shell's "Permission denied" on stderr.
+# Mode 000 does not stop root, so under root (act runs so) the precondition below fails and the table
+# is could-not-run, exit 2, as the root check at the top already makes it.
+host_name_scene "$MARKER_HOST"
+chmod 000 "$FIXTURE_PROFILE_MARKER" || fatal "could not make the profile marker unreadable"
+[[ ! -r "$FIXTURE_PROFILE_MARKER" ]] \
+    || fatal "the profile marker is still readable at mode 000: the unreadable-marker row would assert nothing"
+FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
+check "host name: an unreadable marker falls back to hostname -s, silently" \
+    "$RC|$(contains "$OUT" 'Permission denied')|$(head_subject "$ALPHA_DIR")" "0|no|$STUB_SHORT_HOST: 1 files"
+
+host_name_scene "$MARKER_HOST"
+write_file "$OVERRIDE_PROFILE_MARKER" "$OVERRIDE_MARKER_HOST"
+CLAUDE_SETTINGS_RENDER_MARKER="$OVERRIDE_PROFILE_MARKER" FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
+check "host name: the marker override path is honoured" \
+    "$RC|$(head_subject "$ALPHA_DIR")" "0|$OVERRIDE_MARKER_HOST: 1 files"
+
+# ---------------------------------------------------------------------------------------------
 # units: the tick, and the two links ./install makes for it
 # ---------------------------------------------------------------------------------------------
 
@@ -1853,7 +1936,7 @@ check "install.conf.yaml links the timer" \
     "$(grep -c '^    ~/.config/systemd/user/claude-memory-sync.timer: systemd/claude-memory-sync.timer$' "$DOTFILES/install.conf.yaml")" 1
 
 printf '\n'
-EXPECTED_ROWS=111
+EXPECTED_ROWS=116
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
