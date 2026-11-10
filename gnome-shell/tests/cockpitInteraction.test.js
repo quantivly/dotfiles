@@ -43,6 +43,15 @@ test('cockpitInteraction: the window pick takes the topmost window of a workspac
     assertEqual(interaction.pickWindowToActivate({windows: unminimized, candidatePids: [10, 99]}), 2);
 });
 
+test('cockpitInteraction: the window pick prefers the active workspace even when an off-workspace window is higher in the stack', () => {
+    const offWorkspaceHigher = [
+        {pid: 10, stackIndex: 9, isOnActiveWorkspace: false, isMinimized: false},
+        {pid: 11, stackIndex: 1, isOnActiveWorkspace: true, isMinimized: false},
+    ];
+    assertEqual(interaction.pickWindowToActivate({windows: offWorkspaceHigher, candidatePids: [10, 11]}), 1);
+    assertEqual(interaction.pickWindowToActivate({windows: [...offWorkspaceHigher].reverse(), candidatePids: [10, 11]}), 1);
+});
+
 test('cockpitInteraction: the outcome activates on focused + picked, logs otherwise, never both', () => {
     const outcome = (reply, pickedStackIndex) => interaction.focusSessionOutcome({reply, pickedStackIndex});
     assertEqual(outcome({focused: true, error: null, windowPidCandidates: [10]}, 2), {activateWindow: true, logLine: null});
