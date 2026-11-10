@@ -349,17 +349,19 @@ Code keys it by the main checkout. A submodule has two, its own path and its git
 one store directory. The script's header has the full rules.
 
 **A stray directory is skipped, not a refusal** (M11). A `checkout_globs` match whose `.git` is a
-regular file whose `gitdir:` line names a path with nothing at it, typically an old copy of a
-submodule's working tree, is no checkout: git refuses it too (exit 128). It is not a candidate, and
-every verb names it once on stderr, however many globs reach it:
+regular file whose `gitdir:` line names a path known to have nothing at it, typically an old copy of a
+submodule's working tree, is no checkout: git refuses it too (exit 128). Known means the deepest part
+of that path that exists is a directory this user may search. It is not a candidate, and every verb
+names it once on stderr, however many globs reach it:
 
     claude-memory-link: <dir> is not a checkout: its .git names a git directory that does not exist; skipped
 
 The line is read as git reads it, every trailing CR and LF dropped first. Exit status, the summary line
 and every other key are as they would be without it, and a key of its own that holds memory shows as
-`UNMAPPED`. Only that state is skipped: a `.git` symlink, a `gitdir:` path with anything at it that is
-no git directory (a dangling symlink included), a `plain_dirs` entry whose gitfile dangles, and every
-other failure to read a candidate are still exit 2.
+`UNMAPPED`. Only that state is skipped: a `.git` that is a symlink to a dangling gitfile, a `gitdir:`
+path with anything at it that is no git directory (a dangling symlink included), one behind a
+directory this user cannot search (there, nothing at it cannot be told from something hidden), a
+`plain_dirs` entry whose gitfile dangles, and every other failure to read a candidate are still exit 2.
 So is a populated submodule of a match whose `.git/modules/<name>` is gone, since
 `git submodule foreach` exits 128 there.
 
@@ -448,10 +450,10 @@ or it would bring what it points at into a store that is pushed to a remote.
 | a different `MEMORY.md` or `INDEX_*.md` | the lines only the replaced copy has are appended |
 | any other different file | the store's copy keeps its name, whichever is newer, and the replaced copy becomes a conflict copy beside it |
 
-A conflict copy inserts `.conflict-<host>`, the host's name (above), before the final extension: `x.md` becomes
-`x.conflict-<host>.md`, and a name with no extension gets it appended. A copy that already holds
-another body is kept and the next is `x.conflict-<host>.2.md`, `.3.md`, and so on; one with the same
-body is that file already, so a resumed merge adds none.
+A conflict copy inserts `.conflict-<host>`, the host's name (above), before the final extension:
+`x.md` becomes `x.conflict-<host>.md`, and a name with no extension gets it appended. A copy that
+already holds another body is kept and the next is `x.conflict-<host>.2.md`, `.3.md`, and so on; one
+with the same body is that file already, so a resumed merge adds none.
 
 **Adding a directory.** An `UNMAPPED` row is usually the prompt: it names a key holding memory that
 the table does not claim. A key whose directory still exists is claimed by adding it to
@@ -647,7 +649,7 @@ An armed timer on a host whose `~/.local/share/claude-memory` has gone is skippe
 `CLAUDE_MEMORY_RUN_DEADLINE_SECONDS` and `CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS` override the sync's
 paths, host name (as the link script reads it), route and limits.
 
-State tables: `scripts/test-claude-memory-link.sh` (221 rows) and `scripts/test-claude-memory-sync.sh`
+State tables: `scripts/test-claude-memory-link.sh` (223 rows) and `scripts/test-claude-memory-sync.sh`
 (117 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
 sync local bare repositories as remotes and a stub `gh-route` (CI `claude-memory-link-test` and
 `claude-memory-sync-test`). The doctor's rows are section AA of `scripts/test-claude-doctor.sh`, and
@@ -826,32 +828,42 @@ process group, and counts a mutant that kills nothing as a finding, never a pass
 
 A host joins with one `--apply` from the laptop, once the overlay carries its profile
 (`hosts/<profile>.json`) and the store table's globs reach every checkout it holds memory for. On a
-host with one GitHub account and no clauth, amendments M9 to M11 and H11 of the design are what make
-that one run enough: no tenant gh route is derived there, so the memory sync uses the host's own git
-credential; the memory scripts name the host by its profile; a stray directory among its checkouts is
-skipped; and `claude-doctor`'s Pools section is one note.
+host with one GitHub account and no clauth, amendments M9 to M11 of the design and its D9 note are
+what make that one run enough: no tenant gh route is derived there, so the memory sync uses the
+host's own git credential (M9); the memory scripts name the host by its profile (M10); a stray
+directory among its checkouts is skipped (M11); and `claude-doctor`'s Pools section is one note,
+with a ✗ only for a fault in the tenant table itself, most of which stop memory linking there too
+(D9). H11 is the order: the marker comes first.
 
 **Preflight, read-only, on the host**, for two faults no `--check` row predicts:
 
-- **Every `checkout_globs` match answers git.** `git -C <dir> config --get-regexp '^remote\..*\.url$'`
-  must exit 0 or 1 for each. Any other status makes `scripts/tenant-route` exit 2 for that directory,
-  and the link script then refuses every verb on the host. The one exception is a stray whose `.git`
-  file names a missing git directory, which is skipped and named
-  ([Memory stores](#memory-stores-do-891)); a populated submodule whose `.git/modules/<name>` is gone
-  is not, and stops the host the same way.
+- **Every `checkout_globs` match answers git, and so do its submodules.**
+  `git -C <dir> config --get-regexp '^remote\..*\.url$'` must exit 0 or 1 for each match. Any other
+  status makes `scripts/tenant-route` exit 2 for that directory, and the link script then refuses
+  every verb on the host. The one exception is a stray whose `.git` file names a missing git
+  directory, which is skipped and named ([Memory stores](#memory-stores-do-891)). For each match
+  that is not a worktree, `git -C <dir> submodule --quiet foreach --recursive true` must exit 0 as
+  well. A populated submodule whose `.git/modules/<name>` is gone passes the first command (exit 1)
+  and fails this one (exit 128); it is not tenant-route that refuses it, but the link script's own
+  submodule listing ("git could not list the submodules of <dir>"), exit 2 for every verb.
 
   ```bash
   for dir in ~/<glob>; do   # once per checkout_globs entry
     [ -e "$dir/.git" ] || continue
     git -C "$dir" config --get-regexp '^remote\..*\.url$' >/dev/null 2>&1
-    rc=$?; [ "$rc" -le 1 ] || printf '%s %s\n' "$rc" "$dir"
+    rc=$?; if [ "$rc" -gt 1 ]; then printf '%s %s\n' "$rc" "$dir"; continue; fi
+    [ -f "$dir/.git" ] && grep -qF '/worktrees/' "$dir/.git" && continue   # a worktree: no submodules
+    git -C "$dir" submodule --quiet foreach --recursive true >/dev/null 2>&1 \
+      || printf 'submodules %s\n' "$dir"
   done
   ```
 
-- **The overlay's unconditional link targets are absent or regular files.** Before the overlay's first
+- **The overlay's unconditional link targets are absent, or something dotbot can back up (a regular
+  file or a directory); a symlink pointing elsewhere fails the install.** Before the overlay's first
   install, look at each target its `install.conf.yaml` declares without an `if:` (`ls -ld` on the
-  host). Dotbot backs a regular file up and links in its place; a symlink that points elsewhere makes
-  its link step refuse ("Incorrect link") and the install fail, so remove one by hand first.
+  host). Dotbot moves a regular file or a directory aside and links in its place; a symlink that
+  points elsewhere makes its link step refuse ("Incorrect link") and the install fail, so remove one
+  by hand first.
 
 **1. Write the marker, by hand, on the host** (H11):
 
@@ -862,9 +874,9 @@ mkdir -p ~/.config && printf '%s\n' '<profile>' > ~/.config/claude-host-profile
 host-sync clones and installs the overlay only on a host with a marker, and the overlay's install,
 finding no marker, writes `hostname -s` as one, which on an EC2 host names no profile.
 
-**2. Run it from the laptop, outside the host's 05:00–05:30 window.** An armed host's daily timer
-fires then (05:00 host-local time, up to 30 minutes later at random), and a run that meets another's
-lock exits 2:
+**2. Run it from the laptop, outside the host's 05:00–05:35 window.** An armed host's daily timer
+fires then (05:00 host-local time, up to 30 minutes later at random and up to 5 more for the timer's
+accuracy), and a run that meets another's lock exits 2:
 
 ```bash
 scripts/host-sync --host <alias> --apply
@@ -875,7 +887,7 @@ Beyond what every run does (Claude Code, herdr, the generated skills), the first
 - clones `~/.dotfiles-local`, before the public `./install`;
 - runs both `./install`s. The public one renders `~/.claude/settings.json` and keeps the previous file
   as `~/.local/state/claude-settings-render/settings.json.before-<stamp>`; dotbot moves a regular file
-  at a declared link's path aside to `<path>.dotbot-backup.<stamp>`;
+  or a directory at a declared link's path aside to `<path>.dotbot-backup.<stamp>`;
 - adds the marketplaces and installs the plugins the rendered `settings.json` declares and the host
   lacks, never enabling or disabling one;
 - clones each memory store that serves the profile's tenants and runs `claude-memory-link.sh --apply`:
@@ -892,8 +904,9 @@ scripts/host-sync --host <alias> --check                            # from the l
 ~/.dotfiles/scripts/claude-memory-sync.sh --status                  # on the host, after the first tick: each store's last sync
 ```
 
-`none` from `gh-route` means the sync uses the host's own git credential (M9). `matched`, with a
-token file, means at least one gh config dir the tables route to exists on the host (a tenant's, or
-the team's `~/.config/gh-quantivly`), which makes it a multi-account host: every route is then
-derived, the sync reads the token file the answer names (M7), and it records `skipped-no-token` for as
-long as that file is missing.
+`none` from `gh-route` means the sync uses the host's own git credential (M9). `matched` or
+`default`, with a token file, means at least one gh config dir the tables route to exists on the host
+(a tenant's, or the team's `~/.config/gh-quantivly`), which makes it a multi-account host: every route
+is then derived, the sync reads the token file the answer names (M7; `default` names the default
+dir's, for a store whose owner no route matches), and it records `skipped-no-token` for as long as
+that file is missing.

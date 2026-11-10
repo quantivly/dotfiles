@@ -802,8 +802,8 @@ _claude_plugins_disabled() {
 # the table's read, parse, run and finish checks, and its shape (a tenant named by
 # a route, the default, an overflow or a spill entry that has no members, an empty
 # pool, a member or overflow/spill entry the picker rejects). scripts/tenant-route
-# applies the shape checks with no clauth gate, so a shape fault stops memory
-# linking on a machine without clauth too.
+# refuses a routed tenant with no members and a rejected member name with no
+# clauth gate, so either stops memory linking on a machine without clauth too.
 #
 # A separate function because claude-doctor is one long scope in which every
 # `local` is shared. The table is read FRESH from the file, the way a launch reads
@@ -919,7 +919,7 @@ _claude_doctor_pools() {
   # pick nothing, and every member reads as "no clauth profile store" — one ✗ each
   # about a mechanism that never runs. Those checks are skipped and said once, at
   # the end of the section. The table's SHAPE is still checked, below: tenant-route
-  # refuses a misshapen table with or without clauth, and every memory-link verb
+  # refuses most shape faults with or without clauth, and every memory-link verb
   # with it. PATH, not `command -v`: zshrc.herdr defines a clauth FUNCTION.
   whence -p clauth >/dev/null 2>&1 || clauth_installed=0
 

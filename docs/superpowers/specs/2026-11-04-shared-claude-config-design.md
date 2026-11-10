@@ -386,12 +386,14 @@ stray directory among its checkouts (dev). Where they differ from the text above
   readable file and that line is a usable host name, else `hostname -s`. A marker that is missing,
   unreadable, a directory or holds an unusable line falls back without a word on stderr.
 - **(M11) A directory whose `.git` file names a missing git directory is not a checkout** for the link
-  script. A `checkout_globs` match whose regular `.git` file has a `gitdir:` line naming a path with
-  nothing at it, a worktree's excepted, is skipped and named on stderr once a run, however many globs
-  reach it; the run goes on for every other key. The line is read as git reads it, every trailing CR
-  and LF dropped first. A `plain_dirs` entry in that state and every other failure to read a candidate
-  are still exit 2. So is a populated submodule of a match whose `.git/modules/<name>` is gone:
-  `git submodule foreach` exits 128 there, and that case is left for step 10.
+  script. A `checkout_globs` match whose regular `.git` file has a `gitdir:` line naming a path known
+  to have nothing at it, a worktree's excepted, is skipped and named on stderr once a run, however
+  many globs reach it; the run goes on for every other key. Known means the deepest part of the path
+  that exists is a directory this user may search: behind one it may not, absent cannot be told from
+  hidden, and the directory is not skipped (exit 2). The line is read as git reads it, every trailing
+  CR and LF dropped first. A `plain_dirs` entry in that state and every other failure to read a
+  candidate are still exit 2. So is a populated submodule of a match whose `.git/modules/<name>` is
+  gone: `git submodule foreach` exits 128 there, and that case is left for step 10.
 
 **User memories.** Cross-repo memories about Zvi are curated, low-churn data about this
 person, which is dotfiles-local's charter: `~/.dotfiles-local/claude/memory-user/MEMORY.md`
@@ -507,9 +509,14 @@ drops a key, a sync that commits nothing because `git add` saw an ignored path.
 the doctor's pool checks apply where clauth is installed (`whence -p clauth`), since `claude()` and
 `hspawn` run the account picker only there. On a host without it, the Pools section prints one note,
 `clauth is not installed — the pools pick no account on this machine; pool checks skipped`, in place
-of the member, settings, organisation, pool-shape and plugin sign-in checks. The table's read, parse,
-run and finish checks and the duplicate-account check run either way, since a launch refuses a table
-that fails them with or without clauth.
+of the checks that read clauth's profile stores: a member that is a compat symlink, a retired name or
+has no store, settings parity, organisation and plugin sign-ins. The duplicate-account check, the
+table's read, parse, run and finish checks, and its shape checks (a tenant named by a route, the
+default, an overflow or a spill entry that has no members, an empty pool, a member or overflow/spill
+name the picker rejects) run either way. A launch refuses a table that fails the read, parse, run or
+finish check with or without clauth, and `scripts/tenant-route` refuses a routed tenant with no
+members and a rejected member name with no clauth gate, so either fault stops memory linking on such
+a host too.
 
 ### D10. nanoclaw leaves herdr
 

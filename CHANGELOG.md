@@ -510,15 +510,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own git credential instead of skipping every push for a token file nobody writes; a machine with
   any of the dirs is unchanged. `claude-doctor`'s Pools section prints one note where clauth is not
   installed, in place of a ✗ per pool member about a picker that never runs there; the table's read,
-  parse, run and finish checks and the duplicate-account check still run. Both memory scripts name
-  the host from the profile marker when `CLAUDE_MEMORY_HOST` is unset (a regular, readable file whose
-  first line is a usable name), so a conflict copy, a commit and the `stale_after_minutes` lookup say
-  the profile rather than an `ip-…` hostname. `claude-memory-link.sh` skips a `checkout_globs` match
-  whose `.git` file names a missing git directory, naming it once a run on stderr, where before that
-  one directory stopped every verb on the host. `docs/CLAUDE_SETUP.md` gains "A host's first run":
-  the preflight, the marker written by hand, the run and the three reads that prove it. State tables:
-  `scripts/test-gh-routing.sh` 231 to 240 rows, `scripts/test-claude-doctor.sh` 603 to 609,
-  `scripts/test-hspawn.sh` 454 to 456, `scripts/test-claude-memory-link.sh` 206 to 221,
+  parse, run and finish checks, its shape checks (a tenant routed to with no members, an empty pool,
+  a member name the picker rejects; `scripts/tenant-route` refuses the first and the last with no
+  clauth gate) and the duplicate-account check still run. Both memory scripts name the host from the
+  profile marker when `CLAUDE_MEMORY_HOST` is unset or empty (a regular, readable file whose first
+  line is a usable name), so a conflict copy, a commit and the `stale_after_minutes` lookup say the
+  profile rather than an `ip-…` hostname. `claude-memory-link.sh` skips a `checkout_globs` match
+  whose `.git` file names a git directory known to be missing (one behind a directory this user
+  cannot search is still exit 2), naming it once a run on stderr, where before that one directory
+  stopped every verb on the host. `docs/CLAUDE_SETUP.md` gains "A host's first run": the preflight,
+  the marker written by hand, the run and the three reads that prove it. State tables:
+  `scripts/test-gh-routing.sh` 231 to 240 rows, `scripts/test-claude-doctor.sh` 603 to 611,
+  `scripts/test-hspawn.sh` 454 to 456, `scripts/test-claude-memory-link.sh` 206 to 223,
   `scripts/test-claude-memory-sync.sh` 111 to 117.
 
 - **`scripts/vpn-log-report.py` no longer reads a quiet journal window that spans a reboot as NOT

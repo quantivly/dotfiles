@@ -153,8 +153,9 @@ file and `claude-tenants-apply-gh`), then `zshrc.gh-routes`, then applies the te
 of which there are none on a machine where none of the tenants' gh dirs is present (DO-897: such a
 machine has one GitHub account). That is the shell's own order, assuming the machine's overlay calls
 `claude-tenants-apply-gh` as this laptop's does. A machine whose overlay does not would get
-tenant-derived routes in the tick and not in the shell. That is why the tables and `_GH_TOKEN_CACHE` left `zshrc.company`. A second reader
-would otherwise have to source that whole file, token refresher and hooks included, or keep a copy.
+tenant-derived routes in the tick and not in the shell. That is why the tables and `_GH_TOKEN_CACHE`
+left `zshrc.company`. A second reader would otherwise have to source that whole file, token
+refresher and hooks included, or keep a copy.
 
 - **`~/.zshrc.local` is the one layer it skips.** That file holds secrets, and an answer that goes
   into a unit must not come from sourcing them. A route written there directly, not in the tenants

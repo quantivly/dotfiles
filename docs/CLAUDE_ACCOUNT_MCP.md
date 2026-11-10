@@ -191,7 +191,10 @@ switch. What its findings mean:
 The `differs from`, member (`compat symlink`, `retired name`, `no clauth profile
 store`), organisation and plugin sign-in rows are reported only where clauth is
 installed. A machine without it runs no picker, so its Pools section prints one
-note in their place. The `SAME account` row is checked either way.
+note in their place. The `SAME account` row is checked either way, and so is the
+tenant table's shape (a tenant the table routes to that has no members, an empty
+pool, a member name the picker rejects): `scripts/tenant-route` refuses the first
+and the last with or without clauth, and memory linking with them.
 
 ---
 
