@@ -665,7 +665,9 @@ rather than two that can disagree. It is **defined in `zshrc.herdr` and delibera
 there**: load order is `zshrc.herdr` → `zshrc.company`, whose `zshrc.gh-routes` **assigns** `GH_ACCOUNT_ROUTES=(…)`
 wholesale and would discard anything added first → `~/.zshrc.local` → the machine's own overlay,
 which calls it as its last line. Only that caller knows the order has ended. It is additive and
-idempotent, and never removes or reorders a team default.
+idempotent, and never removes or reorders a team default. It adds nothing at all on a machine where no
+value of `CLAUDE_TENANT_GH_DIR` is present (not empty, and an existing directory or a relative path),
+since such a machine has one GitHub account (DO-897).
 
 Traps this area has, each of which produced a **passing test** first:
 

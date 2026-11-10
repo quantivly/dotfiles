@@ -244,8 +244,10 @@
 #
 # Overrides: CLAUDE_MEMORY_STORES_ROOT (default ~/.local/share/claude-memory), CLAUDE_MEMORY_CONFIG
 # (~/.dotfiles-local/claude/memory-stores.json), CLAUDE_MEMORY_STATE_DIR
-# (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the host in a commit message, a
-# conflict copy's name and the staleness threshold), CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long
+# (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (the host in a commit message, a conflict
+# copy's name and the staleness threshold: else the profile marker's first line when it is a usable
+# name, else hostname -s), CLAUDE_SETTINGS_RENDER_MARKER (~/.config/claude-host-profile, the profile
+# marker, by the renderer's and host-sync's name), CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long
 # --apply waits for link.lock; a whole number above 0), CLAUDE_MEMORY_GH_ROUTE (the sibling
 # scripts/gh-route), CLAUDE_MEMORY_RUN_DEADLINE_SECONDS (240) and CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS
 # (20), whole numbers above 0 (see TIME above).
@@ -259,6 +261,8 @@ SCRIPT_NAME='claude-memory-sync'
 STORES_ROOT_RELATIVE='.local/share/claude-memory'
 CONFIG_RELATIVE='.dotfiles-local/claude/memory-stores.json'
 STATE_DIR_RELATIVE='.local/state/claude-memory-sync'
+# The host's profile marker: one line naming the machine, the renderer's and host-sync's path.
+PROFILE_MARKER_RELATIVE='.config/claude-host-profile'
 REDACTOR_RELATIVE='scripts/redact-secrets.sh'
 REDACTOR_SHAPES_ONLY_FLAG='--shapes-only'
 GH_ROUTE_RELATIVE='scripts/gh-route'
@@ -425,6 +429,7 @@ EXIT_USAGE=64
 STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-${HOME:-}/$STORES_ROOT_RELATIVE}"
 CONFIG_PATH="${CLAUDE_MEMORY_CONFIG:-${HOME:-}/$CONFIG_RELATIVE}"
 STATE_DIR="${CLAUDE_MEMORY_STATE_DIR:-${HOME:-}/$STATE_DIR_RELATIVE}"
+PROFILE_MARKER="${CLAUDE_SETTINGS_RENDER_MARKER:-${HOME:-}/$PROFILE_MARKER_RELATIVE}"
 LINK_LOCK_PATH="$STATE_DIR/$LINK_LOCK_FILE_NAME"
 LOCK_WAIT_SECONDS="${CLAUDE_MEMORY_LOCK_WAIT_SECONDS:-$LOCK_WAIT_SECONDS_DEFAULT}"
 REDACTOR="$DOTFILES/$REDACTOR_RELATIVE"
@@ -1884,9 +1889,31 @@ scan_store() {
     done
 }
 
+# resolve_host_name — print the host's name: CLAUDE_MEMORY_HOST when it is set and not empty, else the
+# profile marker's first line when the marker is a readable file and that line passes HOST_NAME_RE,
+# else `hostname -s`. Readability is tested before the read, so an unreadable marker puts nothing on
+# stderr; the caller still checks whichever name this prints.
+resolve_host_name() {
+    local marker_line=''
+    if [[ -n "${CLAUDE_MEMORY_HOST:-}" ]]; then
+        printf '%s\n' "$CLAUDE_MEMORY_HOST"
+        return 0
+    fi
+    if [[ -f "$PROFILE_MARKER" && -r "$PROFILE_MARKER" ]]; then
+        # read's status is not looked at: a last line with no newline still sets marker_line, and the
+        # rule below decides either way.
+        IFS= read -r marker_line < "$PROFILE_MARKER"
+        if [[ "$marker_line" =~ $HOST_NAME_RE ]]; then
+            printf '%s\n' "$marker_line"
+            return 0
+        fi
+    fi
+    hostname -s
+}
+
 # settle_host_name — the host a commit message, a conflict copy's name and the threshold name.
 settle_host_name() {
-    HOST_NAME=${CLAUDE_MEMORY_HOST:-$(hostname -s)}
+    HOST_NAME=$(resolve_host_name)
     [[ "$HOST_NAME" =~ $HOST_NAME_RE ]] || die "host name '$HOST_NAME' cannot go in a commit message or a file name"
 }
 

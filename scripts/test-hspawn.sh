@@ -247,9 +247,10 @@ chmod +x "$STUBBIN/claude" "$STUBBIN/herdmates"
 # row proves nothing. It equally cannot be an EMPTY path — zsh itself has to stay
 # reachable, or the row fails with "command not found: zsh" and looks like a
 # genuine result. Same construction, and the same two reasons, as SYSBIN /
-# NOJQBIN in scripts/test-claude-doctor.sh.
+# NOJQBIN in scripts/test-claude-doctor.sh. mktemp is claude-tenants-check's, read
+# once a tenants file exists: without it the door refuses every launch (rc 3).
 NOCLAUTHBIN="$TMPROOT/bin-noclauth"; mkdir -p "$NOCLAUTHBIN"
-for t in zsh sh git jq grep sed awk date stat mkdir rm ls cat sort uniq head tail \
+for t in zsh sh git jq grep sed awk date stat mkdir mktemp rm ls cat sort uniq head tail \
          cut tr wc find basename dirname readlink env chmod cp mv; do
     p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$NOCLAUTHBIN/$t"
 done
@@ -625,6 +626,23 @@ check "hspawn with no clauth shares the credential, unpicked" \
 # in at all. "Unchanged" above cannot catch it while the probe collapses empty
 # into unset, which is why the stub distinguishes the two.
 check "and CLAUDE_CONFIG_DIR is not exported EMPTY" "$(inclaude "CFG <empty>")" "0"
+
+# ...AND A TENANT TABLE DOES NOT CHANGE THAT (DO-897). A server with no clauth
+# gets a tenant table so its sessions find their gh route; the picker must still
+# not run there. PIN: both rows pass today and catch a picker that runs on the
+# table alone — the table names the fixture's one registered profile, so such a
+# picker would pick it and isolate. The fixture HOME's default path is the file
+# a launch reads; it is removed after these two rows so no later row loads it.
+NO_CLAUTH_TENANTS_FILE="$FHOME/.config/claude-tenants.zsh"
+mkdir -p "${NO_CLAUTH_TENANTS_FILE%/*}"
+printf '%s\n' 'typeset -gA CLAUDE_TENANT_POOL' 'CLAUDE_TENANT_POOL=( w "personal" )' \
+    'CLAUDE_TENANT_DEFAULT=w' > "$NO_CLAUTH_TENANTS_FILE"
+NOCLAUTH=1 run "claude"; NOCLAUTH=
+check "with no clauth and a tenant table, the launch is unchanged" "$(inclaude "CFG <unset>")" "1"
+NOCLAUTH=1 run "hspawn '$REPO' slug"; NOCLAUTH=
+check "...and hspawn shares the credential, unpicked" \
+      "$(inout "account:   SHARED global credential")" "1"
+rm -f "$NO_CLAUTH_TENANTS_FILE"
 
 # Pinning: claude-as is the verb that replaces `clauth <profile>` for choosing an
 # account, without rewriting the global credential under every other session.
@@ -2278,7 +2296,7 @@ rm -rf "$FHOME/.clauth/profiles/fz"
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=454
+EXPECTED_ROWS=456
 
 docs_claim() {
   local f="$DOTFILES/$1"

@@ -32,6 +32,8 @@ export HOME
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 # The caller's lock wait would otherwise reach every --apply; the row about it sets its own.
 unset CLAUDE_MEMORY_LOCK_WAIT_SECONDS
+# The caller's host name or profile marker would otherwise name the host; the host-name rows set their own.
+unset CLAUDE_SETTINGS_RENDER_MARKER CLAUDE_MEMORY_HOST
 GIT_CONFIG_GLOBAL="$TMPROOT/gitconfig-global"
 GIT_CONFIG_SYSTEM="$TMPROOT/gitconfig-system"
 export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
@@ -86,6 +88,7 @@ cat > "$ROUTE_STUB" <<STUB
 printf '%s\0' "\$1" >> '$ROUTE_CALLS'
 case "\${1##*/}" in
     *route-refuses-*) printf 'stub refusal\n' >&2; exit 3 ;;
+    *route-git-error-*) printf 'stub: no tenant (state git-error)\n' >&2; exit 2 ;;
     *route-garbled-*) printf '{"tenant":"alpha"} and then this is not json\n'; exit 0 ;;
     *route-blank-*)   printf '{"tenant":"","state":"none","why":"stub"}\n'; exit 0 ;;
     *gamma-*)         answer=gamma ;;
@@ -2411,6 +2414,87 @@ chmod 755 "$replaced_dir"
 check "apply: a marker that cannot be written is exit 2, and the key stays pending" \
     "$marker_fails_result" "2|yes|pending body|0 marked, 1 unmarked"
 
+# ---------------------------------------------------------------------------------------------
+# The host name in a conflict copy: CLAUDE_MEMORY_HOST, else the profile marker's first line, else
+# hostname -s. Every row runs with the hostname stub first on PATH, and every row but the variable's
+# with CLAUDE_MEMORY_HOST empty, so a fall-through to hostname -s shows as the stub's name. The marker
+# sits in the fixture HOME, which the next scene's reset_scene removes, so the "defaults to
+# hostname -s" row below runs with no marker.
+# ---------------------------------------------------------------------------------------------
+
+printf 'host name: the profile marker names the host\n'
+# The marker's path, spelled independently of the script under test.
+FIXTURE_PROFILE_MARKER="$HOME/.config/claude-host-profile"
+OVERRIDE_PROFILE_MARKER="$TMPROOT/override-profile-marker"
+MARKER_HOST='markerhost'
+OVERRIDE_MARKER_HOST='overridehost'
+STUB_SHORT_HOST='stub-short-host'
+# Fails the host-name rule: it would climb out of the store directory.
+UNUSABLE_MARKER_LINE='../climb'
+
+write_stub hostname <<STUB
+[ "\$1" = '-s' ] || exit 9
+printf '%s\n' '$STUB_SHORT_HOST'
+STUB
+
+# host_name_scene REPO MARKER_LINE — an apply scene whose topic.md differs from the store's, so the run
+# writes one conflict copy named for the host, and whose profile marker holds MARKER_LINE.
+host_name_scene() {
+    apply_scene "$1"
+    write_file "$memory_dir/topic.md" 'replaced body'
+    write_file "$store_dir/topic.md" 'store body'
+    write_file "$FIXTURE_PROFILE_MARKER" "$2"
+}
+
+# conflict_copy_names — the name of every conflict copy in the scene's store directory, sorted, each
+# followed by a space; so one name here also says no copy carries another host's name.
+conflict_copy_names() { find "$store_dir" -name '*.conflict-*' -printf '%f\n' | LC_ALL=C sort | tr '\n' ' '; }
+
+host_name_scene marker-names-host "$MARKER_HOST"
+FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: the profile marker names the host" \
+    "$RC|$(conflict_copy_names)|$(body_of "$store_dir/topic.conflict-$MARKER_HOST.md")" \
+    "0|topic.conflict-$MARKER_HOST.md |replaced body"
+
+# A pin: a marker that outranked the variable would name the copy markerhost.
+host_name_scene variable-outranks-marker "$MARKER_HOST"
+PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: CLAUDE_MEMORY_HOST outranks the marker" \
+    "$RC|$(conflict_copy_names)" "0|topic.conflict-$FIXTURE_HOST.md "
+
+# A pin: a marker line taken without the host-name rule reaches the last check, which stops the run, exit 2.
+host_name_scene unusable-marker-line "$UNUSABLE_MARKER_LINE"
+FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: an unusable marker line falls back to hostname -s" \
+    "$RC|$OUT|$(conflict_copy_names)" "0|$(linked_line 0 0 1)|topic.conflict-$STUB_SHORT_HOST.md "
+
+# A pin: a read with no readability test before it puts the shell's "Permission denied" on stderr.
+# Mode 000 does not stop root, so under root (act runs so) the precondition below fails and the table
+# is could-not-run, exit 2, as the root check at the top already makes it. LC_ALL=C, here and in the
+# next row: the needle is the shell's English message, and a translated one would pass the mutant.
+host_name_scene unreadable-marker "$MARKER_HOST"
+chmod 000 "$FIXTURE_PROFILE_MARKER" || fatal "could not make the profile marker unreadable"
+[[ ! -r "$FIXTURE_PROFILE_MARKER" ]] \
+    || fatal "the profile marker is still readable at mode 000: the unreadable-marker row would assert nothing"
+LC_ALL=C FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: an unreadable marker falls back to hostname -s, silently" \
+    "$RC|$(contains "$OUT" 'Permission denied')|$(conflict_copy_names)" "0|no|topic.conflict-$STUB_SHORT_HOST.md "
+
+# A pin: it catches the marker test losing its -f half. A directory passes -r, and the read on it puts
+# the shell's "Is a directory" on stderr before the fall-back, which names the copy the same either way.
+host_name_scene marker-is-directory "$MARKER_HOST"
+rm -f "$FIXTURE_PROFILE_MARKER" || fatal "could not remove the profile marker file"
+mkdir "$FIXTURE_PROFILE_MARKER" || fatal "could not put a directory at the profile marker's path"
+LC_ALL=C FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: a marker that is a directory falls back to hostname -s, silently" \
+    "$RC|$(contains "$OUT" 'Is a directory')|$(conflict_copy_names)" "0|no|topic.conflict-$STUB_SHORT_HOST.md "
+
+host_name_scene marker-override-path "$MARKER_HOST"
+write_file "$OVERRIDE_PROFILE_MARKER" "$OVERRIDE_MARKER_HOST"
+CLAUDE_SETTINGS_RENDER_MARKER="$OVERRIDE_PROFILE_MARKER" FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: the marker override path is honoured" \
+    "$RC|$(conflict_copy_names)" "0|topic.conflict-$OVERRIDE_MARKER_HOST.md "
+
 printf 'apply: what it needs\n'
 apply_scene default-host
 write_file "$memory_dir/topic.md" 'replaced body'
@@ -2455,8 +2539,201 @@ for needed_tool in flock cmp; do
 done
 check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
 
+# ---------------------------------------------------------------------------------------------
+# A stray directory: a checkout_globs match whose .git file names a git directory that does not
+# exist, as a copy of a submodule's working tree left behind does. git refuses it (exit 128), so it is
+# no checkout: it is skipped with one line on stderr, and nothing else about the run changes. Any
+# other failure to read a candidate still stops the run. The gitfile line is the one measured on a
+# server, where this directory stopped every key on the host.
+# ---------------------------------------------------------------------------------------------
+
+printf 'stray: a directory whose .git names a missing git directory\n'
+STRAY_DIR_NAME='pg_job'
+STRAY_DIR="$HOME/code/$STRAY_DIR_NAME"
+# The gitfile line measured on the server, and the path it names from $STRAY_DIR.
+STRAY_GITFILE_LINE="gitdir: ../../.git/modules/src/$STRAY_DIR_NAME"
+STRAY_GIT_DIR="$HOME/.git/modules/src/$STRAY_DIR_NAME"
+STRAY_NOTE_TEXT='is not a checkout: its .git names a git directory that does not exist; skipped'
+STRAY_NOTE="claude-memory-link: $STRAY_DIR $STRAY_NOTE_TEXT"
+SUT_STDERR_FILE="$TMPROOT/sut-stderr"
+
+# run_sut_stderr_apart ARGS… — run_sut, with only the script's stdout in $OUT and its stderr in
+# $SUT_STDERR, for a row about which stream a line goes to.
+run_sut_stderr_apart() {
+    # shellcheck disable=SC2016  # $0 and $@ are the inner shell's: the stderr file, then the script and its arguments
+    SUT_RUNNER_PREFIX=(sh -c 'exec "$@" 2>"$0"' "$SUT_STDERR_FILE")
+    run_sut "$@"
+    SUT_RUNNER_PREFIX=()
+    SUT_STDERR=$(< "$SUT_STDERR_FILE")
+}
+
+# add_stray_directory — $STRAY_DIR beside the scene's checkout, its .git the measured gitfile line.
+add_stray_directory() {
+    mkdir -p "$STRAY_DIR" || fatal "could not create the stray directory"
+    printf '%s\n' "$STRAY_GITFILE_LINE" > "$STRAY_DIR/.git" || fatal "could not write the stray gitfile"
+    [[ ! -e "$STRAY_GIT_DIR" ]] \
+        || fatal "the stray gitfile names a git directory that exists: the stray rows would assert nothing"
+}
+
+# The same run without the stray directory is the expected stdout and exit, so the row says the
+# stray changes neither, and adds exactly the one line on stderr.
+apply_scene beside-stray-check
+run_sut_stderr_apart --check
+check_rc_without_stray=$RC
+check_out_without_stray=$OUT
+add_stray_directory
+run_sut_stderr_apart --check
+check "stray: a directory whose .git names a missing git directory is skipped: --check still answers" \
+    "$RC|$OUT|$SUT_STDERR" "$check_rc_without_stray|$check_out_without_stray|$STRAY_NOTE"
+
+apply_scene beside-stray-apply
+add_stray_directory
+run_sut_stderr_apart --apply
+check "stray: ...and --apply still links the real checkout beside it" \
+    "$RC|$OUT|$(memory_kind "$memory_dir")|$SUT_STDERR" "0|$(linked_line 0 0 0)|link to $store_dir|$STRAY_NOTE"
+
+# A pin: it passes before the change and after. It catches a skip of every gitfile, or of every one
+# shaped like the stray's: its gitfile is the stray's line, and only its git directory exists.
+reset_scene
+mkdir -p "$(dirname "$STRAY_GIT_DIR")"
+git init -q --separate-git-dir="$STRAY_GIT_DIR" "$STRAY_DIR" || fatal "could not make the present submodule"
+printf '%s\n' "$STRAY_GITFILE_LINE" > "$STRAY_DIR/.git"
+git --git-dir="$STRAY_DIR/.git" remote add origin "git@github.com:$FIXTURE_OWNER/$STRAY_DIR_NAME.git" \
+    || fatal "git does not accept the present submodule's gitfile"
+present_key=$(key_of "$STRAY_DIR")
+present_git_dir_key=$(key_of "$STRAY_GIT_DIR")
+real_memory "$present_key"
+real_memory "$present_git_dir_key"
+run_sut_stderr_apart --list
+check "stray: a submodule whose git directory exists is still a candidate" \
+    "$RC|$(row_of_key "$present_key" | cut -f2,5)|$(row_of_key "$present_git_dir_key" | cut -f2,5)|$SUT_STDERR" \
+    "0|REAL-DIR$TAB$STRAY_DIR|REAL-DIR$TAB$STRAY_GIT_DIR|"
+
+# A pin: it keeps the skip narrow. tenant-route's exit 2 is the status the stray directory drew on the
+# server (git-error); for a real checkout, HEAD intact and an origin set, it still stops the run. A
+# fix that turned any tenant-route exit 2 into a skip would fail this row. The refusal row above
+# uses exit 3, so it would not catch that fix.
+reset_scene
+make_checkout code/route-git-error-repo "git@github.com:$FIXTURE_OWNER/route-git-error-repo.git"
+run_sut --check
+check "stray: a checkout git cannot answer for is still exit 2" \
+    "$RC|$(contains "$OUT" "tenant-route could not answer for $HOME/code/route-git-error-repo (exit 2)")" "2|yes"
+
+# set_checkout_globs JSON_ARRAY — replace the table's checkout_globs.
+set_checkout_globs() {
+    jq --argjson checkout_globs "$1" '.checkout_globs = $checkout_globs' "$CONFIG" > "$CONFIG.new" \
+        || fatal "could not set checkout_globs"
+    mv "$CONFIG.new" "$CONFIG" || fatal "could not replace the table"
+}
+
+# Two globs that both match the stray: the note names it once a run, as a candidate is asked once.
+reset_scene
+set_checkout_globs '["code/*", "code/pg_*"]'
+add_stray_directory
+run_sut_stderr_apart --check
+check "stray: a stray reached by two globs is named once" "$RC|$SUT_STDERR" "0|$STRAY_NOTE"
+
+# git drops every trailing CR and LF of a gitfile before it resolves the path; $(<) drops only the
+# LFs. A gitfile git did not write can end in CRLF, and git accepts it (the fatal below says so).
+CRLF_GIT_DIR="$HOME/separate-git-dirs/crlf-repo.git"
+reset_scene
+mkdir -p "$(dirname "$CRLF_GIT_DIR")" || fatal "could not create the parent of crlf-repo's git dir"
+git init -q --separate-git-dir="$CRLF_GIT_DIR" "$HOME/code/crlf-repo" || fatal "could not make crlf-repo"
+printf 'gitdir: %s\r\n' "$CRLF_GIT_DIR" > "$HOME/code/crlf-repo/.git"
+git --git-dir="$HOME/code/crlf-repo/.git" remote add origin "git@github.com:$FIXTURE_OWNER/crlf-repo.git" \
+    || fatal "git does not accept the CRLF gitfile"
+key=$(key_of "$HOME/code/crlf-repo")
+real_memory "$key"
+run_sut_stderr_apart --list
+check "stray: a gitfile with CRLF line ends whose target exists is still a candidate" \
+    "$RC|$(row_of_key "$key")|$SUT_STDERR" \
+    "0|$(row_line "$key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/crlf-repo" "$HOME/code/crlf-repo")|"
+
+# What the unchanged script says of a candidate whose git dir git cannot read: the origin read fails.
+STRAY_UNREADABLE_LINE="claude-memory-link: git could not read the origin of $STRAY_DIR (exit 128)"
+
+# A pin: it passes before this change and after. It keeps the skip to a regular .git file: a skip
+# that followed the symlink to the stray's gitfile would exit 0 here, with the note.
+reset_scene
+mkdir -p "$STRAY_DIR" || fatal "could not create the stray directory"
+printf '%s\n' "$STRAY_GITFILE_LINE" > "$HOME/linked-gitfile" || fatal "could not write the linked gitfile"
+ln -s "$HOME/linked-gitfile" "$STRAY_DIR/.git" || fatal "could not link the stray's .git"
+[[ ! -e "$STRAY_GIT_DIR" ]] || fatal "the linked gitfile names a git directory that exists: the row would assert nothing"
+run_sut_stderr_apart --check
+check "stray: a .git that is a symlink to a dangling gitfile is not skipped" \
+    "$RC|$OUT|$SUT_STDERR" "2||$STRAY_UNREADABLE_LINE"
+
+# A pin: it passes before this change and after. It keeps the skip to a path with nothing at it,
+# each scene for one change: an empty directory there catches a skip of whatever is no git
+# directory, and a dangling symlink there (an entry, naming nothing) catches `! -e` in place of
+# path_is_free.
+not_a_git_dir_results=''
+for target_kind in empty-directory dangling-symlink; do
+    reset_scene
+    mkdir -p "$STRAY_DIR" "$(dirname "$STRAY_GIT_DIR")" || fatal "could not create the stray directory"
+    printf '%s\n' "$STRAY_GITFILE_LINE" > "$STRAY_DIR/.git" || fatal "could not write the stray gitfile"
+    case "$target_kind" in
+        empty-directory)  mkdir "$STRAY_GIT_DIR" ;;
+        dangling-symlink) ln -s "$HOME/no-such-git-dir" "$STRAY_GIT_DIR" ;;
+    esac || fatal "could not make the $target_kind target"
+    run_sut_stderr_apart --check
+    not_a_git_dir_results+="$target_kind $RC|$OUT|$SUT_STDERR;"
+done
+check "stray: a gitfile whose target exists but is not a git directory is not skipped" \
+    "$not_a_git_dir_results" \
+    "empty-directory 2||$STRAY_UNREADABLE_LINE;dangling-symlink 2||$STRAY_UNREADABLE_LINE;"
+
+# A pin: it passes before this change and after. It catches a later change that marks a stray's key
+# claimed: the memory under it would then vanish from every report.
+reset_scene
+add_stray_directory
+stray_key=$(key_of "$STRAY_DIR")
+real_memory "$stray_key" MEMORY.md
+run_sut_stderr_apart --check
+check "stray: a stray whose own key holds memory shows as unmapped" \
+    "$RC|$OUT|$SUT_STDERR" \
+    "0|$(row_line "$stray_key" UNMAPPED '' '' '')
+claude-memory-link: 0 linked, 0 to fix, 1 unmapped, 0 without a store|$STRAY_NOTE"
+
+# A real checkout whose git directory sits behind a directory this user cannot search: -e answers
+# "nothing there" for a git directory that is there, so its absence is not known and the checkout is
+# not skipped. It stays exit 2, as it was before the skip existed (final review, I2). Mode 000 does not
+# stop root, so under root (act runs so) the precondition below fails and the table is could-not-run,
+# exit 2, as the root check at the top already makes it.
+LOCKED_PARENT="$HOME/locked-git-dirs"
+LOCKED_GIT_DIR="$LOCKED_PARENT/locked-repo.git"
+LOCKED_CHECKOUT="$HOME/code/locked-repo"
+reset_scene
+mkdir -p "$LOCKED_PARENT" || fatal "could not create the parent of locked-repo's git dir"
+git init -q --separate-git-dir="$LOCKED_GIT_DIR" "$LOCKED_CHECKOUT" || fatal "could not make locked-repo"
+git -C "$LOCKED_CHECKOUT" remote add origin "git@github.com:$FIXTURE_OWNER/locked-repo.git" \
+    || fatal "could not add an origin to locked-repo"
+chmod 000 "$LOCKED_PARENT" || fatal "could not make the parent of locked-repo's git dir unsearchable"
+[[ ! -x "$LOCKED_PARENT" && ! -e "$LOCKED_GIT_DIR" ]] \
+    || fatal "locked-repo's git dir can still be examined at mode 000: the locked-parent row would assert nothing"
+run_sut_stderr_apart --check
+chmod 755 "$LOCKED_PARENT"
+check "stray: a gitfile whose target cannot be examined is not skipped" \
+    "$RC|$OUT|$SUT_STDERR" "2||claude-memory-link: git could not read the origin of $LOCKED_CHECKOUT (exit 128)"
+
+# A pin: it passes before this change and after. The skip is for a checkout_globs match only: a
+# plain_dirs entry whose .git names a missing git directory is still exit 2, as docs/CLAUDE_SETUP.md
+# and the spec's M11 say. It catches the skip applied inside add_candidate, which a plain_dirs entry
+# and every listed submodule pass through too.
+PLAIN_STRAY_DIR="$HOME/notes"
+PLAIN_STRAY_GIT_DIR="$HOME/.git/modules/notes"
+reset_scene
+set_plain_dirs '["notes"]'
+mkdir -p "$PLAIN_STRAY_DIR" || fatal "could not create the plain stray directory"
+printf 'gitdir: %s\n' "$PLAIN_STRAY_GIT_DIR" > "$PLAIN_STRAY_DIR/.git" || fatal "could not write the plain stray's gitfile"
+[[ ! -e "$PLAIN_STRAY_GIT_DIR" ]] \
+    || fatal "the plain stray's gitfile names a git directory that exists: the row would assert nothing"
+run_sut_stderr_apart --check
+check "stray: a plain_dirs entry whose .git names a missing git directory is still exit 2" \
+    "$RC|$OUT|$SUT_STDERR" "2||claude-memory-link: git could not read the origin of $PLAIN_STRAY_DIR (exit 128)"
+
 printf '\n'
-EXPECTED_ROWS=206
+EXPECTED_ROWS=223
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
