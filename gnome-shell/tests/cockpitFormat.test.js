@@ -70,8 +70,12 @@ test('cockpitFormat: eight rows draw six and say +2 more; six or fewer say nothi
 
 test('cockpitFormat: idle text is one unit rounded down; * only from process age; unknown is a dash', () => {
     assertEqual(idleTextOf({idleSeconds: 59}), '59s');
+    assertEqual(idleTextOf({idleSeconds: 60}), '1m');
     assertEqual(idleTextOf({idleSeconds: 61}), '1m');
     assertEqual(idleTextOf({idleSeconds: 3599}), '59m');
+    assertEqual(idleTextOf({idleSeconds: 3600}), '1h');
+    assertEqual(idleTextOf({idleSeconds: 86399}), '23h');
+    assertEqual(idleTextOf({idleSeconds: 86400}), '1d');
     assertEqual(idleTextOf({idleSeconds: 2 * 3600 + 1800}), '2h');
     assertEqual(idleTextOf({idleSeconds: 3 * 86400 + 5}), '3d');
     assertEqual(idleTextOf({idleSeconds: 600, idleFromProcessAge: true}), '10m*');
@@ -96,6 +100,10 @@ test('cockpitFormat: memory text and fraction; the largest row is 1, unknown is 
     const mixed = cockpitFormat.sessionRows({...SESSIONS, rows: [
         {...BASE_ROW, memoryBytes: null}, {...BASE_ROW, memoryBytes: 340 * 1024 * 1024}]}).rows;
     assertEqual(mixed.map(row => [row.memoryText, row.memoryFraction]), [['—', 0], ['340M', 1]]);
+    const memoryTextOf = memoryBytes =>
+        cockpitFormat.sessionRows({...SESSIONS, rows: [{...BASE_ROW, memoryBytes}]}).rows[0].memoryText;
+    assertEqual(memoryTextOf(1024 ** 3), '1.0G');
+    assertEqual(memoryTextOf(1024 ** 3 - 1), '1024M');
     const allZero = cockpitFormat.sessionRows({...SESSIONS, rows: [{...BASE_ROW, memoryBytes: 0}]}).rows;
     assertEqual(allZero[0].memoryFraction, 0);
 });
