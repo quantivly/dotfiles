@@ -2609,8 +2609,84 @@ run_sut --check
 check "stray: a checkout git cannot answer for is still exit 2" \
     "$RC|$(contains "$OUT" "tenant-route could not answer for $HOME/code/route-git-error-repo (exit 2)")" "2|yes"
 
+# set_checkout_globs JSON_ARRAY — replace the table's checkout_globs.
+set_checkout_globs() {
+    jq --argjson checkout_globs "$1" '.checkout_globs = $checkout_globs' "$CONFIG" > "$CONFIG.new" \
+        || fatal "could not set checkout_globs"
+    mv "$CONFIG.new" "$CONFIG" || fatal "could not replace the table"
+}
+
+# Two globs that both match the stray: the note names it once a run, as a candidate is asked once.
+reset_scene
+set_checkout_globs '["code/*", "code/pg_*"]'
+add_stray_directory
+run_sut_stderr_apart --check
+check "stray: a stray reached by two globs is named once" "$RC|$SUT_STDERR" "0|$STRAY_NOTE"
+
+# git drops every trailing CR and LF of a gitfile before it resolves the path; $(<) drops only the
+# LFs. A gitfile git did not write can end in CRLF, and git accepts it (the fatal below says so).
+CRLF_GIT_DIR="$HOME/separate-git-dirs/crlf-repo.git"
+reset_scene
+mkdir -p "$(dirname "$CRLF_GIT_DIR")" || fatal "could not create the parent of crlf-repo's git dir"
+git init -q --separate-git-dir="$CRLF_GIT_DIR" "$HOME/code/crlf-repo" || fatal "could not make crlf-repo"
+printf 'gitdir: %s\r\n' "$CRLF_GIT_DIR" > "$HOME/code/crlf-repo/.git"
+git --git-dir="$HOME/code/crlf-repo/.git" remote add origin "git@github.com:$FIXTURE_OWNER/crlf-repo.git" \
+    || fatal "git does not accept the CRLF gitfile"
+key=$(key_of "$HOME/code/crlf-repo")
+real_memory "$key"
+run_sut_stderr_apart --list
+check "stray: a gitfile with CRLF line ends whose target exists is still a candidate" \
+    "$RC|$(row_of_key "$key")|$SUT_STDERR" \
+    "0|$(row_line "$key" REAL-DIR "$ALPHA_STORE" "repos/$FIXTURE_OWNER/crlf-repo" "$HOME/code/crlf-repo")|"
+
+# What the unchanged script says of a candidate whose git dir git cannot read: the origin read fails.
+STRAY_UNREADABLE_LINE="claude-memory-link: git could not read the origin of $STRAY_DIR (exit 128)"
+
+# A pin: it passes before this change and after. It keeps the skip to a regular .git file: a skip
+# that followed the symlink to the stray's gitfile would exit 0 here, with the note.
+reset_scene
+mkdir -p "$STRAY_DIR" || fatal "could not create the stray directory"
+printf '%s\n' "$STRAY_GITFILE_LINE" > "$HOME/linked-gitfile" || fatal "could not write the linked gitfile"
+ln -s "$HOME/linked-gitfile" "$STRAY_DIR/.git" || fatal "could not link the stray's .git"
+[[ ! -e "$STRAY_GIT_DIR" ]] || fatal "the linked gitfile names a git directory that exists: the row would assert nothing"
+run_sut_stderr_apart --check
+check "stray: a .git that is a symlink to a dangling gitfile is not skipped" \
+    "$RC|$OUT|$SUT_STDERR" "2||$STRAY_UNREADABLE_LINE"
+
+# A pin: it passes before this change and after. It keeps the skip to a path with nothing at it,
+# each scene for one change: an empty directory there catches a skip of whatever is no git
+# directory, and a dangling symlink there (an entry, naming nothing) catches `! -e` in place of
+# path_is_free.
+not_a_git_dir_results=''
+for target_kind in empty-directory dangling-symlink; do
+    reset_scene
+    mkdir -p "$STRAY_DIR" "$(dirname "$STRAY_GIT_DIR")" || fatal "could not create the stray directory"
+    printf '%s\n' "$STRAY_GITFILE_LINE" > "$STRAY_DIR/.git" || fatal "could not write the stray gitfile"
+    case "$target_kind" in
+        empty-directory)  mkdir "$STRAY_GIT_DIR" ;;
+        dangling-symlink) ln -s "$HOME/no-such-git-dir" "$STRAY_GIT_DIR" ;;
+    esac || fatal "could not make the $target_kind target"
+    run_sut_stderr_apart --check
+    not_a_git_dir_results+="$target_kind $RC|$OUT|$SUT_STDERR;"
+done
+check "stray: a gitfile whose target exists but is not a git directory is not skipped" \
+    "$not_a_git_dir_results" \
+    "empty-directory 2||$STRAY_UNREADABLE_LINE;dangling-symlink 2||$STRAY_UNREADABLE_LINE;"
+
+# A pin: it passes before this change and after. It catches a later change that marks a stray's key
+# claimed: the memory under it would then vanish from every report.
+reset_scene
+add_stray_directory
+stray_key=$(key_of "$STRAY_DIR")
+real_memory "$stray_key" MEMORY.md
+run_sut_stderr_apart --check
+check "stray: a stray whose own key holds memory shows as unmapped" \
+    "$RC|$OUT|$SUT_STDERR" \
+    "0|$(row_line "$stray_key" UNMAPPED '' '' '')
+claude-memory-link: 0 linked, 0 to fix, 1 unmapped, 0 without a store|$STRAY_NOTE"
+
 printf '\n'
-EXPECTED_ROWS=215
+EXPECTED_ROWS=220
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

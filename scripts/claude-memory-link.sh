@@ -42,15 +42,17 @@
 #      and neither is a match whose .git file names a git directory that does not exist (below).
 #   2. every plain_dirs entry that exists on this host.
 #
-# A .git FILE is resolved through its gitdir: line, which may be relative to the checkout:
+# A .git FILE is resolved through its gitdir: line, which may be relative to the checkout, and which
+# loses every trailing CR and LF first, as git reads it:
 #   .../.git/worktrees/<n>                    a worktree of an ordinary repo: skipped, since Claude
 #                                             Code keys it by the main checkout
 #   <super>/.git/modules/<name>/worktrees/<n> a worktree of a submodule: skipped likewise
 #   any other path that does not exist        no checkout, git says so too (exit 128): a stray copy of
 #                                             a working tree, which would otherwise stop every key on
 #                                             the host. A checkout_globs match is skipped with one
-#                                             line on stderr; anywhere else it is still exit 2. Only
-#                                             a regular .git file, and only a path with nothing at it
+#                                             line on stderr, once a run however many globs reach
+#                                             it; anywhere else it is still exit 2. Only a regular
+#                                             .git file, and only a path with nothing at it
 #   <super>/.git/modules/<name>               a submodule (<name> may hold /): a second key, from
 #                                             that git dir, where sessions in a worktree of the
 #                                             submodule key; both keys share one store directory
@@ -226,6 +228,8 @@ REPOS_DIR_NAME='repos'
 DIRS_DIR_NAME='dirs'
 HOME_SLUG='home'
 GITDIR_LINE_PREFIX='gitdir: '
+# What git drops from the end of a .git file before it reads the path there: every CR and LF.
+GITFILE_LINE_END_CHARS=$'\r\n'
 # Said after the directory's path, of a checkout_globs match whose .git file names a missing git dir.
 MISSING_GIT_DIR_NOTE='is not a checkout: its .git names a git directory that does not exist; skipped'
 SUBMODULE_GIT_DIR_INFIX='/.git/modules/'
@@ -260,6 +264,7 @@ PLAIN_DIRS=()
 # The candidates, as parallel arrays in discovery order, and who claimed each key.
 declare -A SOURCE_DIR_OF_KEY=()
 declare -A STORE_OF_KEY=()
+declare -A NOTED_STRAY_DIRS=()   # each skipped stray directory already named on stderr this run
 CANDIDATE_KEYS=()
 CANDIDATE_STORES=()
 CANDIDATE_RELATIVE_DIRS=()
@@ -488,7 +493,8 @@ store_dir_of_candidate() {
 }
 
 # classify_directory DIR — set CHECKOUT_KIND and SUBMODULE_GIT_DIR from DIR's .git entry.
-# missing-git-dir is a regular .git file whose gitdir: line names nothing, a worktree's aside.
+# missing-git-dir is a regular .git file whose gitdir: line names nothing, except a worktree's, which
+# stays worktree.
 classify_directory() {
     local dir=$1 dot_git="$1/.git" gitfile_text git_dir
     CHECKOUT_KIND=plain
@@ -500,6 +506,8 @@ classify_directory() {
     fi
     # The whole file, not its first line: git reads it whole, and a path may hold a newline.
     gitfile_text=$(< "$dot_git") || die "could not read $dot_git"
+    # $(<) drops only the trailing LFs; a CR left behind would end the path and name nothing.
+    while [[ "$gitfile_text" == *["$GITFILE_LINE_END_CHARS"] ]]; do gitfile_text=${gitfile_text%?}; done
     [[ "$gitfile_text" == "$GITDIR_LINE_PREFIX"* ]] || die "$dot_git has no gitdir: line"
     git_dir=${gitfile_text#"$GITDIR_LINE_PREFIX"}
     [[ "$git_dir" == /* ]] || git_dir="$dir/$git_dir"
@@ -564,7 +572,11 @@ add_checkout_and_submodules() {
     dir=$(physical_path_of "$1") || exit "$EXIT_COULD_NOT_RUN"
     classify_directory "$dir"
     if [[ "$CHECKOUT_KIND" == missing-git-dir ]]; then
-        printf '%s: %s %s\n' "$SCRIPT_NAME" "$dir" "$MISSING_GIT_DIR_NOTE" >&2
+        # Two globs, or a glob and a symlink, can reach one stray: it is named once a run.
+        if [[ -z "${NOTED_STRAY_DIRS[$dir]:-}" ]]; then
+            NOTED_STRAY_DIRS[$dir]=1
+            printf '%s: %s %s\n' "$SCRIPT_NAME" "$dir" "$MISSING_GIT_DIR_NOTE" >&2
+        fi
         return 0
     fi
     add_candidate "$dir"
