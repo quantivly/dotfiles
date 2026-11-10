@@ -296,7 +296,7 @@ path on one machine, so memory neither survives a new host nor follows a repo be
 `scripts/claude-memory-link.sh` maps each project key to a directory in a git-backed store and makes
 its `memory` entry a symlink there. It is the link half of D7 in the
 [shared-configuration design](superpowers/specs/2026-11-04-shared-claude-config-design.md), as
-amended (M1-M8). The link itself commits and pushes nothing: `scripts/claude-memory-sync.sh` does
+amended (M1-M11). The link itself commits and pushes nothing: `scripts/claude-memory-sync.sh` does
 that, on a timer once a host arms it ([Syncing a store](#syncing-a-store-do-892), below).
 
 **The layout.** A store is a git checkout at `~/.local/share/claude-memory/<store>`, keyed by repo
@@ -322,7 +322,17 @@ The slug is the path relative to `$HOME`, `/` becoming `-`, lowercased, and `hom
 ```
 
 `stale_after_minutes` is optional and read by the sync alone: how long a store may go without a
-successful sync before the doctor calls it stale, per host (`hostname -s`), else `default`, else 60.
+successful sync before the doctor calls it stale, per host by the host's name (below), else `default`,
+else 60.
+
+**The host's name**, which both scripts put into the store (a conflict copy's name; the sync's commit
+messages and its `stale_after_minutes` lookup), is `CLAUDE_MEMORY_HOST` when set and not empty, else
+the first line of the profile marker (`~/.config/claude-host-profile`, or
+`CLAUDE_SETTINGS_RENDER_MARKER`) when the marker is a regular, readable file and that line is a usable
+name, else `hostname -s`. A host with no marker, or one whose marker is its hostname, is named as it
+always was; an EC2 host with a marker is named by its profile rather than its `ip-…` hostname. A
+marker that is unreadable, a directory or holds an unusable line falls back to `hostname -s` and puts
+nothing on stderr.
 
 **A host without the table is not touched**: one line and exit 0, before the script even looks for
 jq. A store in the table that is not checked out on this host is left alone too. `./install` runs
@@ -337,6 +347,21 @@ A candidate's store is the one whose `tenants` holds the tenant `scripts/tenant-
 a tenant no store lists is exit 2, never a default. A worktree has no key of its own, since Claude
 Code keys it by the main checkout. A submodule has two, its own path and its git dir, both linked to
 one store directory. The script's header has the full rules.
+
+**A stray directory is skipped, not a refusal** (M11). A `checkout_globs` match whose `.git` is a
+regular file whose `gitdir:` line names a path with nothing at it, typically an old copy of a
+submodule's working tree, is no checkout: git refuses it too (exit 128). It is not a candidate, and
+every verb names it once on stderr, however many globs reach it:
+
+    claude-memory-link: <dir> is not a checkout: its .git names a git directory that does not exist; skipped
+
+The line is read as git reads it, every trailing CR and LF dropped first. Exit status, the summary line
+and every other key are as they would be without it, and a key of its own that holds memory shows as
+`UNMAPPED`. Only that state is skipped: a `.git` symlink, a `gitdir:` path with anything at it that is
+no git directory (a dangling symlink included), a `plain_dirs` entry whose gitfile dangles, and every
+other failure to read a candidate are still exit 2.
+So is a populated submodule of a match whose `.git/modules/<name>` is gone, since
+`git submodule foreach` exits 128 there.
 
 **The eight states**, first match wins. A candidate with no `memory` entry and nothing in its store
 directory has no state and no row.
@@ -377,7 +402,7 @@ store to be checked out here. No row of `--check` names them; `--list` does.
 |---|---|
 | 0 | nothing to fix, or no table here. `UNMAPPED` rows alone are exit 0, with their rows printed |
 | 1 | `--check` found a key to fix |
-| 2 | could not run: `HOME` unset, no jq or git, a bad table (a symlink to nothing included), `tenant-route` or git could not answer, a key two stores share, an unreadable projects or key directory, a `memory` entry that is neither a directory nor a symlink; on `--apply` also no flock or cmp, an unusable host name, and any step of a swap or a merge that failed, reported once the other keys have run |
+| 2 | could not run: `HOME` unset, no jq or git, a bad table (a symlink to nothing included), `tenant-route` or git could not answer (a stray directory aside, above), a key two stores share, an unreadable projects or key directory, a `memory` entry that is neither a directory nor a symlink; on `--apply` also no flock or cmp, an unusable host name, and any step of a swap or a merge that failed, reported once the other keys have run |
 | 64 | usage |
 
 **What `--apply` does to a real directory**, in this order, which is the safety argument:
@@ -423,7 +448,7 @@ or it would bring what it points at into a store that is pushed to a remote.
 | a different `MEMORY.md` or `INDEX_*.md` | the lines only the replaced copy has are appended |
 | any other different file | the store's copy keeps its name, whichever is newer, and the replaced copy becomes a conflict copy beside it |
 
-A conflict copy inserts `.conflict-<host>` before the final extension: `x.md` becomes
+A conflict copy inserts `.conflict-<host>`, the host's name (above), before the final extension: `x.md` becomes
 `x.conflict-<host>.md`, and a name with no extension gets it appended. A copy that already holds
 another body is kept and the next is `x.conflict-<host>.2.md`, `.3.md`, and so on; one with the same
 body is that file already, so a resumed merge adds none.
@@ -452,9 +477,9 @@ would do), ⚠ with each row and both remedies when an exit 0 carries `UNMAPPED`
 `no store that these keys map to is checked out here (<n> keys wait for one)` when nothing is linked
 and keys hold memory waiting for a store, and ⚠ with the last stderr line when it could not run.
 `CLAUDE_MEMORY_PROJECTS_DIR`, `CLAUDE_MEMORY_STORES_ROOT`,
-`CLAUDE_MEMORY_CONFIG`, `CLAUDE_MEMORY_STATE_DIR`, `CLAUDE_MEMORY_HOST` and
-`CLAUDE_MEMORY_TENANT_ROUTE` override the paths, the host in a conflict copy's name and the tenant
-lookup.
+`CLAUDE_MEMORY_CONFIG`, `CLAUDE_MEMORY_STATE_DIR`, `CLAUDE_MEMORY_HOST`,
+`CLAUDE_SETTINGS_RENDER_MARKER` and `CLAUDE_MEMORY_TENANT_ROUTE` override the paths, the host's name,
+the profile marker it is read from and the tenant lookup.
 
 ### Syncing a store (DO-892)
 
@@ -618,11 +643,12 @@ An armed timer on a host whose `~/.local/share/claude-memory` has gone is skippe
 `scripts/check-timer-health.sh` reports that as the fault it is: memory stopped travelling.
 
 `CLAUDE_MEMORY_STORES_ROOT`, `CLAUDE_MEMORY_CONFIG`, `CLAUDE_MEMORY_STATE_DIR`, `CLAUDE_MEMORY_HOST`,
-`CLAUDE_MEMORY_GH_ROUTE`, `CLAUDE_MEMORY_LOCK_WAIT_SECONDS`, `CLAUDE_MEMORY_RUN_DEADLINE_SECONDS` and
-`CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS` override the sync's paths, host, route and limits.
+`CLAUDE_SETTINGS_RENDER_MARKER`, `CLAUDE_MEMORY_GH_ROUTE`, `CLAUDE_MEMORY_LOCK_WAIT_SECONDS`,
+`CLAUDE_MEMORY_RUN_DEADLINE_SECONDS` and `CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS` override the sync's
+paths, host name (as the link script reads it), route and limits.
 
-State tables: `scripts/test-claude-memory-link.sh` (206 rows) and `scripts/test-claude-memory-sync.sh`
-(111 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
+State tables: `scripts/test-claude-memory-link.sh` (221 rows) and `scripts/test-claude-memory-sync.sh`
+(117 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
 sync local bare repositories as remotes and a stub `gh-route` (CI `claude-memory-link-test` and
 `claude-memory-sync-test`). The doctor's rows are section AA of `scripts/test-claude-doctor.sh`, and
 `scripts/test-claude-config-audit.sh` pins that `claude-config-audit.sh` collects a linked `memory`
@@ -635,7 +661,7 @@ herdr-draft, and now the configuration the sections above declare, which is rend
 declared links, plugins, generated skills, memory stores and the absence of stale entries under
 `~/.claude`. It is step 6 of the
 [shared-configuration design](superpowers/specs/2026-11-04-shared-claude-config-design.md), D8 as
-amended (H1 to H10). It was `scripts/dev-sync` until DO-894, and `scripts/dev-sync` stays one release
+amended (H1 to H11). It was `scripts/dev-sync` until DO-894, and `scripts/dev-sync` stays one release
 as a wrapper that supplies `--host dev`. The script's header has the full rules.
 
 **Two forms.** From the laptop, it collects the laptop's facts (its Claude Code and herdr versions,
@@ -795,3 +821,79 @@ repo, the real link checker and redactor; CI `host-sync-test`) and `scripts/test
 `check-links-test`). Before each merge a mutation sweep applies one fault at a time to a copy of the
 script or the table, names the row expected to kill it first, runs it under a timeout that kills its
 process group, and counts a mutant that kills nothing as a finding, never a pass.
+
+### A host's first run (DO-897)
+
+A host joins with one `--apply` from the laptop, once the overlay carries its profile
+(`hosts/<profile>.json`) and the store table's globs reach every checkout it holds memory for. On a
+host with one GitHub account and no clauth, amendments M9 to M11 and H11 of the design are what make
+that one run enough: no tenant gh route is derived there, so the memory sync uses the host's own git
+credential; the memory scripts name the host by its profile; a stray directory among its checkouts is
+skipped; and `claude-doctor`'s Pools section is one note.
+
+**Preflight, read-only, on the host**, for two faults no `--check` row predicts:
+
+- **Every `checkout_globs` match answers git.** `git -C <dir> config --get-regexp '^remote\..*\.url$'`
+  must exit 0 or 1 for each. Any other status makes `scripts/tenant-route` exit 2 for that directory,
+  and the link script then refuses every verb on the host. The one exception is a stray whose `.git`
+  file names a missing git directory, which is skipped and named
+  ([Memory stores](#memory-stores-do-891)); a populated submodule whose `.git/modules/<name>` is gone
+  is not, and stops the host the same way.
+
+  ```bash
+  for dir in ~/<glob>; do   # once per checkout_globs entry
+    [ -e "$dir/.git" ] || continue
+    git -C "$dir" config --get-regexp '^remote\..*\.url$' >/dev/null 2>&1
+    rc=$?; [ "$rc" -le 1 ] || printf '%s %s\n' "$rc" "$dir"
+  done
+  ```
+
+- **The overlay's unconditional link targets are absent or regular files.** Before the overlay's first
+  install, look at each target its `install.conf.yaml` declares without an `if:` (`ls -ld` on the
+  host). Dotbot backs a regular file up and links in its place; a symlink that points elsewhere makes
+  its link step refuse ("Incorrect link") and the install fail, so remove one by hand first.
+
+**1. Write the marker, by hand, on the host** (H11):
+
+```bash
+mkdir -p ~/.config && printf '%s\n' '<profile>' > ~/.config/claude-host-profile
+```
+
+host-sync clones and installs the overlay only on a host with a marker, and the overlay's install,
+finding no marker, writes `hostname -s` as one, which on an EC2 host names no profile.
+
+**2. Run it from the laptop, outside the host's 05:00–05:30 window.** An armed host's daily timer
+fires then (05:00 host-local time, up to 30 minutes later at random), and a run that meets another's
+lock exits 2:
+
+```bash
+scripts/host-sync --host <alias> --apply
+```
+
+Beyond what every run does (Claude Code, herdr, the generated skills), the first run with a marker:
+
+- clones `~/.dotfiles-local`, before the public `./install`;
+- runs both `./install`s. The public one renders `~/.claude/settings.json` and keeps the previous file
+  as `~/.local/state/claude-settings-render/settings.json.before-<stamp>`; dotbot moves a regular file
+  at a declared link's path aside to `<path>.dotbot-backup.<stamp>`;
+- adds the marketplaces and installs the plugins the rendered `settings.json` declares and the host
+  lacks, never enabling or disabling one;
+- clones each memory store that serves the profile's tenants and runs `claude-memory-link.sh --apply`:
+  every real `memory/` directory a served store claims becomes a link into it, and is kept beside the
+  link as `memory.replaced-<stamp>`;
+- enables `claude-memory-sync.timer`, the host being armed;
+- moves stale skills, hooks and agents to `~/.local/state/host-sync/retired/<stamp>/`.
+
+**3. Three reads prove it:**
+
+```bash
+scripts/host-sync --host <alias> --check                            # from the laptop: no ✗, and read every ⚠
+~/.dotfiles/scripts/gh-route ~/.local/share/claude-memory/<store>   # on the host: "state" is "none" with one GitHub account
+~/.dotfiles/scripts/claude-memory-sync.sh --status                  # on the host, after the first tick: each store's last sync
+```
+
+`none` from `gh-route` means the sync uses the host's own git credential (M9). `matched`, with a
+token file, means at least one gh config dir the tables route to exists on the host (a tenant's, or
+the team's `~/.config/gh-quantivly`), which makes it a multi-account host: every route is then
+derived, the sync reads the token file the answer names (M7), and it records `skipped-no-token` for as
+long as that file is missing.

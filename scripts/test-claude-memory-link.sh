@@ -2479,6 +2479,15 @@ FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
 check "host name: an unreadable marker falls back to hostname -s, silently" \
     "$RC|$(contains "$OUT" 'Permission denied')|$(conflict_copy_names)" "0|no|topic.conflict-$STUB_SHORT_HOST.md "
 
+# A pin: it catches the marker test losing its -f half. A directory passes -r, and the read on it puts
+# the shell's "Is a directory" on stderr before the fall-back, which names the copy the same either way.
+host_name_scene marker-is-directory "$MARKER_HOST"
+rm -f "$FIXTURE_PROFILE_MARKER" || fatal "could not remove the profile marker file"
+mkdir "$FIXTURE_PROFILE_MARKER" || fatal "could not put a directory at the profile marker's path"
+FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
+check "host name: a marker that is a directory falls back to hostname -s, silently" \
+    "$RC|$(contains "$OUT" 'Is a directory')|$(conflict_copy_names)" "0|no|topic.conflict-$STUB_SHORT_HOST.md "
+
 host_name_scene marker-override-path "$MARKER_HOST"
 write_file "$OVERRIDE_PROFILE_MARKER" "$OVERRIDE_MARKER_HOST"
 CLAUDE_SETTINGS_RENDER_MARKER="$OVERRIDE_PROFILE_MARKER" FIXTURE_HOST='' PATH="$STUB_BIN:$PATH" run_sut --apply
@@ -2686,7 +2695,7 @@ check "stray: a stray whose own key holds memory shows as unmapped" \
 claude-memory-link: 0 linked, 0 to fix, 1 unmapped, 0 without a store|$STRAY_NOTE"
 
 printf '\n'
-EXPECTED_ROWS=220
+EXPECTED_ROWS=221
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

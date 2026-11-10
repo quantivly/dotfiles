@@ -501,6 +501,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A host with one GitHub account and no clauth can take the tenant table and the memory stores
+  (DO-897).** Four fixes measured on dev before step 7 of the shared-configuration design brings it
+  level (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, amendments M9-M11 and
+  H11, and the D9 note). `claude-tenants-apply-gh` derives no gh route, path route or default where
+  no value of `CLAUDE_TENANT_GH_DIR` is present (not empty, and an existing directory or a relative
+  path), so `scripts/gh-route` answers `none` for a store there and the memory sync uses the host's
+  own git credential instead of skipping every push for a token file nobody writes; a machine with
+  any of the dirs is unchanged. `claude-doctor`'s Pools section prints one note where clauth is not
+  installed, in place of a ✗ per pool member about a picker that never runs there; the table's read,
+  parse, run and finish checks and the duplicate-account check still run. Both memory scripts name
+  the host from the profile marker when `CLAUDE_MEMORY_HOST` is unset (a regular, readable file whose
+  first line is a usable name), so a conflict copy, a commit and the `stale_after_minutes` lookup say
+  the profile rather than an `ip-…` hostname. `claude-memory-link.sh` skips a `checkout_globs` match
+  whose `.git` file names a missing git directory, naming it once a run on stderr, where before that
+  one directory stopped every verb on the host. `docs/CLAUDE_SETUP.md` gains "A host's first run":
+  the preflight, the marker written by hand, the run and the three reads that prove it. State tables:
+  `scripts/test-gh-routing.sh` 231 to 240 rows, `scripts/test-claude-doctor.sh` 603 to 609,
+  `scripts/test-hspawn.sh` 454 to 456, `scripts/test-claude-memory-link.sh` 206 to 221,
+  `scripts/test-claude-memory-sync.sh` 111 to 117.
+
 - **Two state-table rows failed on Ubuntu 26.04, which CI's `ubuntu-latest` became on 2026-11-08
   and this laptop already runs.** `scripts/test-vpn-failfast.sh`'s system-unit `systemd-analyze`
   row now reads only the lines about its own unit, as the user-unit row already did: verify also

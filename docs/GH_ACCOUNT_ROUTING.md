@@ -149,10 +149,11 @@ registers it with `secrets.register_value`, so `result.md` and the record carry
 `[redacted:minted-token]`. If the file can no longer be read by then, the output tails are withheld.
 
 The resolver copies nothing. It sources `github.sh` for `_gh_route_for`, `zshrc.herdr` (the tenants
-file and `claude-tenants-apply-gh`), then `zshrc.gh-routes`, then applies the tenant-derived routes:
-the shell's own order, assuming the machine's overlay calls `claude-tenants-apply-gh` as this
-laptop's does. A machine whose overlay does not would get tenant-derived routes in the tick and not
-in the shell. That is why the tables and `_GH_TOKEN_CACHE` left `zshrc.company`. A second reader
+file and `claude-tenants-apply-gh`), then `zshrc.gh-routes`, then applies the tenant-derived routes,
+of which there are none on a machine where none of the tenants' gh dirs is present (DO-897: such a
+machine has one GitHub account). That is the shell's own order, assuming the machine's overlay calls
+`claude-tenants-apply-gh` as this laptop's does. A machine whose overlay does not would get
+tenant-derived routes in the tick and not in the shell. That is why the tables and `_GH_TOKEN_CACHE` left `zshrc.company`. A second reader
 would otherwise have to source that whole file, token refresher and hooks included, or keep a copy.
 
 - **`~/.zshrc.local` is the one layer it skips.** That file holds secrets, and an answer that goes

@@ -1868,6 +1868,15 @@ FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
 check "host name: an unreadable marker falls back to hostname -s, silently" \
     "$RC|$(contains "$OUT" 'Permission denied')|$(head_subject "$ALPHA_DIR")" "0|no|$STUB_SHORT_HOST: 1 files"
 
+# A pin: it catches the marker test losing its -f half. A directory passes -r, and the read on it puts
+# the shell's "Is a directory" on stderr before the fall-back, which names the commit the same either way.
+host_name_scene "$MARKER_HOST"
+rm -f "$FIXTURE_PROFILE_MARKER" || fatal "could not remove the profile marker file"
+mkdir "$FIXTURE_PROFILE_MARKER" || fatal "could not put a directory at the profile marker's path"
+FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
+check "host name: a marker that is a directory falls back to hostname -s, silently" \
+    "$RC|$(contains "$OUT" 'Is a directory')|$(head_subject "$ALPHA_DIR")" "0|no|$STUB_SHORT_HOST: 1 files"
+
 host_name_scene "$MARKER_HOST"
 write_file "$OVERRIDE_PROFILE_MARKER" "$OVERRIDE_MARKER_HOST"
 CLAUDE_SETTINGS_RENDER_MARKER="$OVERRIDE_PROFILE_MARKER" FIXTURE_HOST='' PATH="$HOSTNAME_STUB_DIR:$PATH" run_sut --apply
@@ -1936,7 +1945,7 @@ check "install.conf.yaml links the timer" \
     "$(grep -c '^    ~/.config/systemd/user/claude-memory-sync.timer: systemd/claude-memory-sync.timer$' "$DOTFILES/install.conf.yaml")" 1
 
 printf '\n'
-EXPECTED_ROWS=116
+EXPECTED_ROWS=117
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
