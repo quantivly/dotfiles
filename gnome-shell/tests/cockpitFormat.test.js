@@ -154,7 +154,10 @@ test('cockpitFormat: uplink kinds, vpn states and ssh counts', () => {
     assertEqual(vpnOf({isUp: true, interfaceName: null}), 'VPN up');
     assertEqual(vpnOf({isUp: false, interfaceName: null}), 'VPN down');
     assertEqual(vpnOf({isUp: null, interfaceName: null}), 'VPN unknown');
-    assertEqual(cockpitFormat.connectionsRows({...NETWORK, sshMasterCount: 0}, MOUNTS)[2].text, 'no ssh masters');
+    const sshTextOf = (sshMasterCount) => cockpitFormat.connectionsRows({...NETWORK, sshMasterCount}, MOUNTS)[2].text;
+    assertEqual(sshTextOf(0), 'no ssh masters');
+    assertEqual(sshTextOf(1), '1 live ssh master');
+    assertEqual(sshTextOf(null), 'ssh masters unknown');
     assertEqual(cockpitFormat.connectionsRows(NETWORK, {...MOUNTS, rows: []}).length, 3);
 });
 

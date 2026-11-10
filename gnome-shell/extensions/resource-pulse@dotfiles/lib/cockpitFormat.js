@@ -192,11 +192,18 @@ function vpnRow(vpn) {
 /**
  * The ssh control-master row.
  *
- * @param {number} sshMasterCount - Live ssh control masters.
- * @returns {object} A connections row of kind 'ssh'.
+ * @param {number|null} sshMasterCount - Live ssh control masters, or null when unknown.
+ * @returns {object} A connections row of kind 'ssh': 'no ssh masters', '1 live ssh master', '<N> live ssh masters',
+ *   or 'ssh masters unknown'.
  */
 function sshRow(sshMasterCount) {
-    const text = sshMasterCount === 0 ? 'no ssh masters' : `${sshMasterCount} live ssh masters`;
+    let text = `${sshMasterCount} live ssh masters`;
+    if (sshMasterCount === null || sshMasterCount === undefined)
+        text = 'ssh masters unknown';
+    else if (sshMasterCount === 0)
+        text = 'no ssh masters';
+    else if (sshMasterCount === 1)
+        text = '1 live ssh master';
     return {kind: 'ssh', icon: COCKPIT_ICON_NAMES.ssh, text, tooltip: [text], fraction: null};
 }
 
