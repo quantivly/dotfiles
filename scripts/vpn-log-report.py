@@ -369,7 +369,14 @@ def _journalctl_iso(argv, timeout=30):
     # MEASURED: with `-g`, journalctl exits 1 when nothing matches, printing only
     # `-- No entries --`. That is an ANSWER -- zero events -- not a failure to
     # ask, and treating it as one made every quiet window read "NOT CHECKED".
-    if r.returncode == 1 and r.stdout.strip() == NO_ENTRIES_MARKER:
+    # MEASURED 2026-11-10 (systemd 259): when the window spans more than one boot
+    # the same no-match answer carries one `-- Boot <id> --` line per boot BEFORE
+    # the marker, so stdout is separators all the way down and never EQUAL to the
+    # marker. Comparing the whole of stdout to it made the first quiet week after
+    # the 6.x fix read NOT CHECKED the moment the window crossed a reboot.
+    stdout_lines = [line for line in r.stdout.splitlines() if line.strip()]
+    only_separators = bool(stdout_lines) and all(line.startswith('--') for line in stdout_lines)
+    if r.returncode == 1 and only_separators and NO_ENTRIES_MARKER in stdout_lines:
         return []
     if r.returncode != 0:
         return None
