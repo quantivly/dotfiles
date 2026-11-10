@@ -1,0 +1,1228 @@
+// The extension's client of the cockpit service (service/cockpit.js, run by systemd as cockpit.service) on the session
+// bus, io.github.quantivly.dotfiles.Cockpit1: pulseClient.js's sibling, with the same mechanisms. It keeps what the
+// cockpit's cards draw from (the layout, the config error and each source's latest object) and tells listeners what
+// changed; it does no sampling, no file IO and no subprocess. Gio and GLib only (no Shell, St, Clutter or Meta), so it
+// runs under plain gjs, and its proxy, StartUnit, unit read, connection, clocks and timeouts are all injectable.
+//
+// It runs inside gnome-shell, the compositor, so, as pulseClient.js:
+// - every D-Bus call is asynchronous, with DBUS_CALL_TIMEOUT_MS, and none is ever synchronous;
+// - every callback checks for destroy() before it touches anything, and destroy() cancels every pending call, removes
+//   every timeout and disconnects every handler: GNOME 50 disables the extension, destroying this client, on every
+//   lock and every blank;
+// - nothing a timeout or a promise callback runs can throw out of it.
+//
+// How it follows the service (docs/superpowers/specs/2026-11-09-desktop-cockpit-design.md, "Lifecycle"):
+// - start() asks systemd's user manager to start the unit (StartUnit, "replace"), on every start(), with
+//   pulseClient.js's chain: a failure is retried after START_RETRY_DELAYS_SECONDS (5, 30, 300 s, then every 300 s);
+//   the service appearing on the bus ends the chain.
+// - An accepted StartUnit after which the service does not appear within START_CONFIRMATION_TIMEOUT_SECONDS reads the
+//   unit over systemd's D-Bus. ConditionResult false, checked (ConditionTimestampMonotonic above 0, so by the job just
+//   asked for: a unit never started also reads false, ruling R17) is SKIPPED: the layout file is absent, so the
+//   cockpit is not configured. The chain ends there, with one info line and no warning, and the next start() (the next
+//   enable) asks again. Any other reading, a failed read included, counts as a failed attempt and is retried.
+// - It follows the bus name's owner. An owner appearing is asked GetState, whose answer makes the client LIVE and
+//   replaces its layout, config error and sources; a wanted watch is asserted again. An owner leaving makes it
+//   VANISHED and starts nothing: a service stopped on purpose stays stopped, and a crash is systemd's Restart=. Its
+//   sources are kept, so the cards keep their "no data since" times.
+// - The layout is seeded from cachedLayout (the extension keeps the last one across enables), so the grid can be built
+//   before the first answer. A layout event is told only when the layout or the config error changed.
+// - Changed replaces the sources it carries and, when it carries one, the layout; a sources event names the sources
+//   whose object changed. A Changed before any state from this owner asks for the state instead (it holds the change).
+// - Staleness is decided by pulling, not by a timer (ruling R14): pullIfSuspicious(name) asks GetState once per
+//   interval while lib/cockpitStaleness.js suspects a source, stamping when it asked and when the answer came; a pull
+//   that answers the same old stamp makes the source stale. With no owner a pull asks nobody and completes at once.
+// - The watch: WatchCockpit and UnwatchCockpit go out only when the wanted flag changes, and only to an owner.
+//   destroy() sends UnwatchCockpit, uncancellable and best-effort, while a watch is held: the shell's bus connection
+//   outlives the extension, and the service drops a caller's watches only when its connection closes.
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+
+import {
+    CockpitClientEventType, CockpitClientState, DBUS_CALL_TIMEOUT_MS, LOG_PREFIX, START_CONFIRMATION_TIMEOUT_SECONDS,
+} from './lib/constants.js';
+import {
+    COCKPIT_BUS_NAME, COCKPIT_CHANGED_SIGNAL_NAME, COCKPIT_CHANGED_SIGNAL_SIGNATURE, COCKPIT_FOCUS_ERROR,
+    COCKPIT_FOCUS_SESSION_METHOD_NAME, COCKPIT_GET_STATE_METHOD_NAME, COCKPIT_INTERFACE_NAME, COCKPIT_OBJECT_PATH,
+    COCKPIT_SOURCE_NAMES, COCKPIT_UNWATCH_METHOD_NAME, COCKPIT_WATCH_METHOD_NAME, parseChangedPayload,
+    parseCockpitStatePayload, parseFocusSessionReply,
+} from './lib/cockpitProtocol.js';
+import {sourceFreshness as decideSourceFreshness} from './lib/cockpitStaleness.js';
+import {RateLimitedLogger, describeError} from './lib/errorLog.js';
+import {runEveryStep} from './lib/teardown.js';
+import {nextStartRetryDelaySeconds} from './lib/wiring.js';
+
+// systemd's user manager on the session bus, and what the client asks of it.
+const SYSTEMD_BUS_NAME = 'org.freedesktop.systemd1';
+const SYSTEMD_OBJECT_PATH = '/org/freedesktop/systemd1';
+const SYSTEMD_MANAGER_INTERFACE_NAME = 'org.freedesktop.systemd1.Manager';
+const SYSTEMD_UNIT_INTERFACE_NAME = 'org.freedesktop.systemd1.Unit';
+const DBUS_PROPERTIES_INTERFACE_NAME = 'org.freedesktop.DBus.Properties';
+const START_UNIT_METHOD_NAME = 'StartUnit';
+const GET_UNIT_METHOD_NAME = 'GetUnit';
+const GET_PROPERTY_METHOD_NAME = 'Get';
+/** The service's unit: systemd/cockpit.service, linked into the user's unit directory. */
+const COCKPIT_UNIT_NAME = 'cockpit.service';
+/** StartUnit's job mode: replace a conflicting queued job. Starting a unit that already runs changes nothing. */
+const START_UNIT_MODE = 'replace';
+/** StartUnit(s name, s mode) → (o job). */
+const START_UNIT_PARAMETERS_SIGNATURE = '(ss)';
+const START_UNIT_REPLY_SIGNATURE = '(o)';
+/** GetUnit(s name) → (o unit): the unit's object, if systemd has it loaded. */
+const GET_UNIT_PARAMETERS_SIGNATURE = '(s)';
+const GET_UNIT_REPLY_SIGNATURE = '(o)';
+/** Properties.Get(s interface, s property) → (v value). */
+const GET_PROPERTY_PARAMETERS_SIGNATURE = '(ss)';
+const GET_PROPERTY_REPLY_SIGNATURE = '(v)';
+/** The unit's properties the skip check reads, each with systemd's type. */
+const CONDITION_RESULT_PROPERTY = Object.freeze({name: 'ConditionResult', signature: 'b'});
+const CONDITION_TIMESTAMP_MONOTONIC_PROPERTY = Object.freeze({name: 'ConditionTimestampMonotonic', signature: 't'});
+const ACTIVE_STATE_PROPERTY = Object.freeze({name: 'ActiveState', signature: 's'});
+/** What a unit read that failed gives: nothing known, which is no skip. */
+const UNKNOWN_UNIT_CONDITION = Object.freeze({
+    conditionResult: null, conditionTimestampMonotonic: null, activeState: null,
+});
+/** GetState → (s state); FocusSession(s sessionId) → (s reply). */
+const STATE_REPLY_SIGNATURE = '(s)';
+const FOCUS_SESSION_PARAMETERS_SIGNATURE = '(s)';
+const FOCUS_SESSION_REPLY_SIGNATURE = '(s)';
+/**
+ * The proxy loads no properties (the interface has none) and never asks the bus to activate the service: systemd
+ * starts it, through StartUnit.
+ */
+const PROXY_FLAGS = Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES | Gio.DBusProxyFlags.DO_NOT_AUTO_START;
+/** No call asks the bus to activate a name: a name nobody owns fails the call at once. */
+const CALL_FLAGS = Gio.DBusCallFlags.NO_AUTO_START;
+/** The GObject signal a GDBusProxy emits when the bus name's owner changes. */
+const NAME_OWNER_NOTIFY_SIGNAL = 'notify::g-name-owner';
+/** The GObject signal a GDBusProxy emits for each D-Bus signal from the owner. */
+const PROXY_DBUS_SIGNAL_SIGNAL = 'g-signal';
+
+// Template keys of the rate-limited journal lines whose text varies (lib/errorLog.js). Each names the cockpit, so a
+// logger the extension shares with pulseClient.js keeps their limits apart.
+const START_UNIT_FAILURE_LOG_KEY = 'cockpit StartUnit failed';
+const START_UNCONFIRMED_LOG_KEY = 'cockpit StartUnit unconfirmed';
+const CONNECT_FAILURE_LOG_KEY = 'cannot follow the cockpit';
+const STATE_FAILURE_LOG_KEY = 'cockpit GetState failed';
+const UNREADABLE_STATE_LOG_KEY = 'unreadable cockpit state';
+const WRONG_CHANGED_SIGNATURE_LOG_KEY = 'cockpit Changed of another signature';
+const UNREADABLE_CHANGED_LOG_KEY = 'unreadable cockpit Changed';
+const WATCH_CALL_FAILURE_LOG_KEY = 'cockpit watch call failed';
+const FOCUS_SESSION_FAILURE_LOG_KEY = 'cockpit FocusSession failed';
+const LISTENER_FAILURE_LOG_KEY = 'cockpit listener failed';
+const STEP_FAILURE_LOG_KEY = 'cockpit client step failed';
+const TEARDOWN_FAILURE_LOG_KEY = 'cockpit client teardown step failed';
+
+/** GLib's timeouts at the default priority: the client's StartUnit chain. */
+const GLIB_TIMEOUTS = Object.freeze({
+    addSeconds: (intervalSeconds, callback) =>
+        GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, intervalSeconds, callback),
+    remove: sourceId => GLib.source_remove(sourceId),
+});
+
+/**
+ * Asks systemd's user manager, on the session bus, to start the service: StartUnit('cockpit.service', 'replace') on
+ * /org/freedesktop/systemd1, asynchronously.
+ *
+ * @param {Gio.DBusConnection} connection - The session bus, where the user manager lives.
+ * @param {Gio.Cancellable} cancellable - Cancels the call.
+ * @param {(error: Error|null) => void} onAnswered - Called once: null when systemd took the start job, or the failure.
+ * @returns {void}
+ */
+function startCockpitUnit(connection, cancellable, onAnswered) {
+    const startUnitParameters = new GLib.Variant(START_UNIT_PARAMETERS_SIGNATURE, [COCKPIT_UNIT_NAME, START_UNIT_MODE]);
+    const startUnitReplyType = new GLib.VariantType(START_UNIT_REPLY_SIGNATURE);
+    connection.call(SYSTEMD_BUS_NAME, SYSTEMD_OBJECT_PATH, SYSTEMD_MANAGER_INTERFACE_NAME, START_UNIT_METHOD_NAME,
+        startUnitParameters, startUnitReplyType, CALL_FLAGS, DBUS_CALL_TIMEOUT_MS, cancellable,
+        (callingConnection, result) => {
+            try {
+                callingConnection.call_finish(result);
+            } catch (error) {
+                onAnswered(error);
+                return;
+            }
+            onAnswered(null);
+        });
+}
+
+/**
+ * Creates the proxy for the service's object, asynchronously. The proxy follows the bus name's owner
+ * (notify::g-name-owner) and delivers the owner's signals (g-signal).
+ *
+ * @param {Gio.DBusConnection} connection - The session bus.
+ * @param {Gio.Cancellable} cancellable - Cancels the creation.
+ * @param {(error: Error|null, proxy: Gio.DBusProxy|null) => void} onCreated - Called once, with the proxy or the
+ *     failure.
+ * @returns {void}
+ */
+function createCockpitProxy(connection, cancellable, onCreated) {
+    Gio.DBusProxy.new(connection, PROXY_FLAGS, null, COCKPIT_BUS_NAME, COCKPIT_OBJECT_PATH, COCKPIT_INTERFACE_NAME,
+        cancellable, (_source, result) => {
+            let proxy;
+            try {
+                proxy = Gio.DBusProxy.new_finish(result);
+            } catch (error) {
+                onCreated(error, null);
+                return;
+            }
+            onCreated(null, proxy);
+        });
+}
+
+/**
+ * Calls a method of systemd's user manager on the session bus, asynchronously, with DBUS_CALL_TIMEOUT_MS.
+ *
+ * @param {Gio.DBusConnection} connection - The session bus.
+ * @param {object} call - The call.
+ * @param {string} call.objectPath - The object called.
+ * @param {string} call.interfaceName - The method's interface.
+ * @param {string} call.methodName - The method.
+ * @param {GLib.Variant} call.parameters - Its arguments.
+ * @param {string} call.replySignature - The reply's type; a reply of another type fails the call.
+ * @param {Gio.Cancellable} cancellable - Cancels the call.
+ * @returns {Promise<GLib.Variant>} The reply; rejects with the failure.
+ */
+function callSystemd(connection, {objectPath, interfaceName, methodName, parameters, replySignature}, cancellable) {
+    const replyType = new GLib.VariantType(replySignature);
+    return new Promise((resolve, reject) => {
+        connection.call(SYSTEMD_BUS_NAME, objectPath, interfaceName, methodName, parameters, replyType, CALL_FLAGS,
+            DBUS_CALL_TIMEOUT_MS, cancellable, (callingConnection, result) => {
+                let reply;
+                try {
+                    reply = callingConnection.call_finish(result);
+                } catch (error) {
+                    reject(error);
+                    return;
+                }
+                resolve(reply);
+            });
+    });
+}
+
+/**
+ * Reads one property of a systemd unit (Properties.Get on the unit's object).
+ *
+ * @param {Gio.DBusConnection} connection - The session bus.
+ * @param {string} unitObjectPath - The unit's object, as GetUnit answered it.
+ * @param {{name: string, signature: string}} property - The property, and the type systemd gives it.
+ * @param {Gio.Cancellable} cancellable - Cancels the call.
+ * @returns {Promise<boolean|number|string|null>} Its value; null when it is not of that type. Rejects when the call
+ *     fails.
+ */
+async function readUnitProperty(connection, unitObjectPath, property, cancellable) {
+    const parameters = new GLib.Variant(GET_PROPERTY_PARAMETERS_SIGNATURE,
+        [SYSTEMD_UNIT_INTERFACE_NAME, property.name]);
+    const reply = await callSystemd(connection, {
+        objectPath: unitObjectPath, interfaceName: DBUS_PROPERTIES_INTERFACE_NAME, methodName: GET_PROPERTY_METHOD_NAME,
+        parameters, replySignature: GET_PROPERTY_REPLY_SIGNATURE,
+    }, cancellable);
+    const [propertyValue] = reply.deepUnpack();
+    return propertyValue.get_type_string() === property.signature ? propertyValue.deepUnpack() : null;
+}
+
+/**
+ * Reads cockpit.service's condition over systemd's D-Bus: GetUnit, then the three properties.
+ *
+ * @param {Gio.DBusConnection} connection - The session bus.
+ * @param {Gio.Cancellable} cancellable - Cancels the calls.
+ * @returns {Promise<{conditionResult: boolean|null, conditionTimestampMonotonic: number|null,
+ *     activeState: string|null}>} Each property, null when not of its type. Rejects when a call fails (the unit not
+ *     loaded included).
+ */
+async function readLoadedUnitCondition(connection, cancellable) {
+    const getUnitParameters = new GLib.Variant(GET_UNIT_PARAMETERS_SIGNATURE, [COCKPIT_UNIT_NAME]);
+    const getUnitReply = await callSystemd(connection, {
+        objectPath: SYSTEMD_OBJECT_PATH, interfaceName: SYSTEMD_MANAGER_INTERFACE_NAME,
+        methodName: GET_UNIT_METHOD_NAME, parameters: getUnitParameters, replySignature: GET_UNIT_REPLY_SIGNATURE,
+    }, cancellable);
+    const [unitObjectPath] = getUnitReply.deepUnpack();
+    const conditionProperties =
+        [CONDITION_RESULT_PROPERTY, CONDITION_TIMESTAMP_MONOTONIC_PROPERTY, ACTIVE_STATE_PROPERTY];
+    const [conditionResult, conditionTimestampMonotonic, activeState] = await Promise.all(
+        conditionProperties.map(property => readUnitProperty(connection, unitObjectPath, property, cancellable)));
+    return {conditionResult, conditionTimestampMonotonic, activeState};
+}
+
+/**
+ * The real readUnitCondition: cockpit.service's condition as systemd reports it, asynchronously, never rejecting.
+ *
+ * @param {Gio.DBusConnection} connection - The session bus.
+ * @param {Gio.Cancellable} cancellable - Cancels the calls.
+ * @returns {Promise<{conditionResult: boolean|null, conditionTimestampMonotonic: number|null,
+ *     activeState: string|null}>} The three properties; every one null when any call failed (the unit not loaded, no
+ *     systemd, a timeout, a cancel), which is no skip.
+ */
+function readCockpitUnitCondition(connection, cancellable) {
+    return readLoadedUnitCondition(connection, cancellable).catch(() => UNKNOWN_UNIT_CONDITION);
+}
+
+/**
+ * Says whether systemd skipped the start job for the unit's condition: ConditionResult false, checked by a job
+ * (ConditionTimestampMonotonic above 0). A unit never started reads false too, with no check time (ruling R17).
+ *
+ * @param {{conditionResult: boolean|null, conditionTimestampMonotonic: number|null}} unitCondition - The unit read.
+ * @returns {boolean} True for a skip.
+ */
+function isSkippedByCondition({conditionResult, conditionTimestampMonotonic}) {
+    const wasConditionChecked = typeof conditionTimestampMonotonic === 'number' && conditionTimestampMonotonic > 0;
+    return conditionResult === false && wasConditionChecked;
+}
+
+/**
+ * The one string a reply or a signal carries, when it is of the signature expected.
+ *
+ * @param {*} variant - A GLib.Variant, or anything else.
+ * @param {string} signature - The signature expected: '(s)'.
+ * @returns {string|null} The string; null for anything else.
+ */
+function stringOfVariant(variant, signature) {
+    if (!(variant instanceof GLib.Variant) || variant.get_type_string() !== signature)
+        return null;
+    const [text] = variant.deepUnpack();
+    return text;
+}
+
+/**
+ * Says whether a call failed only because the client cancelled it (destroy()).
+ *
+ * @param {*} error - The failure.
+ * @returns {boolean} True for Gio's CANCELLED.
+ */
+function isCancelledError(error) {
+    return error instanceof GLib.Error && error.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
+}
+
+/**
+ * The reply focusSession gives when FocusSession gave no readable one: a fault on the way, as the service's own
+ * internal code says.
+ *
+ * @returns {{focused: boolean, windowPid: null, error: string, windowPidCandidates: number[]}} A new one each time.
+ */
+function internalFocusSessionReply() {
+    return {focused: false, windowPid: null, error: COCKPIT_FOCUS_ERROR.INTERNAL, windowPidCandidates: []};
+}
+
+/**
+ * Says whether two values read the same as JSON: how the client tells a layout or a source that changed.
+ *
+ * @param {*} firstValue - A parsed value.
+ * @param {*} secondValue - Another.
+ * @returns {boolean} True when their JSON texts are equal.
+ */
+function isSameAsJson(firstValue, secondValue) {
+    return JSON.stringify(firstValue) === JSON.stringify(secondValue);
+}
+
+/** Follows the cockpit service on the bus, and keeps what the cockpit's cards draw. */
+export class CockpitClient {
+    /**
+     * @param {object} [options] - Everything injectable, so the rows can run it on fakes; each has a real default.
+     * @param {Gio.BusType} [options.busType] - The bus whose connection is fetched when none is given: the session bus,
+     *     where both the service and systemd's user manager live.
+     * @param {Gio.DBusConnection|null} [options.connection] - A connection to use instead of fetching busType's.
+     * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable,
+     *     onAnswered: (error: Error|null) => void) => void} [options.startUnit] - Asks systemd to start the service.
+     * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable,
+     *     onCreated: (error: Error|null, proxy: Gio.DBusProxy|null) => void) => void} [options.createProxy] - Creates
+     *     the service's proxy.
+     * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable) => Promise<{conditionResult: boolean|null,
+     *     conditionTimestampMonotonic: number|null, activeState: string|null}>} [options.readUnitCondition] - Reads
+     *     cockpit.service's condition over systemd's D-Bus; a failure resolves to every property null.
+     * @param {() => number} [options.nowUsec] - Monotonic microseconds, for the log's rate limit.
+     * @param {() => number} [options.nowRealUsec] - Wall-clock microseconds, the clock of the sources' sampledAtUsec:
+     *     for staleness and the pull stamps.
+     * @param {{addSeconds: (intervalSeconds: number, callback: () => boolean) => number,
+     *     remove: (sourceId: number) => void}} [options.timeouts] - Adds and removes timeouts.
+     * @param {RateLimitedLogger} [options.errorLog] - Where failures go. The extension passes one that outlives every
+     *     client, so a lasting failure is logged once per 10 minutes, not once per enable.
+     * @param {(line: string) => void} [options.writeInfoLine] - Where the one info line of a skipped unit goes: the
+     *     journal at info level, never as a warning.
+     * @param {object|null} [options.cachedLayout] - The last layout an earlier client received (the extension keeps
+     *     it across enables), so the grid can be built before this client's first answer.
+     */
+    constructor({
+        busType = Gio.BusType.SESSION,
+        connection = null,
+        startUnit = startCockpitUnit,
+        createProxy = createCockpitProxy,
+        readUnitCondition = readCockpitUnitCondition,
+        nowUsec = () => GLib.get_monotonic_time(),
+        nowRealUsec = () => GLib.get_real_time(),
+        timeouts = GLIB_TIMEOUTS,
+        errorLog = new RateLimitedLogger({nowUsec, write: line => console.warn(line)}),
+        writeInfoLine = line => console.info(line),
+        cachedLayout = null,
+    } = {}) {
+        this._busType = busType;
+        this._connection = connection;
+        this._startUnit = startUnit;
+        this._createProxy = createProxy;
+        this._readUnitCondition = readUnitCondition;
+        this._nowRealUsec = nowRealUsec;
+        this._timeouts = timeouts;
+        this._errorLog = errorLog;
+        this._writeInfoLine = writeInfoLine;
+
+        // Cancels every call, read and creation in flight, at destroy(); the best-effort UnwatchCockpit uses none.
+        this._cancellable = new Gio.Cancellable();
+        this._isStarted = false;
+        this._isDestroyed = false;
+        this._state = CockpitClientState.STARTING;
+        this._proxy = null;
+        this._proxyHandlerIds = [];
+        // The unique name owning the service's bus name, as last seen; null while nobody does.
+        this._nameOwner = null;
+        // The StartUnit chain's pending timeout, at most one: a retry after a failure, or the wait for the service to
+        // appear after an accepted StartUnit. Every way the chain ends or restarts removes it.
+        this._startChainSourceId = null;
+        // The latest StartUnit sent: {attemptNumber}, counted from 1 by each start(). An answer to an older one, or a
+        // unit read for one, is ignored, so two start() calls in a row cannot both schedule a retry.
+        this._latestStartAttempt = null;
+        // True while a StartUnit is due but the connection is not up yet.
+        this._isServiceStartPending = false;
+        // True once a GetState of the current owner was applied; until then a Changed asks for the state instead.
+        this._hasStateFromOwner = false;
+        // Each GetState sent takes the next number; only the answer to the latest one is applied.
+        this._stateRequestNumber = 0;
+        this._isStateRequestInFlight = false;
+        // The pulls waiting for the GetState in flight: {sourceName, resolve}.
+        this._pendingPulls = [];
+        this._isWatchWanted = false;
+        // True from a WatchCockpit sent to the current owner until an UnwatchCockpit follows or that owner leaves (its
+        // watches leave with it).
+        this._isWatchHeld = false;
+        this._layout = cachedLayout;
+        this._configError = null;
+        this._sourcesByName = new Map(COCKPIT_SOURCE_NAMES.map(sourceName => [sourceName, null]));
+        // When the client last asked for each source's state on suspicion, and when that answer came: wall clock.
+        this._pullStampsBySourceName = new Map(COCKPIT_SOURCE_NAMES.map(sourceName =>
+            [sourceName, {requestedAtUsec: null, completedAtUsec: null}]));
+        this._listeners = new Map();
+        this._nextListenerId = 1;
+    }
+
+    /** @returns {string} One of CockpitClientState's values. */
+    get state() {
+        return this._state;
+    }
+
+    /** @returns {object|null} The latest layout (lib/cockpitProtocol.js parseLayout's shape), or the cached one. */
+    get layout() {
+        return this._layout;
+    }
+
+    /** @returns {string|null} Why the service could not read its layout config; null when it could. */
+    get configError() {
+        return this._configError;
+    }
+
+    /** @returns {{sessions: object|null, network: object|null, mounts: object|null}} Each source's latest object. */
+    get sourcesByName() {
+        return Object.fromEntries(this._sourcesByName);
+    }
+
+    /**
+     * Judges one source now (lib/cockpitStaleness.js sourceFreshness), from its latest stamp and the pulls made for it.
+     * A source the client does not know reads as one with no data.
+     *
+     * @param {string} sourceName - One of COCKPIT_SOURCE_NAMES.
+     * @returns {{isStale: boolean, shouldPull: boolean, ageSeconds: number|null}} The verdict.
+     */
+    sourceFreshness(sourceName) {
+        const source = this._sourcesByName.get(sourceName) ?? null;
+        const pullStamps = this._pullStampsBySourceName.get(sourceName);
+        return decideSourceFreshness({
+            sampledAtUsec: source?.sampledAtUsec ?? null,
+            intervalSeconds: source?.intervalSeconds ?? null,
+            nowRealUsec: this._nowRealUsec(),
+            lastPullRequestedAtUsec: pullStamps?.requestedAtUsec ?? null,
+            lastPullCompletedAtUsec: pullStamps?.completedAtUsec ?? null,
+        });
+    }
+
+    /**
+     * Asks systemd to start the service, and the first time also starts following it: the bus connection and the
+     * proxy. Every call asks systemd again (each enable makes one), restarting the retries; a SKIPPED client is
+     * STARTING again, so a layout file created since is picked up. Nothing is connected twice. Does nothing once
+     * destroyed.
+     *
+     * @returns {void}
+     */
+    start() {
+        if (this._isDestroyed)
+            return;
+        if (this._state === CockpitClientState.SKIPPED) {
+            this._setState(CockpitClientState.STARTING);
+            // A listener may have destroyed the client.
+            if (this._isDestroyed)
+                return;
+        }
+        this._restartServiceStartAttempts();
+        if (this._isStarted)
+            return;
+        this._isStarted = true;
+        this._connect();
+    }
+
+    /**
+     * Stops everything for good: releases a held watch (an UnwatchCockpit no cancel can stop), cancels every call in
+     * flight, removes every timeout, disconnects from the proxy, settles every pull and forgets every listener. Each
+     * step runs whatever the others throw. Safe twice.
+     *
+     * @returns {void}
+     */
+    destroy() {
+        if (this._isDestroyed)
+            return;
+        this._isDestroyed = true;
+        runEveryStep([
+            {name: 'release the cockpit watch', run: () => this._sendUnwatchCockpit(null)},
+            {name: 'cancel the calls in flight', run: () => this._cancellable.cancel()},
+            {name: 'remove the timeouts', run: () => this._cancelStartChainStep()},
+            {name: 'disconnect from the proxy', run: () => this._disconnectFromProxy()},
+            {name: 'settle the pulls in flight', run: () => this._settlePulls(this._takePendingPulls())},
+            {name: 'forget the listeners', run: () => this._listeners.clear()},
+        ], (stepName, error) => {
+            const errorText = describeError(error);
+            this._errorLog.log(`cockpit client teardown: ${stepName} failed: ${errorText}`, TEARDOWN_FAILURE_LOG_KEY);
+        });
+    }
+
+    /**
+     * Says whether a cockpit watch is wanted (lib/cockpitInteraction.js isCockpitWatchWanted). Only a change is sent,
+     * and only to an owner: WatchCockpit when it becomes wanted, UnwatchCockpit when it stops being. With no owner it
+     * is only recorded, and sent when one appears.
+     *
+     * @param {boolean} isWanted - True while a cockpit card is visible or the dropdown is open.
+     * @returns {void}
+     */
+    setWatchWanted(isWanted) {
+        if (this._isDestroyed || isWanted === this._isWatchWanted)
+            return;
+        this._isWatchWanted = isWanted;
+        if (this._nameOwner === null)
+            return;
+        if (isWanted)
+            this._sendWatchCockpit();
+        else
+            this._sendUnwatchCockpit(this._cancellable);
+    }
+
+    /**
+     * Adds a callback for each event: {type: 'state', state}, {type: 'layout', layout, configError} or
+     * {type: 'sources', names} (CockpitClientEventType), in that order when one answer brings several.
+     *
+     * @param {(event: object) => void} callback - Called with each event.
+     * @returns {number} An id for removeListener.
+     */
+    addListener(callback) {
+        const listenerId = this._nextListenerId++;
+        this._listeners.set(listenerId, callback);
+        return listenerId;
+    }
+
+    /**
+     * Removes a callback added with addListener; an unknown id is ignored.
+     *
+     * @param {number} listenerId - The id addListener returned.
+     * @returns {void}
+     */
+    removeListener(listenerId) {
+        this._listeners.delete(listenerId);
+    }
+
+    /**
+     * Pulls the state once when a source is suspected stale (ruling R14): when lib/cockpitStaleness.js says to pull
+     * (past COCKPIT_SOURCE_STALE_INTERVALS of its interval, and no pull asked for within one interval), it stamps the
+     * request and calls GetState, joining one already in flight. The answer stamps the completion, replaces the
+     * state, and tells a sources event naming this source (its freshness may have changed) and any other that changed.
+     * With no owner it asks nobody: the pull completes at once, so a suspect source reads stale. A GetState that fails
+     * is logged and stamps no completion, so the source stays suspect and the next interval asks again.
+     *
+     * @param {string} sourceName - One of COCKPIT_SOURCE_NAMES.
+     * @returns {Promise<{pulled: boolean}>} Settles once the pull did (never rejects): pulled is true when one was
+     *     made, whatever it answered.
+     */
+    pullIfSuspicious(sourceName) {
+        if (this._isDestroyed || !this.sourceFreshness(sourceName).shouldPull)
+            return Promise.resolve({pulled: false});
+        const pullStamps = this._pullStampsBySourceName.get(sourceName);
+        pullStamps.requestedAtUsec = this._nowRealUsec();
+        if (this._nameOwner === null) {
+            pullStamps.completedAtUsec = pullStamps.requestedAtUsec;
+            this._notifyListeners({type: CockpitClientEventType.SOURCES, names: [sourceName]});
+            return Promise.resolve({pulled: true});
+        }
+        return new Promise(resolve => {
+            this._pendingPulls.push({sourceName, resolve});
+            if (!this._isStateRequestInFlight)
+                this._requestState();
+        });
+    }
+
+    /**
+     * Asks the service to bring one session's herdr pane to the front (FocusSession).
+     *
+     * @param {string} sessionId - The session row's id.
+     * @returns {Promise<{focused: boolean|null, windowPid: number|null, error: string|null,
+     *     windowPidCandidates: number[]}>} The reply as lib/cockpitProtocol.js parseFocusSessionReply reads it. Never
+     *     rejects: a call that fails, a reply that cannot be read, no proxy yet, an id that is not a string or a
+     *     destroyed client give the internal reply, the failures logged at most once per 10 minutes.
+     */
+    focusSession(sessionId) {
+        if (this._isDestroyed || this._proxy === null || typeof sessionId !== 'string') {
+            this._logFocusSessionFailure('the client is not following the cockpit, or the id is not a string');
+            return Promise.resolve(internalFocusSessionReply());
+        }
+        const focusSessionParameters = new GLib.Variant(FOCUS_SESSION_PARAMETERS_SIGNATURE, [sessionId]);
+        return new Promise(resolve => {
+            this._callService(COCKPIT_FOCUS_SESSION_METHOD_NAME, focusSessionParameters, this._cancellable,
+                (error, reply) => resolve(this._readFocusSessionReply(error, reply)));
+        });
+    }
+
+    /**
+     * Reads FocusSession's answer.
+     *
+     * @param {Error|null} error - Why the call failed, or null.
+     * @param {GLib.Variant|null} reply - The reply.
+     * @returns {object} The parsed reply, or the internal reply.
+     */
+    _readFocusSessionReply(error, reply) {
+        if (error !== null) {
+            if (!isCancelledError(error))
+                this._logFocusSessionFailure(describeError(error));
+            return internalFocusSessionReply();
+        }
+        const focusReply = parseFocusSessionReply(stringOfVariant(reply, FOCUS_SESSION_REPLY_SIGNATURE));
+        if (focusReply === null) {
+            this._logFocusSessionFailure('it answered something that is not a reply');
+            return internalFocusSessionReply();
+        }
+        return focusReply;
+    }
+
+    /**
+     * Logs why a FocusSession gave no reply, unless destroyed.
+     *
+     * @param {string} reasonText - What went wrong.
+     * @returns {void}
+     */
+    _logFocusSessionFailure(reasonText) {
+        if (this._isDestroyed)
+            return;
+        this._errorLog.log(`${COCKPIT_FOCUS_SESSION_METHOD_NAME} failed: ${reasonText}`, FOCUS_SESSION_FAILURE_LOG_KEY);
+    }
+
+    /**
+     * Moves to a state and tells listeners, when it is a change.
+     *
+     * @param {string} nextState - One of CockpitClientState's values.
+     * @returns {void}
+     */
+    _setState(nextState) {
+        if (nextState === this._state)
+            return;
+        this._state = nextState;
+        this._notifyListeners({type: CockpitClientEventType.STATE, state: nextState});
+    }
+
+    /**
+     * Starts a new StartUnit chain: removes a pending retry, counts attempts from 1 again, and sends the first now if
+     * the connection is up (else once it is).
+     *
+     * @returns {void}
+     */
+    _restartServiceStartAttempts() {
+        this._cancelStartChainStep();
+        this._latestStartAttempt = null;
+        this._isServiceStartPending = true;
+        this._attemptServiceStartIfConnected();
+    }
+
+    /**
+     * Sends the StartUnit that is due, if one is and the connection is up.
+     *
+     * @returns {void}
+     */
+    _attemptServiceStartIfConnected() {
+        if (!this._isServiceStartPending || this._connection === null)
+            return;
+        this._isServiceStartPending = false;
+        const previousAttemptNumber = this._latestStartAttempt?.attemptNumber ?? 0;
+        const startAttempt = {attemptNumber: previousAttemptNumber + 1};
+        this._latestStartAttempt = startAttempt;
+        this._startUnit(this._connection, this._cancellable,
+            error => this._onServiceStartAnswered(startAttempt, error));
+    }
+
+    /**
+     * Handles systemd's answer to the latest StartUnit (an answer to an older one, or to one the service appearing
+     * superseded, is ignored). A failure is logged. While the service is on the bus nothing follows. Otherwise an
+     * accepted StartUnit waits for the service to appear, and a failure is retried after nextStartRetryDelaySeconds.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The attempt answered.
+     * @param {Error|null} error - Null when systemd accepted the start job.
+     * @returns {void}
+     */
+    _onServiceStartAnswered(startAttempt, error) {
+        if (this._isDestroyed || startAttempt !== this._latestStartAttempt)
+            return;
+        if (error !== null) {
+            const errorText = describeError(error);
+            this._errorLog.log(`StartUnit ${COCKPIT_UNIT_NAME} failed: ${errorText}`, START_UNIT_FAILURE_LOG_KEY);
+        }
+        if (this._nameOwner !== null)
+            return;
+        if (error === null)
+            this._awaitServiceAppearance(startAttempt);
+        else
+            this._scheduleStartRetry(startAttempt);
+    }
+
+    /**
+     * Waits START_CONFIRMATION_TIMEOUT_SECONDS for the service an accepted StartUnit started to appear on the bus. Its
+     * appearing ends the chain (and removes this wait); otherwise the unit's condition is read.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The accepted attempt.
+     * @returns {void}
+     */
+    _awaitServiceAppearance(startAttempt) {
+        this._startChainSourceId = this._timeouts.addSeconds(START_CONFIRMATION_TIMEOUT_SECONDS,
+            () => this._onStartConfirmationTimeout(startAttempt));
+    }
+
+    /**
+     * The service did not appear after an accepted StartUnit: reads the unit's condition, to tell a skipped unit from
+     * a failed start. Runs as a GLib timeout, so it never throws.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The accepted attempt.
+     * @returns {boolean} GLib.SOURCE_REMOVE: each step of the chain is a timeout of its own.
+     */
+    _onStartConfirmationTimeout(startAttempt) {
+        this._startChainSourceId = null;
+        this._runWithoutThrowing('read the cockpit unit\'s condition', () => this._readUnitConditionFor(startAttempt));
+        return GLib.SOURCE_REMOVE;
+    }
+
+    /**
+     * Reads the unit's condition, then goes on in _onUnitConditionRead. A read that rejects counts as nothing known,
+     * and nothing the answer's handling throws escapes the promise.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The accepted attempt the read is for.
+     * @returns {void}
+     */
+    _readUnitConditionFor(startAttempt) {
+        this._readUnitCondition(this._connection, this._cancellable)
+            .catch(() => UNKNOWN_UNIT_CONDITION)
+            .then(unitCondition => this._runWithoutThrowing('act on the cockpit unit\'s condition',
+                () => this._onUnitConditionRead(startAttempt, unitCondition)));
+    }
+
+    /**
+     * Acts on the unit's condition, if it answers the latest attempt (the service appearing supersedes it, as a new
+     * start() does): a unit skipped by its condition ends the chain (SKIPPED); anything else is logged and retried,
+     * as a failure.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The accepted attempt the read is for.
+     * @param {{conditionResult: boolean|null, conditionTimestampMonotonic: number|null,
+     *     activeState: string|null}} unitCondition - What systemd said.
+     * @returns {void}
+     */
+    _onUnitConditionRead(startAttempt, unitCondition) {
+        if (this._isDestroyed || startAttempt !== this._latestStartAttempt)
+            return;
+        if (isSkippedByCondition(unitCondition)) {
+            this._onUnitSkipped();
+            return;
+        }
+        const unitConditionText = `ConditionResult ${unitCondition.conditionResult}, ` +
+            `ActiveState ${unitCondition.activeState}`;
+        this._errorLog.log(`StartUnit ${COCKPIT_UNIT_NAME} was accepted, but the service did not appear on the bus ` +
+            `within ${START_CONFIRMATION_TIMEOUT_SECONDS} s (${unitConditionText})`, START_UNCONFIRMED_LOG_KEY);
+        this._scheduleStartRetry(startAttempt);
+    }
+
+    /**
+     * systemd skipped the unit for its condition: the cockpit is not configured. The chain ends with one info line
+     * (no warning: this is the normal state for anyone without the layout file), and the next start() asks again.
+     *
+     * @returns {void}
+     */
+    _onUnitSkipped() {
+        this._latestStartAttempt = null;
+        this._writeInfoLine(`${LOG_PREFIX} ${COCKPIT_UNIT_NAME} was skipped by its start condition (no layout file): ` +
+            'the cockpit is not configured; the next enable asks again');
+        this._setState(CockpitClientState.SKIPPED);
+    }
+
+    /**
+     * Schedules the next StartUnit after nextStartRetryDelaySeconds for the attempt that failed.
+     *
+     * @param {{attemptNumber: number}} startAttempt - The failed (or unconfirmed) attempt.
+     * @returns {void}
+     */
+    _scheduleStartRetry(startAttempt) {
+        const retryDelaySeconds = nextStartRetryDelaySeconds(startAttempt.attemptNumber);
+        this._startChainSourceId = this._timeouts.addSeconds(retryDelaySeconds, () => this._onStartRetryTimeout());
+    }
+
+    /**
+     * Sends the next StartUnit of the chain. Runs as a GLib timeout, so it never throws.
+     *
+     * @returns {boolean} GLib.SOURCE_REMOVE: each step of the chain is a timeout of its own.
+     */
+    _onStartRetryTimeout() {
+        this._startChainSourceId = null;
+        this._isServiceStartPending = true;
+        this._runWithoutThrowing('retry StartUnit', () => this._attemptServiceStartIfConnected());
+        return GLib.SOURCE_REMOVE;
+    }
+
+    /**
+     * Removes the StartUnit chain's pending timeout, if any: a retry, or the wait for the service to appear.
+     *
+     * @returns {void}
+     */
+    _cancelStartChainStep() {
+        if (this._startChainSourceId === null)
+            return;
+        const startChainSourceId = this._startChainSourceId;
+        this._startChainSourceId = null;
+        this._timeouts.remove(startChainSourceId);
+    }
+
+    /**
+     * Uses the connection given, or fetches busType's asynchronously, then goes on in _onConnected.
+     *
+     * @returns {void}
+     */
+    _connect() {
+        if (this._connection !== null) {
+            this._onConnected(this._connection);
+            return;
+        }
+        Gio.bus_get(this._busType, this._cancellable, (_source, result) => {
+            let connection;
+            try {
+                connection = Gio.bus_get_finish(result);
+            } catch (error) {
+                this._logFollowFailure(error);
+                return;
+            }
+            this._onConnected(connection);
+        });
+    }
+
+    /**
+     * Sends a StartUnit that waited for the connection, and creates the service's proxy.
+     *
+     * @param {Gio.DBusConnection} connection - The bus connection.
+     * @returns {void}
+     */
+    _onConnected(connection) {
+        if (this._isDestroyed)
+            return;
+        this._connection = connection;
+        this._attemptServiceStartIfConnected();
+        this._createProxy(connection, this._cancellable, (error, proxy) => this._onProxyCreated(error, proxy));
+    }
+
+    /**
+     * Connects to the new proxy's owner changes and signals, and takes its owner as it is now.
+     *
+     * @param {Error|null} error - Why it could not be created, or null.
+     * @param {Gio.DBusProxy|null} proxy - The proxy.
+     * @returns {void}
+     */
+    _onProxyCreated(error, proxy) {
+        if (this._isDestroyed)
+            return;
+        if (error !== null) {
+            this._logFollowFailure(error);
+            return;
+        }
+        this._proxy = proxy;
+        this._proxyHandlerIds = [
+            proxy.connect(NAME_OWNER_NOTIFY_SIGNAL, () => this._followNameOwner()),
+            proxy.connect(PROXY_DBUS_SIGNAL_SIGNAL,
+                (_proxy, _senderName, signalName, parameters) => this._onServiceSignal(signalName, parameters)),
+        ];
+        this._followNameOwner();
+    }
+
+    /**
+     * Logs that the client cannot follow the service at all (no bus connection, or no proxy), unless destroyed.
+     *
+     * @param {*} error - The failure.
+     * @returns {void}
+     */
+    _logFollowFailure(error) {
+        if (this._isDestroyed)
+            return;
+        const errorText = describeError(error);
+        this._errorLog.log(`cannot follow the cockpit service on the bus: ${errorText}`, CONNECT_FAILURE_LOG_KEY);
+    }
+
+    /**
+     * Acts on the proxy's owner as it is now: an owner that left vanished, a new one appeared (both, for a direct
+     * change from one to another).
+     *
+     * @returns {void}
+     */
+    _followNameOwner() {
+        if (this._isDestroyed)
+            return;
+        const nameOwner = this._proxy.get_name_owner();
+        if (nameOwner === this._nameOwner)
+            return;
+        if (this._nameOwner !== null)
+            this._onServiceVanished();
+        if (nameOwner !== null && !this._isDestroyed)
+            this._onServiceAppeared(nameOwner);
+    }
+
+    /**
+     * The service left the bus: VANISHED, its watch gone with it, its sources and their stamps kept (each reads stale
+     * on its next pull), the pulls waiting on it settled with no completion, and no StartUnit (a stop stays a stop
+     * until the next start()).
+     *
+     * @returns {void}
+     */
+    _onServiceVanished() {
+        this._nameOwner = null;
+        this._isWatchHeld = false;
+        this._hasStateFromOwner = false;
+        // An answer still on its way comes from the owner that left.
+        this._stateRequestNumber++;
+        this._isStateRequestInFlight = false;
+        this._settlePulls(this._takePendingPulls());
+        this._setState(CockpitClientState.VANISHED);
+    }
+
+    /**
+     * A service is on the bus: it runs, so the StartUnit chain ends (its pending timeout removed, and a StartUnit or a
+     * unit read still on its way superseded); its state is read, and a wanted watch asserted.
+     *
+     * @param {string} nameOwner - Its unique name.
+     * @returns {void}
+     */
+    _onServiceAppeared(nameOwner) {
+        this._nameOwner = nameOwner;
+        this._cancelStartChainStep();
+        this._latestStartAttempt = null;
+        this._requestState();
+        if (this._isWatchWanted)
+            this._sendWatchCockpit();
+    }
+
+    /**
+     * Calls GetState. Only the answer to the latest call is applied.
+     *
+     * @returns {void}
+     */
+    _requestState() {
+        this._stateRequestNumber++;
+        const stateRequestNumber = this._stateRequestNumber;
+        this._isStateRequestInFlight = true;
+        this._callService(COCKPIT_GET_STATE_METHOD_NAME, null, this._cancellable,
+            (error, reply) => this._onStateAnswered(stateRequestNumber, error, reply));
+    }
+
+    /**
+     * Applies GetState's answer, if it answers the latest call, and settles the pulls that waited for it. A failure or
+     * an unreadable state is logged and changes nothing.
+     *
+     * @param {number} stateRequestNumber - The call's number.
+     * @param {Error|null} error - Why the call failed, or null.
+     * @param {GLib.Variant|null} reply - The reply.
+     * @returns {void}
+     */
+    _onStateAnswered(stateRequestNumber, error, reply) {
+        if (this._isDestroyed || stateRequestNumber !== this._stateRequestNumber)
+            return;
+        this._isStateRequestInFlight = false;
+        const pendingPulls = this._takePendingPulls();
+        const state = this._readStateReply(error, reply);
+        if (state !== null) {
+            const pulledSourceNames = pendingPulls.map(pendingPull => pendingPull.sourceName);
+            this._applyState(state, pulledSourceNames);
+        }
+        this._settlePulls(pendingPulls);
+    }
+
+    /**
+     * Reads GetState's answer, logging what cannot be used.
+     *
+     * @param {Error|null} error - Why the call failed, or null.
+     * @param {GLib.Variant|null} reply - The reply.
+     * @returns {object|null} lib/cockpitProtocol.js parseCockpitStatePayload's result; null for a failure.
+     */
+    _readStateReply(error, reply) {
+        if (error !== null) {
+            const errorText = describeError(error);
+            this._errorLog.log(`cockpit ${COCKPIT_GET_STATE_METHOD_NAME} failed: ${errorText}`, STATE_FAILURE_LOG_KEY);
+            return null;
+        }
+        const state = parseCockpitStatePayload(stringOfVariant(reply, STATE_REPLY_SIGNATURE));
+        if (state === null) {
+            this._errorLog.log(`cockpit ${COCKPIT_GET_STATE_METHOD_NAME} answered something that is not a state`,
+                UNREADABLE_STATE_LOG_KEY);
+        }
+        return state;
+    }
+
+    /**
+     * Takes a state whole: the layout, the config error and every source replace the client's, the pulled sources'
+     * completion is stamped, and the client is LIVE. Then tells, in order, the state, the layout (if it changed) and
+     * the sources that changed or were pulled.
+     *
+     * @param {object} state - lib/cockpitProtocol.js parseCockpitStatePayload's result.
+     * @param {string[]} pulledSourceNames - The sources whose pulls this answer completes.
+     * @returns {void}
+     */
+    _applyState(state, pulledSourceNames) {
+        this._hasStateFromOwner = true;
+        const isLayoutChanged = this._storeLayout(state.layout, state.configError);
+        const changedSourceNames = this._storeSources(state.sources);
+        const completedAtUsec = this._nowRealUsec();
+        for (const pulledSourceName of pulledSourceNames)
+            this._pullStampsBySourceName.get(pulledSourceName).completedAtUsec = completedAtUsec;
+        const toldSourceNames = COCKPIT_SOURCE_NAMES.filter(sourceName =>
+            changedSourceNames.includes(sourceName) || pulledSourceNames.includes(sourceName));
+        this._setState(CockpitClientState.LIVE);
+        if (isLayoutChanged)
+            this._notifyLayoutChanged();
+        if (toldSourceNames.length > 0)
+            this._notifyListeners({type: CockpitClientEventType.SOURCES, names: toldSourceNames});
+    }
+
+    /**
+     * Reads a D-Bus signal from the service: a Changed of signature '(s)' holding a JSON object is applied; another
+     * signal is ignored, and a malformed Changed is logged and dropped. Before any state from this owner it asks for
+     * the state instead (unless a GetState is on its way): the state holds this change, and a part of a state is not
+     * drawn.
+     *
+     * @param {string} signalName - The D-Bus signal's name.
+     * @param {GLib.Variant} parameters - Its parameters.
+     * @returns {void}
+     */
+    _onServiceSignal(signalName, parameters) {
+        if (this._isDestroyed || signalName !== COCKPIT_CHANGED_SIGNAL_NAME)
+            return;
+        const changedText = stringOfVariant(parameters, COCKPIT_CHANGED_SIGNAL_SIGNATURE);
+        if (changedText === null) {
+            this._errorLog.log(`dropped a cockpit ${COCKPIT_CHANGED_SIGNAL_NAME} whose parameters are not ` +
+                `${COCKPIT_CHANGED_SIGNAL_SIGNATURE}`, WRONG_CHANGED_SIGNATURE_LOG_KEY);
+            return;
+        }
+        const change = parseChangedPayload(changedText);
+        if (change === null) {
+            this._errorLog.log(`dropped a cockpit ${COCKPIT_CHANGED_SIGNAL_NAME} that is not a JSON object`,
+                UNREADABLE_CHANGED_LOG_KEY);
+            return;
+        }
+        if (!this._hasStateFromOwner) {
+            if (!this._isStateRequestInFlight && this._nameOwner !== null)
+                this._requestState();
+            return;
+        }
+        this._applyChange(change);
+    }
+
+    /**
+     * Applies one Changed: the layout and its config error when it carries either (the service sends both when the
+     * layout changed), and each source it carries. Tells the layout if it changed, then the sources that changed.
+     *
+     * @param {object} change - lib/cockpitProtocol.js parseChangedPayload's result.
+     * @returns {void}
+     */
+    _applyChange(change) {
+        const isLayoutChange = change.layout !== null || change.configError !== null;
+        const isLayoutChanged = isLayoutChange && this._storeLayout(change.layout, change.configError);
+        const changedSourceNames = this._storeSources(change.sources);
+        if (isLayoutChanged)
+            this._notifyLayoutChanged();
+        if (changedSourceNames.length > 0)
+            this._notifyListeners({type: CockpitClientEventType.SOURCES, names: changedSourceNames});
+    }
+
+    /**
+     * Keeps a layout and its config error.
+     *
+     * @param {object|null} layout - The layout.
+     * @param {string|null} configError - The config error.
+     * @returns {boolean} True when either differs from what the client had.
+     */
+    _storeLayout(layout, configError) {
+        const isChanged = !isSameAsJson({layout, configError}, {layout: this._layout, configError: this._configError});
+        this._layout = layout;
+        this._configError = configError;
+        return isChanged;
+    }
+
+    /**
+     * Keeps each source an answer carries.
+     *
+     * @param {object} sources - Source objects by name; a name the client does not know is ignored.
+     * @returns {string[]} The names whose object changed, in COCKPIT_SOURCE_NAMES's order.
+     */
+    _storeSources(sources) {
+        const changedSourceNames = [];
+        for (const sourceName of COCKPIT_SOURCE_NAMES) {
+            if (!Object.hasOwn(sources, sourceName))
+                continue;
+            const source = sources[sourceName];
+            if (!isSameAsJson(this._sourcesByName.get(sourceName), source))
+                changedSourceNames.push(sourceName);
+            this._sourcesByName.set(sourceName, source);
+        }
+        return changedSourceNames;
+    }
+
+    /**
+     * Tells listeners the layout and the config error now.
+     *
+     * @returns {void}
+     */
+    _notifyLayoutChanged() {
+        this._notifyListeners({
+            type: CockpitClientEventType.LAYOUT, layout: this._layout, configError: this._configError,
+        });
+    }
+
+    /**
+     * Takes the pulls waiting for the GetState in flight.
+     *
+     * @returns {Array<{sourceName: string, resolve: Function}>} Them; none wait afterwards.
+     */
+    _takePendingPulls() {
+        const pendingPulls = this._pendingPulls;
+        this._pendingPulls = [];
+        return pendingPulls;
+    }
+
+    /**
+     * Settles pulls: each was made, whatever its GetState answered.
+     *
+     * @param {Array<{sourceName: string, resolve: Function}>} pendingPulls - The pulls.
+     * @returns {void}
+     */
+    _settlePulls(pendingPulls) {
+        for (const pendingPull of pendingPulls)
+            pendingPull.resolve({pulled: true});
+    }
+
+    /**
+     * Calls every listener with an event. One that throws is logged, and the rest still run.
+     *
+     * @param {object} event - The event.
+     * @returns {void}
+     */
+    _notifyListeners(event) {
+        for (const [listenerId, listener] of [...this._listeners]) {
+            // A listener may destroy the client or remove a later listener.
+            if (this._isDestroyed)
+                return;
+            if (!this._listeners.has(listenerId))
+                continue;
+            try {
+                listener(event);
+            } catch (error) {
+                this._errorLog.log(`cockpit listener failed: ${describeError(error)}`, LISTENER_FAILURE_LOG_KEY);
+            }
+        }
+    }
+
+    /**
+     * Runs one step of a timeout or promise callback, logging (never throwing) what it throws, even should the
+     * logging throw.
+     *
+     * @param {string} stepName - What the step does, for the journal.
+     * @param {() => void} step - The step.
+     * @returns {void}
+     */
+    _runWithoutThrowing(stepName, step) {
+        runEveryStep([{name: stepName, run: step}], (failedStepName, error) => {
+            const errorText = describeError(error);
+            this._errorLog.log(`cockpit client could not ${failedStepName}: ${errorText}`, STEP_FAILURE_LOG_KEY);
+        });
+    }
+
+    /**
+     * Sends WatchCockpit to the owner, and records that it holds the watch.
+     *
+     * @returns {void}
+     */
+    _sendWatchCockpit() {
+        this._isWatchHeld = true;
+        this._callService(COCKPIT_WATCH_METHOD_NAME, null, this._cancellable,
+            error => this._logWatchCallFailure(COCKPIT_WATCH_METHOD_NAME, error));
+    }
+
+    /**
+     * Sends UnwatchCockpit, if the current owner holds a watch of this client's. destroy() passes no cancellable: its
+     * cancel must not stop the one call that releases the watch.
+     *
+     * @param {Gio.Cancellable|null} cancellable - The call's cancellable.
+     * @returns {void}
+     */
+    _sendUnwatchCockpit(cancellable) {
+        if (!this._isWatchHeld)
+            return;
+        this._isWatchHeld = false;
+        this._callService(COCKPIT_UNWATCH_METHOD_NAME, null, cancellable,
+            error => this._logWatchCallFailure(COCKPIT_UNWATCH_METHOD_NAME, error));
+    }
+
+    /**
+     * Logs a watch call that failed, other than by the client's own cancel. Touches nothing else, so it is safe after
+     * destroy().
+     *
+     * @param {string} methodName - WatchCockpit or UnwatchCockpit.
+     * @param {Error|null} error - The failure, or null.
+     * @returns {void}
+     */
+    _logWatchCallFailure(methodName, error) {
+        if (error === null || isCancelledError(error))
+            return;
+        const errorText = describeError(error);
+        this._errorLog.log(`${methodName} failed: ${errorText}`, WATCH_CALL_FAILURE_LOG_KEY);
+    }
+
+    /**
+     * Calls a method of the service, asynchronously, with DBUS_CALL_TIMEOUT_MS.
+     *
+     * @param {string} methodName - GetState, WatchCockpit, UnwatchCockpit or FocusSession.
+     * @param {GLib.Variant|null} parameters - Its arguments, or null for none.
+     * @param {Gio.Cancellable|null} cancellable - The call's cancellable.
+     * @param {(error: Error|null, reply: GLib.Variant|null) => void} onAnswered - Called once, with the reply or the
+     *     failure.
+     * @returns {void}
+     */
+    _callService(methodName, parameters, cancellable, onAnswered) {
+        this._proxy.call(methodName, parameters, CALL_FLAGS, DBUS_CALL_TIMEOUT_MS, cancellable, (proxy, result) => {
+            let reply;
+            try {
+                reply = proxy.call_finish(result);
+            } catch (error) {
+                onAnswered(error, null);
+                return;
+            }
+            onAnswered(null, reply);
+        });
+    }
+
+    /**
+     * Disconnects every handler from the proxy and lets it go.
+     *
+     * @returns {void}
+     */
+    _disconnectFromProxy() {
+        const proxy = this._proxy;
+        const proxyHandlerIds = this._proxyHandlerIds;
+        this._proxy = null;
+        this._proxyHandlerIds = [];
+        for (const handlerId of proxyHandlerIds)
+            proxy.disconnect(handlerId);
+    }
+}

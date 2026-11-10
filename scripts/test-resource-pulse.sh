@@ -113,12 +113,13 @@ for glue_file in extension.js indicator.js card.js; do
   fi
 done
 
-# lib/, pulseClient.js and graph.js run under plain gjs in the JS rows above,
-# which only works while they import nothing from the Shell. A listed file that
-# is missing fails the row: an absent file contains nothing, which is not a pass.
-PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/graph.js")
+# lib/, pulseClient.js, cockpitClient.js and graph.js run under plain gjs in the
+# JS rows above, which only works while they import nothing from the Shell. A
+# listed file that is missing fails the row: an absent file contains nothing,
+# which is not a pass.
+PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/cockpitClient.js" "$EXT_DIR/graph.js")
 mapfile -d '' LIB_MODULE_PATHS < <(find "$EXT_DIR/lib" -type f -name '*.js' -print0 2>/dev/null)
-row_name="lib/, pulseClient.js and graph.js import nothing from resource:///"
+row_name="lib/, pulseClient.js, cockpitClient.js and graph.js import nothing from resource:///"
 if (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
   bad "$row_name — found no lib/*.js under $EXT_DIR"
 else
@@ -3769,7 +3770,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=758
+EXPECTED_ROWS=789
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

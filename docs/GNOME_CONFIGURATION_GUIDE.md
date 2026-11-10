@@ -461,12 +461,14 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (758 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (789 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
-version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
+version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
+cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, the real `service/main.js`, the cockpit's D-Bus
-face, and the real `service/cockpit.js` (under a temp home, with no system bus, and a fake herdr and a
+face, the cockpit client against it and against a fake systemd that answers its unit read, and the real
+`service/cockpit.js` (under a temp home, with no system bus, and a fake herdr and a
 fake herdr client, a process named `herdr` in a terminal of its own, for `FocusSession`; then with a fault
 injected into its `/proc` scan; then in fixture mode). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 covers `genable_extension`, `gnome-status`, the unit and its install step, the cost script and the

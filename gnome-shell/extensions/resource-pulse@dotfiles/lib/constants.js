@@ -146,6 +146,31 @@ export const COCKPIT_SOURCE_STALE_INTERVALS = 3;
 /** The interval a cockpit source is judged against when it publishes none (null or 0): one sample a minute. */
 export const COCKPIT_FALLBACK_INTERVAL_SECONDS = 60;
 /**
+ * What the extension's cockpit client (cockpitClient.js) knows of cockpit.service:
+ * - STARTING: asked systemd to start it, and no state from it yet;
+ * - SKIPPED: systemd skipped the start job for its condition (no layout file: the cockpit is not configured); nothing
+ *   is retried until the next start();
+ * - LIVE: its GetState answered, and its changes are followed;
+ * - VANISHED: it left the bus after it was there; the client starts nothing (a stop stays a stop).
+ */
+export const CockpitClientState = Object.freeze({
+    STARTING: 'starting',
+    SKIPPED: 'skipped',
+    LIVE: 'live',
+    VANISHED: 'vanished',
+});
+/**
+ * The `type` of each event the cockpit client tells its listeners:
+ * - STATE: its CockpitClientState changed (`{type, state}`);
+ * - LAYOUT: the layout or the config error changed (`{type, layout, configError}`);
+ * - SOURCES: these sources changed, or a pull settled their freshness (`{type, names}`).
+ */
+export const CockpitClientEventType = Object.freeze({
+    STATE: 'state',
+    LAYOUT: 'layout',
+    SOURCES: 'sources',
+});
+/**
  * Longest name, in characters, a cockpit source publishes (a session slug or branch, a workspace label, an account, a
  * mount label); a longer one is published as COCKPIT_REDACTED_NAME.
  */
