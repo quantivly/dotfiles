@@ -38,13 +38,19 @@
 #   1. every directory matching a checkout_globs entry that holds .git, and every populated
 #      submodule of it, recursively. `git submodule status --recursive` lists the same submodules
 #      but has no NUL form and prints paths that cannot be told from its trailing `(describe)`, so
-#      this asks `git submodule foreach`. An unpopulated submodule has no .git, so it is no checkout.
+#      this asks `git submodule foreach`. An unpopulated submodule has no .git, so it is no checkout,
+#      and neither is a match whose .git file names a git directory that does not exist (below).
 #   2. every plain_dirs entry that exists on this host.
 #
 # A .git FILE is resolved through its gitdir: line, which may be relative to the checkout:
 #   .../.git/worktrees/<n>                    a worktree of an ordinary repo: skipped, since Claude
 #                                             Code keys it by the main checkout
 #   <super>/.git/modules/<name>/worktrees/<n> a worktree of a submodule: skipped likewise
+#   any other path that does not exist        no checkout, git says so too (exit 128): a stray copy of
+#                                             a working tree, which would otherwise stop every key on
+#                                             the host. A checkout_globs match is skipped with one
+#                                             line on stderr; anywhere else it is still exit 2. Only
+#                                             a regular .git file, and only a path with nothing at it
 #   <super>/.git/modules/<name>               a submodule (<name> may hold /): a second key, from
 #                                             that git dir, where sessions in a worktree of the
 #                                             submodule key; both keys share one store directory
@@ -220,6 +226,8 @@ REPOS_DIR_NAME='repos'
 DIRS_DIR_NAME='dirs'
 HOME_SLUG='home'
 GITDIR_LINE_PREFIX='gitdir: '
+# Said after the directory's path, of a checkout_globs match whose .git file names a missing git dir.
+MISSING_GIT_DIR_NOTE='is not a checkout: its .git names a git directory that does not exist; skipped'
 SUBMODULE_GIT_DIR_INFIX='/.git/modules/'
 WORKTREE_GIT_DIR_RE='/\.git/(modules/.+/)?worktrees/[^/]+$'
 # shellcheck disable=SC2016  # expanded by the shell `git submodule foreach` starts, not this one
@@ -256,7 +264,7 @@ CANDIDATE_KEYS=()
 CANDIDATE_STORES=()
 CANDIDATE_RELATIVE_DIRS=()
 CANDIDATE_SOURCE_DIRS=()
-CHECKOUT_KIND=''              # what classify_directory found: plain | ordinary | submodule | worktree
+CHECKOUT_KIND=''              # what classify_directory found: plain | ordinary | submodule | worktree | missing-git-dir
 SUBMODULE_GIT_DIR=''          # and, for a submodule, its git dir
 GLOB_MATCHES=()               # what expand_home_glob found
 # The report, as parallel arrays: each row's key, its state, its store, and its line as printed.
@@ -480,6 +488,7 @@ store_dir_of_candidate() {
 }
 
 # classify_directory DIR — set CHECKOUT_KIND and SUBMODULE_GIT_DIR from DIR's .git entry.
+# missing-git-dir is a regular .git file whose gitdir: line names nothing, a worktree's aside.
 classify_directory() {
     local dir=$1 dot_git="$1/.git" gitfile_text git_dir
     CHECKOUT_KIND=plain
@@ -497,6 +506,8 @@ classify_directory() {
     git_dir=$(lexically_normal_path "$git_dir")
     if [[ "$git_dir" =~ $WORKTREE_GIT_DIR_RE ]]; then
         CHECKOUT_KIND=worktree
+    elif is_regular_file "$dot_git" && path_is_free "$git_dir"; then
+        CHECKOUT_KIND=missing-git-dir
     elif [[ "$git_dir" == *"$SUBMODULE_GIT_DIR_INFIX"?* ]]; then
         CHECKOUT_KIND=submodule
         SUBMODULE_GIT_DIR=$git_dir
@@ -542,13 +553,20 @@ add_candidate() {
 }
 
 # add_checkout_and_submodules DIR — a checkout_globs match: when it holds .git, DIR and each of its
-# populated submodules, recursively. A worktree brings no submodules with it.
+# populated submodules, recursively. A worktree brings no submodules with it. A match whose .git file
+# names a git directory that does not exist (a stray copy of a working tree) adds nothing and says so
+# on stderr: git refuses it, and stopping the run there would leave every other key unlinked.
 add_checkout_and_submodules() {
     local dir submodule_paths=() submodule_path
     [[ -d "$1" ]] || return 0
     if [[ ! -e "$1/.git" && ! -L "$1/.git" ]]; then return 0; fi
     # It dies inside the command substitution, having said why; pass the exit on.
     dir=$(physical_path_of "$1") || exit "$EXIT_COULD_NOT_RUN"
+    classify_directory "$dir"
+    if [[ "$CHECKOUT_KIND" == missing-git-dir ]]; then
+        printf '%s: %s %s\n' "$SCRIPT_NAME" "$dir" "$MISSING_GIT_DIR_NOTE" >&2
+        return 0
+    fi
     add_candidate "$dir"
     [[ "$CHECKOUT_KIND" != worktree ]] || return 0
     read_nul_items submodule_paths git -C "$dir" submodule --quiet foreach --recursive "$PRINT_SUBMODULE_PATH" \

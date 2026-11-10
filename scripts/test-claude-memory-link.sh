@@ -88,6 +88,7 @@ cat > "$ROUTE_STUB" <<STUB
 printf '%s\0' "\$1" >> '$ROUTE_CALLS'
 case "\${1##*/}" in
     *route-refuses-*) printf 'stub refusal\n' >&2; exit 3 ;;
+    *route-git-error-*) printf 'stub: no tenant (state git-error)\n' >&2; exit 2 ;;
     *route-garbled-*) printf '{"tenant":"alpha"} and then this is not json\n'; exit 0 ;;
     *route-blank-*)   printf '{"tenant":"","state":"none","why":"stub"}\n'; exit 0 ;;
     *gamma-*)         answer=gamma ;;
@@ -2528,8 +2529,88 @@ for needed_tool in flock cmp; do
 done
 check "tools: flock or cmp missing is exit 2 naming it" "$apply_tool_results" "flock 2 yes|cmp 2 yes|"
 
+# ---------------------------------------------------------------------------------------------
+# A stray directory: a checkout_globs match whose .git file names a git directory that does not
+# exist, as a copy of a submodule's working tree left behind does. git refuses it (exit 128), so it is
+# no checkout: it is skipped with one line on stderr, and nothing else about the run changes. Any
+# other failure to read a candidate still stops the run. The gitfile line is the one measured on a
+# server, where this directory stopped every key on the host.
+# ---------------------------------------------------------------------------------------------
+
+printf 'stray: a directory whose .git names a missing git directory\n'
+STRAY_DIR_NAME='pg_job'
+STRAY_DIR="$HOME/code/$STRAY_DIR_NAME"
+# The gitfile line measured on the server, and the path it names from $STRAY_DIR.
+STRAY_GITFILE_LINE="gitdir: ../../.git/modules/src/$STRAY_DIR_NAME"
+STRAY_GIT_DIR="$HOME/.git/modules/src/$STRAY_DIR_NAME"
+STRAY_NOTE_TEXT='is not a checkout: its .git names a git directory that does not exist; skipped'
+STRAY_NOTE="claude-memory-link: $STRAY_DIR $STRAY_NOTE_TEXT"
+SUT_STDERR_FILE="$TMPROOT/sut-stderr"
+
+# run_sut_stderr_apart ARGS… — run_sut, with only the script's stdout in $OUT and its stderr in
+# $SUT_STDERR, for a row about which stream a line goes to.
+run_sut_stderr_apart() {
+    # shellcheck disable=SC2016  # $0 and $@ are the inner shell's: the stderr file, then the script and its arguments
+    SUT_RUNNER_PREFIX=(sh -c 'exec "$@" 2>"$0"' "$SUT_STDERR_FILE")
+    run_sut "$@"
+    SUT_RUNNER_PREFIX=()
+    SUT_STDERR=$(< "$SUT_STDERR_FILE")
+}
+
+# add_stray_directory — $STRAY_DIR beside the scene's checkout, its .git the measured gitfile line.
+add_stray_directory() {
+    mkdir -p "$STRAY_DIR" || fatal "could not create the stray directory"
+    printf '%s\n' "$STRAY_GITFILE_LINE" > "$STRAY_DIR/.git" || fatal "could not write the stray gitfile"
+    [[ ! -e "$STRAY_GIT_DIR" ]] \
+        || fatal "the stray gitfile names a git directory that exists: the stray rows would assert nothing"
+}
+
+# The same run without the stray directory is the expected stdout and exit, so the row says the
+# stray changes neither, and adds exactly the one line on stderr.
+apply_scene beside-stray-check
+run_sut_stderr_apart --check
+check_rc_without_stray=$RC
+check_out_without_stray=$OUT
+add_stray_directory
+run_sut_stderr_apart --check
+check "stray: a directory whose .git names a missing git directory is skipped: --check still answers" \
+    "$RC|$OUT|$SUT_STDERR" "$check_rc_without_stray|$check_out_without_stray|$STRAY_NOTE"
+
+apply_scene beside-stray-apply
+add_stray_directory
+run_sut_stderr_apart --apply
+check "stray: ...and --apply still links the real checkout beside it" \
+    "$RC|$OUT|$(memory_kind "$memory_dir")|$SUT_STDERR" "0|$(linked_line 0 0 0)|link to $store_dir|$STRAY_NOTE"
+
+# A pin: it passes before the change and after. It catches a skip of every gitfile, or of every one
+# shaped like the stray's: its gitfile is the stray's line, and only its git directory exists.
+reset_scene
+mkdir -p "$(dirname "$STRAY_GIT_DIR")"
+git init -q --separate-git-dir="$STRAY_GIT_DIR" "$STRAY_DIR" || fatal "could not make the present submodule"
+printf '%s\n' "$STRAY_GITFILE_LINE" > "$STRAY_DIR/.git"
+git --git-dir="$STRAY_DIR/.git" remote add origin "git@github.com:$FIXTURE_OWNER/$STRAY_DIR_NAME.git" \
+    || fatal "git does not accept the present submodule's gitfile"
+present_key=$(key_of "$STRAY_DIR")
+present_git_dir_key=$(key_of "$STRAY_GIT_DIR")
+real_memory "$present_key"
+real_memory "$present_git_dir_key"
+run_sut_stderr_apart --list
+check "stray: a submodule whose git directory exists is still a candidate" \
+    "$RC|$(row_of_key "$present_key" | cut -f2,5)|$(row_of_key "$present_git_dir_key" | cut -f2,5)|$SUT_STDERR" \
+    "0|REAL-DIR$TAB$STRAY_DIR|REAL-DIR$TAB$STRAY_GIT_DIR|"
+
+# A pin: it keeps the skip narrow. tenant-route's exit 2 is the status the stray directory drew on the
+# server (git-error); for a real checkout, HEAD intact and an origin set, it still stops the run. A
+# fix that turned any tenant-route exit 2 into a skip would fail this row. The refusal row above
+# uses exit 3, so it would not catch that fix.
+reset_scene
+make_checkout code/route-git-error-repo "git@github.com:$FIXTURE_OWNER/route-git-error-repo.git"
+run_sut --check
+check "stray: a checkout git cannot answer for is still exit 2" \
+    "$RC|$(contains "$OUT" "tenant-route could not answer for $HOME/code/route-git-error-repo (exit 2)")" "2|yes"
+
 printf '\n'
-EXPECTED_ROWS=211
+EXPECTED_ROWS=215
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi
