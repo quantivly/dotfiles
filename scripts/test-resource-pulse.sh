@@ -1457,7 +1457,6 @@ is_private_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "${RESOURCE_PULSE_TEST_BU
   || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
 USEC_PER_SECOND=1000000
 FOCUS_REQUEST_PATTERN="^(workspace|pane)\.focus "
-PUBLISHED_TIME_PATTERN="^published=[0-9]+$"
 # still_running <pid>: the process exists and is not a zombie (the state after the last ") " of its stat).
 still_running() {
   local stat_line process_state
@@ -1466,17 +1465,10 @@ still_running() {
   [[ "${process_state%% *}" != Z ]]
 }
 now_usec() { printf "%s" "${EPOCHREALTIME/./}"; }
-# publish_verdict <reading before> <reading after>: two "published=" readings
-# compared: unchanged, moved, or unreadable when either is not a time (two
-# failed probes would otherwise compare equal).
-publish_verdict() {
-  if [[ ! "$1" =~ $PUBLISHED_TIME_PATTERN || ! "$2" =~ $PUBLISHED_TIME_PATTERN ]]; then
-    printf "unreadable"
-  elif [[ "$1" == "$2" ]]; then
-    printf "unchanged"
-  else
-    printf "moved"
-  fi
+# layout_changed_count <file>: the Changed signals gdbus monitor wrote to <file>
+# that carry the key configError, which only a layout change adds.
+layout_changed_count() {
+  grep -c -E 'Changed.*configError' "$1"
 }
 # probe_state <seconds> <needle> <field...>: asks GetState through gdbus until
 # the decoded fields hold <needle>, for at most <seconds>; prints the last
@@ -1539,16 +1531,32 @@ printf "no-system-bus=%s\n" "$(probe_state 2 "uplink=" uplink intervals)"
 "${serve_environment[@]}" timeout 30 gjs -m "$cockpit_main" >>"$serve_log" 2>&1
 printf "second-exit=%s\n" "$?"
 printf "after-second=%s\n" "$(probe_state 5 "protocol=1" protocol)"
-published_before="$(probe_state 2 "published=" published)"
+# A monitor on the the service bus name, attached (its first output line, the
+# "Monitoring signals" banner, is the readiness signal) before any rewrite. Only a
+# layout change adds the key configError to Changed, so counting those lines
+# says whether a rewrite published a layout; a mounts resample cannot move it.
+monitor_log="$run_dir/layout-monitor.log"
+: >"$monitor_log"
+gdbus monitor --session --dest "$bus_name" >"$monitor_log" 2>&1 &
+monitor_pid=$!
+trap '"'"'kill "$monitor_pid" 2>/dev/null'"'"' EXIT
+for (( attempt = 0; attempt < 50; attempt++ )); do
+  [[ -s "$monitor_log" ]] && break
+  sleep 0.1
+done
 cp -- "$config_template" "$serve_config"
 sleep 1
-published_after_same_text="$(probe_state 2 "published=" published)"
+layout_changes_after_same_text="$(layout_changed_count "$monitor_log")"
 printf "{" >"$serve_config"
 printf "malformed=%s\n" "$(probe_state 3 "layout=null" layout configError mounts)"
-published_after_new_text="$(probe_state 2 "published=" published)"
-printf "config-publishes=same-text=%s new-text=%s\n" \
-  "$(publish_verdict "$published_before" "$published_after_same_text")" \
-  "$(publish_verdict "$published_after_same_text" "$published_after_new_text")"
+for (( attempt = 0; attempt < 30; attempt++ )); do
+  (( $(layout_changed_count "$monitor_log") >= 1 )) && break
+  sleep 0.1
+done
+layout_changes_after_new_text="$(layout_changed_count "$monitor_log")"
+kill "$monitor_pid" 2>/dev/null
+printf "layout-changes=same-text=%s new-text=%s\n" \
+  "$layout_changes_after_same_text" "$layout_changes_after_new_text"
 rm -f -- "$serve_config"
 printf "deleted=%s\n" "$(probe_state 3 "configError=\"missing\"" layout configError mounts)"
 cp -- "$config_template" "$serve_config.new" && mv -- "$serve_config.new" "$serve_config"
@@ -1589,8 +1597,8 @@ check "with no system bus it serves all the same: no uplink known, and every cad
 check "a second service/cockpit.js finds the name taken and exits 1, while the first keeps serving" \
   "second-exit=${cockpit_driver_said[second-exit]-} after-second=${cockpit_driver_said[after-second]-}" \
   "second-exit=1 after-second=protocol=1"
-check "the config rewritten with the same text publishes nothing, and with a new text publishes (GetState's latest publish time)" \
-  "${cockpit_driver_said[config-publishes]-}" "same-text=unchanged new-text=moved"
+check "the config rewritten with the same text publishes no layout change, and with a new text publishes one (Changed signals carrying configError, watched on the bus)" \
+  "${cockpit_driver_said[layout-changes]-}" "same-text=0 new-text=1"
 check "the config overwritten with '{' reads within 3 s as no layout and the parse error, and the sources keep serving" \
   "${cockpit_driver_said[malformed]-}" 'layout=null configError="config: expected a JSON object" mounts=object'
 check "the config deleted reads within 3 s as no layout and the error missing, and the sources keep serving" \
