@@ -49,6 +49,8 @@ const SKIPPED = 'skipped';
 const LIVE = 'live';
 const VANISHED = 'vanished';
 const FOCUSABLE_SESSION_ID = 'wL:p1';
+/** The D-Bus error systemd answers for a unit it has not loaded, or has no file for. */
+const NO_SUCH_UNIT_ERROR_NAME = 'org.freedesktop.systemd1.NoSuchUnit';
 /** What focusSession resolves to whenever FocusSession gives no readable reply. */
 const INTERNAL_FOCUS_REPLY = {focused: false, windowPid: null, error: 'internal', windowPidCandidates: []};
 /** Array.at's index of the last element. */
@@ -342,6 +344,16 @@ class FakeServiceStarter {
         this.attempts.at(LATEST_INDEX).onAnswered(new GLib.Error(Gio.DBusError, Gio.DBusError.SERVICE_UNKNOWN,
             'The name org.freedesktop.systemd1 was not provided by any .service files'));
     }
+
+    /**
+     * Fails the latest attempt as systemd does for a unit it has no file for: the remote error NoSuchUnit.
+     *
+     * @returns {void}
+     */
+    failWithUnitNotFound() {
+        this.attempts.at(LATEST_INDEX).onAnswered(
+            Gio.DBusError.new_for_dbus_error(NO_SUCH_UNIT_ERROR_NAME, 'Unit cockpit.service not found.'));
+    }
 }
 
 /**
@@ -357,8 +369,8 @@ class FakeSystemdUnit {
     }
 
     /**
-     * @param {{conditionResult: boolean|null, conditionTimestampMonotonic: number|null,
-     *     activeState: string|null}} unitCondition - What the latest read resolves to.
+     * @param {{conditionResult: boolean|null, conditionTimestampMonotonic: number|null, activeState: string|null,
+     *     isUnitMissing: boolean}} unitCondition - What the latest read resolves to.
      * @returns {void}
      */
     answer(unitCondition) {
@@ -496,6 +508,11 @@ async function waitOutAcceptedStart(fixture, unitCondition) {
 /** What systemd answers for a unit the start job just skipped: its condition false, checked at a real time. */
 const SKIPPED_UNIT_CONDITION = {
     conditionResult: false, conditionTimestampMonotonic: CONDITION_CHECKED_AT_MONOTONIC_USEC, activeState: 'inactive',
+    isUnitMissing: false,
+};
+/** What the read gives when GetUnit answers NoSuchUnit: systemd has unloaded the unit since its start job. */
+const MISSING_UNIT_CONDITION = {
+    conditionResult: null, conditionTimestampMonotonic: null, activeState: null, isUnitMissing: true,
 };
 
 test('cockpitClient: CockpitClientState names the four states and CockpitClientEventType the three events, frozen',
@@ -574,10 +591,13 @@ test('cockpitClient: an accepted StartUnit with no name in 15 s whose unit reads
 });
 
 test('cockpitClient: a unit that reads ConditionResult false never checked (timestamp 0: R17, a unit never started), ' +
-    'or a unit read that failed (all null), is no skip: the retry chain goes on', async () => {
+    'or a unit read that failed for another reason than a missing unit (all null), is no skip: the retry chain goes ' +
+    'on', async () => {
     const unitConditions = {
-        neverChecked: {conditionResult: false, conditionTimestampMonotonic: 0, activeState: 'inactive'},
-        readFailed: {conditionResult: null, conditionTimestampMonotonic: null, activeState: null},
+        neverChecked: {conditionResult: false, conditionTimestampMonotonic: 0, activeState: 'inactive',
+            isUnitMissing: false},
+        readFailed: {conditionResult: null, conditionTimestampMonotonic: null, activeState: null,
+            isUnitMissing: false},
     };
     const outcomes = {};
     for (const [caseName, unitCondition] of Object.entries(unitConditions)) {
@@ -591,13 +611,43 @@ test('cockpitClient: a unit that reads ConditionResult false never checked (time
     });
 });
 
-test('cockpitClient: a failed StartUnit is retried without reading the unit (only an accepted job can be skipped)',
+test('cockpitClient: a StartUnit that fails otherwise than NoSuchUnit (no systemd here) is retried without reading ' +
+    'the unit',
     () => {
         const {timeouts, serviceStarter, systemdUnit} = makeClientFixture({nameOwner: null});
         serviceStarter.fail();
         assertEqual({pending: timeouts.pendingIntervalsSeconds(), readCount: systemdUnit.reads.length},
             {pending: [RETRY_DELAYS_SECONDS[0]], readCount: 0});
     });
+
+test('cockpitClient: a StartUnit rejected with NoSuchUnit (the unit not linked) is SKIPPED at once: no unit read, no ' +
+    'retry, the cached layout kept, one info line and no warning', () => {
+    const {client, timeouts, serviceStarter, systemdUnit, events, logged, infoLines} =
+        makeClientFixture({nameOwner: null, cachedLayout: LAYOUT});
+    serviceStarter.failWithUnitNotFound();
+    assertEqual({
+        state: client.state, events, pending: timeouts.pendingIntervalsSeconds(), layout: client.layout,
+        readCount: systemdUnit.reads.length, infoLineCount: infoLines.length, logged,
+    }, {
+        state: SKIPPED, events: [{type: 'state', state: SKIPPED}], pending: [], layout: LAYOUT, readCount: 0,
+        infoLineCount: 1, logged: [],
+    });
+});
+
+test('cockpitClient: an accepted StartUnit with no name in 15 s whose unit read finds no unit (GetUnit answered ' +
+    'NoSuchUnit: unloaded after a skipped job) is SKIPPED: no retry, the cached layout kept, one info line and no ' +
+    'warning', async () => {
+    const fixture = makeClientFixture({nameOwner: null, cachedLayout: LAYOUT});
+    const {client, timeouts, serviceStarter, events, logged, infoLines} = fixture;
+    await waitOutAcceptedStart(fixture, MISSING_UNIT_CONDITION);
+    assertEqual({
+        state: client.state, events, pending: timeouts.pendingIntervalsSeconds(), layout: client.layout,
+        attemptCount: serviceStarter.attempts.length, infoLineCount: infoLines.length, logged,
+    }, {
+        state: SKIPPED, events: [{type: 'state', state: SKIPPED}], pending: [], layout: LAYOUT, attemptCount: 1,
+        infoLineCount: 1, logged: [],
+    });
+});
 
 test('cockpitClient: the name appearing while the unit is being read supersedes the read: no SKIPPED, no retry, ' +
     'LIVE once GetState answers', async () => {

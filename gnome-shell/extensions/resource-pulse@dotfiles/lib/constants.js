@@ -148,8 +148,9 @@ export const COCKPIT_FALLBACK_INTERVAL_SECONDS = 60;
 /**
  * What the extension's cockpit client (cockpitClient.js) knows of cockpit.service:
  * - STARTING: asked systemd to start it, and no state from it yet;
- * - SKIPPED: systemd skipped the start job for its condition (no layout file: the cockpit is not configured); nothing
- *   is retried until the next start();
+ * - SKIPPED: the cockpit is not configured: systemd skipped the start job for its condition (no layout file), or has
+ *   no such unit (NoSuchUnit: never linked, or unloaded after a skipped job); nothing is retried until the next
+ *   start();
  * - LIVE: its GetState answered, and its changes are followed;
  * - VANISHED: it left the bus after it was there; the client starts nothing (a stop stays a stop).
  */

@@ -42,6 +42,8 @@ const SYSTEMD_UNIT_INTERFACE_NAME = 'org.freedesktop.systemd1.Unit';
 const COCKPIT_UNIT_PATH = '/org/freedesktop/systemd1/unit/cockpit_2eservice';
 const START_UNIT_JOB_PATH = '/org/freedesktop/systemd1/job/1';
 const NO_SUCH_UNIT_ERROR_NAME = 'org.freedesktop.systemd1.NoSuchUnit';
+/** Another error GetUnit could answer: the read fails, but the unit is not known to be missing. */
+const ACCESS_DENIED_ERROR_NAME = 'org.freedesktop.DBus.Error.AccessDenied';
 /** systemd's Manager as the client uses it: StartUnit and GetUnit. */
 const SYSTEMD_MANAGER_INTERFACE_XML = `<node>
   <interface name="${SYSTEMD_MANAGER_INTERFACE_NAME}">
@@ -340,36 +342,40 @@ async function withLiveCockpitClient(body) {
 }
 
 /**
- * Serves a fake systemd (Manager and cockpit.service's Unit) under its real name on the private bus, starts a client
- * whose timeouts a row fires, lets its accepted StartUnit's 15 s wait run out (nothing owns the cockpit's name), and
- * runs a row on what follows; takes it all down whatever happens.
+ * Serves a fake systemd (Manager and cockpit.service's Unit, the Unit's properties those of a skipped unit) under its
+ * real name on the private bus, starts a client whose timeouts a row fires, and runs a row; nothing owns the cockpit's
+ * name. Takes it all down whatever happens.
  *
  * @param {object} systemd - How the fake systemd answers.
- * @param {object} systemd.unitProperties - The Unit's ConditionResult, ConditionTimestampMonotonic and ActiveState.
- * @param {boolean} systemd.isUnitLoaded - False to answer GetUnit with NoSuchUnit, as for a unit not loaded.
- * @param {(fixture: object) => Promise<void>} body - The row; gets {client, events, infoLines, timeouts,
- *     startUnitCalls, getUnitCalls, isNameOwned, isWaitingForService}.
+ * @param {string|null} systemd.startUnitErrorName - The D-Bus error StartUnit answers; null to accept the job.
+ * @param {string|null} systemd.getUnitErrorName - The D-Bus error GetUnit answers; null for the unit's object.
+ * @param {(fixture: object) => Promise<void>} body - The row; gets {client, timeouts, startUnitCalls, getUnitCalls,
+ *     infoLines, logged, isNameOwned, waitOutConfirmation}, waitOutConfirmation firing the accepted StartUnit's 15 s
+ *     wait once it is pending, and saying whether it was.
  * @returns {Promise<void>}
  */
-async function withAcceptedStartAndNoService({unitProperties, isUnitLoaded}, body) {
+async function withFakeSystemd({startUnitErrorName, getUnitErrorName}, body) {
     const systemdConnection = openPrivateBusConnection();
     const clientConnection = openPrivateBusConnection();
     const startUnitCalls = [];
     const getUnitCalls = [];
     const exportedManager = Gio.DBusExportedObject.wrapJSObject(SYSTEMD_MANAGER_INTERFACE_XML, {
-        StartUnit: (unitName, mode) => {
+        StartUnitAsync: ([unitName, mode], invocation) => {
             startUnitCalls.push({unitName, mode});
-            return START_UNIT_JOB_PATH;
+            if (startUnitErrorName === null)
+                invocation.return_value(new GLib.Variant('(o)', [START_UNIT_JOB_PATH]));
+            else
+                invocation.return_dbus_error(startUnitErrorName, `Unit ${unitName} not found.`);
         },
         GetUnitAsync: ([unitName], invocation) => {
             getUnitCalls.push(unitName);
-            if (isUnitLoaded)
+            if (getUnitErrorName === null)
                 invocation.return_value(new GLib.Variant('(o)', [COCKPIT_UNIT_PATH]));
             else
-                invocation.return_dbus_error(NO_SUCH_UNIT_ERROR_NAME, `Unit ${unitName} not loaded.`);
+                invocation.return_dbus_error(getUnitErrorName, `Unit ${unitName} not loaded.`);
         },
     });
-    const exportedUnit = Gio.DBusExportedObject.wrapJSObject(SYSTEMD_UNIT_INTERFACE_XML, {...unitProperties});
+    const exportedUnit = Gio.DBusExportedObject.wrapJSObject(SYSTEMD_UNIT_INTERFACE_XML, {...SKIPPED_UNIT_PROPERTIES});
     let ownerId = null;
     let client = null;
     try {
@@ -380,13 +386,17 @@ async function withAcceptedStartAndNoService({unitProperties, isUnitLoaded}, bod
         const timeouts = new FakeTimeouts();
         const started = startClient(clientConnection, {timeouts});
         client = started.client;
-        const isWaitingForService = await waitUntil(
-            () => timeouts.pendingIntervalsSeconds().includes(START_CONFIRMATION_SECONDS), BUS_ROUND_TRIP_TIMEOUT_MS);
-        if (isWaitingForService)
-            timeouts.fire(START_CONFIRMATION_SECONDS);
+        const waitOutConfirmation = async () => {
+            const isWaitingForService = await waitUntil(
+                () => timeouts.pendingIntervalsSeconds().includes(START_CONFIRMATION_SECONDS),
+                BUS_ROUND_TRIP_TIMEOUT_MS);
+            if (isWaitingForService)
+                timeouts.fire(START_CONFIRMATION_SECONDS);
+            return isWaitingForService;
+        };
         await body({
-            client, timeouts, startUnitCalls, getUnitCalls, events: started.events, infoLines: started.infoLines,
-            isNameOwned: ownership.isOwned, isWaitingForService,
+            client, timeouts, startUnitCalls, getUnitCalls, infoLines: started.infoLines, logged: started.logged,
+            isNameOwned: ownership.isOwned, waitOutConfirmation,
         });
     } finally {
         client?.destroy();
@@ -454,26 +464,60 @@ test('cockpit client on a private bus: focusSession sends the id and resolves to
 
 test('cockpit client on a private bus: an accepted StartUnit("cockpit.service", "replace") with no name in 15 s ' +
     'reads the unit over systemd\'s D-Bus (GetUnit, then its properties), and a skipped unit makes it SKIPPED', () =>
-    withAcceptedStartAndNoService({unitProperties: SKIPPED_UNIT_PROPERTIES, isUnitLoaded: true},
-        async ({client, timeouts, startUnitCalls, getUnitCalls, infoLines, isNameOwned, isWaitingForService}) => {
+    withFakeSystemd({startUnitErrorName: null, getUnitErrorName: null},
+        async ({client, timeouts, startUnitCalls, getUnitCalls, infoLines, logged, isNameOwned,
+            waitOutConfirmation}) => {
+            const isWaitingForService = await waitOutConfirmation();
             const isSkipped = await waitUntil(() => client.state === SKIPPED, BUS_ROUND_TRIP_TIMEOUT_MS);
             assertEqual({
                 isNameOwned, isWaitingForService, isSkipped, startUnitCalls, getUnitCalls,
-                pending: timeouts.pendingIntervalsSeconds(), infoLineCount: infoLines.length,
+                pending: timeouts.pendingIntervalsSeconds(), infoLineCount: infoLines.length, logged,
             }, {
                 isNameOwned: true, isWaitingForService: true, isSkipped: true,
                 startUnitCalls: [{unitName: 'cockpit.service', mode: 'replace'}], getUnitCalls: ['cockpit.service'],
-                pending: [], infoLineCount: 1,
+                pending: [], infoLineCount: 1, logged: [],
             });
         }));
 
-test('cockpit client on a private bus: a unit systemd does not have loaded (GetUnit answers NoSuchUnit) reads as ' +
-    'nothing known, so the retry chain goes on', () =>
-    withAcceptedStartAndNoService({unitProperties: SKIPPED_UNIT_PROPERTIES, isUnitLoaded: false},
-        async ({client, timeouts, getUnitCalls, isWaitingForService}) => {
+test('cockpit client on a private bus: a unit systemd no longer has loaded after an accepted job (GetUnit answers ' +
+    'NoSuchUnit) is not configured: SKIPPED, no retry, no warning', () =>
+    withFakeSystemd({startUnitErrorName: null, getUnitErrorName: NO_SUCH_UNIT_ERROR_NAME},
+        async ({client, timeouts, getUnitCalls, infoLines, logged, waitOutConfirmation}) => {
+            const isWaitingForService = await waitOutConfirmation();
+            const isSkipped = await waitUntil(() => client.state === SKIPPED, BUS_ROUND_TRIP_TIMEOUT_MS);
+            assertEqual({
+                isWaitingForService, isSkipped, getUnitCalls, pending: timeouts.pendingIntervalsSeconds(),
+                infoLineCount: infoLines.length, logged,
+            }, {
+                isWaitingForService: true, isSkipped: true, getUnitCalls: ['cockpit.service'], pending: [],
+                infoLineCount: 1, logged: [],
+            });
+        }));
+
+test('cockpit client on a private bus: a unit read that fails with another error (GetUnit answers AccessDenied) ' +
+    'reads as nothing known, so the retry chain goes on', () =>
+    withFakeSystemd({startUnitErrorName: null, getUnitErrorName: ACCESS_DENIED_ERROR_NAME},
+        async ({client, timeouts, getUnitCalls, infoLines, waitOutConfirmation}) => {
+            const isWaitingForService = await waitOutConfirmation();
             const isRetryPending = await waitUntil(
                 () => timeouts.pendingIntervalsSeconds().includes(FIRST_RETRY_DELAY_SECONDS),
                 BUS_ROUND_TRIP_TIMEOUT_MS);
-            assertEqual({isWaitingForService, isRetryPending, getUnitCalls, state: client.state},
-                {isWaitingForService: true, isRetryPending: true, getUnitCalls: ['cockpit.service'], state: STARTING});
+            assertEqual({isWaitingForService, isRetryPending, getUnitCalls, state: client.state, infoLines}, {
+                isWaitingForService: true, isRetryPending: true, getUnitCalls: ['cockpit.service'], state: STARTING,
+                infoLines: [],
+            });
+        }));
+
+test('cockpit client on a private bus: a StartUnit systemd rejects with NoSuchUnit (the unit not linked) is not ' +
+    'configured: SKIPPED at once, no unit read, no retry, no warning', () =>
+    withFakeSystemd({startUnitErrorName: NO_SUCH_UNIT_ERROR_NAME, getUnitErrorName: null},
+        async ({client, timeouts, startUnitCalls, getUnitCalls, infoLines, logged}) => {
+            const isSkipped = await waitUntil(() => client.state === SKIPPED, BUS_ROUND_TRIP_TIMEOUT_MS);
+            assertEqual({
+                isSkipped, startUnitCalls, getUnitCalls, pending: timeouts.pendingIntervalsSeconds(),
+                infoLineCount: infoLines.length, logged,
+            }, {
+                isSkipped: true, startUnitCalls: [{unitName: 'cockpit.service', mode: 'replace'}], getUnitCalls: [],
+                pending: [], infoLineCount: 1, logged: [],
+            });
         }));

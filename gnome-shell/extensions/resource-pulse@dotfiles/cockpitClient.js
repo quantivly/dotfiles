@@ -15,11 +15,19 @@
 // - start() asks systemd's user manager to start the unit (StartUnit, "replace"), on every start(), with
 //   pulseClient.js's chain: a failure is retried after START_RETRY_DELAYS_SECONDS (5, 30, 300 s, then every 300 s);
 //   the service appearing on the bus ends the chain.
-// - An accepted StartUnit after which the service does not appear within START_CONFIRMATION_TIMEOUT_SECONDS reads the
-//   unit over systemd's D-Bus. ConditionResult false, checked (ConditionTimestampMonotonic above 0, so by the job just
-//   asked for: a unit never started also reads false, ruling R17) is SKIPPED: the layout file is absent, so the
-//   cockpit is not configured. The chain ends there, with one info line and no warning, and the next start() (the next
-//   enable) asks again. Any other reading, a failed read included, counts as a failed attempt and is retried.
+// - The cockpit is optional, so a unit that is not there to run is "not configured", never a fault to retry. The client
+//   is SKIPPED (the chain ends, with one info line and no warning; the cached layout is kept; the next start(), the
+//   next enable, asks again, which is how a layout file created mid-session is picked up) in three cases:
+//   - StartUnit is rejected with org.freedesktop.systemd1.NoSuchUnit: no unit file is linked (./install never ran);
+//   - after an accepted StartUnit with no service on the bus within START_CONFIRMATION_TIMEOUT_SECONDS, the unit read
+//     over systemd's D-Bus gives ConditionResult false, checked (ConditionTimestampMonotonic above 0, so by the job
+//     just asked for: a unit never started also reads false, ruling R17): the layout file is absent;
+//   - in that same read, GetUnit answers NoSuchUnit: systemd unloaded the unit after its skipped job. This is the
+//     fallback, and how often it fires is unmeasured: whether a skipped cockpit.service is still loaded 15 s later is
+//     up to systemd's garbage collection, and its PartOf=graphical-session.target points from the unit to the target,
+//     so it may not keep the unit loaded.
+//   Any other answer (a true or unchecked condition, a read that failed otherwise: a timeout, no systemd, another
+//   error) counts as a failed attempt and is retried.
 // - It follows the bus name's owner. An owner appearing is asked GetState, whose answer makes the client LIVE and
 //   replaces its layout, config error and sources; a wanted watch is asserted again. An owner leaving makes it
 //   VANISHED and starts nothing: a service stopped on purpose stays stopped, and a crash is systemd's Restart=. Its
@@ -79,8 +87,18 @@ const CONDITION_TIMESTAMP_MONOTONIC_PROPERTY = Object.freeze({name: 'ConditionTi
 const ACTIVE_STATE_PROPERTY = Object.freeze({name: 'ActiveState', signature: 's'});
 /** What a unit read that failed gives: nothing known, which is no skip. */
 const UNKNOWN_UNIT_CONDITION = Object.freeze({
-    conditionResult: null, conditionTimestampMonotonic: null, activeState: null,
+    conditionResult: null, conditionTimestampMonotonic: null, activeState: null, isUnitMissing: false,
 });
+/** What a unit read gives when GetUnit answers NoSuchUnit: systemd has no such unit loaded, which is a skip. */
+const MISSING_UNIT_CONDITION = Object.freeze({
+    conditionResult: null, conditionTimestampMonotonic: null, activeState: null, isUnitMissing: true,
+});
+/** The D-Bus error systemd answers StartUnit and GetUnit with for a unit it has no file for, or has not loaded. */
+const SYSTEMD_NO_SUCH_UNIT_ERROR_NAME = 'org.freedesktop.systemd1.NoSuchUnit';
+// Why a client is SKIPPED, for its info line: each completes "cockpit.service <reason>".
+const CONDITION_SKIP_REASON = 'was skipped by its start condition (no layout file)';
+const UNIT_NOT_FOUND_SKIP_REASON = 'is unknown to systemd (no unit file is linked)';
+const UNIT_UNLOADED_SKIP_REASON = 'is no longer loaded after its start job (systemd unloaded it once skipped)';
 /** GetState → (s state); FocusSession(s sessionId) → (s reply). */
 const STATE_REPLY_SIGNATURE = '(s)';
 const FOCUS_SESSION_PARAMETERS_SIGNATURE = '(s)';
@@ -220,26 +238,50 @@ async function readUnitProperty(connection, unitObjectPath, property, cancellabl
 }
 
 /**
- * Reads cockpit.service's condition over systemd's D-Bus: GetUnit, then the three properties.
+ * Says whether a D-Bus call failed because systemd has no such unit: the remote error
+ * org.freedesktop.systemd1.NoSuchUnit, read from the error's name, never from its text.
+ *
+ * @param {*} error - The failure.
+ * @returns {boolean} True for NoSuchUnit.
+ */
+function isNoSuchUnitError(error) {
+    return error instanceof GLib.Error && Gio.DBusError.is_remote_error(error) &&
+        Gio.DBusError.get_remote_error(error) === SYSTEMD_NO_SUCH_UNIT_ERROR_NAME;
+}
+
+/**
+ * Finds cockpit.service's object on systemd's D-Bus (GetUnit): there only while systemd has the unit loaded.
  *
  * @param {Gio.DBusConnection} connection - The session bus.
- * @param {Gio.Cancellable} cancellable - Cancels the calls.
- * @returns {Promise<{conditionResult: boolean|null, conditionTimestampMonotonic: number|null,
- *     activeState: string|null}>} Each property, null when not of its type. Rejects when a call fails (the unit not
- *     loaded included).
+ * @param {Gio.Cancellable} cancellable - Cancels the call.
+ * @returns {Promise<string>} The unit's object path. Rejects when the call fails (NoSuchUnit for a unit not loaded).
  */
-async function readLoadedUnitCondition(connection, cancellable) {
+async function findCockpitUnitObjectPath(connection, cancellable) {
     const getUnitParameters = new GLib.Variant(GET_UNIT_PARAMETERS_SIGNATURE, [COCKPIT_UNIT_NAME]);
     const getUnitReply = await callSystemd(connection, {
         objectPath: SYSTEMD_OBJECT_PATH, interfaceName: SYSTEMD_MANAGER_INTERFACE_NAME,
         methodName: GET_UNIT_METHOD_NAME, parameters: getUnitParameters, replySignature: GET_UNIT_REPLY_SIGNATURE,
     }, cancellable);
     const [unitObjectPath] = getUnitReply.deepUnpack();
+    return unitObjectPath;
+}
+
+/**
+ * Reads the three properties the skip check needs from a loaded unit's object.
+ *
+ * @param {Gio.DBusConnection} connection - The session bus.
+ * @param {string} unitObjectPath - The unit's object, as GetUnit answered it.
+ * @param {Gio.Cancellable} cancellable - Cancels the calls.
+ * @returns {Promise<{conditionResult: boolean|null, conditionTimestampMonotonic: number|null,
+ *     activeState: string|null, isUnitMissing: boolean}>} Each property, null when not of its type; isUnitMissing
+ *     false. Rejects when a call fails.
+ */
+async function readUnitConditionProperties(connection, unitObjectPath, cancellable) {
     const conditionProperties =
         [CONDITION_RESULT_PROPERTY, CONDITION_TIMESTAMP_MONOTONIC_PROPERTY, ACTIVE_STATE_PROPERTY];
     const [conditionResult, conditionTimestampMonotonic, activeState] = await Promise.all(
         conditionProperties.map(property => readUnitProperty(connection, unitObjectPath, property, cancellable)));
-    return {conditionResult, conditionTimestampMonotonic, activeState};
+    return {conditionResult, conditionTimestampMonotonic, activeState, isUnitMissing: false};
 }
 
 /**
@@ -248,11 +290,19 @@ async function readLoadedUnitCondition(connection, cancellable) {
  * @param {Gio.DBusConnection} connection - The session bus.
  * @param {Gio.Cancellable} cancellable - Cancels the calls.
  * @returns {Promise<{conditionResult: boolean|null, conditionTimestampMonotonic: number|null,
- *     activeState: string|null}>} The three properties; every one null when any call failed (the unit not loaded, no
- *     systemd, a timeout, a cancel), which is no skip.
+ *     activeState: string|null, isUnitMissing: boolean}>} The three properties, isUnitMissing false. When GetUnit
+ *     answers NoSuchUnit, every property null and isUnitMissing true (a skip: systemd unloaded the unit). When any
+ *     other call fails (no systemd, a timeout, another error, a cancel), every property null and isUnitMissing false
+ *     (no skip).
  */
-function readCockpitUnitCondition(connection, cancellable) {
-    return readLoadedUnitCondition(connection, cancellable).catch(() => UNKNOWN_UNIT_CONDITION);
+async function readCockpitUnitCondition(connection, cancellable) {
+    let unitObjectPath;
+    try {
+        unitObjectPath = await findCockpitUnitObjectPath(connection, cancellable);
+    } catch (error) {
+        return isNoSuchUnitError(error) ? MISSING_UNIT_CONDITION : UNKNOWN_UNIT_CONDITION;
+    }
+    return readUnitConditionProperties(connection, unitObjectPath, cancellable).catch(() => UNKNOWN_UNIT_CONDITION);
 }
 
 /**
@@ -325,8 +375,9 @@ export class CockpitClient {
      *     onCreated: (error: Error|null, proxy: Gio.DBusProxy|null) => void) => void} [options.createProxy] - Creates
      *     the service's proxy.
      * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable) => Promise<{conditionResult: boolean|null,
-     *     conditionTimestampMonotonic: number|null, activeState: string|null}>} [options.readUnitCondition] - Reads
-     *     cockpit.service's condition over systemd's D-Bus; a failure resolves to every property null.
+     *     conditionTimestampMonotonic: number|null, activeState: string|null, isUnitMissing: boolean}>}
+     *     [options.readUnitCondition] - Reads cockpit.service's condition over systemd's D-Bus; a failure resolves to
+     *     every property null, with isUnitMissing true only when GetUnit answered NoSuchUnit.
      * @param {() => number} [options.nowUsec] - Monotonic microseconds, for the log's rate limit.
      * @param {() => number} [options.nowRealUsec] - Wall-clock microseconds, the clock of the sources' sampledAtUsec:
      *     for staleness and the pull stamps.
@@ -657,8 +708,9 @@ export class CockpitClient {
 
     /**
      * Handles systemd's answer to the latest StartUnit (an answer to an older one, or to one the service appearing
-     * superseded, is ignored). A failure is logged. While the service is on the bus nothing follows. Otherwise an
-     * accepted StartUnit waits for the service to appear, and a failure is retried after nextStartRetryDelaySeconds.
+     * superseded, is ignored). A failure other than NoSuchUnit is logged. While the service is on the bus nothing
+     * follows. Otherwise NoSuchUnit (no unit file is linked) is SKIPPED, an accepted StartUnit waits for the service to
+     * appear, and any other failure is retried after nextStartRetryDelaySeconds.
      *
      * @param {{attemptNumber: number}} startAttempt - The attempt answered.
      * @param {Error|null} error - Null when systemd accepted the start job.
@@ -667,13 +719,16 @@ export class CockpitClient {
     _onServiceStartAnswered(startAttempt, error) {
         if (this._isDestroyed || startAttempt !== this._latestStartAttempt)
             return;
-        if (error !== null) {
+        const isUnitNotFound = error !== null && isNoSuchUnitError(error);
+        if (error !== null && !isUnitNotFound) {
             const errorText = describeError(error);
             this._errorLog.log(`StartUnit ${COCKPIT_UNIT_NAME} failed: ${errorText}`, START_UNIT_FAILURE_LOG_KEY);
         }
         if (this._nameOwner !== null)
             return;
-        if (error === null)
+        if (isUnitNotFound)
+            this._onUnitSkipped(UNIT_NOT_FOUND_SKIP_REASON);
+        else if (error === null)
             this._awaitServiceAppearance(startAttempt);
         else
             this._scheduleStartRetry(startAttempt);
@@ -720,19 +775,23 @@ export class CockpitClient {
 
     /**
      * Acts on the unit's condition, if it answers the latest attempt (the service appearing supersedes it, as a new
-     * start() does): a unit skipped by its condition ends the chain (SKIPPED); anything else is logged and retried,
-     * as a failure.
+     * start() does): a unit systemd no longer has loaded, or one skipped by its condition, ends the chain (SKIPPED);
+     * anything else is logged and retried, as a failure.
      *
      * @param {{attemptNumber: number}} startAttempt - The accepted attempt the read is for.
-     * @param {{conditionResult: boolean|null, conditionTimestampMonotonic: number|null,
-     *     activeState: string|null}} unitCondition - What systemd said.
+     * @param {{conditionResult: boolean|null, conditionTimestampMonotonic: number|null, activeState: string|null,
+     *     isUnitMissing: boolean}} unitCondition - What systemd said.
      * @returns {void}
      */
     _onUnitConditionRead(startAttempt, unitCondition) {
         if (this._isDestroyed || startAttempt !== this._latestStartAttempt)
             return;
+        if (unitCondition.isUnitMissing === true) {
+            this._onUnitSkipped(UNIT_UNLOADED_SKIP_REASON);
+            return;
+        }
         if (isSkippedByCondition(unitCondition)) {
-            this._onUnitSkipped();
+            this._onUnitSkipped(CONDITION_SKIP_REASON);
             return;
         }
         const unitConditionText = `ConditionResult ${unitCondition.conditionResult}, ` +
@@ -743,15 +802,18 @@ export class CockpitClient {
     }
 
     /**
-     * systemd skipped the unit for its condition: the cockpit is not configured. The chain ends with one info line
-     * (no warning: this is the normal state for anyone without the layout file), and the next start() asks again.
+     * The unit is not there to run (skipped for its condition, or unknown to systemd): the cockpit is not configured.
+     * The chain ends with one info line (no warning: this is the normal state for anyone without the layout file), and
+     * the next start() asks again.
      *
+     * @param {string} skipReason - Why, completing "cockpit.service <reason>": CONDITION_SKIP_REASON,
+     *     UNIT_NOT_FOUND_SKIP_REASON or UNIT_UNLOADED_SKIP_REASON.
      * @returns {void}
      */
-    _onUnitSkipped() {
+    _onUnitSkipped(skipReason) {
         this._latestStartAttempt = null;
-        this._writeInfoLine(`${LOG_PREFIX} ${COCKPIT_UNIT_NAME} was skipped by its start condition (no layout file): ` +
-            'the cockpit is not configured; the next enable asks again');
+        this._writeInfoLine(`${LOG_PREFIX} ${COCKPIT_UNIT_NAME} ${skipReason}: the cockpit is not configured; ` +
+            'the next enable asks again');
         this._setState(CockpitClientState.SKIPPED);
     }
 
