@@ -451,14 +451,27 @@ _claude_tenant_for() {
 
 # Derive the gh routing tables from the tenant table, so adding a root is ONE
 # edit rather than two that can disagree. Additive and idempotent: it never
-# removes or reorders a team default.
+# removes or reorders a team default. Returns 0; on a machine where none of the
+# tenants' gh dirs is present it returns having added nothing.
+#
+# NONE PRESENT MEANS ONE GITHUB ACCOUNT (DO-897). A route derived on such a
+# machine pins nothing: it makes scripts/gh-route answer `matched` with a token
+# file nobody writes, and the memory sync then skipped every push (dev,
+# 2026-11-10). With at least one dir present, a missing one is a fault that must
+# stay visible, so nothing is skipped entry by entry. A value is present when it
+# is an existing directory (a symlink to one counts) or is not an absolute path:
+# a relative dir is not judged here, because gh-route names it as the fault it is.
 #
 # Defined here, deliberately NOT called here. Load order is zshrc.herdr (this
 # file) -> zshrc.company, whose zshrc.gh-routes ASSIGNS GH_ACCOUNT_ROUTES=(…) wholesale and would
 # discard anything added first -> ~/.zshrc.local -> the machine's own overlay,
 # which calls this as its last line. Only that caller knows the order has ended.
 claude-tenants-apply-gh() {
-  local e t d
+  local e t d gh_dir has_present_gh_dir=0
+  for gh_dir in "${(@v)CLAUDE_TENANT_GH_DIR}"; do
+    if [[ "$gh_dir" != /* || -d "$gh_dir" ]]; then has_present_gh_dir=1; break; fi
+  done
+  (( has_present_gh_dir )) || return 0
   for e in "${CLAUDE_TENANT_ROUTES[@]}"; do
     t="${e#*=}"; d="${CLAUDE_TENANT_GH_DIR[$t]:-}"; [[ -n "$d" ]] || continue
     (( ${GH_ACCOUNT_ROUTES[(I)${e%%=*}=*]} )) || GH_ACCOUNT_ROUTES+=("${e%%=*}=$d")

@@ -1058,6 +1058,11 @@ echo "=== tenant-derived gh routes (claude-tenants-apply-gh, DO-599) ==="
 # route that quietly stops existing is the #127 incident over again.
 
 HERDR_RC="$DOTFILES/zsh/zshrc.herdr"
+# Real gh dirs, because the helper derives nothing on a machine where none of the
+# tenants' gh dirs exists (DO-897). GH_ABSENT_DIR is absolute and never created.
+GH_WORK_DIR="$TMPROOT/apply-gh-work"; GH_PERSONAL_DIR="$TMPROOT/apply-gh-personal"
+mkdir -p "$GH_WORK_DIR" "$GH_PERSONAL_DIR"
+GH_ABSENT_DIR="$TMPROOT/apply-gh-absent"
 apply() {   # $1 = extra prelude -> "ROUTES|PATH_ROUTES|DEFAULT"
     zsh -f -c "
       source '$GITHUB_SH' >/dev/null 2>&1
@@ -1066,7 +1071,7 @@ apply() {   # $1 = extra prelude -> "ROUTES|PATH_ROUTES|DEFAULT"
       CLAUDE_TENANT_ROUTES=( 'quantivly=work' 'Acme-LTD=client' )
       CLAUDE_TENANT_PATH_ROUTES=( '/roots/work=work' )
       CLAUDE_TENANT_DEFAULT=home
-      CLAUDE_TENANT_GH_DIR=( work /gh-work client /gh-personal home /gh-personal )
+      CLAUDE_TENANT_GH_DIR=( work '$GH_WORK_DIR' client '$GH_PERSONAL_DIR' home '$GH_PERSONAL_DIR' )
       $1
       claude-tenants-apply-gh
       print -r -- \"\${(j:,:)GH_ACCOUNT_ROUTES}|\${(j:,:)GH_ACCOUNT_PATH_ROUTES}|\$GH_ACCOUNT_DEFAULT_DIR\"
@@ -1075,14 +1080,14 @@ apply() {   # $1 = extra prelude -> "ROUTES|PATH_ROUTES|DEFAULT"
 
 check "it adds every entry the tenant table implies" \
       "$(apply '')" \
-      "quantivly=/gh-work,Acme-LTD=/gh-personal|/roots/work=/gh-work|/gh-personal"
+      "quantivly=$GH_WORK_DIR,Acme-LTD=$GH_PERSONAL_DIR|/roots/work=$GH_WORK_DIR|$GH_PERSONAL_DIR"
 
 check "an existing team default is left alone" \
       "$(apply "GH_ACCOUNT_DEFAULT_DIR=/team-default" | cut -d'|' -f3)" "/team-default"
 
 check "an existing owner route is neither duplicated nor reordered" \
       "$(apply "GH_ACCOUNT_ROUTES=( 'quantivly=/team-work' )" | cut -d'|' -f1)" \
-      "quantivly=/team-work,Acme-LTD=/gh-personal"
+      "quantivly=/team-work,Acme-LTD=$GH_PERSONAL_DIR"
 
 check "an existing path route is neither duplicated nor reordered" \
       "$(apply "GH_ACCOUNT_PATH_ROUTES=( '/roots/work=/team-work' )" | cut -d'|' -f2)" \
@@ -1090,13 +1095,52 @@ check "an existing path route is neither duplicated nor reordered" \
 
 check "running it twice changes nothing (idempotent)" \
       "$(apply 'claude-tenants-apply-gh')" \
-      "quantivly=/gh-work,Acme-LTD=/gh-personal|/roots/work=/gh-work|/gh-personal"
+      "quantivly=$GH_WORK_DIR,Acme-LTD=$GH_PERSONAL_DIR|/roots/work=$GH_WORK_DIR|$GH_PERSONAL_DIR"
 
 check "a tenant with no gh dir contributes no entry" \
-      "$(apply "CLAUDE_TENANT_GH_DIR=( work /gh-work )" | cut -d'|' -f1)" "quantivly=/gh-work"
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work '$GH_WORK_DIR' )" | cut -d'|' -f1)" "quantivly=$GH_WORK_DIR"
 
 check "a default tenant with no gh dir leaves the default empty, not garbage" \
-      "$(apply "CLAUDE_TENANT_GH_DIR=( work /gh-work )" | cut -d'|' -f3)" ""
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work '$GH_WORK_DIR' )" | cut -d'|' -f3)" ""
+
+# A MACHINE WITH NONE OF THE DIRS HAS ONE GITHUB ACCOUNT (DO-897). A route
+# derived there pins nothing: gh-route answers `matched` with a token file nobody
+# writes, and the memory sync skips every push. With one dir present, a missing
+# one is a fault that must stay visible, so the guard is all-or-nothing, never
+# per entry. The rows above are the control that the helper runs at all: an
+# undefined helper also prints `||`.
+check "a machine with none of the tenants' gh dirs gets no route, no path route and no default" \
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work '$GH_ABSENT_DIR' client '$GH_ABSENT_DIR' home '$GH_ABSENT_DIR' )")" "||"
+
+# Pin: catches a guard that skips each missing dir's entry instead of judging the
+# table as a whole — that hides the very fault this row keeps visible.
+check "one tenant's gh dir present: every entry is still derived, the missing ones included" \
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work '$GH_WORK_DIR' client '$GH_ABSENT_DIR' home '$GH_ABSENT_DIR' )" | cut -d'|' -f1,3)" \
+      "quantivly=$GH_WORK_DIR,Acme-LTD=$GH_ABSENT_DIR|$GH_ABSENT_DIR"
+
+# Pin: catches a presence test that does not follow links (`-d` does; `! -L` or
+# a test of the link itself would call this machine one with no dirs).
+GH_WORK_LINK="$TMPROOT/apply-gh-work-link"; ln -s "$GH_WORK_DIR" "$GH_WORK_LINK"
+check "a gh dir that is a symlink to a directory counts as present" \
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work '$GH_WORK_LINK' client '$GH_ABSENT_DIR' home '$GH_ABSENT_DIR' )" | cut -d'|' -f1 | cut -d, -f1)" \
+      "quantivly=$GH_WORK_LINK"
+
+# A file where a gh dir should be is not one: an `-e` test would count it.
+GH_REGULAR_FILE="$TMPROOT/apply-gh-regular-file"; : > "$GH_REGULAR_FILE"
+check "a gh dir path that is a regular file does not count as present" \
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work '$GH_REGULAR_FILE' client '$GH_ABSENT_DIR' home '$GH_ABSENT_DIR' )")" "||"
+
+# Pin: catches a guard that judges a relative value by `-d` too. A relative dir
+# is a fault gh-route names (exit 2, the reldir row below); the guard must pass
+# it on, not hide it as "no dirs on this machine".
+check "a relative gh dir is not judged: its entry is passed on" \
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work relative/gh )" | cut -d'|' -f1)" "quantivly=relative/gh"
+
+# Pin: catches a guard that clears the tables rather than adding nothing.
+check "a team default survives on a machine with none of the dirs" \
+      "$(apply "GH_ACCOUNT_DEFAULT_DIR=/team-default
+                CLAUDE_TENANT_GH_DIR=( work '$GH_ABSENT_DIR' client '$GH_ABSENT_DIR' home '$GH_ABSENT_DIR' )" | cut -d'|' -f3)" \
+      "/team-default"
 
 # The mechanism itself stays untouched: _gh_route_for is covered by the rows
 # above, and the tenant layer only ever feeds it data.
@@ -1181,20 +1225,39 @@ check "gh-route with an empty token cache dir is exit 2, never /<basename>" \
 
 # The tenants file's derived routes are part of the shell's tables
 # (claude-tenants-apply-gh, called by the machine's overlay), so they are part of
-# this answer too.
-printf "CLAUDE_TENANT_ROUTES=( 'acme=client' )\nCLAUDE_TENANT_GH_DIR=( client /gh-client )\n" > "$TEN/derived.zsh"
+# this answer too. The client dir exists: on a machine with none of the tenants'
+# gh dirs nothing is derived at all (DO-897; the one-account rows below).
+GR_CLIENT_DIR="$HOOKHOME/.config/gh-client"; mkdir -p "$GR_CLIENT_DIR"
+printf "CLAUDE_TENANT_ROUTES=( 'acme=client' )\nCLAUDE_TENANT_GH_DIR=( client '%s' )\n" "$GR_CLIENT_DIR" > "$TEN/derived.zsh"
 check "gh-route: a route the tenants file derives is applied" \
-      "$(groute "$HOOKHOME" "$R_WORK" "$TEN/derived.zsh")" "0|matched|/gh-client"
+      "$(groute "$HOOKHOME" "$R_WORK" "$TEN/derived.zsh")" "0|matched|$GR_CLIENT_DIR"
 check "gh-route --tables lists the derived route after the shipped one" \
       "$(env -i PATH=/usr/bin:/bin HOME="$HOOKHOME" CLAUDE_TENANTS_FILE="$TEN/derived.zsh" "$GHROUTE" --tables \
            | sed -n 's/^route *\([^=]*\)=.*/\1/p' | paste -sd, -)" "quantivly,acme"
+
+# THE ONE-ACCOUNT SERVER (dev, 2026-11-10): a tenants file whose gh dirs do not
+# exist on this machine routes nothing, so the memory sync is not told `matched`
+# with a token file nobody writes. Under the gate-off HOME, so the shipped tables
+# add no route of their own and the tenants file is the only possible source.
+GR_NOGATE_CLIENT_DIR="$GR_NOGATE/.config/gh-client"
+printf "CLAUDE_TENANT_ROUTES=( 'acme=client' )\nCLAUDE_TENANT_GH_DIR=( client '%s' )\n" "$GR_NOGATE_CLIENT_DIR" > "$TEN/onehost.zsh"
+groute_answer() {  # groute_answer <home> <dir> <tenants-file> -> "<state>|<dir>|<token_file>"
+  env -i PATH="/usr/bin:/bin" HOME="$1" CLAUDE_TENANTS_FILE="$3" "$GHROUTE" "$2" 2>/dev/null \
+    | jq -r '"\(.state)|\(.dir)|\(.token_file)"' 2>/dev/null
+}
+check "gh-route: a tenants file on a machine with none of the tenants' gh dirs: a routed owner answers none" \
+      "$(groute_answer "$GR_NOGATE" "$R_WORK" "$TEN/onehost.zsh")" "none||"
+# The control: the same HOME and tenants file route that owner once the dir exists.
+mkdir -p "$GR_NOGATE_CLIENT_DIR"
+check "gh-route: ...and with that tenant's dir created, the same owner answers matched" \
+      "$(groute_answer "$GR_NOGATE" "$R_WORK" "$TEN/onehost.zsh" | cut -d'|' -f1,2)" "matched|$GR_NOGATE_CLIENT_DIR"
 
 # Could not tell is exit 2 and NO answer on stdout — never an empty dir.
 GR_BAD="$(mkrepo grbad "origin=git@github.com:quantivly/platform.git")"
 printf '[remote "origin"\n\turl = broken\n' > "$GR_BAD/.git/config"
 check "gh-route: a repository git cannot read is exit 2, not the default" \
       "$(groute "$HOOKHOME" "$GR_BAD")" "2|"
-printf "CLAUDE_TENANT_PATH_ROUTES=( 'relative/x=client' )\nCLAUDE_TENANT_GH_DIR=( client /gh-client )\n" > "$TEN/badtable.zsh"
+printf "CLAUDE_TENANT_PATH_ROUTES=( 'relative/x=client' )\nCLAUDE_TENANT_GH_DIR=( client '%s' )\n" "$GR_CLIENT_DIR" > "$TEN/badtable.zsh"
 check "gh-route: a malformed table is exit 2, not no-route" \
       "$(groute "$HOOKHOME" "$NOTREPO" "$TEN/badtable.zsh")" "2|"
 printf "CLAUDE_TENANT_ROUTES=( 'acme=client' )\nCLAUDE_TENANT_GH_DIR=( client relative/gh )\n" > "$TEN/reldir.zsh"
@@ -1228,7 +1291,7 @@ check "gh-route calls _gh_route_for and parses no remote itself" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=231
+EXPECTED_ROWS=239
 
 docs_claim() {
   local f="$DOTFILES/$1"
