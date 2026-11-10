@@ -219,7 +219,11 @@ either way.
 
 - On battery (UPower's `OnBattery`), every interval triples.
 - A signal within 2 s of a source's last signal-driven sample gives one more sample at the end of those
-  2 s, not one per signal.
+  2 s, not one per signal. The 2 s are counted on the monotonic clock, so setting the clock does not stretch
+  them.
+- A signal while the source's sample is still running gives one more sample once that one ends, and at the
+  earliest 1 s after the signal: a change made mid-sample does not wait for the next interval.
+- A source whose signal cannot be watched logs one line and is still sampled on its interval.
 - A sample still running when the next one is due is not started twice.
 - A source that fails keeps its last object, stamp included, and logs one line; the others go on.
 - Each request to herdr gives up after 2 s. With no herdr socket (`~/.config/herdr/herdr.sock`), or one that
@@ -433,7 +437,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (691 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (694 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it

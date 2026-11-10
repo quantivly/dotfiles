@@ -7,7 +7,11 @@
 //   MOUNTS_INTERVAL_SECONDS either way; each multiplied by BATTERY_CADENCE_MULTIPLIER while on battery. The battery
 //   check runs at each firing, so a change of power takes effect at the source's next firing.
 // - A source's own signal (watchChanges) samples it at once, at most once per SOURCE_SIGNAL_COOLDOWN_SECONDS; signals
-//   inside the cooldown give one sample when it ends, so the last change is never lost to it.
+//   inside the cooldown give one sample when it ends, so the last change is never lost to it. A signal while the
+//   source's sample is pending arms the same timer; if that sample is still pending when the timer fires, one
+//   trailing sample starts as soon as it settles, so a change mid-sample waits neither a full interval nor in line.
+//   The cooldown runs on the monotonic clock, so a wall clock set back or forward does not stretch it.
+// - A source whose watchChanges throws is logged and still sampled on its interval; the others are untouched.
 // - A sample still pending when its source's turn comes again is skipped, never queued.
 // - A sample that rejects keeps the source's previous object and logs `cockpit: <source>: <error>`, rate-limited per
 //   source; the other sources are untouched.
@@ -46,6 +50,7 @@ const MIN_TIMEOUT_SECONDS = 1;
 const LISTENER_LOG_KEY = 'listener';
 const ON_BATTERY_LOG_KEY = 'on-battery';
 const SOURCE_DESTROY_LOG_KEY = 'source destroy';
+const WATCH_CHANGES_LOG_KEY = 'watchChanges failed';
 
 /**
  * The real battery check: UPower's OnBattery, read from a proxy's property cache (UPower signals its changes), never
@@ -76,7 +81,9 @@ export class CockpitSources {
      * @param {{addSeconds: (intervalSeconds: number, callback: () => boolean) => number,
      *     remove: (sourceId: number) => void}} [options.timeouts] - Adds and removes timeouts.
      * @param {() => number} [options.nowUsec] - Wall-clock microseconds since the epoch: the stamp a card turns into
-     *     "no data since HH:MM", and the cooldown's clock.
+     *     "no data since HH:MM".
+     * @param {() => number} [options.monotonicNowUsec] - Monotonic microseconds: the signal cooldown's clock and the
+     *     log's rate limit, which a wall clock set back would stretch.
      * @param {() => boolean} [options.isOnBattery] - Whether the machine runs on battery (default: UPower's
      *     OnBattery, false when UPower is absent).
      * @param {(line: string) => void} [options.logWriter] - Where rate-limited journal lines go.
@@ -86,13 +93,17 @@ export class CockpitSources {
         sources,
         timeouts = GLIB_TIMEOUTS,
         nowUsec = () => GLib.get_real_time(),
+        monotonicNowUsec = () => GLib.get_monotonic_time(),
         isOnBattery = createOnBatteryReader(),
         logWriter = line => console.warn(line),
     }) {
         this._timeouts = timeouts;
         this._nowUsec = nowUsec;
+        this._monotonicNowUsec = monotonicNowUsec;
         this._isOnBatteryReader = isOnBattery;
-        this._errorLog = new RateLimitedLogger({nowUsec, write: logWriter, prefix: COCKPIT_LOG_PREFIX});
+        this._errorLog = new RateLimitedLogger({
+            nowUsec: monotonicNowUsec, write: logWriter, prefix: COCKPIT_LOG_PREFIX,
+        });
         this._stateByName = new Map();
         for (const source of sources) {
             const hasCadence = Object.hasOwn(BASE_INTERVAL_SECONDS_BY_SOURCE_NAME, source.name);
@@ -109,6 +120,7 @@ export class CockpitSources {
                 scheduledIntervalSeconds: null,
                 lastSignalSampleUsec: null,
                 cooldownTimerId: null,
+                isTrailingSampleArmed: false,
             });
         }
         this._listenersById = new Map();
@@ -120,7 +132,8 @@ export class CockpitSources {
 
     /**
      * Subscribes to every source's signal, samples every source once at once, then schedules each on its interval.
-     * Safe twice; does nothing after destroy.
+     * A source whose subscription throws is logged and still scheduled, and so are the sources after it. Safe twice;
+     * does nothing after destroy.
      *
      * @returns {void}
      */
@@ -129,9 +142,26 @@ export class CockpitSources {
             return;
         this._isStarted = true;
         for (const sourceState of this._stateByName.values()) {
-            sourceState.source.watchChanges(() => this._onSourceSignal(sourceState));
+            this._watchSourceChanges(sourceState);
             this._scheduleInterval(sourceState);
             this._startSample(sourceState);
+        }
+    }
+
+    /**
+     * Subscribes to a source's signal. A watchChanges that throws is logged, rate-limited per source, and leaves the
+     * source on its interval alone.
+     *
+     * @param {object} sourceState - The source's state.
+     * @returns {void}
+     */
+    _watchSourceChanges(sourceState) {
+        const sourceName = sourceState.source.name;
+        try {
+            sourceState.source.watchChanges(() => this._onSourceSignal(sourceState));
+        } catch (error) {
+            this._errorLog.log(`${sourceName}: watchChanges: ${describeError(error)}`,
+                `${WATCH_CHANGES_LOG_KEY}: ${sourceName}`);
         }
     }
 
@@ -280,8 +310,9 @@ export class CockpitSources {
     }
 
     /**
-     * A source's signal: samples it at once unless it was signal-sampled within the cooldown; inside the cooldown,
-     * arms one sample for when the cooldown ends (unless one is armed already).
+     * A source's signal: samples it at once unless it was signal-sampled within the cooldown or its sample is
+     * pending. Otherwise it arms one timer, for the rest of the cooldown and at least MIN_TIMEOUT_SECONDS, unless a
+     * sample after this signal is already coming (a timer, or a trailing sample, is armed).
      *
      * @param {object} sourceState - The source's state.
      * @returns {void}
@@ -289,24 +320,55 @@ export class CockpitSources {
     _onSourceSignal(sourceState) {
         if (this._isDestroyed)
             return;
-        const nowUsec = this._nowUsec();
+        if (sourceState.cooldownTimerId !== null || sourceState.isTrailingSampleArmed)
+            return;
+        const nowUsec = this._monotonicNowUsec();
         const sinceLastSignalSampleUsec = sourceState.lastSignalSampleUsec === null
             ? Infinity : nowUsec - sourceState.lastSignalSampleUsec;
-        if (sinceLastSignalSampleUsec >= SIGNAL_COOLDOWN_USEC) {
-            sourceState.lastSignalSampleUsec = nowUsec;
-            this._startSample(sourceState);
+        const isCooldownOver = sinceLastSignalSampleUsec >= SIGNAL_COOLDOWN_USEC;
+        if (isCooldownOver && sourceState.pendingSample === null) {
+            this._startSignalSample(sourceState);
             return;
         }
-        if (sourceState.cooldownTimerId !== null)
-            return;
         const cooldownRemainingSeconds = Math.max(MIN_TIMEOUT_SECONDS,
             Math.ceil((SIGNAL_COOLDOWN_USEC - sinceLastSignalSampleUsec) / MICROSECONDS_PER_SECOND));
-        sourceState.cooldownTimerId = this._timeouts.addSeconds(cooldownRemainingSeconds, () => {
-            sourceState.cooldownTimerId = null;
-            sourceState.lastSignalSampleUsec = this._nowUsec();
-            this._startSample(sourceState);
+        sourceState.cooldownTimerId = this._timeouts.addSeconds(cooldownRemainingSeconds,
+            () => this._onCooldownTimeout(sourceState));
+    }
+
+    /**
+     * The timer a signal armed: samples the source now, or, while its sample is still pending, arms one trailing
+     * sample that starts as soon as that one settles.
+     *
+     * @param {object} sourceState - The source's state.
+     * @returns {boolean} GLib.SOURCE_REMOVE: the timer fires once.
+     */
+    _onCooldownTimeout(sourceState) {
+        sourceState.cooldownTimerId = null;
+        if (sourceState.pendingSample === null) {
+            this._startSignalSample(sourceState);
             return GLib.SOURCE_REMOVE;
-        });
+        }
+        sourceState.isTrailingSampleArmed = true;
+        const startTrailingSample = () => {
+            sourceState.isTrailingSampleArmed = false;
+            if (!this._isDestroyed)
+                this._startSignalSample(sourceState);
+        };
+        // Either way it settles: the pending promise rejects only when the log writer throws.
+        sourceState.pendingSample.then(startTrailingSample, startTrailingSample);
+        return GLib.SOURCE_REMOVE;
+    }
+
+    /**
+     * Starts a sample a signal asked for, and starts the cooldown from now.
+     *
+     * @param {object} sourceState - The source's state.
+     * @returns {void}
+     */
+    _startSignalSample(sourceState) {
+        sourceState.lastSignalSampleUsec = this._monotonicNowUsec();
+        this._startSample(sourceState);
     }
 
     /**

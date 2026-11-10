@@ -17,6 +17,7 @@ import * as cockpitProtocol from '../extensions/resource-pulse@dotfiles/lib/cock
 const MICROSECONDS_PER_SECOND = 1e6;
 /** The fake wall clock's start: a plausible epoch time, in microseconds. */
 const FAKE_START_USEC = 1_800_000_000 * MICROSECONDS_PER_SECOND;
+const SECONDS_PER_HOUR = 3600;
 const SOURCE_NAMES = ['sessions', 'network', 'mounts'];
 const FAKE_HOME = '/home/tester';
 const FAKE_CONFIG_HOME = `${FAKE_HOME}/.config`;
@@ -69,10 +70,14 @@ function settle() {
     }));
 }
 
-/** A hand-driven wall clock and the timeouts on it: advanceSeconds fires each due timeout in time order. */
+/**
+ * A hand-driven wall clock and the timeouts on it: advanceSeconds fires each due timeout in time order. Its monotonic
+ * reading moves with it, counted from zero, so a row that mixes the two clocks up reads a different time.
+ */
 class FakeClock {
     constructor() {
         this.nowUsec = FAKE_START_USEC;
+        this.monotonicNowUsec = () => this.nowUsec - FAKE_START_USEC;
         this._timersById = new Map();
         this._nextTimerId = 1;
         this.timeouts = {
@@ -210,6 +215,7 @@ function fakeSetup({watched = false, onBattery = false} = {}) {
         sources: fakeSources,
         timeouts: clock.timeouts,
         nowUsec: () => clock.nowUsec,
+        monotonicNowUsec: clock.monotonicNowUsec,
         isOnBattery: () => power.onBattery,
         logWriter: line => loggedLines.push(line),
     });
@@ -290,7 +296,7 @@ test('cockpitSources: a source that rejects keeps its last object and does not s
     const okNetwork = countingSource('network', {network: 0});
     const sources = new cockpitSources.CockpitSources({
         sources: [failingSessions, okNetwork], timeouts: clock.timeouts, nowUsec: () => clock.nowUsec,
-        isOnBattery: () => false, logWriter: line => loggedLines.push(line),
+        monotonicNowUsec: clock.monotonicNowUsec, isOnBattery: () => false, logWriter: line => loggedLines.push(line),
     });
     sources.start();
     await settle();
@@ -370,6 +376,74 @@ test('cockpitSources: a signal samples its source at once, once per cooldown, wi
     await clock.advanceSeconds(5);
     assertEqual(calls.network, 4, 'and nothing more before the interval');
     assertEqual(calls.sessions, 1, 'another source is not sampled by the signal');
+    sources.destroy();
+});
+
+test('cockpitSources: a signal while its sample is pending gives one trailing sample once that one settles',
+    async () => {
+    const {sources, clock, calls, fakeSources} = fakeSetup({watched: true});
+    const networkFake = fakeSources[1];
+    const resolveNetworkSamples = [];
+    networkFake.sample = () => {
+        calls.network++;
+        return new Promise(resolve => resolveNetworkSamples.push(resolve));
+    };
+    sources.start();
+    await settle();
+    networkFake.onChange();
+    networkFake.onChange();
+    await settle();
+    assertEqual(calls.network, 1, 'the signals neither start a sample nor fold into the pending one');
+    await clock.advanceSeconds(1);
+    assertEqual(calls.network, 1, 'the timer finds the sample still pending');
+    networkFake.onChange();
+    resolveNetworkSamples[0](sourceObjectFor('network', 1));
+    await settle();
+    await settle();
+    assertEqual(calls.network, 2, 'the trailing sample starts as soon as the pending one settles');
+    resolveNetworkSamples[1](sourceObjectFor('network', 2));
+    await clock.advanceSeconds(8.5);
+    assertEqual(calls.network, 2, 'one trailing sample, however many signals came while it waited');
+    assertEqual(sources.sourcesByName.network.sshMasterCount, 2);
+    sources.destroy();
+});
+
+test('cockpitSources: the signal cooldown runs on the monotonic clock, so a wall clock set back does not stretch it',
+    async () => {
+    const clock = new FakeClock();
+    const calls = {network: 0};
+    const networkFake = countingSource('network', calls);
+    let wallClockStepUsec = 0;
+    const sources = new cockpitSources.CockpitSources({
+        sources: [networkFake], timeouts: clock.timeouts, nowUsec: () => clock.nowUsec + wallClockStepUsec,
+        monotonicNowUsec: clock.monotonicNowUsec, isOnBattery: () => false, logWriter: () => {},
+    });
+    sources.start();
+    await settle();
+    networkFake.onChange();
+    await settle();
+    assertEqual(calls.network, 2, 'the first signal samples at once');
+    await clock.advanceSeconds(3);
+    wallClockStepUsec = -SECONDS_PER_HOUR * MICROSECONDS_PER_SECOND;
+    networkFake.onChange();
+    await settle();
+    assertEqual(calls.network, 3, 'three seconds later the cooldown is over, though the wall clock went back an hour');
+    sources.destroy();
+});
+
+test('cockpitSources: a source whose watchChanges throws is logged; it and the sources after it are still scheduled',
+    async () => {
+    const {sources, clock, calls, fakeSources, loggedLines} = fakeSetup({watched: true});
+    fakeSources[0].watchChanges = () => {
+        throw new Error('no monitor');
+    };
+    sources.start();
+    await clock.advanceSeconds(60);
+    assertEqual(calls, {sessions: 7, network: 7, mounts: 3});
+    assertEqual(loggedLines, ['cockpit: sessions: watchChanges: no monitor']);
+    fakeSources[1].onChange();
+    await settle();
+    assertEqual(calls.network, 8, 'a source after it still has its signal');
     sources.destroy();
 });
 
