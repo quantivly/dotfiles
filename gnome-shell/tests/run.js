@@ -14,6 +14,7 @@ import './wiring.test.js';
 import './visibility.test.js';
 import './protocol.test.js';
 import './cockpitProtocol.test.js';
+import './cockpitConfig.test.js';
 import './service-sampler.test.js';
 import './client.test.js';
 import './graph.test.js';

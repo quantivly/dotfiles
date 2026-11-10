@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to ~/.config/resource-pulse/cockpit.json; see docs/GNOME_CONFIGURATION_GUIDE.md",
+  "version": 1,
+  "monitor": {"vendor": "DEL", "product": "DELL U2723QE"},
+  "groups": [
+    {"id": "machine", "caption": "MACHINE", "columns": 2, "cards": ["system", "apps", "connections", "health"]},
+    {"id": "agents", "caption": "AGENTS", "columns": 1, "cards": ["sessions", "seats"]},
+    {"id": "work", "caption": "WORK", "columns": 1, "cards": ["sol", "work"]}
+  ]
+}

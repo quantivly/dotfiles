@@ -153,3 +153,9 @@ export const COCKPIT_NAME_MAX_CHARS = 64;
 export const COCKPIT_REDACTED_NAME = '—';
 /** Prefix of every journal line the cockpit service writes. */
 export const COCKPIT_LOG_PREFIX = 'cockpit:';
+/** The card ids a cockpit layout config may name, in the order the cockpit draws them by default. */
+export const COCKPIT_CARD_IDS = ['system', 'apps', 'connections', 'sessions', 'health', 'seats', 'sol', 'work'];
+/** Columns of the cockpit grid: the most the groups' `columns` may add up to. */
+export const COCKPIT_GRID_COLUMNS = 4;
+/** The cockpit layout config's path under the user's config home (XDG_CONFIG_HOME). */
+export const COCKPIT_CONFIG_RELATIVE_PATH = 'resource-pulse/cockpit.json';
