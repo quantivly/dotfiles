@@ -84,6 +84,10 @@ test('cockpitConfig: a card id with a control character is redacted in the error
     const text = configTextOf([['machine', 1, ['bad\u001bid']]]);
     assertEqual(errorOf(text), "groups[0].cards[0]: unknown card id '—'");
 });
+test('cockpitConfig: a token-shaped card id is redacted in the error', () => {
+    const tokenShapedCardId = 'ghp_' + 'A1'.repeat(18);
+    assertEqual(errorOf(configTextOf([['machine', 1, [tokenShapedCardId]]])), "groups[0].cards[0]: unknown card id '—'");
+});
 test('cockpitConfig: a repeated group id that is unsafe to print is redacted in the error', () => {
     const text = configTextOf([['bad\u007fid', 1, ['system']], ['bad\u007fid', 1, ['apps']]]);
     assertEqual(errorOf(text), "groups[1].id: repeated group id '—'");

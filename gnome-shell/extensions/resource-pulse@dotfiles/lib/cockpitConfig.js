@@ -5,10 +5,9 @@
 // The layout it returns is exactly the shape cockpitProtocol.parseLayout rebuilds, so what the service publishes is
 // what the config said. Keys the parser does not know are ignored, `_`-prefixed ones (the template's `_comment`)
 // included, so the format can grow additively like the protocol.
-import {
-    COCKPIT_CARD_IDS, COCKPIT_CONFIG_RELATIVE_PATH, COCKPIT_GRID_COLUMNS, COCKPIT_NAME_MAX_CHARS, COCKPIT_REDACTED_NAME,
-} from './constants.js';
+import {COCKPIT_CARD_IDS, COCKPIT_CONFIG_RELATIVE_PATH, COCKPIT_GRID_COLUMNS} from './constants.js';
 import {isPlainObject, parseJsonObject, stringOrNull} from './jsonFields.js';
+import {guardDisplayName} from './nameGuard.js';
 
 /** The only `version` this parser reads. */
 const SUPPORTED_CONFIG_VERSION = 1;
@@ -18,21 +17,17 @@ const GROUP_COLUMN_CHOICES = [1, 2];
 const NOT_TEXT_ERROR = 'config: expected JSON text';
 /** The error for text that is not a JSON object. */
 const NOT_OBJECT_ERROR = 'config: expected a JSON object';
-/** Matches a control character (below 0x20, or 0x7f), which never reaches an error message. */
-const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
 
 /**
- * Renders a value from the config file for an error message that is published and drawn on screen. Bounded: a
- * string of 1 to COCKPIT_NAME_MAX_CHARS characters with no control character prints as is, anything else prints as
- * COCKPIT_REDACTED_NAME. A later task may swap this for the repo's name guard.
+ * Renders a value from the config file for an error message that is published and drawn on screen, through the
+ * display-name guard: a safe short string prints as is, anything else (too long, empty, a control character, a
+ * secret shape, not a string) prints as COCKPIT_REDACTED_NAME.
  *
  * @param {*} value - A value read from the config file.
  * @returns {string} The value itself when it is a safe short string, otherwise COCKPIT_REDACTED_NAME.
  */
 function describeConfigValue(value) {
-    const isSafeName = typeof value === 'string' && value.length >= 1 && [...value].length <= COCKPIT_NAME_MAX_CHARS &&
-        !CONTROL_CHARACTER_PATTERN.test(value);
-    return isSafeName ? value : COCKPIT_REDACTED_NAME;
+    return guardDisplayName(value);
 }
 
 /**
