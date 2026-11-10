@@ -1203,7 +1203,7 @@ function removeTree(path) {
     file.delete(null);
 }
 
-test('readFileRefusingSecrets: every stat-only path is refused before it is opened; an ordinary file is read', () => {
+test('readFileRefusingSecrets: every stat-only path is refused, as a StatOnlyPathRefusedError, before it is opened; an ordinary file is read', () => {
     const fakeHome = makeTempHome();
     try {
         const secretPaths = [
@@ -1211,14 +1211,16 @@ test('readFileRefusingSecrets: every stat-only path is refused before it is open
             ...LOCAL_FILE_STEMS.map(stem => `${fakeHome}/${stem}${LOCAL_FILE_SUFFIX}`),
         ];
         secretPaths.forEach(path => plantFile(path, PLANTED_SECRET_TEXT));
+        // Typed, so that service/cockpit.js can tell a refusal from a fault (its fixture read catches this alone).
         const outcomes = secretPaths.map(path => {
             try {
                 return `read: ${sourceIo.readFileRefusingSecrets(path)}`;
             } catch (error) {
-                return error.message;
+                const refusalType = error instanceof sourceIo.StatOnlyPathRefusedError ? 'refusal' : 'other';
+                return `${refusalType}: ${error.message}`;
             }
         });
-        assertEqual(outcomes, secretPaths.map(path => `cockpit: refused to open ${path}`));
+        assertEqual(outcomes, secretPaths.map(path => `refusal: cockpit: refused to open ${path}`));
         const ordinaryPath = `${fakeHome}/dev/notes.json`;
         plantFile(ordinaryPath, '{"ok": true}');
         assertEqual(sourceIo.readFileRefusingSecrets(ordinaryPath), '{"ok": true}');

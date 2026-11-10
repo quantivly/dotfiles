@@ -22,14 +22,16 @@
 # install step runs against a systemctl stub, never the live user manager.
 #
 # "Could not run" is exit 2, never a pass: a missing gjs, zsh, find, timeout,
-# dbus-run-session or gdbus, or a missing tally line (an import error prints
-# none) is fatal. The suite asserts its own row total.
+# dbus-run-session, gdbus or script, a fake herdr client that did not come up,
+# or a missing tally line (an import error prints none) is fatal. The suite
+# asserts its own row total.
 #
 # Requires: bash, gjs, zsh (for gnome-status), find, timeout, dbus-run-session
 # (Ubuntu: dbus-daemon), gdbus (libglib2.0-bin; gnome-status asks the real
-# service through it), and for the card-width row the Pango typelibs
-# (gir1.2-pango-1.0) and the card's font, Ubuntu Sans (fonts-ubuntu): without
-# them that row fails, never passes. No network, no root.
+# service through it), script (util-linux's, from bsdutils: it gives the fake
+# herdr client of the FocusSession rows a terminal), and for the card-width row
+# the Pango typelibs (gir1.2-pango-1.0) and the card's font, Ubuntu Sans
+# (fonts-ubuntu): without them that row fails, never passes. No network, no root.
 #
 # Usage: scripts/test-resource-pulse.sh
 #   RESOURCE_PULSE_EXT_DIR=<dir> points the file rows at a copy of the
@@ -51,7 +53,7 @@ fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
 [[ -r "$RUNNER" ]] || fatal "cannot read $RUNNER"
 [[ -d "$EXT_DIR" ]] || fatal "no extension directory at $EXT_DIR"
-for required_tool in gjs zsh find timeout dbus-run-session gdbus; do
+for required_tool in gjs zsh find timeout dbus-run-session gdbus script; do
   command -v "$required_tool" >/dev/null || fatal "$required_tool is required"
 done
 # Every fixture this run writes lives here, from the placement rows on; removed on exit.
@@ -1530,11 +1532,15 @@ printf '\nservice/cockpit.js on a private bus (the real sources, under a home of
 # ~/.ssh. DBUS_SYSTEM_BUS_ADDRESS names a socket that does not exist, so
 # NetworkManager and UPower are absent, as on a runner with no system bus at
 # all. The first run has no herdr socket; the second has a fake herdr at
-# <config home>/herdr/herdr.sock, so FocusSession never reaches the live herdr.
+# <config home>/herdr/herdr.sock, so FocusSession never reaches the live herdr,
+# and beside it a fake herdr client: a process named herdr in a terminal of its
+# own, whose pid and its terminal's FocusSession must name, on any machine.
 # Neither is in fixture mode: the first sets RESOURCE_PULSE_COCKPIT_FIXTURE
 # empty, the second unsets it. A third run sets it to a copy of
 # gnome-shell/tests/fixtures/cockpit/nested-state.json, under a config home with
 # no config and no herdr socket, so what it serves can only be the fixture's.
+# A fourth runs a copy of the extension whose listing of /proc throws a plain
+# Error (a fault, not IO), with a fake herdr of its own.
 COCKPIT_MAIN_PATH="$EXT_DIR/service/cockpit.js"
 COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
 COCKPIT_OBJECT_PATH='/io/github/quantivly/dotfiles/Cockpit1'
@@ -1555,6 +1561,35 @@ COCKPIT_NESTED_FIXTURE="$DOTFILES/gnome-shell/tests/fixtures/cockpit/nested-stat
 COCKPIT_FIXTURE_PATH="$COCKPIT_RUN_DIR/cockpit-fixture.json"
 COCKPIT_FIXTURE_NETWORK_REWRITE="$COCKPIT_RUN_DIR/cockpit-fixture-network.json"
 COCKPIT_FIXTURE_LAYOUT_REWRITE="$COCKPIT_RUN_DIR/cockpit-fixture-layout.json"
+# The same fixture, readable and valid, under a stat-only directory (/.ssh/, one
+# of lib/constants.js's STAT_ONLY_PATH_FRAGMENTS): the service must refuse it
+# unopened, so serving it, or failing to read it, both fail its row.
+COCKPIT_REFUSED_FIXTURE_PATH="$COCKPIT_RUN_DIR/fixture-home/.ssh/cockpit-fixture.json"
+COCKPIT_REFUSED_FIXTURE_LOG="$COCKPIT_RUN_DIR/cockpit-refused-fixture.log"
+# service/cockpit.js's COCKPIT_FIXTURE_REFUSED_ERROR: the reason its shutdown line gives.
+COCKPIT_FIXTURE_REFUSED_REASON='refused before opening it: its path names a file the cockpit may stat, never open'
+# The fake herdr client: a /bin/sh script whose file name is herdr, which the
+# kernel takes as its comm (a copied binary cannot be renamed that way). The
+# driver runs it under script(1), which gives it a pseudo-terminal (a non-zero
+# tty_nr) and stays its parent, as a terminal emulator would. It writes its pid
+# to the file it is given and sleeps until killed, or at most
+# FAKE_CLIENT_LIFETIME_SECONDS should every cleanup be skipped; it never reaches
+# any herdr socket. It lives in this run's directory, never on PATH.
+COCKPIT_FAKE_CLIENT_DIR="$COCKPIT_RUN_DIR/fake-herdr-client"
+COCKPIT_FAKE_CLIENT_PATH="$COCKPIT_FAKE_CLIENT_DIR/herdr"
+COCKPIT_FAKE_CLIENT_PID_FILE="$COCKPIT_FAKE_CLIENT_DIR/client.pid"
+COCKPIT_FAKE_CLIENT_LOG="$COCKPIT_RUN_DIR/fake-herdr-client.log"
+# The /proc-fault run: a copy of the extension in which service/sources/sourceIo.js
+# re-exports the real module (moved beside it) but listEntryNames throws a plain
+# Error for /proc. Under the real tree the scan never meets such an Error, so
+# this is the one way to drive the fault path of service/cockpit.js itself.
+COCKPIT_PROC_FAULT_EXT_DIR="$COCKPIT_RUN_DIR/proc-fault-extension"
+COCKPIT_PROC_FAULT_SOURCE_IO="$COCKPIT_PROC_FAULT_EXT_DIR/service/sources/sourceIo.js"
+COCKPIT_PROC_FAULT_REAL_SOURCE_IO="$COCKPIT_PROC_FAULT_EXT_DIR/service/sources/sourceIoWithoutFault.js"
+COCKPIT_PROC_FAULT_MAIN_PATH="$COCKPIT_PROC_FAULT_EXT_DIR/service/cockpit.js"
+COCKPIT_PROC_FAULT_LOG="$COCKPIT_RUN_DIR/cockpit-proc-fault.log"
+COCKPIT_PROC_FAULT_HERDR_REQUEST_LOG="$COCKPIT_RUN_DIR/proc-fault-herdr-requests.log"
+COCKPIT_PROC_FAULT_MESSAGE='injected fault: listing /proc'
 for cockpit_run_name in serve focus; do
   for cockpit_home_kind in home config state; do
     mkdir -p "$COCKPIT_RUN_DIR/$cockpit_run_name-$cockpit_home_kind" \
@@ -1567,8 +1602,44 @@ for cockpit_run_name in serve focus; do
 done
 mkdir -p "$COCKPIT_RUN_DIR/focus-config/herdr" || fatal "cannot create the fake herdr's directory"
 for cockpit_home_kind in home config state; do
-  mkdir -p "$COCKPIT_RUN_DIR/fixture-$cockpit_home_kind" || fatal "cannot create $COCKPIT_RUN_DIR/fixture-$cockpit_home_kind"
+  mkdir -p "$COCKPIT_RUN_DIR/fixture-$cockpit_home_kind" "$COCKPIT_RUN_DIR/proc-fault-$cockpit_home_kind" \
+    || fatal "cannot create the fixture and /proc-fault $cockpit_home_kind directories under $COCKPIT_RUN_DIR"
 done
+mkdir -p "$COCKPIT_RUN_DIR/proc-fault-config/herdr" "${COCKPIT_REFUSED_FIXTURE_PATH%/*}" "$COCKPIT_FAKE_CLIENT_DIR" \
+  || fatal "cannot create the /proc-fault fake herdr's, the refused fixture's or the fake client's directory"
+cp -- "$COCKPIT_NESTED_FIXTURE" "$COCKPIT_REFUSED_FIXTURE_PATH" || fatal "cannot copy $COCKPIT_NESTED_FIXTURE"
+cat >"$COCKPIT_FAKE_CLIENT_PATH" <<'FAKE_HERDR_CLIENT' || fatal "cannot write $COCKPIT_FAKE_CLIENT_PATH"
+#!/bin/sh
+# A stand-in for a herdr client, for scripts/test-resource-pulse.sh: see
+# COCKPIT_FAKE_CLIENT_PATH there. $1 is the file its pid goes to.
+FAKE_CLIENT_LIFETIME_SECONDS=300
+printf '%s\n' "$$" >"$1"
+trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM HUP INT
+sleep "$FAKE_CLIENT_LIFETIME_SECONDS" &
+sleep_pid=$!
+wait "$sleep_pid"
+FAKE_HERDR_CLIENT
+chmod +x "$COCKPIT_FAKE_CLIENT_PATH" || fatal "cannot make $COCKPIT_FAKE_CLIENT_PATH executable"
+if ! cp -R -- "$EXT_DIR" "$COCKPIT_PROC_FAULT_EXT_DIR" \
+  || ! mv -- "$COCKPIT_PROC_FAULT_SOURCE_IO" "$COCKPIT_PROC_FAULT_REAL_SOURCE_IO"; then
+  fatal "cannot copy the extension to $COCKPIT_PROC_FAULT_EXT_DIR, or move its sourceIo.js aside"
+fi
+# A module's own export shadows the same name from export *, so every other
+# helper is the real one.
+cat >"$COCKPIT_PROC_FAULT_SOURCE_IO" <<PROC_FAULT_SOURCE_IO || fatal "cannot write $COCKPIT_PROC_FAULT_SOURCE_IO"
+// scripts/test-resource-pulse.sh's /proc-fault copy of sourceIo.js: the real
+// module, but a listing of PROC_ROOT_PATH throws a plain Error.
+import {PROC_ROOT_PATH} from '../../lib/constants.js';
+import {listEntryNames as listEntryNamesWithoutFault} from './${COCKPIT_PROC_FAULT_REAL_SOURCE_IO##*/}';
+
+export * from './${COCKPIT_PROC_FAULT_REAL_SOURCE_IO##*/}';
+
+export function listEntryNames(directoryPath) {
+    if (directoryPath === PROC_ROOT_PATH)
+        throw new Error('$COCKPIT_PROC_FAULT_MESSAGE');
+    return listEntryNamesWithoutFault(directoryPath);
+}
+PROC_FAULT_SOURCE_IO
 cp -- "$COCKPIT_NESTED_FIXTURE" "$COCKPIT_FIXTURE_PATH" || fatal "cannot copy $COCKPIT_NESTED_FIXTURE"
 sed 's/"sshMasterCount": 2/"sshMasterCount": 3/' "$COCKPIT_FIXTURE_PATH" >"$COCKPIT_FIXTURE_NETWORK_REWRITE" \
   || fatal "cannot write $COCKPIT_FIXTURE_NETWORK_REWRITE"
@@ -1581,23 +1652,30 @@ if cmp -s "$COCKPIT_FIXTURE_PATH" "$COCKPIT_FIXTURE_NETWORK_REWRITE" \
   fatal "a rewrite of $COCKPIT_NESTED_FIXTURE changed nothing: its ssh master count or WORK caption moved"
 fi
 : >"$COCKPIT_SERVE_LOG"; : >"$COCKPIT_FOCUS_LOG"; : >"$COCKPIT_HERDR_REQUEST_LOG"; : >"$COCKPIT_FAKE_HERDR_LOG"
-: >"$COCKPIT_FIXTURE_LOG"; : >"$COCKPIT_BAD_FIXTURE_LOG"
+: >"$COCKPIT_FIXTURE_LOG"; : >"$COCKPIT_BAD_FIXTURE_LOG"; : >"$COCKPIT_REFUSED_FIXTURE_LOG"
+: >"$COCKPIT_FAKE_CLIENT_LOG"; : >"$COCKPIT_PROC_FAULT_LOG"; : >"$COCKPIT_PROC_FAULT_HERDR_REQUEST_LOG"
 # Decodes a gdbus call's reply (GLib.Variant text, as gdbus prints it, holding
 # one JSON string). For `reply` it prints the JSON compactly (FocusSession's);
-# `live-reply` does the same, but a focused reply's windowPidCandidates, read
-# from this machine's /proc, print as as-in-proc when they equal one of the
-# comma-joined lists given after the text (the driver's own reads of /proc,
-# just before and just after the call), and as themselves otherwise; for
-# `state` it prints the GetState fields named after the text, as <name>=<value>
-# separated by spaces, in the order asked.
+# `client-reply` does the same, but a focused reply's windowPidCandidates print
+# as fake-client-then-script when they hold the fake herdr client's pid with its
+# terminal's (script's) right after it, the two pids given after the text, and
+# hold no pid 1; as themselves otherwise. Other herdr clients may come before or
+# after (this machine's own), so only those two are asked for. For `state` it
+# prints the GetState fields named after the text, as <name>=<value> separated
+# by spaces, in the order asked.
 # shellcheck disable=SC2016  # JavaScript source: $ and backticks are gjs's, not bash's.
 COCKPIT_REPLY_DECODER_JS='
 const {GLib} = imports.gi;
 const [replyKind, gdbusReplyText, ...fieldNames] = ARGV;
-const expectedCandidateTexts = fieldNames;
 const SOURCE_NAMES = ["sessions", "network", "mounts"];
 const SINGLE_STRING_TYPE = new GLib.VariantType("(s)");
-const PROC_CANDIDATES_TAG = "as-in-proc";
+const FAKE_CLIENT_CANDIDATES_TAG = "fake-client-then-script";
+const INIT_PID = 1;
+function holdsFakeClientThenScript(candidates, fakeClientPid, fakeClientScriptPid) {
+    const fakeClientIndex = candidates.indexOf(fakeClientPid);
+    return fakeClientIndex >= 0 && candidates[fakeClientIndex + 1] === fakeClientScriptPid &&
+        !candidates.includes(INIT_PID);
+}
 function kindOf(value) {
     if (value === null || value === undefined)
         return "null";
@@ -1637,10 +1715,11 @@ try {
     const [replyJson] = GLib.Variant.parse(SINGLE_STRING_TYPE, gdbusReplyText, null, null).deepUnpack();
     const reply = JSON.parse(replyJson);
     const candidates = reply.windowPidCandidates;
-    if (replyKind === "live-reply" && reply.focused === true && Array.isArray(candidates) &&
-            expectedCandidateTexts.includes(candidates.join(",")))
-        reply.windowPidCandidates = PROC_CANDIDATES_TAG;
-    if (replyKind === "reply" || replyKind === "live-reply") {
+    const [fakeClientPid, fakeClientScriptPid] = fieldNames.map(Number);
+    if (replyKind === "client-reply" && reply.focused === true && Array.isArray(candidates) &&
+            holdsFakeClientThenScript(candidates, fakeClientPid, fakeClientScriptPid))
+        reply.windowPidCandidates = FAKE_CLIENT_CANDIDATES_TAG;
+    if (replyKind === "reply" || replyKind === "client-reply") {
         decoded = JSON.stringify(reply);
     } else {
         const fieldTexts = stateFieldTexts(reply);
@@ -1729,15 +1808,18 @@ new GLib.MainLoop(null, false).run();
 # The driver. The serve run: owns the name, answers GetState, a second copy
 # exits 1, then the config is rewritten unchanged (GetState's latest publish
 # time read around it), overwritten with "{", deleted and renamed back into
-# place, each followed by GetState for up to 3 s; then SIGTERM. The focus run: a fake herdr first, then the service, then one
+# place, each followed by GetState for up to 3 s; then SIGTERM. The focus run: a
+# fake herdr and the fake herdr client first, then the service, then one
 # FocusSession per kind of row, each followed by the focus requests the fake
 # herdr saw for it; then the fake herdr stopped and one more FocusSession, which
-# finds herdr unreachable; then SIGTERM. The fixture run: GetState, two
-# FocusSessions, then the fixture renamed over twice (the network rewrite, then
-# the layout one), each followed by GetState for up to 3 s, with the Changed
-# signals watched on the bus; then SIGTERM; then a fixture that does not exist
-# and one that is not JSON, each ending the service at its start. Every wait is
-# bounded.
+# finds herdr unreachable; then SIGTERM. The /proc-fault run: its own fake herdr,
+# the faulty copy of the service, one FocusSession, SIGTERM; then the fake herdr
+# client is stopped (and by the EXIT trap on every other path). The fixture run:
+# GetState, two FocusSessions, then the fixture renamed over twice (the network
+# rewrite, then the layout one), each followed by GetState for up to 3 s, with
+# the Changed signals watched on the bus; then SIGTERM; then a fixture that does
+# not exist, one that is not JSON and one under a stat-only path, each ending
+# the service at its start. Every wait is bounded.
 # shellcheck disable=SC2016  # The driver's own source: its variables expand when it runs.
 COCKPIT_DRIVER_OUTPUT="$(on_private_bus bash -c '
 set -u
@@ -1745,7 +1827,9 @@ cockpit_main="$1" decoder_js="$2" fake_herdr_js="$3" bus_name="$4" object_path="
 config_template="$7" config_relative_path="$8" no_system_bus="$9"
 serve_log="${10}" focus_log="${11}" request_log="${12}" fake_herdr_log="${13}"
 fixture_path="${14}" fixture_network_rewrite="${15}" fixture_layout_rewrite="${16}" fixture_log="${17}"
-bad_fixture_log="${18}"
+bad_fixture_log="${18}" refused_fixture_path="${19}" refused_fixture_log="${20}"
+fake_client_path="${21}" fake_client_pid_file="${22}" fake_client_log="${23}"
+proc_fault_main="${24}" proc_fault_log="${25}" proc_fault_request_log="${26}"
 is_private_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "${RESOURCE_PULSE_TEST_BUS_DIR:-}" \
   || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
 USEC_PER_SECOND=1000000
@@ -1792,38 +1876,52 @@ wait_for_changed() {
     sleep 0.1
   done
 }
-# proc_window_candidates: the window candidates the /proc of this machine
-# gives, read here independently of lib/processTree.js: the processes named herdr
-# with a controlling terminal, by ascending pid, each followed by its parents
-# up to pid 1 (16 processes at most, pid 1 left out), each pid once, the first
-# 64 of them, joined by commas; empty with no herdr client.
-proc_window_candidates() {
-  local stat_path stat_line process_pid process_comm client_pid chain_pid chain_depth seen_pids=" "
-  local -a stat_fields=() client_pids=() sorted_client_pids=() candidates=()
-  local -A parent_by_pid=()
-  for stat_path in /proc/[0-9]*/stat; do
-    read -r stat_line 2>/dev/null <"$stat_path" || continue
-    process_pid="${stat_line%% *}"
-    process_comm="${stat_line#*(}"
-    process_comm="${process_comm%)*}"
-    read -r -a stat_fields <<<"${stat_line##*) }"
-    parent_by_pid[$process_pid]="${stat_fields[1]}"
-    [[ "$process_comm" == herdr && "${stat_fields[4]}" != 0 ]] && client_pids+=("$process_pid")
+# start_fake_herdr_client: runs the fake herdr client under script(1), through
+# an exec in the shell script starts, so that script is its parent; waits at
+# most 5 s for its pid; sets fake_client_pid and fake_client_script_pid.
+# SHELL=/bin/sh, so no login shell of this machine reads its rc files. Prints
+# fake-herdr-client=ready, or "could not run" and why when it wrote no pid, or
+# is not named herdr, has no terminal or is not the child of script.
+start_fake_herdr_client() {
+  local attempt client_stat_line client_comm client_state="could not run: it wrote no pid within 5 s"
+  local -a client_stat_fields=()
+  : >"$fake_client_pid_file"
+  env SHELL=/bin/sh script -qec "exec \"$fake_client_path\" \"$fake_client_pid_file\"" /dev/null \
+    </dev/null >>"$fake_client_log" 2>&1 &
+  fake_client_script_pid=$!
+  for (( attempt = 0; attempt < 50; attempt++ )); do
+    [[ -s "$fake_client_pid_file" ]] && break
+    sleep 0.1
   done
-  (( ${#client_pids[@]} > 0 )) && mapfile -t sorted_client_pids < <(printf "%s\n" "${client_pids[@]}" | sort -n)
-  for client_pid in "${sorted_client_pids[@]}"; do
-    chain_pid="$client_pid"
-    for (( chain_depth = 0; chain_depth < 16; chain_depth++ )); do
-      [[ -n "${parent_by_pid[$chain_pid]+set}" && "$chain_pid" != 1 ]] || break
-      if [[ "$seen_pids" != *" $chain_pid "* ]]; then
-        candidates+=("$chain_pid")
-        seen_pids+="$chain_pid "
-      fi
-      chain_pid="${parent_by_pid[$chain_pid]}"
+  read -r fake_client_pid 2>/dev/null <"$fake_client_pid_file" || fake_client_pid=""
+  [[ -n "$fake_client_pid" ]] && client_state="could not run: no /proc/$fake_client_pid/stat"
+  if [[ -n "$fake_client_pid" ]] && read -r client_stat_line 2>/dev/null <"/proc/$fake_client_pid/stat"; then
+    client_comm="${client_stat_line#*(}"
+    client_comm="${client_comm%)*}"
+    read -r -a client_stat_fields <<<"${client_stat_line##*) }"
+    client_state="could not run: comm=$client_comm ppid=${client_stat_fields[1]-} tty_nr=${client_stat_fields[4]-}"
+    [[ "$client_comm" == herdr && "${client_stat_fields[1]-}" == "$fake_client_script_pid" \
+      && "${client_stat_fields[4]-0}" != 0 ]] && client_state=ready
+  fi
+  printf "fake-herdr-client=%s\n" "$client_state"
+}
+# stop_fake_herdr_client: SIGTERM to the fake herdr client, while its pid is
+# still a process named herdr, and to script; then at most 5 s for script to
+# end, and SIGKILL only while it still runs; safe when neither runs.
+stop_fake_herdr_client() {
+  local attempt client_stat_line=""
+  [[ -n "$fake_client_pid" ]] && read -r client_stat_line 2>/dev/null <"/proc/$fake_client_pid/stat"
+  [[ "$client_stat_line" == *" (herdr) "* ]] && kill -TERM "$fake_client_pid" 2>/dev/null
+  if [[ -n "$fake_client_script_pid" ]]; then
+    still_running "$fake_client_script_pid" && kill -TERM "$fake_client_script_pid" 2>/dev/null
+    for (( attempt = 0; attempt < 50; attempt++ )); do
+      still_running "$fake_client_script_pid" || break
+      sleep 0.1
     done
-  done
-  local IFS=,
-  printf "%s" "${candidates[*]:0:64}"
+    still_running "$fake_client_script_pid" && kill -KILL "$fake_client_script_pid" 2>/dev/null
+    wait "$fake_client_script_pid" 2>/dev/null
+  fi
+  fake_client_pid="" fake_client_script_pid=""
 }
 # wait_for_banner <file>: waits at most 5 s for the first line of gdbus monitor
 # (its "Monitoring signals" banner, the readiness signal) in <file>.
@@ -1871,26 +1969,20 @@ stop_process() {
 }
 # focus_session <id> [label] [decoding]: one FocusSession through gdbus;
 # prints, under "focus <label>" (the id by default), the reply as the decoding
-# <decoding> of the decoder gives it (live-reply by default) and the focus
-# requests the fake herdr saw for it, joined by |. For live-reply it also
-# prints, under "proc-candidates <label>", what /proc gave just before and just
-# after the call, for a failing row to show.
+# <decoding> of the decoder gives it (client-reply, against the fake herdr
+# client running now, by default) and the focus requests the fake herdr saw for
+# it in request_log, joined by |.
 focus_session() {
-  local session_id="$1" label="${2:-$1}" reply_decoding="${3:-live-reply}" requests_before reply decoded requests
-  local candidates_before="" candidates_after=""
+  local session_id="$1" label="${2:-$1}" reply_decoding="${3:-client-reply}" requests_before reply decoded requests
   requests_before="$(grep -c -E "$FOCUS_REQUEST_PATTERN" "$request_log")"
-  [[ "$reply_decoding" == live-reply ]] && candidates_before="$(proc_window_candidates)"
   if reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
       --method "$bus_name.FocusSession" "\"$session_id\"" --timeout 5 2>&1)"; then
-    [[ "$reply_decoding" == live-reply ]] && candidates_after="$(proc_window_candidates)"
-    decoded="$(gjs -c "$decoder_js" "$reply_decoding" "$reply" "$candidates_before" "$candidates_after")"
+    decoded="$(gjs -c "$decoder_js" "$reply_decoding" "$reply" "$fake_client_pid" "$fake_client_script_pid")"
   else
     decoded="D-Bus error: ${reply%%$'"'"'\n'"'"'*}"
   fi
   requests="$(grep -E "$FOCUS_REQUEST_PATTERN" "$request_log" | tail -n "+$(( requests_before + 1 ))" | tr "\n" "|")"
   printf "focus %s=reply=%s requests=[%s]\n" "$label" "$decoded" "${requests%|}"
-  [[ "$reply_decoding" == live-reply ]] \
-    && printf "proc-candidates %s=before=[%s] after=[%s]\n" "$label" "$candidates_before" "$candidates_after"
   return 0
 }
 
@@ -1914,7 +2006,8 @@ monitor_log="$run_dir/layout-monitor.log"
 gdbus monitor --session --dest "$bus_name" >"$monitor_log" 2>&1 &
 monitor_pid=$!
 fixture_monitor_pid=""
-trap '"'"'kill "$monitor_pid" ${fixture_monitor_pid:+"$fixture_monitor_pid"} 2>/dev/null'"'"' EXIT
+fake_client_pid="" fake_client_script_pid=""
+trap '"'"'kill "$monitor_pid" ${fixture_monitor_pid:+"$fixture_monitor_pid"} 2>/dev/null; stop_fake_herdr_client'"'"' EXIT
 wait_for_banner "$monitor_log"
 cp -- "$config_template" "$serve_config"
 sleep 1
@@ -1942,6 +2035,7 @@ for (( attempt = 0; attempt < 50; attempt++ )); do
   [[ -S "$herdr_socket" ]] && break
   sleep 0.1
 done
+start_fake_herdr_client
 focus_environment=(env -u RESOURCE_PULSE_COCKPIT_FIXTURE HOME="$run_dir/focus-home"
   XDG_CONFIG_HOME="$run_dir/focus-config" XDG_STATE_HOME="$run_dir/focus-state"
   DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
@@ -1957,6 +2051,29 @@ kill -TERM "$fake_herdr_pid" 2>/dev/null
 wait "$fake_herdr_pid" 2>/dev/null
 focus_session w1:p1 "w1:p1 without herdr"
 stop_process focus-exit "$focus_pid"
+
+# The first fake herdr is gone, so the /proc-fault run has its own, logging to
+# its own request log. The fake herdr client still runs: a scan that did not
+# fault would name it.
+request_log="$proc_fault_request_log"
+proc_fault_herdr_socket="$run_dir/proc-fault-config/herdr/herdr.sock"
+gjs -c "$fake_herdr_js" "$proc_fault_herdr_socket" "$request_log" >>"$fake_herdr_log" 2>&1 &
+proc_fault_herdr_pid=$!
+for (( attempt = 0; attempt < 50; attempt++ )); do
+  [[ -S "$proc_fault_herdr_socket" ]] && break
+  sleep 0.1
+done
+proc_fault_environment=(env -u RESOURCE_PULSE_COCKPIT_FIXTURE HOME="$run_dir/proc-fault-home"
+  XDG_CONFIG_HOME="$run_dir/proc-fault-config" XDG_STATE_HOME="$run_dir/proc-fault-state"
+  DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+"${proc_fault_environment[@]}" gjs -m "$proc_fault_main" >>"$proc_fault_log" 2>&1 &
+proc_fault_pid=$!
+printf "proc-fault-ready=%s\n" "$(probe_state 15 "sessionRows=4" herdrRunning sessionRows)"
+focus_session w1:p1 "proc-fault w1:p1" reply
+stop_process proc-fault-exit "$proc_fault_pid"
+kill -TERM "$proc_fault_herdr_pid" 2>/dev/null
+wait "$proc_fault_herdr_pid" 2>/dev/null
+stop_fake_herdr_client
 
 fixture_environment=(env HOME="$run_dir/fixture-home" XDG_CONFIG_HOME="$run_dir/fixture-config"
   XDG_STATE_HOME="$run_dir/fixture-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
@@ -1988,15 +2105,26 @@ printf "{" >"$run_dir/malformed-fixture.json"
 "${fixture_environment[@]}" RESOURCE_PULSE_COCKPIT_FIXTURE="$run_dir/malformed-fixture.json" \
   timeout 30 gjs -m "$cockpit_main" >>"$bad_fixture_log" 2>&1
 printf "malformed-fixture-exit=%s\n" "$?"
+"${fixture_environment[@]}" RESOURCE_PULSE_COCKPIT_FIXTURE="$refused_fixture_path" \
+  timeout 30 gjs -m "$cockpit_main" >>"$refused_fixture_log" 2>&1
+printf "refused-fixture-exit=%s\n" "$?"
 ' cockpit-driver "$COCKPIT_MAIN_PATH" "$COCKPIT_REPLY_DECODER_JS" "$COCKPIT_FAKE_HERDR_JS" "$COCKPIT_BUS_NAME" \
   "$COCKPIT_OBJECT_PATH" "$COCKPIT_RUN_DIR" "$COCKPIT_CONFIG_TEMPLATE" "$COCKPIT_CONFIG_RELATIVE_PATH" \
   "$COCKPIT_NO_SYSTEM_BUS" "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_HERDR_REQUEST_LOG" \
   "$COCKPIT_FAKE_HERDR_LOG" "$COCKPIT_FIXTURE_PATH" "$COCKPIT_FIXTURE_NETWORK_REWRITE" \
-  "$COCKPIT_FIXTURE_LAYOUT_REWRITE" "$COCKPIT_FIXTURE_LOG" "$COCKPIT_BAD_FIXTURE_LOG" 2>&1)"
+  "$COCKPIT_FIXTURE_LAYOUT_REWRITE" "$COCKPIT_FIXTURE_LOG" "$COCKPIT_BAD_FIXTURE_LOG" \
+  "$COCKPIT_REFUSED_FIXTURE_PATH" "$COCKPIT_REFUSED_FIXTURE_LOG" "$COCKPIT_FAKE_CLIENT_PATH" \
+  "$COCKPIT_FAKE_CLIENT_PID_FILE" "$COCKPIT_FAKE_CLIENT_LOG" "$COCKPIT_PROC_FAULT_MAIN_PATH" \
+  "$COCKPIT_PROC_FAULT_LOG" "$COCKPIT_PROC_FAULT_HERDR_REQUEST_LOG" 2>&1)"
 declare -A cockpit_driver_said=()
 while IFS= read -r driver_line; do
   [[ "$driver_line" == *=* ]] && cockpit_driver_said["${driver_line%%=*}"]="${driver_line#*=}"
 done <<<"$COCKPIT_DRIVER_OUTPUT"
+# Without the fake herdr client the FocusSession rows would check nothing, so a
+# client that did not come up is "could not run", never a row of its own.
+cockpit_fake_client_state="${cockpit_driver_said[fake-herdr-client]-never started}"
+[[ "$cockpit_fake_client_state" == ready ]] \
+  || fatal "the fake herdr client of the FocusSession rows: $cockpit_fake_client_state (driver said: $COCKPIT_DRIVER_OUTPUT)"
 cockpit_fail_count_before=$FAIL
 check "service/cockpit.js, with RESOURCE_PULSE_COCKPIT_FIXTURE set empty (no fixture), owns Cockpit1 within 15 s and its GetState says protocol 1, the template's three groups, herdr not running and a list of mount rows" \
   "${cockpit_driver_said[served]-}" "protocol=1 sources=object/object/object groups=3 configError=null herdrRunning=false mountsRows=list"
@@ -2018,20 +2146,22 @@ check "SIGTERM ends service/cockpit.js with exit 0, in all three runs" \
   "serve=0 focus=0 fixture=0"
 check "service/cockpit.js logged its serving line once, with the protocol" \
   "$(grep -c -F "cockpit: serving $COCKPIT_BUS_NAME (protocol 1)" "$COCKPIT_SERVE_LOG")" 1
-check "service/cockpit.js logged no gjs or GLib warning, critical or uncaught error, in any run (the fixture's and the bad fixtures' included)" \
-  "$(cat "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_FIXTURE_LOG" "$COCKPIT_BAD_FIXTURE_LOG" | grep -c -E "$ENGINE_WARNING_PATTERN")" 0
-# A focused reply's windowPidCandidates come from this machine's /proc (its
-# herdr clients and their parents), so the decoder prints them as as-in-proc
-# when they equal what the driver read from /proc itself, just before or just
-# after the call. On a machine with no herdr client in a terminal (CI) both are
-# empty, so the comparison holds without reading a chain; lib/processTree.js's
-# rows pin the chains themselves.
-check "FocusSession, with RESOURCE_PULSE_COCKPIT_FIXTURE unset, focuses the row's own workspace, then its pane, over the herdr socket: focused true, windowPid null, and the window candidates this machine's /proc gives" \
+check "service/cockpit.js logged no gjs or GLib warning, critical or uncaught error, in any run (the fixture's, the bad and refused fixtures' and the /proc-fault run's included)" \
+  "$(cat "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_FIXTURE_LOG" "$COCKPIT_BAD_FIXTURE_LOG" \
+    "$COCKPIT_REFUSED_FIXTURE_LOG" "$COCKPIT_PROC_FAULT_LOG" | grep -c -E "$ENGINE_WARNING_PATTERN")" 0
+# A focused reply's windowPidCandidates come from /proc: every herdr client (a
+# process named herdr with a terminal) and its parents. The driver's own fake
+# client is one on any machine, CI included, so the decoder prints
+# fake-client-then-script only when the reply names its pid with its terminal's
+# (script's) right after it, and no pid 1. This machine's real herdr clients may
+# add their own chains around it, so nothing else in the list is asked for;
+# lib/processTree.js's rows pin the order, the repeats and the bounds.
+check "FocusSession, with RESOURCE_PULSE_COCKPIT_FIXTURE unset, focuses the row's own workspace, then its pane, over the herdr socket: focused true, windowPid null, and window candidates naming the fake herdr client, then its terminal, and never pid 1" \
   "ready=${cockpit_driver_said[focus-ready]-} ${cockpit_driver_said[focus w1:p1]-}" \
-  'ready=herdrRunning=true sessionRows=4 reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":"as-in-proc"} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p1"}]'
-check "FocusSession on a row in no workspace sends pane.focus alone" \
+  'ready=herdrRunning=true sessionRows=4 reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":"fake-client-then-script"} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p1"}]'
+check "FocusSession on a row in no workspace sends pane.focus alone, and names the fake herdr client, then its terminal, and never pid 1" \
   "${cockpit_driver_said[focus p3]-}" \
-  'reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":"as-in-proc"} requests=[pane.focus {"pane_id":"p3"}]'
+  'reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":"fake-client-then-script"} requests=[pane.focus {"pane_id":"p3"}]'
 # A herdr rejection is an answer, not a fault: the cockpit replies with its
 # code itself, so the D-Bus face's fault line never appears for it. herdr's own
 # text goes to the journal alone (ruling R18).
@@ -2044,6 +2174,13 @@ check "an unknown id, and a row with no pane, answer focused false with the code
 check "with the fake herdr stopped, a row answers focused false and the code herdr-unreachable, and herdr's text goes to the journal" \
   "${cockpit_driver_said[focus w1:p1 without herdr]-} logged=$(grep -c -F 'cockpit: focus: w1:p1: herdr: ' "$COCKPIT_FOCUS_LOG")" \
   'reply={"focused":false,"windowPid":null,"error":"herdr-unreachable","windowPidCandidates":[]} requests=[] logged=1'
+# The /proc-fault copy throws a plain Error listing /proc, once herdr focused
+# the pane. The pane is focused all the same, so the reply must say so, naming
+# no window (the fake client still runs, so the scan would otherwise name it),
+# with the fault logged once, never answered as the face's internal error.
+check "a fault (not IO) while naming the window candidates leaves the reply focused, with no candidates, the fault logged once and never as the face's internal error" \
+  "ready=${cockpit_driver_said[proc-fault-ready]-} ${cockpit_driver_said[focus proc-fault w1:p1]-} logged=$(grep -c -F "cockpit: focus: window candidates: $COCKPIT_PROC_FAULT_MESSAGE" "$COCKPIT_PROC_FAULT_LOG") faults=$(grep -c -F 'cockpit: FocusSession failed' "$COCKPIT_PROC_FAULT_LOG") exit=${cockpit_driver_said[proc-fault-exit]-}" \
+  'ready=herdrRunning=true sessionRows=4 reply={"focused":true,"windowPid":null,"error":null,"windowPidCandidates":[]} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p1"}] logged=1 faults=0 exit=0'
 # The fixture run's config home holds no config and no herdr socket: serving the
 # config would read as no layout and the error missing, serving the sources as
 # herdr not running, no session rows and no uplink.
@@ -2064,6 +2201,11 @@ check "with the fixture, service/cockpit.js logs its serving line and the fixtur
 check "a fixture that does not exist, or that is not JSON, ends service/cockpit.js at its start with exit 1, saying why, before it serves" \
   "missing=${cockpit_driver_said[missing-fixture-exit]-} malformed=${cockpit_driver_said[malformed-fixture-exit]-} logged=$(grep -c -F 'cockpit: shutting down: cannot serve the fixture (' "$COCKPIT_BAD_FIXTURE_LOG") served=$(grep -c -F 'cockpit: serving' "$COCKPIT_BAD_FIXTURE_LOG")" \
   'missing=1 malformed=1 logged=2 served=0'
+# The fixture at that path is readable and valid: reading it would serve it,
+# and only the refusing reader's refusal ends the start, with its own reason.
+check "a readable, valid fixture under a stat-only path (/.ssh/) is refused unopened: service/cockpit.js exits 1 at its start, saying so, and never serves" \
+  "exit=${cockpit_driver_said[refused-fixture-exit]-} logged=$(grep -c -F "cockpit: shutting down: cannot serve the fixture ($COCKPIT_REFUSED_FIXTURE_PATH): $COCKPIT_FIXTURE_REFUSED_REASON" "$COCKPIT_REFUSED_FIXTURE_LOG") served=$(grep -c -F 'cockpit: serving' "$COCKPIT_REFUSED_FIXTURE_LOG")" \
+  'exit=1 logged=1 served=0'
 if (( FAIL > cockpit_fail_count_before )); then
   printf '    (driver said: %s)\n' "$COCKPIT_DRIVER_OUTPUT"
   sed 's/^/    serve log: /' "$COCKPIT_SERVE_LOG"
@@ -2071,6 +2213,9 @@ if (( FAIL > cockpit_fail_count_before )); then
   sed 's/^/    fake herdr log: /' "$COCKPIT_FAKE_HERDR_LOG"
   sed 's/^/    fixture log: /' "$COCKPIT_FIXTURE_LOG"
   sed 's/^/    bad fixture log: /' "$COCKPIT_BAD_FIXTURE_LOG"
+  sed 's/^/    refused fixture log: /' "$COCKPIT_REFUSED_FIXTURE_LOG"
+  sed 's/^/    \/proc-fault log: /' "$COCKPIT_PROC_FAULT_LOG"
+  sed 's/^/    fake herdr client log: /' "$COCKPIT_FAKE_CLIENT_LOG"
 fi
 
 printf '\nthe stat-only paths (named nowhere under service/ or lib/ but their list)\n'
@@ -2260,6 +2405,8 @@ EXPECTED_COCKPIT_UNIT_SETTINGS=(
   '[Service]Type=dbus'
   "[Service]BusName=$COCKPIT_BUS_NAME"
   "[Service]ExecStart=$UNIT_INTERPRETER $UNIT_DOTFILES_PREFIX$COCKPIT_MAIN_RELATIVE_PATH"
+  # Fixture mode is the nested harness's alone: the unit never inherits its variable.
+  '[Service]UnsetEnvironment=RESOURCE_PULSE_COCKPIT_FIXTURE'
   '[Service]Restart=on-failure'
   '[Service]RestartSec=5'
   '[Service]Slice=background.slice'
@@ -2271,7 +2418,7 @@ EXPECTED_COCKPIT_UNIT_SETTINGS=(
 read_unit_settings "$COCKPIT_UNIT"
 check "cockpit.service has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
   "$unit_sections" "[Unit] [Service] "
-check "cockpit.service's settings are exactly the design's: Type=dbus on Cockpit1, PartOf, its condition, restart and its limit, caps" \
+check "cockpit.service's settings are exactly the design's: Type=dbus on Cockpit1, PartOf, its condition, the fixture variable unset, restart and its limit, caps" \
   "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_COCKPIT_UNIT_SETTINGS[@]}")"
 # Counted over every section, so a second condition anywhere (a stricter or a
 # looser one, in [Service] by mistake) shows, and so does the right one missing.
@@ -3622,7 +3769,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=756
+EXPECTED_ROWS=758
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

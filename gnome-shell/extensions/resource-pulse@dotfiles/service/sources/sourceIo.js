@@ -14,6 +14,20 @@ const ENTRY_NAME_ATTRIBUTE = 'standard::name';
 const MODIFICATION_TIME_ATTRIBUTES = 'time::modified,time::modified-usec';
 
 /**
+ * readFileRefusingSecrets's refusal of a stat-only path, typed so that a caller can tell it from a fault: its message
+ * is `cockpit: refused to open <path>`.
+ */
+export class StatOnlyPathRefusedError extends Error {
+    /**
+     * @param {string} path - The path refused.
+     */
+    constructor(path) {
+        super(`${COCKPIT_LOG_PREFIX} refused to open ${path}`);
+        this.name = 'StatOnlyPathRefusedError';
+    }
+}
+
+/**
  * Reads a whole file as UTF-8, unless its path contains a STAT_ONLY_PATH_FRAGMENTS entry: such a path is refused
  * before anything opens it. The one file reader every cockpit source defaults to, so the spec's "stat, never open"
  * rule has one enforcement point. It matches the path as given: a symlink elsewhere that points into a stat-only
@@ -21,12 +35,12 @@ const MODIFICATION_TIME_ATTRIBUTES = 'time::modified,time::modified-usec';
  *
  * @param {string} path - Absolute path.
  * @returns {string} The file's contents.
- * @throws {Error} `cockpit: refused to open <path>` for a stat-only path; a GLib.Error when the file cannot be
- *     opened or read.
+ * @throws {StatOnlyPathRefusedError} For a stat-only path, which is never opened.
+ * @throws {GLib.Error} When the file cannot be opened or read.
  */
 export function readFileRefusingSecrets(path) {
     if (STAT_ONLY_PATH_FRAGMENTS.some(fragment => path.includes(fragment)))
-        throw new Error(`${COCKPIT_LOG_PREFIX} refused to open ${path}`);
+        throw new StatOnlyPathRefusedError(path);
     return readFileToEnd(path);
 }
 

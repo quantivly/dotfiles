@@ -24,13 +24,15 @@
 //   focused the pane, the reply names the windows that may show herdr's client, which the shell (no IO of its own)
 //   then activates: herdr's API lists no clients, so the stat line of every process in /proc is read (through the
 //   sources' refusing reader) and lib/processTree.js picks the herdr clients and their parents. A /proc that cannot
-//   be read leaves the candidates read so far, none at worst, and one rate-limited journal line.
+//   be read leaves the candidates read so far, none at worst, and a fault in naming them leaves none; either way
+//   the reply stays focused, with one rate-limited journal line.
 // - Fixture mode, for the nested test harness: when COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE names a file, the process
 //   runs no source, reads no config and never asks herdr. It serves the file's `state` (layout, configError and
 //   sources), reads the file again on change as it does the config (a change publishes Changed for the layout or the
 //   sources that differ; a file that no longer reads keeps the one before, logged), and answers every FocusSession
-//   with the file's `focusReply`, whatever the id. The variable unset or empty is no fixture; cockpit.service never
-//   sets it.
+//   with the file's `focusReply`, whatever the id. The file is read through the sources' refusing reader, so a path
+//   under a stat-only fragment is never opened: the start fails instead. The variable unset or empty is no fixture;
+//   cockpit.service unsets it, so a user manager whose environment carries it cannot make the unit serve one.
 // - Every shutdown destroys the sources, never only stops them.
 // - Exit status: 0 for a signal, or for losing the name once owned (the bus connection closed: the session ended);
 //   1 when the name was never owned, the object could not be exported, or the fixture could not be served at start.
@@ -58,7 +60,9 @@ import {HERDR_ERROR_CODES, HerdrSocketClient, herdrSocketPath} from './herdrSock
 import {MountsSource} from './sources/mounts.js';
 import {NetworkSource} from './sources/network.js';
 import {SessionsSource} from './sources/sessions.js';
-import {isNotFoundError, listEntryNames, readFileRefusingSecrets} from './sources/sourceIo.js';
+import {
+    StatOnlyPathRefusedError, isNotFoundError, listEntryNames, readFileRefusingSecrets,
+} from './sources/sourceIo.js';
 
 const SIGINT_NUMBER = 2;
 const SIGTERM_NUMBER = 15;
@@ -78,6 +82,11 @@ const COCKPIT_CONFIG_MISSING_ERROR = 'missing';
  * `focusReply` object.
  */
 const COCKPIT_FIXTURE_MALFORMED_ERROR = 'not a JSON object with a state object and a focusReply object';
+/**
+ * Why a fixture whose path holds a STAT_ONLY_PATH_FRAGMENTS entry is not served: the refusing reader never opens it.
+ */
+const COCKPIT_FIXTURE_REFUSED_ERROR =
+    'refused before opening it: its path names a file the cockpit may stat, never open';
 /** How long after the first of a burst of a watched file's events (the config's, the fixture's) it is read, once. */
 const WATCHED_FILE_RELOAD_DEBOUNCE_MS = 200;
 /**
@@ -165,18 +174,22 @@ function cockpitFixturePathOrNull() {
  */
 
 /**
- * Reads the fixture file fixture mode serves.
+ * Reads the fixture file fixture mode serves, through the sources' refusing reader: whatever path the environment
+ * names, one under a stat-only fragment is never opened.
  *
  * @param {string} fixturePath - Path of the file.
  * @returns {{fixture: CockpitFixtureContent|null, error: string|null}} The fixture and a null error; or a null
- *     fixture and why: the read's error for a file that cannot be read, COCKPIT_FIXTURE_MALFORMED_ERROR for one that
- *     holds no JSON object with a `state` object and a `focusReply` object.
+ *     fixture and why: COCKPIT_FIXTURE_REFUSED_ERROR for a stat-only path, the read's error for a file that cannot be
+ *     read, COCKPIT_FIXTURE_MALFORMED_ERROR for one that holds no JSON object with a `state` object and a
+ *     `focusReply` object.
  */
 function readCockpitFixtureFile(fixturePath) {
     let fixtureText;
     try {
-        fixtureText = readFileToEnd(fixturePath);
+        fixtureText = readFileRefusingSecrets(fixturePath);
     } catch (error) {
+        if (error instanceof StatOnlyPathRefusedError)
+            return {fixture: null, error: COCKPIT_FIXTURE_REFUSED_ERROR};
         if (error instanceof GLib.Error)
             return {fixture: null, error: describeError(error)};
         throw error;
@@ -705,19 +718,36 @@ class CockpitServiceProcess {
 
     /**
      * Names the windows that may show herdr's client: every process's stat line (readProcessStats), handed to
-     * lib/processTree.js's focusWindowPidCandidates. A failure to read /proc is logged once per
-     * ERROR_LOG_REPEAT_INTERVAL_USEC as `cockpit: focus: window candidates: <error>` and leaves the candidates read
-     * so far, none at worst.
+     * lib/processTree.js's focusWindowPidCandidates. It runs once herdr focused the pane, so nothing here may undo
+     * that answer. A failure to read /proc leaves the candidates read so far, none at worst; a fault (any other
+     * throw, from the scan or the builder) leaves none. Either is logged once per ERROR_LOG_REPEAT_INTERVAL_USEC as
+     * `cockpit: focus: window candidates: <error>`.
      *
      * @returns {number[]} The candidates: each herdr client's pid and its parents', without pid 1.
      */
     _readFocusWindowPidCandidates() {
-        const {statByPid, readFailure} = readProcessStats();
-        if (readFailure !== null) {
-            const failureText = describeError(readFailure);
-            this._errorLog.log(`focus: window candidates: ${failureText}`, FOCUS_WINDOW_CANDIDATES_FAILURE_LOG_KEY);
+        let processStats;
+        let windowPidCandidates;
+        try {
+            processStats = readProcessStats();
+            windowPidCandidates = focusWindowPidCandidates(processStats.statByPid);
+        } catch (error) {
+            // Not IO, which readProcessStats keeps as readFailure, but a fault here: caught whatever it is, for the
+            // reply must stay focused, naming no window, rather than become the face's internal error.
+            this._logFocusWindowCandidatesFailure(describeErrorWithStack(error));
+            return [];
         }
-        return focusWindowPidCandidates(statByPid);
+        if (processStats.readFailure !== null)
+            this._logFocusWindowCandidatesFailure(describeError(processStats.readFailure));
+        return windowPidCandidates;
+    }
+
+    /**
+     * @param {string} failureText - What went wrong naming the window candidates.
+     * @returns {void}
+     */
+    _logFocusWindowCandidatesFailure(failureText) {
+        this._errorLog.log(`focus: window candidates: ${failureText}`, FOCUS_WINDOW_CANDIDATES_FAILURE_LOG_KEY);
     }
 
     /**

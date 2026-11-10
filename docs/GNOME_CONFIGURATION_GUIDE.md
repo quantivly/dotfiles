@@ -182,12 +182,15 @@ the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
   `cockpit: focus: <id>: <message>`. Once herdr focused the pane, the answer also names
   `windowPidCandidates`, for the shell to bring the window showing herdr forward: herdr's API lists no
   clients, so the service finds them in `/proc` (a `herdr` process with a controlling terminal; the server
-  has none) and names each client's pid and its parents' (pid 1 left out, at most 64). A failure names none.
+  has none) and names each client's pid and its parents' (pid 1 left out, at most 64). A failure names none,
+  and so does a fault while naming them, which is logged: the pane stays focused.
 
 **Fixture mode.** With `RESOURCE_PULSE_COCKPIT_FIXTURE` naming a JSON file, the service runs no source,
 reads no config and never asks herdr: it serves the file's `state` (re-read on change, as the config is) and
-answers every `FocusSession` with its `focusReply`, and logs `cockpit: serving a fixture (<path>)`. It is
-for the nested harness alone; the unit never sets it.
+answers every `FocusSession` with its `focusReply`, and logs `cockpit: serving a fixture (<path>)`. The
+file is read through the cockpit's refusing reader, so a path under a stat-only directory is never opened:
+the service exits 1 instead. It is for the nested harness alone; the unit unsets the variable
+(`UnsetEnvironment=`), so a user manager that carries it cannot make the unit serve a fixture.
 
 **Stale.** The service sends `Changed` only when something changed, so a quiet source is not a dead one.
 A source is stale once its `sampledAtUsec` is older than 3 of its own `intervalSeconds`
@@ -458,20 +461,21 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (756 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (758 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, the real `service/main.js`, the cockpit's D-Bus
-face, and the real `service/cockpit.js` (under a temp home, with no system bus, and a fake herdr for
-`FocusSession`; then in fixture mode). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
+face, and the real `service/cockpit.js` (under a temp home, with no system bus, and a fake herdr and a
+fake herdr client, a process named `herdr` in a terminal of its own, for `FocusSession`; then with a fault
+injected into its `/proc` scan; then in fixture mode). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 covers `genable_extension`, `gnome-status`, the unit and its install step, the cost script and the
 nested harness against stubs. It never touches the live session, but it is **not fully hermetic**: the
 `service/main.js` rows sample this machine's real `/proc` and `/sys`, and the `service/cockpit.js` rows
 its real mount and route tables and its processes' `/proc/<pid>/stat` lines. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
-(package `dbus-daemon`) and `gdbus` (`libglib2.0-bin`): without any of them it stops with exit 2. The
-card-width row also needs Pango's typelibs (`gir1.2-pango-1.0`) and the card's font, Ubuntu Sans
-(`fonts-ubuntu`): without them that row fails. Neither is ever a pass.
+(package `dbus-daemon`), `gdbus` (`libglib2.0-bin`) and util-linux's `script` (`bsdutils`): without any of them it
+stops with exit 2. The card-width row also needs Pango's typelibs (`gir1.2-pango-1.0`) and the card's font,
+Ubuntu Sans (`fonts-ubuntu`): without them that row fails. Neither is ever a pass.
 
 ## Keyboard-driven workflow (no extensions needed)
 
