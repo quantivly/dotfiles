@@ -240,3 +240,26 @@ export const COCKPIT_GRID_MIN_SCALE = 0.5;
 export const COCKPIT_GRID_MAX_SCALE = 2;
 /** The card ids the cockpit draws; any other id in the layout still gets a cell, drawn as a placeholder. */
 export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'sessions'];
+/** The most session rows the sessions card draws; the rest collapse into a '+N more' line. */
+export const SESSIONS_CARD_ROW_LIMIT = 6;
+/** The most rows each ranking (CPU, memory) of the apps card draws. */
+export const APPS_CARD_ROW_LIMIT = 6;
+/** Seconds in the units an idle time is written in; a session idle for less than the next unit up shows this one. */
+export const SECONDS_PER_MINUTE = 60;
+export const SECONDS_PER_HOUR = 3600;
+export const SECONDS_PER_DAY = 86400;
+/** Icon names (symbolic, from the stock theme) the cockpit cards draw, by session state and by connection kind. */
+export const COCKPIT_ICON_NAMES = Object.freeze({
+    working: 'media-playback-start-symbolic',
+    blocked: 'dialog-warning-symbolic',
+    idle: 'media-playback-pause-symbolic',
+    done: 'emblem-ok-symbolic',
+    unknown: 'dialog-question-symbolic',
+    wired: 'network-wired-symbolic',
+    wifi: 'network-wireless-symbolic',
+    offline: 'network-offline-symbolic',
+    vpn: 'network-vpn-symbolic',
+    ssh: 'utilities-terminal-symbolic',
+    mountRemovable: 'drive-removable-media-symbolic',
+    mountNetwork: 'folder-remote-symbolic',
+});

@@ -18,6 +18,7 @@ import './cockpitConfig.test.js';
 import './cockpitGrid.test.js';
 import './cockpitMonitor.test.js';
 import './cockpitStaleness.test.js';
+import './cockpitFormat.test.js';
 import './cockpitInteraction.test.js';
 import './nameGuard.test.js';
 import './sessions.test.js';
