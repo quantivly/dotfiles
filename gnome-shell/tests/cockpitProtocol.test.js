@@ -83,6 +83,8 @@ const UNLISTED_FIELD_NAME_BY_LEVEL = {
 const UNLISTED_FIELD_NAMES = Object.values(UNLISTED_FIELD_NAME_BY_LEVEL);
 /** The field no reader lists, planted in a FocusSession reply. */
 const UNLISTED_REPLY_FIELD_NAME = 'unlistedInReply';
+/** herdr's own text for a pane that is gone: what a FocusSession reply's error must never carry (ruling R18). */
+const HERDR_FREE_TEXT_ERROR = 'herdr: pane_not_found: pane not found';
 
 /**
  * A copy of a state with one unlisted field planted at every object level: the state, the layout, its monitor and
@@ -191,10 +193,23 @@ test('cockpitProtocol: a field no reader lists, at any level, never leaves the C
     assertEqual(unlistedFieldNamesIn(JSON.stringify(plantedChange)), UNLISTED_FIELD_NAMES);
     assertEqual(unlistedFieldNamesIn(cockpitProtocol.buildChangedPayload(plantedChange)), []);
 });
-test('cockpitProtocol: a field no reader lists never leaves the FocusSession reply builder', () => {
-    const text = cockpitProtocol.buildFocusSessionReply(
-        {focused: true, windowPid: 4242, error: null, [UNLISTED_REPLY_FIELD_NAME]: 'leaked'});
-    assertEqual(text.includes(UNLISTED_REPLY_FIELD_NAME), false);
+test('cockpitProtocol: a field no reader lists, or herdr\'s text as the error, never leaves the FocusSession reply ' +
+    'builder', () => {
+    const text = cockpitProtocol.buildFocusSessionReply({
+        focused: false, windowPid: 4242, error: HERDR_FREE_TEXT_ERROR, [UNLISTED_REPLY_FIELD_NAME]: 'leaked',
+    });
+    assertEqual([text.includes(UNLISTED_REPLY_FIELD_NAME), text.includes(HERDR_FREE_TEXT_ERROR)], [false, false]);
+    assertEqual(JSON.parse(text), {focused: false, windowPid: 4242, error: null});
+});
+test('cockpitProtocol: a FocusSession reply\'s error is one of five codes; any other string reads as null', () => {
+    assertEqual(cockpitProtocol.COCKPIT_FOCUS_ERROR_CODES,
+        ['unknown-session', 'no-pane', 'herdr-rejected', 'herdr-unreachable', 'internal']);
+    assertEqual(Object.isFrozen(cockpitProtocol.COCKPIT_FOCUS_ERROR_CODES), true);
+    const readErrors = cockpitProtocol.COCKPIT_FOCUS_ERROR_CODES.map(errorCode =>
+        cockpitProtocol.parseFocusSessionReply(JSON.stringify({focused: false, error: errorCode})).error);
+    assertEqual(readErrors, cockpitProtocol.COCKPIT_FOCUS_ERROR_CODES);
+    const unlistedReply = JSON.stringify({focused: false, windowPid: null, error: 'herdr-on-fire'});
+    assertEqual(cockpitProtocol.parseFocusSessionReply(unlistedReply), {focused: false, windowPid: null, error: null});
 });
 test('cockpitProtocol: a session row with an empty id or an empty name is dropped, the others kept', () => {
     const [firstRow] = FULL_STATE.sources.sessions.rows;
@@ -238,6 +253,9 @@ test('cockpitProtocol: Changed carries the layout and its error beside the sourc
 test('cockpitProtocol: a FocusSession reply round-trips, and a mistyped field is null for itself alone', () => {
     const reply = {focused: true, windowPid: 4242, error: null};
     assertEqual(cockpitProtocol.parseFocusSessionReply(cockpitProtocol.buildFocusSessionReply(reply)), reply);
-    assertEqual(cockpitProtocol.parseFocusSessionReply('{"focused":"yes","windowPid":-1,"error":"herdr: gone"}'),
-        {focused: null, windowPid: null, error: 'herdr: gone'});
+    const failedReply = {focused: false, windowPid: null, error: 'herdr-unreachable'};
+    assertEqual(cockpitProtocol.parseFocusSessionReply(cockpitProtocol.buildFocusSessionReply(failedReply)),
+        failedReply);
+    assertEqual(cockpitProtocol.parseFocusSessionReply('{"focused":"yes","windowPid":-1,"error":"herdr-rejected"}'),
+        {focused: null, windowPid: null, error: 'herdr-rejected'});
 });

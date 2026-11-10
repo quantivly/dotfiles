@@ -1671,7 +1671,8 @@ new GLib.MainLoop(null, false).run();
 # time read around it), overwritten with "{", deleted and renamed back into
 # place, each followed by GetState for up to 3 s; then SIGTERM. The focus run: a fake herdr first, then the service, then one
 # FocusSession per kind of row, each followed by the focus requests the fake
-# herdr saw for it; then SIGTERM. Every wait is bounded.
+# herdr saw for it; then the fake herdr stopped and one more FocusSession, which
+# finds herdr unreachable; then SIGTERM. Every wait is bounded.
 # shellcheck disable=SC2016  # The driver's own source: its variables expand when it runs.
 COCKPIT_DRIVER_OUTPUT="$(on_private_bus bash -c '
 set -u
@@ -1730,10 +1731,11 @@ stop_process() {
     printf "%s=%s\n" "$label" "$?"
   fi
 }
-# focus_session <id>: one FocusSession through gdbus; prints the reply and the
-# focus requests the fake herdr saw for it, joined by |.
+# focus_session <id> [label]: one FocusSession through gdbus; prints, under
+# "focus <label>" (the id by default), the reply and the focus requests the fake
+# herdr saw for it, joined by |.
 focus_session() {
-  local session_id="$1" requests_before reply decoded requests
+  local session_id="$1" label="${2:-$1}" requests_before reply decoded requests
   requests_before="$(grep -c -E "$FOCUS_REQUEST_PATTERN" "$request_log")"
   if reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
       --method "$bus_name.FocusSession" "\"$session_id\"" --timeout 5 2>&1)"; then
@@ -1742,7 +1744,7 @@ focus_session() {
     decoded="D-Bus error: ${reply%%$'"'"'\n'"'"'*}"
   fi
   requests="$(grep -E "$FOCUS_REQUEST_PATTERN" "$request_log" | tail -n "+$(( requests_before + 1 ))" | tr "\n" "|")"
-  printf "focus %s=reply=%s requests=[%s]\n" "$session_id" "$decoded" "${requests%|}"
+  printf "focus %s=reply=%s requests=[%s]\n" "$label" "$decoded" "${requests%|}"
 }
 
 serve_config="$run_dir/serve-config/$config_relative_path"
@@ -1803,9 +1805,12 @@ printf "focus-ready=%s\n" "$(probe_state 15 "sessionRows=4" herdrRunning session
 for session_id in w1:p1 p3 w1:p2 w1:p9 s4; do
   focus_session "$session_id"
 done
-stop_process focus-exit "$focus_pid"
+# The rows stay those of the start sample: unwatched, sessions resamples only
+# after 60 s, so w1:p1 is still a row once herdr is gone.
 kill -TERM "$fake_herdr_pid" 2>/dev/null
 wait "$fake_herdr_pid" 2>/dev/null
+focus_session w1:p1 "w1:p1 without herdr"
+stop_process focus-exit "$focus_pid"
 ' cockpit-driver "$COCKPIT_MAIN_PATH" "$COCKPIT_REPLY_DECODER_JS" "$COCKPIT_FAKE_HERDR_JS" "$COCKPIT_BUS_NAME" \
   "$COCKPIT_OBJECT_PATH" "$COCKPIT_RUN_DIR" "$COCKPIT_CONFIG_TEMPLATE" "$COCKPIT_CONFIG_RELATIVE_PATH" \
   "$COCKPIT_NO_SYSTEM_BUS" "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_HERDR_REQUEST_LOG" \
@@ -1842,14 +1847,18 @@ check "FocusSession focuses the row's own workspace, then its pane, over the her
 check "FocusSession on a row in no workspace sends pane.focus alone" \
   "${cockpit_driver_said[focus p3]-}" \
   'reply={"focused":true,"windowPid":null,"error":null} requests=[pane.focus {"pane_id":"p3"}]'
-# A herdr rejection is an answer, not a fault: the cockpit replies with it
-# itself, so the D-Bus face's fault line never appears for it.
-check "a herdr rejection of pane.focus answers focused false with herdr's error, not a D-Bus error, and is not logged as a fault" \
-  "${cockpit_driver_said[focus w1:p2]-} faults=$(grep -c -F 'cockpit: FocusSession failed' "$COCKPIT_FOCUS_LOG")" \
-  'reply={"focused":false,"windowPid":null,"error":"herdr: pane_not_found: pane not found"} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p2"}] faults=0'
-check "an unknown id, and a row with no pane, answer focused false with the cockpit's error and ask herdr nothing" \
+# A herdr rejection is an answer, not a fault: the cockpit replies with its
+# code itself, so the D-Bus face's fault line never appears for it. herdr's own
+# text goes to the journal alone (ruling R18).
+check "a herdr rejection of pane.focus answers focused false and the code herdr-rejected, not a D-Bus error nor herdr's text, which is logged, not as a fault" \
+  "${cockpit_driver_said[focus w1:p2]-} logged=$(grep -c -F 'cockpit: focus: w1:p2: herdr: pane_not_found: pane not found' "$COCKPIT_FOCUS_LOG") faults=$(grep -c -F 'cockpit: FocusSession failed' "$COCKPIT_FOCUS_LOG")" \
+  'reply={"focused":false,"windowPid":null,"error":"herdr-rejected"} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p2"}] logged=1 faults=0'
+check "an unknown id, and a row with no pane, answer focused false with the codes unknown-session and no-pane and ask herdr nothing" \
   "unknown: ${cockpit_driver_said[focus w1:p9]-} no-pane: ${cockpit_driver_said[focus s4]-}" \
-  'unknown: reply={"focused":false,"windowPid":null,"error":"cockpit: unknown session id"} requests=[] no-pane: reply={"focused":false,"windowPid":null,"error":"cockpit: the session has no herdr pane"} requests=[]'
+  'unknown: reply={"focused":false,"windowPid":null,"error":"unknown-session"} requests=[] no-pane: reply={"focused":false,"windowPid":null,"error":"no-pane"} requests=[]'
+check "with the fake herdr stopped, a row answers focused false and the code herdr-unreachable, and herdr's text goes to the journal" \
+  "${cockpit_driver_said[focus w1:p1 without herdr]-} logged=$(grep -c -F 'cockpit: focus: w1:p1: herdr: ' "$COCKPIT_FOCUS_LOG")" \
+  'reply={"focused":false,"windowPid":null,"error":"herdr-unreachable"} requests=[] logged=1'
 if (( FAIL > cockpit_fail_count_before )); then
   printf '    (driver said: %s)\n' "$COCKPIT_DRIVER_OUTPUT"
   sed 's/^/    serve log: /' "$COCKPIT_SERVE_LOG"
@@ -3399,7 +3408,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=694
+EXPECTED_ROWS=696
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

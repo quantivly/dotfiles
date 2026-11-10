@@ -6,8 +6,8 @@
 // - WatchCockpit() / UnwatchCockpit() are counted per caller (its unique bus name). A caller's watches all drop when
 //   its name vanishes, so a shell that crashes or disables the extension cannot leave a watch held. The cockpit hears
 //   setWatched only when "any watch held" changes.
-// - FocusSession(id) hands the id to the cockpit and answers its reply JSON; a failure there is answered as a reply
-//   with focused false and the reason, never as a D-Bus error.
+// - FocusSession(id) hands the id to the cockpit and answers its reply JSON; a failure there is logged and answered
+//   as a reply with focused false and the code internal, never as a D-Bus error or its text.
 // It never owns the bus name: service/cockpit.js does, after this object is exported. The watch counting mirrors
 // service/dbusService.js's on purpose; the two are kept apart rather than generalised.
 import Gio from 'gi://Gio';
@@ -16,9 +16,10 @@ import GLib from 'gi://GLib';
 import {COCKPIT_LOG_PREFIX} from '../lib/constants.js';
 import {RateLimitedLogger, describeError} from '../lib/errorLog.js';
 import {
-    COCKPIT_CHANGED_SIGNAL_NAME, COCKPIT_CHANGED_SIGNAL_SIGNATURE, COCKPIT_FOCUS_SESSION_METHOD_NAME,
-    COCKPIT_GET_STATE_METHOD_NAME, COCKPIT_INTERFACE_XML, COCKPIT_OBJECT_PATH, COCKPIT_UNWATCH_METHOD_NAME,
-    COCKPIT_WATCH_METHOD_NAME, buildChangedPayload, buildCockpitStatePayload, buildFocusSessionReply,
+    COCKPIT_CHANGED_SIGNAL_NAME, COCKPIT_CHANGED_SIGNAL_SIGNATURE, COCKPIT_FOCUS_ERROR,
+    COCKPIT_FOCUS_SESSION_METHOD_NAME, COCKPIT_GET_STATE_METHOD_NAME, COCKPIT_INTERFACE_XML, COCKPIT_OBJECT_PATH,
+    COCKPIT_UNWATCH_METHOD_NAME, COCKPIT_WATCH_METHOD_NAME, buildChangedPayload, buildCockpitStatePayload,
+    buildFocusSessionReply,
 } from '../lib/cockpitProtocol.js';
 import {runEveryStep} from '../lib/teardown.js';
 
@@ -166,8 +167,8 @@ export class CockpitDBusService {
     }
 
     /**
-     * Answers a FocusSession call once the cockpit has: with its reply, or with focused false and the reason when it
-     * rejected or threw. The call is always answered, so the caller never waits out its timeout.
+     * Answers a FocusSession call once the cockpit has: with its reply, or with focused false and the code internal
+     * when it rejected or threw. The call is always answered, so the caller never waits out its timeout.
      *
      * @param {string} sessionId - The session row's id, as the caller sent it.
      * @param {Gio.DBusMethodInvocation} invocation - The call.
@@ -187,8 +188,8 @@ export class CockpitDBusService {
     /**
      * @param {string} sessionId - The session row's id.
      * @returns {Promise<string>} The reply JSON (buildFocusSessionReply): the cockpit's reply, or focused false,
-     *     windowPid null and the error's message when the cockpit rejected, threw or answered something that is
-     *     not a reply (which is logged).
+     *     windowPid null and the code internal when the cockpit rejected, threw or answered something that is not a
+     *     reply. The error's message goes to the journal, never to the bus.
      */
     async _focusSessionReplyText(sessionId) {
         try {
@@ -197,7 +198,7 @@ export class CockpitDBusService {
         } catch (error) {
             const errorText = describeError(error);
             this._errorLog.log(`FocusSession failed: ${errorText}`, FOCUS_SESSION_FAILURE_LOG_KEY);
-            return buildFocusSessionReply({focused: false, windowPid: null, error: errorText});
+            return buildFocusSessionReply({focused: false, windowPid: null, error: COCKPIT_FOCUS_ERROR.INTERNAL});
         }
     }
 

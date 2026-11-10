@@ -47,7 +47,8 @@ export const COCKPIT_CHANGED_SIGNAL_SIGNATURE = '(s)';
  *   gnome-status;
  * - WatchCockpit() and UnwatchCockpit(): a caller holds a watch while the cockpit monitor is visible; the service
  *   counts them per caller and drops a caller's watches when its connection closes;
- * - FocusSession(s sessionId) → s: the reply JSON (buildFocusSessionReply) for focusing one session row's pane;
+ * - FocusSession(s sessionId) → s: the reply JSON (buildFocusSessionReply) for focusing one session row's pane,
+ *   its error a code from COCKPIT_FOCUS_ERROR_CODES;
  * - Changed(s): the changed JSON (buildChangedPayload), once per change.
  */
 export const COCKPIT_INTERFACE_XML = `<node>
@@ -74,6 +75,23 @@ export const UPLINK_KINDS = ['wired', 'wifi', 'none'];
 export const CONNECTIVITY_STATES = ['full', 'limited', 'portal', 'none', 'unknown'];
 /** What a mount row's `kind` may hold. */
 export const MOUNT_KINDS = ['network', 'removable'];
+/**
+ * What a FocusSession reply's `error` may hold, by name: a short code, never another program's text (ruling R18).
+ * - UNKNOWN_SESSION: no session row of the latest sessions sample carries the id;
+ * - NO_PANE: the row names no herdr pane, so there is nothing to focus;
+ * - HERDR_REJECTED: herdr answered with an error or a malformed reply, or closed the connection without one;
+ * - HERDR_UNREACHABLE: no herdr socket, a refused connection, or no reply in time;
+ * - INTERNAL: a fault in the cockpit service itself.
+ */
+export const COCKPIT_FOCUS_ERROR = Object.freeze({
+    UNKNOWN_SESSION: 'unknown-session',
+    NO_PANE: 'no-pane',
+    HERDR_REJECTED: 'herdr-rejected',
+    HERDR_UNREACHABLE: 'herdr-unreachable',
+    INTERNAL: 'internal',
+});
+/** Every code a FocusSession reply's `error` may hold; the reader reads any other value as null. */
+export const COCKPIT_FOCUS_ERROR_CODES = Object.freeze(Object.values(COCKPIT_FOCUS_ERROR));
 
 /** Each source's reader, in the order the JSON lists the sources. The one place a source is tied to its reader. */
 const SOURCE_READERS_BY_NAME = {
@@ -136,13 +154,15 @@ export function buildChangedPayload({publishedAtUsec, sources, layout, configErr
 }
 
 /**
- * The JSON FocusSession answers.
+ * The JSON FocusSession answers. Its error goes through the reader too, so only a code from
+ * COCKPIT_FOCUS_ERROR_CODES is written; any other text is written as null.
  *
  * @param {object} reply - What focusing found.
  * @param {boolean|null} reply.focused - Whether herdr focused the session's pane.
  * @param {number|null} reply.windowPid - The process of the herdr client's window; null when not known (focused in
  *     herdr, window unknown).
- * @param {string|null} reply.error - Why focusing failed; null when it did not.
+ * @param {string|null} reply.error - Why focusing failed, a code from COCKPIT_FOCUS_ERROR_CODES; null when it did
+ *     not.
  * @returns {string} The JSON.
  */
 export function buildFocusSessionReply(reply) {
@@ -180,7 +200,8 @@ export function parseChangedPayload(text) {
  *
  * @param {*} text - The JSON text.
  * @returns {{focused: boolean|null, windowPid: number|null, error: string|null}|null} The reply, each field null when
- *     missing or mistyped; null for text that is not a JSON object.
+ *     missing or mistyped, and `error` null unless a code from COCKPIT_FOCUS_ERROR_CODES; null for text that is not a
+ *     JSON object.
  */
 export function parseFocusSessionReply(text) {
     const payload = parseJsonObject(text);
@@ -295,13 +316,14 @@ function readChanged(changed) {
  * Reads a FocusSession reply's fields.
  *
  * @param {object} reply - The reply to read: a parsed payload, or the service's reply.
- * @returns {{focused: boolean|null, windowPid: number|null, error: string|null}} Each field of its type or null.
+ * @returns {{focused: boolean|null, windowPid: number|null, error: string|null}} Each field of its type or null;
+ *     `error` a code from COCKPIT_FOCUS_ERROR_CODES or null, so no other program's text passes.
  */
 function readFocusSessionReply(reply) {
     return {
         focused: booleanOrNull(reply.focused),
         windowPid: countOrNull(reply.windowPid),
-        error: stringOrNull(reply.error),
+        error: enumOrNull(reply.error, COCKPIT_FOCUS_ERROR_CODES),
     };
 }
 

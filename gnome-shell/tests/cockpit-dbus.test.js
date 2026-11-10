@@ -35,7 +35,9 @@ const LAYOUT_CHANGE_NAME = 'layout';
 const SINGLE_STRING_TYPE = new GLib.VariantType('(s)');
 const FOCUSABLE_SESSION_ID = 'wL:p1';
 const UNKNOWN_SESSION_ID = 'wL:p99';
-const UNKNOWN_SESSION_ERROR = 'cockpit: unknown session id';
+const UNKNOWN_SESSION_ERROR = 'unknown-session';
+/** The code the face answers when the cockpit rejects or throws: its message goes to the journal alone. */
+const INTERNAL_FOCUS_ERROR = 'internal';
 /** A rejection that is not herdr's: the real cockpit answers herdr's rejections itself, so only a fault rejects. */
 const FOCUS_FAULT_MESSAGE = 'sessionRows.find is not a function';
 const CONFIG_MISSING_ERROR = 'missing';
@@ -407,7 +409,7 @@ test('cockpit-dbus: FocusSession hands the id to the cockpit and answers its rep
             {reply: {focused: true, windowPid: null, error: null}, dbusError: null, ids: [FOCUSABLE_SESSION_ID]});
     }));
 
-test('cockpit-dbus: FocusSession with an unknown id answers focused false and an error, not a D-Bus error', () =>
+test('cockpit-dbus: FocusSession with an unknown id answers focused false and its code, not a D-Bus error', () =>
     withExportedCockpit(async ({cockpit, serviceName, openClient}) => {
         const {replyText, dbusError} = await callFocusSession(openClient(), serviceName, UNKNOWN_SESSION_ID);
         assertEqual({reply: parseFocusSessionReply(replyText), dbusError, ids: cockpit.focusedSessionIds}, {
@@ -417,12 +419,14 @@ test('cockpit-dbus: FocusSession with an unknown id answers focused false and an
         });
     }));
 
-test('cockpit-dbus: a FocusSession the cockpit rejects answers focused false with the reason, not a D-Bus error, ' +
-    'and logs it', () => withExportedCockpit(async ({cockpit, logLines, serviceName, openClient}) => {
+test('cockpit-dbus: a FocusSession the cockpit rejects answers focused false and the code internal, not a D-Bus ' +
+    'error nor its message, which is logged', () => withExportedCockpit(async ({cockpit, logLines, serviceName,
+    openClient}) => {
     cockpit.focusRejection = new Error(FOCUS_FAULT_MESSAGE);
     const {replyText, dbusError} = await callFocusSession(openClient(), serviceName, FOCUSABLE_SESSION_ID);
+    assertEqual(String(replyText).includes(FOCUS_FAULT_MESSAGE), false, 'the message of the fault stays off the bus');
     assertEqual({reply: parseFocusSessionReply(replyText), dbusError, logLines}, {
-        reply: {focused: false, windowPid: null, error: FOCUS_FAULT_MESSAGE},
+        reply: {focused: false, windowPid: null, error: INTERNAL_FOCUS_ERROR},
         dbusError: null,
         logLines: [`cockpit: FocusSession failed: ${FOCUS_FAULT_MESSAGE}`],
     });

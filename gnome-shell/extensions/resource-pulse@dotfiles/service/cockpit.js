@@ -18,7 +18,8 @@
 //   configError COCKPIT_CONFIG_MISSING_ERROR, one that does not parse the parser's error; either way the layout is
 //   null and the sources keep serving. A read that gives the same layout and error as the one before reports nothing.
 // - FocusSession finds the row with the id it is given in the latest sessions sample, and asks herdr over its socket
-//   to focus the row's workspace (when it has one), then its pane.
+//   to focus the row's workspace (when it has one), then its pane. A failure answers a code from
+//   COCKPIT_FOCUS_ERROR_CODES (ruling R18); herdr's own message goes to the journal, never to the bus.
 // - Every shutdown destroys the sources, never only stops them.
 // - Exit status: 0 for a signal, or for losing the name once owned (the bus connection closed: the session ended);
 //   1 when the name was never owned, or the object could not be exported.
@@ -28,7 +29,7 @@ import GLibUnix from 'gi://GLibUnix';
 import System from 'system';
 
 import {cockpitConfigPath, parseCockpitConfig} from '../lib/cockpitConfig.js';
-import {COCKPIT_BUS_NAME, COCKPIT_PROTOCOL_VERSION} from '../lib/cockpitProtocol.js';
+import {COCKPIT_BUS_NAME, COCKPIT_FOCUS_ERROR, COCKPIT_PROTOCOL_VERSION} from '../lib/cockpitProtocol.js';
 import {COCKPIT_LOG_PREFIX, HERDR_REQUEST_TIMEOUT_MS} from '../lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from '../lib/errorLog.js';
 import {isPlainObject, stringOrNull} from '../lib/jsonFields.js';
@@ -65,21 +66,30 @@ const CONFIG_RELOAD_EVENTS = new Set([
     Gio.FileMonitorEvent.DELETED, Gio.FileMonitorEvent.MOVED_IN, Gio.FileMonitorEvent.MOVED_OUT,
     Gio.FileMonitorEvent.RENAMED,
 ]);
-/** FocusSession's error for an id no session row of the latest sessions sample carries. */
-const COCKPIT_UNKNOWN_SESSION_ERROR = 'cockpit: unknown session id';
-/** FocusSession's error for a session row herdr names no pane for: there is nothing to focus. */
-const COCKPIT_SESSION_WITHOUT_PANE_ERROR = 'cockpit: the session has no herdr pane';
 /** The source whose rows FocusSession looks the id up in. */
 const SESSIONS_SOURCE_NAME = 'sessions';
 /** herdr's methods for focusing, and their parameters (from `herdr api schema --json`: WorkspaceTarget, PaneTarget). */
 const WORKSPACE_FOCUS_METHOD = 'workspace.focus';
 const PANE_FOCUS_METHOD = 'pane.focus';
-/** Every code a HerdrSocketClient rejection carries: a rejection with any other is not herdr's, but a fault here. */
-const HERDR_REJECTION_CODES = Object.values(HERDR_ERROR_CODES);
+/**
+ * FocusSession's error code for each code a HerdrSocketClient rejection carries (ruling R18): herdr not there or not
+ * answering is unreachable; herdr answering with an error, or with nothing it could read, is rejected. A rejection
+ * with any other code is not herdr's, but a fault here.
+ */
+const FOCUS_ERROR_BY_HERDR_ERROR_CODE = new Map([
+    [HERDR_ERROR_CODES.NO_SOCKET, COCKPIT_FOCUS_ERROR.HERDR_UNREACHABLE],
+    [HERDR_ERROR_CODES.CONNECT_REFUSED, COCKPIT_FOCUS_ERROR.HERDR_UNREACHABLE],
+    [HERDR_ERROR_CODES.TIMEOUT, COCKPIT_FOCUS_ERROR.HERDR_UNREACHABLE],
+    [HERDR_ERROR_CODES.REMOTE_ERROR, COCKPIT_FOCUS_ERROR.HERDR_REJECTED],
+    [HERDR_ERROR_CODES.MALFORMED, COCKPIT_FOCUS_ERROR.HERDR_REJECTED],
+    [HERDR_ERROR_CODES.CLOSED, COCKPIT_FOCUS_ERROR.HERDR_REJECTED],
+]);
 /** Template keys of this process's own log lines, so each logs once per ERROR_LOG_REPEAT_INTERVAL_USEC. */
 const CONFIG_WATCH_FAILURE_LOG_KEY = 'config watch failed';
 const CONFIG_RELOAD_FAILURE_LOG_KEY = 'config reload failed';
 const LISTENER_FAILURE_LOG_KEY = 'listener failed';
+/** Prefix of the template key of a herdr rejection's journal line: one key per herdr code. */
+const FOCUS_FAILURE_LOG_KEY_PREFIX = 'focus failed';
 
 /**
  * Reads and parses the layout config file.
@@ -101,11 +111,11 @@ function readCockpitConfigFile(configPath) {
 }
 
 /**
- * @param {string} errorText - Why the session was not focused.
+ * @param {string} focusErrorCode - Why the session was not focused: a code from COCKPIT_FOCUS_ERROR_CODES.
  * @returns {{focused: boolean, windowPid: null, error: string}} FocusSession's reply for a session not focused.
  */
-function focusFailureReply(errorText) {
-    return {focused: false, windowPid: null, error: errorText};
+function focusFailureReply(focusErrorCode) {
+    return {focused: false, windowPid: null, error: focusErrorCode};
 }
 
 /** The layout config file: its latest reading, read again whenever its file monitor reports a change to it. */
@@ -302,26 +312,33 @@ class CockpitServiceProcess {
      *
      * @param {string} sessionId - A session row's id.
      * @returns {Promise<{focused: boolean, windowPid: null, error: string|null}>} focused true once herdr focused the
-     *     pane; otherwise false with the reason: COCKPIT_UNKNOWN_SESSION_ERROR, COCKPIT_SESSION_WITHOUT_PANE_ERROR, or
-     *     herdr's rejection's message.
-     * @throws {Error} (as a rejection) A failure that is not herdr's: a fault here.
+     *     pane; otherwise false with a code from COCKPIT_FOCUS_ERROR_CODES: unknown-session, no-pane, or the code
+     *     FOCUS_ERROR_BY_HERDR_ERROR_CODE gives herdr's rejection, whose message is logged as
+     *     `cockpit: focus: <id>: <message>`.
+     * @throws {Error} (as a rejection) A failure that is not herdr's: a fault here, which the D-Bus face answers as
+     *     internal.
      */
     async focusSession(sessionId) {
         const sessionRow = this._latestSessionRow(sessionId);
         if (sessionRow === null)
-            return focusFailureReply(COCKPIT_UNKNOWN_SESSION_ERROR);
+            return focusFailureReply(COCKPIT_FOCUS_ERROR.UNKNOWN_SESSION);
         const paneId = stringOrNull(sessionRow.paneId);
         if (paneId === null)
-            return focusFailureReply(COCKPIT_SESSION_WITHOUT_PANE_ERROR);
+            return focusFailureReply(COCKPIT_FOCUS_ERROR.NO_PANE);
         const workspaceId = stringOrNull(sessionRow.workspaceId);
         try {
             if (workspaceId !== null)
                 await this._herdrClient.request(WORKSPACE_FOCUS_METHOD, {workspace_id: workspaceId});
             await this._herdrClient.request(PANE_FOCUS_METHOD, {pane_id: paneId});
         } catch (error) {
-            if (!HERDR_REJECTION_CODES.includes(error?.code))
+            const focusErrorCode = FOCUS_ERROR_BY_HERDR_ERROR_CODE.get(error?.code);
+            if (focusErrorCode === undefined)
                 throw error;
-            return focusFailureReply(describeError(error));
+            // herdr's message, bounded by the client, is for the journal only: the bus carries the code.
+            const herdrMessage = describeError(error);
+            const logTemplateKey = `${FOCUS_FAILURE_LOG_KEY_PREFIX}: ${error.code}`;
+            this._errorLog.log(`focus: ${sessionId}: ${herdrMessage}`, logTemplateKey);
+            return focusFailureReply(focusErrorCode);
         }
         return {focused: true, windowPid: null, error: null};
     }

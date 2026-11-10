@@ -174,7 +174,11 @@ the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
 - `WatchCockpit` / `UnwatchCockpit`: held while the cockpit can be seen. Watches are counted per caller and
   dropped when the caller leaves the bus, as the sampler's are.
 - `FocusSession(id)`: focuses that session's herdr workspace, then its pane, and answers whether it did. A
-  herdr refusal is an answer (`focused: false`, with herdr's message), never a D-Bus error.
+  failure is an answer, never a D-Bus error: `focused: false` and an `error` code, one of `unknown-session`
+  (no row has that id), `no-pane` (the row has no herdr pane), `herdr-rejected` (herdr refused, or its
+  reply could not be read), `herdr-unreachable` (no socket, a refused connection, or no reply in 2 s) and
+  `internal` (a fault in the service). herdr's own message goes to the journal, never to the bus:
+  `cockpit: focus: <id>: <message>`.
 
 **Stale.** The service sends `Changed` only when something changed, so a quiet source is not a dead one: a
 source is stale when its `sampledAtUsec` is older than 3 of its own `intervalSeconds`
@@ -437,7 +441,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (694 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (696 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
