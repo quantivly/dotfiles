@@ -187,3 +187,31 @@ export const HERDR_ERROR_MESSAGE_MAX_CHARS = 200;
  * so a runaway reply cannot fill the service's memory. A live session snapshot measured about 63 KB.
  */
 export const HERDR_REPLY_MAX_BYTES = 8 * 1024 * 1024;
+/** Seconds between samples of the sessions source while a client watches the cockpit. */
+export const SESSIONS_WATCHED_INTERVAL_SECONDS = 10;
+/** Seconds between samples of the sessions source while no client watches the cockpit: its standing cost. */
+export const SESSIONS_UNWATCHED_INTERVAL_SECONDS = 60;
+/** Seconds between samples of the network source, watched or not (NetworkManager's signals cover the rest). */
+export const NETWORK_INTERVAL_SECONDS = 10;
+/** Seconds between samples of the mounts source, watched or not (the mount monitor's signal covers the rest). */
+export const MOUNTS_INTERVAL_SECONDS = 30;
+/** Every cockpit source's interval is multiplied by this while UPower reports the machine on battery. */
+export const BATTERY_CADENCE_MULTIPLIER = 3;
+/**
+ * Seconds after a signal-driven sample of a cockpit source during which another signal does not sample it at once;
+ * signals inside it give one sample when it ends.
+ */
+export const SOURCE_SIGNAL_COOLDOWN_SECONDS = 2;
+/**
+ * Path fragments of the files the cockpit service may stat but never open (the spec's "stat, never open" list): the
+ * sources' file reader (service/sources/sourceIo.js) refuses any path containing one, before opening it. Listing a
+ * directory's names is not opening a file, so counting the SSH control sockets stays allowed.
+ */
+export const STAT_ONLY_PATH_FRAGMENTS = [
+    '/.aws/', '/.ssh/', '/.credentials', '/.zshrc.local', '/.gitconfig.local', '/.backup.local',
+];
+/**
+ * Milliseconds a mount's filesystem size query may take before it counts as failed (its sizes null), so a hung network
+ * share cannot stall the mounts source.
+ */
+export const FILESYSTEM_QUERY_TIMEOUT_MS = 2000;

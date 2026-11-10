@@ -1,6 +1,7 @@
-// Journal lines for failures, shared by the service and the extension: each message at most once per
+// Journal lines for failures, shared by the services and the extension: each message at most once per
 // ERROR_LOG_REPEAT_INTERVAL_USEC for its template key (its own text unless a caller names one), with the journal
-// prefix. Pure: the clock and the writer are injected, so it runs under plain gjs.
+// prefix (LOG_PREFIX unless a caller names another). Pure: the clock and the writer are injected, so it runs under
+// plain gjs.
 import {ERROR_LOG_REPEAT_INTERVAL_USEC, LOG_PREFIX} from './constants.js';
 
 /**
@@ -25,23 +26,26 @@ export function describeErrorWithStack(error) {
 }
 
 /**
- * Writes each message at most once per ERROR_LOG_REPEAT_INTERVAL_USEC for its template key, prefixed with
- * LOG_PREFIX. The key defaults to the message itself, so a caller that names none is limited per distinct text.
+ * Writes each message at most once per ERROR_LOG_REPEAT_INTERVAL_USEC for its template key, prefixed with the
+ * logger's prefix. The key defaults to the message itself, so a caller that names none is limited per distinct text.
  */
 export class RateLimitedLogger {
     /**
-     * @param {object} options - The clock and the writer.
+     * @param {object} options - The clock, the writer and the prefix.
      * @param {() => number} options.nowUsec - Monotonic microseconds.
      * @param {(line: string) => void} options.write - Where a line goes (the journal, in the shell).
+     * @param {string} [options.prefix] - What every line starts with: LOG_PREFIX unless the caller names another
+     *     (the cockpit service passes COCKPIT_LOG_PREFIX).
      */
-    constructor({nowUsec, write}) {
+    constructor({nowUsec, write, prefix = LOG_PREFIX}) {
         this._nowUsec = nowUsec;
         this._write = write;
+        this._prefix = prefix;
         this._lastLoggedUsecByTemplateKey = new Map();
     }
 
     /**
-     * Writes a message with the journal prefix, unless a message with the same template key was written less than
+     * Writes a message with the logger's prefix, unless a message with the same template key was written less than
      * ERROR_LOG_REPEAT_INTERVAL_USEC ago. Entries old enough to write again are forgotten, so the table stays
      * small.
      *
@@ -60,6 +64,6 @@ export class RateLimitedLogger {
                 this._lastLoggedUsecByTemplateKey.delete(loggedTemplateKey);
         }
         this._lastLoggedUsecByTemplateKey.set(templateKey, nowUsec);
-        this._write(`${LOG_PREFIX} ${message}`);
+        this._write(`${this._prefix} ${message}`);
     }
 }
