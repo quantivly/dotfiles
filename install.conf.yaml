@@ -40,6 +40,9 @@
     # opted in it is inert. The shell step after the reconcile below reloads
     # systemd and restarts it only when its code changed.
     ~/.config/systemd/user/resource-pulse.service: systemd/resource-pulse.service
+    # Its cockpit service. Linked, NEVER enabled, and inert without
+    # ~/.config/resource-pulse/cockpit.json: its ConditionPathExists skips every start.
+    ~/.config/systemd/user/cockpit.service: systemd/cockpit.service
     # Sound files config.toml names by RELATIVE path, which herdr resolves against
     # the directory of the config.toml symlink, not the repo. Without this link
     # done_path is missing and herdr's per-turn beep silently comes back.

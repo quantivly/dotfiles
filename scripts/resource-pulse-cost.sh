@@ -3,41 +3,46 @@
 # scripts/resource-pulse-cost.sh
 # ==============================
 #
-# Measure what Resource Pulse costs. It has two parts, and each is measured on
-# its own:
+# Measure what Resource Pulse costs. It has three parts, and each is measured
+# on its own:
 #   - the extension, which only draws, lives inside gnome-shell, so its cost is
 #     gnome-shell's: take a reading with the extension off, another with it on,
 #     and compare;
 #   - the sampler service (resource-pulse.service) is a process of its own:
-#     --service measures it directly, the same way.
+#     --service measures it directly, the same way;
+#   - so is the cockpit service (cockpit.service): --cockpit measures it.
 #
 # Usage:
-#   scripts/resource-pulse-cost.sh [--service] --cpu-percent <seconds>
+#   scripts/resource-pulse-cost.sh [--service|--cockpit] --cpu-percent <seconds>
 #       CPU over a window, as a % of ONE core
-#   scripts/resource-pulse-cost.sh [--service] --rss-kib
+#   scripts/resource-pulse-cost.sh [--service|--cockpit] --rss-kib
 #       resident memory, KiB
 #   scripts/resource-pulse-cost.sh --rss-check <baseline_kib>
 #       gnome-shell only: exit 0 when its resident memory grew by at most
 #       RSS_GROWTH_TOLERANCE_MIB since the baseline, 1 otherwise; prints both
-#       numbers either way. The service's RSS budget is absolute, not a growth
-#       (at most SERVICE_RSS_BUDGET_MIB): read it with --service --rss-kib.
-# --service may stand anywhere on the line. Any other argument left over, or a
-# mode without its value, is a usage error (exit 2): an ignored word could make
-# a reading of gnome-shell pass for one of the service.
+#       numbers either way. Each service's RSS budget is absolute, not a growth
+#       (the sampler at most SERVICE_RSS_BUDGET_MIB, the cockpit at most
+#       COCKPIT_RSS_BUDGET_MIB): read it with --service --rss-kib or
+#       --cockpit --rss-kib, and --rss-check under either says that budget.
+# --service or --cockpit may stand anywhere on the line, and only one of them.
+# Any other argument left over, or a mode without its value, is a usage error
+# (exit 2): an ignored word could make a reading of gnome-shell pass for one of
+# a service.
 #
 # Finding gnome-shell: the one process of this user whose comm is "gnome-shell".
 # GNOME_SHELL_PID names it outright. More than one candidate, or none, is exit 2:
 # a guess would measure the wrong process and look like a result.
-# Finding the service: its unit's MainPID, from
-# `systemctl --user show -p MainPID --value resource-pulse.service`. MainPID 0
-# (not running) is exit 2.
+# Finding a service: its unit's MainPID, from
+# `systemctl --user show -p MainPID --value <unit>` (resource-pulse.service or
+# cockpit.service). MainPID 0 (not running, or skipped for want of its config
+# file) is exit 2.
 #
 # Reads only <proc root>/<pid>/comm, /stat and /status: no argument list, no
 # environment and no process-listing tool, all of which print what other
 # processes were started with and so end up in a transcript.
 #
 # Environment: PROC_ROOT (default /proc, overridable for the test fixture),
-#              GNOME_SHELL_PID (never consulted with --service).
+#              GNOME_SHELL_PID (never consulted with --service or --cockpit).
 # Exit: 0 ok, 1 --rss-check failed, 2 could not measure or bad usage.
 
 set -uo pipefail
@@ -46,12 +51,21 @@ readonly PROC_ROOT="${PROC_ROOT:-/proc}"
 readonly SHELL_COMM="gnome-shell"
 readonly SERVICE_UNIT="resource-pulse.service"
 readonly SERVICE_FLAG="--service"
-# What is measured: gnome-shell (the default), or the sampler service.
+readonly COCKPIT_UNIT="cockpit.service"
+readonly COCKPIT_FLAG="--cockpit"
+# What is measured: gnome-shell (the default), the sampler service, or the cockpit service.
 readonly MEASURED_GNOME_SHELL="gnome-shell"
 readonly MEASURED_SERVICE="service"
+readonly MEASURED_COCKPIT="cockpit"
 readonly RSS_GROWTH_TOLERANCE_MIB=64
-# The design's budget for the service's resident memory (docs/GNOME_CONFIGURATION_GUIDE.md).
+# The design's budget for the sampler service's resident memory (docs/GNOME_CONFIGURATION_GUIDE.md).
 readonly SERVICE_RSS_BUDGET_MIB=64
+# The design's budget for the cockpit service's resident memory
+# (docs/superpowers/specs/2026-11-09-desktop-cockpit-design.md).
+readonly COCKPIT_RSS_BUDGET_MIB=48
+# How each service gets started, for the line that says it is not running.
+readonly SERVICE_START_HINT="its extension starts it, or: systemctl --user start $SERVICE_UNIT"
+readonly COCKPIT_START_HINT="it needs ~/.config/resource-pulse/cockpit.json, then: systemctl --user start $COCKPIT_UNIT"
 readonly KIB_PER_MIB=1024
 readonly EXIT_BAD_USAGE_OR_NO_MEASUREMENT=2
 
@@ -91,30 +105,33 @@ find_gnome_shell_pid() {
 }
 
 #######################################
-# Print the pid of the sampler service: its unit's MainPID. Die when systemctl
-# cannot answer, or the unit has no running main process (MainPID 0).
+# Print the pid of a service: its unit's MainPID. Die when systemctl cannot
+# answer, or the unit has no running main process (MainPID 0).
+# Arguments:
+#   $1 - the unit: SERVICE_UNIT or COCKPIT_UNIT
+#   $2 - how it gets started, said when it is not running
 #######################################
-find_service_pid() {
-    local main_pid
-    main_pid="$(systemctl --user show -p MainPID --value "$SERVICE_UNIT")" \
-        || die "systemctl --user show $SERVICE_UNIT failed: is a user manager running?"
-    [[ "$main_pid" =~ ^[0-9]+$ ]] || die "$SERVICE_UNIT's MainPID is not a number: '$main_pid'"
-    (( main_pid > 0 )) \
-        || die "$SERVICE_UNIT is not running (MainPID 0): its extension starts it, or: systemctl --user start $SERVICE_UNIT"
+find_unit_main_pid() {
+    local unit="$1" start_hint="$2" main_pid
+    main_pid="$(systemctl --user show -p MainPID --value "$unit")" \
+        || die "systemctl --user show $unit failed: is a user manager running?"
+    [[ "$main_pid" =~ ^[0-9]+$ ]] || die "$unit's MainPID is not a number: '$main_pid'"
+    (( main_pid > 0 )) || die "$unit is not running (MainPID 0): $start_hint"
     printf '%s' "$main_pid"
 }
 
 #######################################
-# Print the pid of what is measured: the sampler service, or gnome-shell.
+# Print the pid of what is measured: the sampler service, the cockpit service,
+# or gnome-shell.
 # Arguments:
-#   $1 - MEASURED_SERVICE or MEASURED_GNOME_SHELL
+#   $1 - MEASURED_SERVICE, MEASURED_COCKPIT or MEASURED_GNOME_SHELL
 #######################################
 find_measured_pid() {
-    if [[ "$1" == "$MEASURED_SERVICE" ]]; then
-        find_service_pid
-    else
-        find_gnome_shell_pid
-    fi
+    case "$1" in
+        "$MEASURED_SERVICE") find_unit_main_pid "$SERVICE_UNIT" "$SERVICE_START_HINT" ;;
+        "$MEASURED_COCKPIT") find_unit_main_pid "$COCKPIT_UNIT" "$COCKPIT_START_HINT" ;;
+        *) find_gnome_shell_pid ;;
+    esac
 }
 
 #######################################
@@ -186,17 +203,42 @@ check_rss_growth() {
     (( growth_kib <= tolerance_kib ))
 }
 
+#######################################
+# Die, naming the right flag and figure, for --rss-check under a service: the
+# growth tripwire is gnome-shell's, and a service's budget is absolute.
+# Arguments:
+#   $1 - MEASURED_SERVICE or MEASURED_COCKPIT
+#######################################
+refuse_service_rss_check() {
+    local service_flag="$SERVICE_FLAG" budget_mib="$SERVICE_RSS_BUDGET_MIB" budget_kib
+    if [[ "$1" == "$MEASURED_COCKPIT" ]]; then
+        service_flag="$COCKPIT_FLAG"
+        budget_mib="$COCKPIT_RSS_BUDGET_MIB"
+    fi
+    budget_kib=$(( budget_mib * KIB_PER_MIB ))
+    die "--rss-check is gnome-shell's growth tripwire; the service's" \
+        "budget is absolute: $service_flag --rss-kib must read at most $budget_kib"
+}
+
 main() {
-    local measured="$MEASURED_GNOME_SHELL" argument mode mode_value measured_pid
+    local measured="$MEASURED_GNOME_SHELL" argument argument_measures mode mode_value measured_pid
     local -a mode_arguments=()
-    local usage_text="usage: $0 [$SERVICE_FLAG] --cpu-percent <seconds> | [$SERVICE_FLAG] --rss-kib | --rss-check <baseline_kib>"
-    # --service anywhere; everything else is the mode and its value.
+    local service_choice="[$SERVICE_FLAG|$COCKPIT_FLAG]"
+    local usage_text="usage: $0 $service_choice --cpu-percent <seconds> | $service_choice --rss-kib | --rss-check <baseline_kib>"
+    # --service or --cockpit anywhere, one of them only; everything else is the
+    # mode and its value.
     for argument in "$@"; do
-        if [[ "$argument" == "$SERVICE_FLAG" ]]; then
-            measured="$MEASURED_SERVICE"
-        else
-            mode_arguments+=("$argument")
+        case "$argument" in
+            "$SERVICE_FLAG") argument_measures="$MEASURED_SERVICE" ;;
+            "$COCKPIT_FLAG") argument_measures="$MEASURED_COCKPIT" ;;
+            *)
+                mode_arguments+=("$argument")
+                continue ;;
+        esac
+        if [[ "$measured" != "$MEASURED_GNOME_SHELL" && "$measured" != "$argument_measures" ]]; then
+            die "$usage_text"
         fi
+        measured="$argument_measures"
     done
     mode="${mode_arguments[0]:-}"
     mode_value="${mode_arguments[1]:-}"
@@ -213,8 +255,7 @@ main() {
             read_rss_kib "$measured_pid" || exit $?
             printf '\n' ;;
         --rss-check)
-            [[ "$measured" == "$MEASURED_GNOME_SHELL" ]] || die "--rss-check is gnome-shell's growth tripwire; the service's" \
-                "budget is absolute: $SERVICE_FLAG --rss-kib must read at most $(( SERVICE_RSS_BUDGET_MIB * KIB_PER_MIB ))"
+            [[ "$measured" == "$MEASURED_GNOME_SHELL" ]] || refuse_service_rss_check "$measured"
             if (( ${#mode_arguments[@]} != 2 )) || [[ -z "$mode_value" ]]; then
                 die "$usage_text"
             fi

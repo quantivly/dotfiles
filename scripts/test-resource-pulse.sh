@@ -506,6 +506,21 @@ EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/co
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
   "shell=[${EXPECTED_SHELL_CLOSURE}exit=0] service=[${EXPECTED_SERVICE_CLOSURE}exit=0]"
+# cockpit.service's closure decides its own restarts: it holds the file helpers
+# both services share (service/fileIo.js), never the sampler's modules, so a
+# sampler-only change never restarts the cockpit (ruling R13).
+cockpit_closure="$(sorted_closure "$EXT_DIR" service/cockpit.js)"
+cockpit_closure_summary="exit=${cockpit_closure##*exit=}"
+for closure_probe in service/cockpit.js service/fileIo.js service/main.js service/sampler.js service/dbusService.js; do
+  if [[ " $cockpit_closure" == *" $closure_probe "* ]]; then
+    cockpit_closure_summary+=" +$closure_probe"
+  else
+    cockpit_closure_summary+=" -$closure_probe"
+  fi
+done
+check "closure: on the real tree, service/cockpit.js holds itself and the shared service/fileIo.js, never the sampler's service/main.js, sampler.js or dbusService.js" \
+  "$cockpit_closure_summary" \
+  "exit=0 +service/cockpit.js +service/fileIo.js -service/main.js -service/sampler.js -service/dbusService.js"
 
 # A fixture of every shape it follows, and of what it must not: a JSDoc type
 # and a comment naming import('./x.js') are no imports; a multi-line import
@@ -1632,6 +1647,72 @@ if (( FAIL > cockpit_fail_count_before )); then
   sed 's/^/    fake herdr log: /' "$COCKPIT_FAKE_HERDR_LOG"
 fi
 
+printf '\nthe stat-only paths (named nowhere under service/ or lib/ but their list)\n'
+# The cockpit service may stat these files, never open them (the spec's "stat,
+# never open" list): its file reader (service/sources/sourceIo.js) refuses a
+# path holding a fragment of lib/constants.js's STAT_ONLY_PATH_FRAGMENTS. So no
+# file under service/ or lib/ may name one anywhere else, in a path it reads or
+# one it builds; the list itself is the one place that does, and only its own
+# lines are passed over. The names are the spec's, so the row does not lean on
+# the list it guards.
+# shellcheck disable=SC2088  # The ~ is text the row searches for, never a path to expand.
+STAT_ONLY_NAMES=('.credentials' '.aws/' '.zshrc.local' '.gitconfig.local' '.backup.local' '~/.ssh/')
+STAT_ONLY_LIST_FIRST_LINE='export const STAT_ONLY_PATH_FRAGMENTS = ['
+STAT_ONLY_LIST_LAST_LINE='];'
+STAT_ONLY_LIST_MODULE='lib/constants.js'
+# stat_only_mentions <extension dir>: "named-in=[<file> ...] list=<state>": the
+# files under service/ and lib/ (relative, sorted) naming one of STAT_ONLY_NAMES
+# outside the list, and whether lib/constants.js held the list, closed. A tree
+# that cannot be listed, or holds no file, says so instead of naming none.
+stat_only_mentions() {
+  local extension_dir="$1" listing_path="$WIRING_TMP/stat-only-listing" module_path relative_path
+  local module_line stat_only_name list_state="absent" inside_list named_in=""
+  local -a module_paths=()
+  find "$extension_dir/service" "$extension_dir/lib" -type f -print0 >"$listing_path" 2>/dev/null \
+    || { printf 'cannot list service/ and lib/ under %s' "$extension_dir"; return; }
+  mapfile -d '' module_paths < <(LC_ALL=C sort -z "$listing_path")
+  (( ${#module_paths[@]} > 0 )) || { printf 'no file under service/ or lib/ in %s' "$extension_dir"; return; }
+  for module_path in "${module_paths[@]}"; do
+    relative_path="${module_path#"$extension_dir"/}"
+    inside_list=false
+    while IFS= read -r module_line || [[ -n "$module_line" ]]; do
+      if [[ "$relative_path" == "$STAT_ONLY_LIST_MODULE" ]]; then
+        if [[ "$module_line" == "$STAT_ONLY_LIST_FIRST_LINE" ]]; then
+          inside_list=true; list_state="unclosed"; continue
+        fi
+        if [[ "$inside_list" == true ]]; then
+          [[ "$module_line" == "$STAT_ONLY_LIST_LAST_LINE" ]] && { inside_list=false; list_state="closed"; }
+          continue
+        fi
+      fi
+      for stat_only_name in "${STAT_ONLY_NAMES[@]}"; do
+        if [[ "$module_line" == *"$stat_only_name"* ]]; then
+          named_in+="$relative_path "
+          continue 3
+        fi
+      done
+    done <"$module_path"
+  done
+  printf 'named-in=[%s] list=%s' "${named_in% }" "$list_state"
+}
+# The fixture: the real lib/constants.js with one name planted after its list,
+# a source that load_contents a planted path, and a clean module beside it.
+STAT_ONLY_FIXTURE_DIR="$WIRING_TMP/stat-only-fixture"
+mkdir -p "$STAT_ONLY_FIXTURE_DIR/lib" "$STAT_ONLY_FIXTURE_DIR/service/sources" \
+  || fatal "cannot create $STAT_ONLY_FIXTURE_DIR"
+cp "$EXT_DIR/$STAT_ONLY_LIST_MODULE" "$STAT_ONLY_FIXTURE_DIR/$STAT_ONLY_LIST_MODULE" \
+  || fatal "cannot copy $STAT_ONLY_LIST_MODULE into $STAT_ONLY_FIXTURE_DIR"
+printf '%s\n' "export const PLANTED_CONFIG_PATH = '${STAT_ONLY_NAMES[5]}config';" \
+  >>"$STAT_ONLY_FIXTURE_DIR/$STAT_ONLY_LIST_MODULE"
+printf '%s\n' "import Gio from 'gi://Gio';" "import GLib from 'gi://GLib';" \
+  "const plantedPath = GLib.build_filenamev([GLib.get_home_dir(), '${STAT_ONLY_NAMES[1]}config']);" \
+  "const [, plantedBytes] = Gio.File.new_for_path(plantedPath).load_contents(null);" \
+  >"$STAT_ONLY_FIXTURE_DIR/service/sources/planted.js"
+printf '%s\n' "export const CLEAN_INTERVAL_SECONDS = 10;" >"$STAT_ONLY_FIXTURE_DIR/service/clean.js"
+check "no file under service/ or lib/ names a stat-only path outside lib/constants.js's list; a planted load_contents of one, or a name after the list, is found" \
+  "real: $(stat_only_mentions "$EXT_DIR") fixture: $(stat_only_mentions "$STAT_ONLY_FIXTURE_DIR")" \
+  "real: named-in=[] list=closed fixture: named-in=[lib/constants.js service/sources/planted.js] list=closed"
+
 printf '\nthe unit (systemd/resource-pulse.service)\n'
 SERVICE_UNIT="$DOTFILES/systemd/resource-pulse.service"
 SERVICE_MAIN_RELATIVE_PATH='gnome-shell/extensions/resource-pulse@dotfiles/service/main.js'
@@ -1653,10 +1734,18 @@ EXPECTED_UNIT_SETTINGS=(
   '[Service]MemoryHigh=96M'
   '[Service]MemoryMax=128M'
 )
-# Each setting is read as "[Section]Key=value", comments and blank lines aside;
-# a Description's text is not pinned, only that it is set.
-unit_sections=""; unit_section=""; unit_settings=(); unit_exec_start=""
-if [[ -r "$SERVICE_UNIT" ]]; then
+# read_unit_settings <unit file>: reads each setting as "[Section]Key=value",
+# comments and blank lines aside, into unit_settings; the section headers, in
+# order, into unit_sections; and the ExecStart value into unit_exec_start. A
+# Description's text is not pinned, only that it is set. An unreadable file
+# leaves no settings and says so in unit_sections.
+read_unit_settings() {
+  local unit_path="$1" unit_section="" unit_line
+  unit_sections=""; unit_settings=(); unit_exec_start=""
+  if [[ ! -r "$unit_path" ]]; then
+    unit_sections="cannot read $unit_path"
+    return
+  fi
   while IFS= read -r unit_line || [[ -n "$unit_line" ]]; do
     case "$unit_line" in
       ''|'#'*|';'*) ;;
@@ -1667,26 +1756,24 @@ if [[ -r "$SERVICE_UNIT" ]]; then
         [[ "$unit_line" == ExecStart=* ]] && unit_exec_start="${unit_line#ExecStart=}"
         ;;
     esac
-  done <"$SERVICE_UNIT"
-else
-  unit_sections="cannot read $SERVICE_UNIT"
-fi
-check "the unit has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
-  "$unit_sections" "[Unit] [Service] "
+  done <"$unit_path"
+}
 sorted_settings() { printf '%s\n' "$@" | LC_ALL=C sort | tr '\n' '|'; }
-check "the unit's settings are exactly the design's: Type=dbus on its bus name, PartOf, restart and its limit, caps" \
-  "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_UNIT_SETTINGS[@]}")"
-# The ExecStart above is pinned as text; this row resolves it: the script it
-# names under ~/.dotfiles must be this checkout's service/main.js.
-unit_exec_script="${unit_exec_start#"$UNIT_INTERPRETER "}"
-unit_exec_script_in_checkout="$DOTFILES/${unit_exec_script#"$UNIT_DOTFILES_PREFIX"}"
-unit_exec_resolution="unresolved"
-if [[ "$unit_exec_script" == "$UNIT_DOTFILES_PREFIX"* && -f "$unit_exec_script_in_checkout" \
-  && "$unit_exec_script_in_checkout" -ef "$DOTFILES/$SERVICE_MAIN_RELATIVE_PATH" ]]; then
-  unit_exec_resolution="service/main.js"
-fi
-check "the unit's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own service/main.js" \
-  "${unit_exec_start%% "$UNIT_DOTFILES_PREFIX"*}|$unit_exec_resolution" "$UNIT_INTERPRETER|service/main.js"
+# unit_exec_resolution <entry path relative to the checkout>: resolves the
+# unit_exec_start that read_unit_settings left: the script it names under
+# ~/.dotfiles, found in this checkout, is that entry. Prints the entry relative
+# to the extension directory when it is, "unresolved" otherwise.
+unit_exec_resolution() {
+  local expected_entry_path="$1" exec_script exec_script_in_checkout
+  exec_script="${unit_exec_start#"$UNIT_INTERPRETER "}"
+  exec_script_in_checkout="$DOTFILES/${exec_script#"$UNIT_DOTFILES_PREFIX"}"
+  if [[ "$exec_script" == "$UNIT_DOTFILES_PREFIX"* && -f "$exec_script_in_checkout" \
+    && "$exec_script_in_checkout" -ef "$DOTFILES/$expected_entry_path" ]]; then
+    printf '%s' "${expected_entry_path#"gnome-shell/extensions/$EXTENSION_UUID/"}"
+  else
+    printf 'unresolved'
+  fi
+}
 # verify checks that ExecStart's command exists, and ~/.dotfiles is not this
 # checkout on a runner, so it verifies a copy pointed at this checkout: the same
 # unit text with a command that exists. The rows above pin the real path.
@@ -1694,35 +1781,101 @@ check "the unit's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own se
 # RuntimeDirectory path", measured), which a CI runner need not have, so it runs
 # behind the barrier, whose private runtime dir is all it needs. It still exits
 # 1 for an unknown key and for a missing command (both measured).
-if command -v systemd-analyze >/dev/null 2>&1; then
-  UNIT_COPY_DIR="$WIRING_TMP/unit-copy"
-  mkdir -p "$UNIT_COPY_DIR" || fatal "cannot create $UNIT_COPY_DIR"
-  sed -e "/^ExecStart=/s#$UNIT_DOTFILES_PREFIX#$DOTFILES/#" "$SERVICE_UNIT" >"$UNIT_COPY_DIR/resource-pulse.service" 2>/dev/null
-  unit_verify_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" systemd-analyze --user verify --man=no \
-    --recursive-errors=no "$UNIT_COPY_DIR/resource-pulse.service" 2>&1)"
-  unit_verify_exit=$?
-  check "systemd-analyze --user verify accepts the unit (ExecStart pointed at this checkout) and says nothing of it" \
-    "$unit_verify_exit:[$(grep -F 'resource-pulse' <<<"$unit_verify_output")]" "0:[]"
-elif [[ -n "${CI:-}" ]]; then
-  # CI is where this row is meant to run, so a runner without the tool is a failure, never a skip.
-  bad "systemd-analyze --user verify accepts the unit — systemd-analyze is missing on CI"
-else
-  ok "systemd-analyze absent here; CI verifies the unit"
-fi
+UNIT_COPY_DIR="$WIRING_TMP/unit-copy"
+# check_unit_verifies <unit file> <what verify's complaints about it contain> <row name>:
+# one row, systemd-analyze --user verify on that copy.
+check_unit_verifies() {
+  local unit_path="$1" complaint_needle="$2" row_name="$3" unit_copy_path verify_output verify_exit
+  # An empty copy of a missing unit is not one that verifies.
+  if [[ ! -r "$unit_path" ]]; then
+    bad "$row_name — cannot read $unit_path"
+  elif command -v systemd-analyze >/dev/null 2>&1; then
+    unit_copy_path="$UNIT_COPY_DIR/${unit_path##*/}"
+    mkdir -p "$UNIT_COPY_DIR" || fatal "cannot create $UNIT_COPY_DIR"
+    sed -e "/^ExecStart=/s#$UNIT_DOTFILES_PREFIX#$DOTFILES/#" "$unit_path" >"$unit_copy_path" 2>/dev/null
+    verify_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" systemd-analyze --user verify --man=no \
+      --recursive-errors=no "$unit_copy_path" 2>&1)"
+    verify_exit=$?
+    check "$row_name" "$verify_exit:[$(grep -F "$complaint_needle" <<<"$verify_output")]" "0:[]"
+  elif [[ -n "${CI:-}" ]]; then
+    # CI is where this row is meant to run, so a runner without the tool is a failure, never a skip.
+    bad "$row_name — systemd-analyze is missing on CI"
+  else
+    ok "systemd-analyze absent here; CI verifies ${unit_path##*/}"
+  fi
+}
+read_unit_settings "$SERVICE_UNIT"
+check "the unit has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
+  "$unit_sections" "[Unit] [Service] "
+check "the unit's settings are exactly the design's: Type=dbus on its bus name, PartOf, restart and its limit, caps" \
+  "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_UNIT_SETTINGS[@]}")"
+# The ExecStart above is pinned as text; this row resolves it: the script it
+# names under ~/.dotfiles must be this checkout's service/main.js.
+check "the unit's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own service/main.js" \
+  "${unit_exec_start%% "$UNIT_DOTFILES_PREFIX"*}|$(unit_exec_resolution "$SERVICE_MAIN_RELATIVE_PATH")" \
+  "$UNIT_INTERPRETER|service/main.js"
+check_unit_verifies "$SERVICE_UNIT" 'resource-pulse' \
+  "systemd-analyze --user verify accepts the unit (ExecStart pointed at this checkout) and says nothing of it"
+
+printf '\nthe cockpit unit (systemd/cockpit.service)\n'
+COCKPIT_UNIT="$DOTFILES/systemd/cockpit.service"
+COCKPIT_MAIN_RELATIVE_PATH="gnome-shell/extensions/$EXTENSION_UUID/service/cockpit.js"
+# The opt-in: for anyone without the layout file, systemd skips the unit.
+COCKPIT_UNIT_CONDITION_KEY='ConditionPathExists'
+COCKPIT_UNIT_CONDITION="$COCKPIT_UNIT_CONDITION_KEY=%h/.config/$COCKPIT_CONFIG_RELATIVE_PATH"
+EXPECTED_COCKPIT_UNIT_SETTINGS=(
+  '[Unit]Description=<set>'
+  '[Unit]PartOf=graphical-session.target'
+  '[Unit]StartLimitIntervalSec=300'
+  '[Unit]StartLimitBurst=5'
+  "[Unit]$COCKPIT_UNIT_CONDITION"
+  '[Service]Type=dbus'
+  "[Service]BusName=$COCKPIT_BUS_NAME"
+  "[Service]ExecStart=$UNIT_INTERPRETER $UNIT_DOTFILES_PREFIX$COCKPIT_MAIN_RELATIVE_PATH"
+  '[Service]Restart=on-failure'
+  '[Service]RestartSec=5'
+  '[Service]Slice=background.slice'
+  '[Service]Nice=10'
+  '[Service]CPUQuota=10%'
+  '[Service]MemoryHigh=64M'
+  '[Service]MemoryMax=96M'
+)
+read_unit_settings "$COCKPIT_UNIT"
+check "cockpit.service has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
+  "$unit_sections" "[Unit] [Service] "
+check "cockpit.service's settings are exactly the design's: Type=dbus on Cockpit1, PartOf, its condition, restart and its limit, caps" \
+  "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_COCKPIT_UNIT_SETTINGS[@]}")"
+# Counted over every section, so a second condition anywhere (a stricter or a
+# looser one, in [Service] by mistake) shows, and so does the right one missing.
+cockpit_condition_count=0; cockpit_exact_condition_count=0
+for unit_setting in "${unit_settings[@]}"; do
+  [[ "$unit_setting" == *"]$COCKPIT_UNIT_CONDITION_KEY="* ]] && cockpit_condition_count=$((cockpit_condition_count + 1))
+  [[ "$unit_setting" == "[Unit]$COCKPIT_UNIT_CONDITION" ]] && cockpit_exact_condition_count=$((cockpit_exact_condition_count + 1))
+done
+check "cockpit.service has exactly one $COCKPIT_UNIT_CONDITION_KEY, in [Unit], on ~/.config/$COCKPIT_CONFIG_RELATIVE_PATH" \
+  "conditions=$cockpit_condition_count exact=$cockpit_exact_condition_count" "conditions=1 exact=1"
+check "cockpit.service's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own service/cockpit.js" \
+  "${unit_exec_start%% "$UNIT_DOTFILES_PREFIX"*}|$(unit_exec_resolution "$COCKPIT_MAIN_RELATIVE_PATH")" \
+  "$UNIT_INTERPRETER|service/cockpit.js"
+check_unit_verifies "$COCKPIT_UNIT" 'cockpit.service' \
+  "systemd-analyze --user verify accepts cockpit.service (ExecStart pointed at this checkout) and says nothing of it"
 
 printf '\nthe service'"'"'s install wiring\n'
 check "install.conf.yaml links the service unit" \
   "$(grep -c -x -F '    ~/.config/systemd/user/resource-pulse.service: systemd/resource-pulse.service' \
     "$DOTFILES/install.conf.yaml")" 1
+check "install.conf.yaml links the cockpit unit" \
+  "$(grep -c -x -F '    ~/.config/systemd/user/cockpit.service: systemd/cockpit.service' \
+    "$DOTFILES/install.conf.yaml")" 1
 # Linked and started by the extension, never enabled: no line of ./install or of
-# its config (comments aside) may enable it.
+# its config (comments aside) may enable either unit.
 if [[ -r "$DOTFILES/install" && -r "$DOTFILES/install.conf.yaml" ]]; then
   service_enabling_lines="$(cat "$DOTFILES/install" "$DOTFILES/install.conf.yaml" | grep -v '^[[:space:]]*#' \
-    | grep -c 'enable.*resource-pulse')"
+    | grep -c -E 'enable.*(resource-pulse|cockpit)')"
 else
   service_enabling_lines="install or install.conf.yaml is unreadable"
 fi
-check "install.conf.yaml runs the refresh step, and nothing in ./install or its config enables the unit" \
+check "install.conf.yaml runs the refresh step, and nothing in ./install or its config enables either unit" \
   "refresh=$(grep -c -x -F '        bash scripts/resource-pulse-service-refresh.sh' "$DOTFILES/install.conf.yaml") enabling=$service_enabling_lines" \
   "refresh=1 enabling=0"
 
@@ -1737,15 +1890,19 @@ REFRESH_STUB_BIN="$WIRING_TMP/refresh-bin"
 REFRESH_NO_SYSTEMCTL_BIN="$WIRING_TMP/refresh-no-systemctl-bin"
 REFRESH_CALLS="$WIRING_TMP/refresh-systemctl-calls"
 REFRESH_EXTENSION_DIR="$WIRING_TMP/refresh-extension"
-# The fixture's own copy of systemd/resource-pulse.service, with a chosen mtime.
+# The fixture's own copies of systemd/resource-pulse.service and
+# systemd/cockpit.service, with chosen mtimes.
 REFRESH_UNIT_FILE="$WIRING_TMP/refresh-unit/resource-pulse.service"
+REFRESH_COCKPIT_UNIT_FILE="$WIRING_TMP/refresh-unit/cockpit.service"
 UNIT_STARTED_AT_EPOCH=1700000100
 BEFORE_START_EPOCH=1700000000
 AFTER_START_EPOCH=1700000200
 mkdir -p "$REFRESH_NO_SYSTEMCTL_BIN" || fatal "cannot create $REFRESH_NO_SYSTEMCTL_BIN"
 # shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
 install_stub "$REFRESH_STUB_BIN" systemctl '#!/usr/bin/env bash
-# Records each call, and answers from the REFRESH_STUB_* variables.
+# Records each call, and answers from the REFRESH_STUB_* variables. cockpit.service
+# is inactive unless REFRESH_STUB_COCKPIT_ACTIVE_STATE says otherwise, as for
+# anyone without its layout file, whose unit systemd skips.
 printf "%s\n" "$*" >>"$REFRESH_CALLS"
 case "$*" in
   "--user show-environment") exit "$REFRESH_STUB_MANAGER_EXIT" ;;
@@ -1756,23 +1913,36 @@ case "$*" in
   "--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix")
     printf "%s\n" "$REFRESH_STUB_STARTED_AT" ;;
   "--user try-restart resource-pulse.service") exit "$REFRESH_STUB_RESTART_EXIT" ;;
+  "--user show cockpit.service -p ActiveState --value")
+    printf "%s\n" "${REFRESH_STUB_COCKPIT_ACTIVE_STATE:-inactive}" ;;
+  "--user show cockpit.service -p ActiveEnterTimestamp --value --timestamp=unix")
+    printf "%s\n" "${REFRESH_STUB_COCKPIT_STARTED_AT:-}" ;;
+  "--user try-restart cockpit.service") exit "${REFRESH_STUB_COCKPIT_RESTART_EXIT:-0}" ;;
   *) printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64 ;;
 esac'
 # reset_refresh_extension <service/main.js mtime> <lib/protocol.js mtime> <outside mtime>:
 # a fixture extension directory whose service/main.js, lib/protocol.js, and files
 # outside service/ and lib/ carry those epoch mtimes ('' leaves that file out).
 # Its modules import one another as the real ones do, in small: service/main.js
-# imports lib/protocol.js and lib/cadence.js, extension.js imports lib/protocol.js
-# and lib/visibility.js; those two lib/ modules are older than the start.
+# imports lib/protocol.js, lib/cadence.js and service/fileIo.js; service/cockpit.js
+# (cockpit.service's entry) imports service/fileIo.js and lib/sessions.js;
+# extension.js imports lib/protocol.js and lib/visibility.js. All but the three
+# chosen are older than the start, and so is the cockpit unit's file.
 reset_refresh_extension() {
   rm -rf "$REFRESH_EXTENSION_DIR"
-  mkdir -p "$REFRESH_EXTENSION_DIR/lib" || fatal "cannot create $REFRESH_EXTENSION_DIR"
+  mkdir -p "$REFRESH_EXTENSION_DIR/lib" "$REFRESH_EXTENSION_DIR/service" || fatal "cannot create $REFRESH_EXTENSION_DIR"
   if [[ -n "$1" ]]; then
-    mkdir -p "$REFRESH_EXTENSION_DIR/service"
     printf '%s\n' "import {PROTOCOL_VERSION} from '../lib/protocol.js';" \
-      "import {decideAppScan} from '../lib/cadence.js';" >"$REFRESH_EXTENSION_DIR/service/main.js"
+      "import {decideAppScan} from '../lib/cadence.js';" \
+      "import {readFileToEnd} from './fileIo.js';" >"$REFRESH_EXTENSION_DIR/service/main.js"
     touch -d "@$1" "$REFRESH_EXTENSION_DIR/service/main.js" || fatal "touch -d @$1 failed"
   fi
+  printf '%s\n' "import {readFileToEnd} from './fileIo.js';" \
+    "import {buildSessionRows} from '../lib/sessions.js';" >"$REFRESH_EXTENSION_DIR/service/cockpit.js"
+  : >"$REFRESH_EXTENSION_DIR/service/fileIo.js"
+  : >"$REFRESH_EXTENSION_DIR/lib/sessions.js"
+  touch -d "@$BEFORE_START_EPOCH" "$REFRESH_EXTENSION_DIR/service/cockpit.js" "$REFRESH_EXTENSION_DIR/service/fileIo.js" \
+    "$REFRESH_EXTENSION_DIR/lib/sessions.js" || fatal "touch -d @$BEFORE_START_EPOCH failed"
   if [[ -n "$2" ]]; then
     : >"$REFRESH_EXTENSION_DIR/lib/protocol.js"
     touch -d "@$2" "$REFRESH_EXTENSION_DIR/lib/protocol.js" || fatal "touch -d @$2 failed"
@@ -1788,7 +1958,9 @@ reset_refresh_extension() {
     || fatal "touch -d @$3 failed"
   mkdir -p "${REFRESH_UNIT_FILE%/*}" || fatal "cannot create ${REFRESH_UNIT_FILE%/*}"
   : >"$REFRESH_UNIT_FILE"
-  touch -d "@$BEFORE_START_EPOCH" "$REFRESH_UNIT_FILE" || fatal "touch -d @$BEFORE_START_EPOCH failed"
+  : >"$REFRESH_COCKPIT_UNIT_FILE"
+  touch -d "@$BEFORE_START_EPOCH" "$REFRESH_UNIT_FILE" "$REFRESH_COCKPIT_UNIT_FILE" \
+    || fatal "touch -d @$BEFORE_START_EPOCH failed"
 }
 # refresh_extension_with_change <module>: the fixture with every file older than
 # the unit's start but that one module, which is newer.
@@ -1797,7 +1969,9 @@ refresh_extension_with_change() {
   touch -d "@$AFTER_START_EPOCH" "$REFRESH_EXTENSION_DIR/$1" || fatal "touch -d @$AFTER_START_EPOCH failed"
 }
 # run_refresh <manager exit> <reload exit> <ActiveState> <ActiveEnterTimestamp> <try-restart exit> [stub bin]
-# prints "exit=<n> calls=[<call>;...] output=[<stdout+stderr>]".
+# prints "exit=<n> calls=[<call>;...] output=[<stdout+stderr>]". The arguments
+# answer for resource-pulse.service; cockpit.service answers from the
+# REFRESH_STUB_COCKPIT_* variables of the caller's environment (inactive without).
 run_refresh() {
   local refresh_output refresh_exit stub_bin="${6:-$REFRESH_STUB_BIN}"
   : >"$REFRESH_CALLS"
@@ -1805,6 +1979,7 @@ run_refresh() {
     REFRESH_STUB_MANAGER_EXIT="$1" REFRESH_STUB_RELOAD_EXIT="$2" REFRESH_STUB_ACTIVE_STATE="$3" \
     REFRESH_STUB_STARTED_AT="$4" REFRESH_STUB_RESTART_EXIT="$5" \
     RESOURCE_PULSE_EXTENSION_DIR="$REFRESH_EXTENSION_DIR" RESOURCE_PULSE_UNIT_FILE="$REFRESH_UNIT_FILE" \
+    RESOURCE_PULSE_COCKPIT_UNIT_FILE="$REFRESH_COCKPIT_UNIT_FILE" \
     "$BASH" "$REFRESH_SCRIPT" 2>&1)"
   refresh_exit=$?
   printf 'exit=%s calls=[%s] output=[%s]' "$refresh_exit" "$(tr '\n' ';' <"$REFRESH_CALLS")" "$refresh_output"
@@ -1812,9 +1987,20 @@ run_refresh() {
 STARTED_AT="@$UNIT_STARTED_AT_EPOCH"
 # warnings_naming <summary> <step>: how many ⚠ lines of a run name that step.
 warnings_naming() { grep -F '⚠' <<<"$1" | grep -c -F "$2"; }
-CALLS_UP_TO_STATE='--user show-environment;--user daemon-reload;--user show resource-pulse.service -p ActiveState --value;'
-CALLS_UP_TO_START_TIME="$CALLS_UP_TO_STATE--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix;"
-CALLS_WITH_RESTART="$CALLS_UP_TO_START_TIME--user try-restart resource-pulse.service;"
+# Each unit's calls in the order the script makes them: its state, then (active)
+# its start time, then (changed) its try-restart; resource-pulse.service first.
+REFRESH_PREAMBLE_CALLS='--user show-environment;--user daemon-reload;'
+SAMPLER_STATE_CALL='--user show resource-pulse.service -p ActiveState --value;'
+SAMPLER_START_TIME_CALL='--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix;'
+SAMPLER_RESTART_CALL='--user try-restart resource-pulse.service;'
+COCKPIT_STATE_CALL='--user show cockpit.service -p ActiveState --value;'
+COCKPIT_START_TIME_CALL='--user show cockpit.service -p ActiveEnterTimestamp --value --timestamp=unix;'
+COCKPIT_RESTART_CALL='--user try-restart cockpit.service;'
+# The sampler's rows below leave cockpit.service inactive, so each run that gets
+# past the reload ends with its one state call, and says nothing of it.
+CALLS_UP_TO_STATE="$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$COCKPIT_STATE_CALL"
+CALLS_UP_TO_START_TIME="$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$SAMPLER_START_TIME_CALL$COCKPIT_STATE_CALL"
+CALLS_WITH_RESTART="$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$SAMPLER_START_TIME_CALL$SAMPLER_RESTART_CALL$COCKPIT_STATE_CALL"
 
 reset_refresh_extension "$AFTER_START_EPOCH" "$AFTER_START_EPOCH" "$AFTER_START_EPOCH"
 check "refresh: no user manager (a server) is silent and exits 0, asking nothing more" \
@@ -1868,9 +2054,10 @@ reload_failed_summary="$(run_refresh 0 1 active "$STARTED_AT" 0)"
 # Every failure below warns with a ⚠ line naming the step, restarts nothing, and
 # still returns 0: under `set -e` an exit 1 would abort the rest of ./install
 # for every desktop user (ruling R12; reconcile-systemd-units.sh does the same).
-check "refresh: a failed daemon-reload warns, naming it, restarts nothing and returns 0" \
-  "${reload_failed_summary%% output=*} warned=$(warnings_naming "$reload_failed_summary" daemon-reload)" \
-  "exit=0 calls=[--user show-environment;--user daemon-reload;] warned=1"
+# The reload is one step for both units, so its one line names both.
+check "refresh: a failed daemon-reload warns once, naming it and both units, restarts nothing and returns 0" \
+  "${reload_failed_summary%% output=*} warned=$(warnings_naming "$reload_failed_summary" daemon-reload) names-both=$(grep -c -F '⚠ resource-pulse.service, cockpit.service: daemon-reload failed' <<<"$reload_failed_summary")" \
+  "exit=0 calls=[$REFRESH_PREAMBLE_CALLS] warned=1 names-both=1"
 # A state that cannot be read must not pass for "not active", which is silent.
 state_unreadable_summary="$(REFRESH_STUB_STATE_EXIT=1 run_refresh 0 0 active "$STARTED_AT" 0)"
 check "refresh: a state it cannot read warns, naming it, restarts nothing and returns 0" \
@@ -1930,6 +2117,74 @@ find_warning_summary="$(run_refresh 0 0 active "$STARTED_AT" 0 "$REFRESH_FIND_WA
 check "refresh: a warning find prints on stderr while succeeding is shown, and never read as a changed file" \
   "${find_warning_summary%% output=*} shown=$(grep -c -F 'stand-in warning' <<<"$find_warning_summary")" \
   "exit=0 calls=[$CALLS_UP_TO_START_TIME] shown=1"
+
+# cockpit.service is the step's second unit: its own entry (service/cockpit.js),
+# its own closure and its own unit file, decided alone after the one reload, and
+# every line names its unit. A module both closures hold (service/fileIo.js)
+# restarts both; one only the sampler runs never restarts the cockpit, nor the
+# reverse.
+# run_refresh_both_active [sampler state exit] [cockpit start time]: both units
+# active since UNIT_STARTED_AT_EPOCH, every call succeeding.
+run_refresh_both_active() {
+  REFRESH_STUB_STATE_EXIT="${1:-0}" REFRESH_STUB_COCKPIT_ACTIVE_STATE=active \
+    REFRESH_STUB_COCKPIT_STARTED_AT="${2:-$STARTED_AT}" run_refresh 0 0 active "$STARTED_AT" 0
+}
+SAMPLER_CHECKED_CALLS="$SAMPLER_STATE_CALL$SAMPLER_START_TIME_CALL"
+COCKPIT_CHECKED_CALLS="$COCKPIT_STATE_CALL$COCKPIT_START_TIME_CALL"
+CALLS_BOTH_UNCHANGED="$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$COCKPIT_CHECKED_CALLS"
+CALLS_COCKPIT_RESTARTED="$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$COCKPIT_CHECKED_CALLS$COCKPIT_RESTART_CALL"
+CALLS_SAMPLER_RESTARTED="$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$SAMPLER_RESTART_CALL$COCKPIT_CHECKED_CALLS"
+CALLS_BOTH_RESTARTED="$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$SAMPLER_RESTART_CALL$COCKPIT_CHECKED_CALLS$COCKPIT_RESTART_CALL"
+# restart_lines <summary>: the ✓ lines of a run's output (what follows
+# "output=[", its closing bracket dropped), joined by |.
+restart_lines() {
+  local run_output="${1#* output=\[}"
+  grep -F '✓' <<<"${run_output%]}" | tr '\n' '|'
+}
+COCKPIT_ENTRY_RESTART_LINE='  ✓ cockpit.service restarted: service/cockpit.js changed since it started|'
+SAMPLER_ENTRY_RESTART_LINE='  ✓ resource-pulse.service restarted: service/main.js changed since it started (its histories start again)|'
+refresh_extension_with_change service/cockpit.js
+cockpit_entry_changed_run="$(run_refresh_both_active)"
+check "refresh: service/cockpit.js newer than cockpit.service's start try-restarts cockpit.service and leaves resource-pulse.service alone, in a line naming cockpit.service" \
+  "${cockpit_entry_changed_run%% output=*} said=[$(restart_lines "$cockpit_entry_changed_run")]" \
+  "exit=0 calls=[$CALLS_COCKPIT_RESTARTED] said=[$COCKPIT_ENTRY_RESTART_LINE]"
+refresh_extension_with_change service/main.js
+sampler_entry_changed_run="$(run_refresh_both_active)"
+check "refresh: service/main.js newer than resource-pulse.service's start try-restarts it and leaves an active cockpit.service alone" \
+  "${sampler_entry_changed_run%% output=*} said=[$(restart_lines "$sampler_entry_changed_run")]" \
+  "exit=0 calls=[$CALLS_SAMPLER_RESTARTED] said=[$SAMPLER_ENTRY_RESTART_LINE]"
+refresh_by_closure_summary=""
+for changed_module in service/fileIo.js lib/sessions.js lib/cadence.js; do
+  refresh_extension_with_change "$changed_module"
+  refresh_closure_run="$(run_refresh_both_active)"
+  refresh_by_closure_summary+="$changed_module:${refresh_closure_run%% output=*} "
+done
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+touch -d "@$AFTER_START_EPOCH" "$REFRESH_COCKPIT_UNIT_FILE" || fatal "touch -d @$AFTER_START_EPOCH failed"
+refresh_closure_run="$(run_refresh_both_active)"
+refresh_by_closure_summary+="cockpit-unit-file:${refresh_closure_run%% output=*} said=[$(restart_lines "$refresh_closure_run")]"
+check "refresh: a module both run (service/fileIo.js) restarts both units; one only the cockpit runs (lib/sessions.js), or cockpit.service's own unit file, restarts only it; one only the sampler runs (lib/cadence.js) only the sampler" \
+  "$refresh_by_closure_summary" \
+  "service/fileIo.js:exit=0 calls=[$CALLS_BOTH_RESTARTED] lib/sessions.js:exit=0 calls=[$CALLS_COCKPIT_RESTARTED] lib/cadence.js:exit=0 calls=[$CALLS_SAMPLER_RESTARTED] cockpit-unit-file:exit=0 calls=[$CALLS_COCKPIT_RESTARTED] said=[  ✓ cockpit.service restarted: its unit file changed since it started|]"
+# Without ~/.config/resource-pulse/cockpit.json, systemd skips cockpit.service
+# on its condition and reports it inactive: however new its code, the step
+# leaves it alone and says nothing of it, while the sampler is still decided.
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+touch -d "@$AFTER_START_EPOCH" "$REFRESH_EXTENSION_DIR/service/cockpit.js" "$REFRESH_COCKPIT_UNIT_FILE" \
+  || fatal "touch -d @$AFTER_START_EPOCH failed"
+check "refresh: an inactive (condition-skipped) cockpit.service, with newer code and unit file, is left alone, silently, after the sampler is decided" \
+  "$(run_refresh 0 0 active "$STARTED_AT" 0)" "exit=0 calls=[$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$COCKPIT_STATE_CALL] output=[]"
+# A failure on one unit warns naming that unit, and the other is still decided.
+refresh_failure_isolation_summary=""
+refresh_extension_with_change service/cockpit.js
+refresh_isolation_run="$(run_refresh_both_active 1)"
+refresh_failure_isolation_summary+="sampler-state-unreadable:${refresh_isolation_run%% output=*} warned=$(grep -c -F '⚠ resource-pulse.service: cannot read its state' <<<"$refresh_isolation_run") said=[$(restart_lines "$refresh_isolation_run")]"
+refresh_extension_with_change service/main.js
+refresh_isolation_run="$(run_refresh_both_active 0 'n/a')"
+refresh_failure_isolation_summary+=" cockpit-start-unparseable:${refresh_isolation_run%% output=*} warned=$(grep -c -F '⚠ cockpit.service: cannot parse when it started' <<<"$refresh_isolation_run") said=[$(restart_lines "$refresh_isolation_run")]"
+check "refresh: a failure deciding one unit warns in a line naming that unit, and the other is still decided and restarted" \
+  "$refresh_failure_isolation_summary" \
+  "sampler-state-unreadable:exit=0 calls=[$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$COCKPIT_CHECKED_CALLS$COCKPIT_RESTART_CALL] warned=1 said=[$COCKPIT_ENTRY_RESTART_LINE] cockpit-start-unparseable:exit=0 calls=[$CALLS_SAMPLER_RESTARTED] warned=1 said=[$SAMPLER_ENTRY_RESTART_LINE]"
 
 printf '\nresource-pulse-cost.sh (fake PROC_ROOT)\n'
 # make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry.
@@ -2017,9 +2272,11 @@ COST_SYSTEMCTL_CALLS="$WIRING_TMP/cost-systemctl-calls"
 # shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
 install_stub "$COST_SYSTEMCTL_STUB_BIN" systemctl '#!/usr/bin/env bash
 printf "%s\n" "$*" >>"$COST_SYSTEMCTL_CALLS"
-[[ "$*" == "--user show -p MainPID --value resource-pulse.service" ]] \
-  || { printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64; }
-printf "%s\n" "$COST_SERVICE_MAIN_PID"
+case "$*" in
+  "--user show -p MainPID --value resource-pulse.service") printf "%s\n" "$COST_SERVICE_MAIN_PID" ;;
+  "--user show -p MainPID --value cockpit.service") printf "%s\n" "${COST_COCKPIT_MAIN_PID:-0}" ;;
+  *) printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64 ;;
+esac
 exit "${COST_SYSTEMCTL_EXIT:-0}"'
 # cost_service_run <MainPID answer> <args...> [-- with COST_SYSTEMCTL_EXIT in the
 # caller's environment]; leaves COST_OUTPUT, COST_EXIT and the systemctl calls.
@@ -2072,6 +2329,25 @@ cost_service_run "$FAKE_SERVICE_PID" --cpu-percent "$COST_WINDOW_SECONDS" --serv
 cost_flag_order_summary+=" cpu-percent=$COST_EXIT/$COST_OUTPUT"
 check "cost: --service after the mode still measures the service" \
   "$cost_flag_order_summary" "rss-kib=0/$FAKE_SERVICE_RSS_KIB cpu-percent=0/9.00"
+# --cockpit measures cockpit.service the same way, by its own unit's MainPID:
+# the fake root holds the sampler's process as well as gnome-shell, and the
+# stub answers both units, so measuring either neighbour shows as its number.
+FAKE_COCKPIT_PID=6161
+FAKE_COCKPIT_RSS_KIB=31000
+# The design's budget for the cockpit's resident memory, 48 MiB, written out.
+COCKPIT_RSS_BUDGET_KIB=49152
+make_fake_proc "$SERVICE_PROC_ROOT" "$FAKE_COCKPIT_PID" gjs "$FAKE_COCKPIT_RSS_KIB"
+COST_COCKPIT_MAIN_PID="$FAKE_COCKPIT_PID" cost_service_run "$FAKE_SERVICE_PID" --cockpit --rss-kib
+check "cost: --cockpit --rss-kib prints cockpit.service's VmRSS, found by its own unit's MainPID, never the sampler's or gnome-shell's" \
+  "exit=$COST_EXIT rss=$COST_OUTPUT calls=[$(tr '\n' ';' <"$COST_SYSTEMCTL_CALLS")]" \
+  "exit=0 rss=$FAKE_COCKPIT_RSS_KIB calls=[--user show -p MainPID --value cockpit.service;]"
+cost_cockpit_usage_summary=""
+COST_COCKPIT_MAIN_PID="$FAKE_COCKPIT_PID" cost_service_run "$FAKE_SERVICE_PID" --cockpit --rss-check 30000
+cost_cockpit_usage_summary+="rss-check=$COST_EXIT/$(grep -c -F -- "--cockpit --rss-kib must read at most $COCKPIT_RSS_BUDGET_KIB" <<<"$COST_OUTPUT")"
+COST_COCKPIT_MAIN_PID="$FAKE_COCKPIT_PID" cost_service_run "$FAKE_SERVICE_PID" --service --cockpit --rss-kib
+cost_cockpit_usage_summary+=" both-flags=$COST_EXIT/$(grep -c -F 'usage:' <<<"$COST_OUTPUT")"
+check "cost: --cockpit --rss-check is refused, naming the cockpit's own budget ($COCKPIT_RSS_BUDGET_KIB KiB), and --service with --cockpit is a usage error" \
+  "$cost_cockpit_usage_summary calls=$(wc -l <"$COST_SYSTEMCTL_CALLS")" "rss-check=2/1 both-flags=2/1 calls=0"
 # Anything left over is a usage error, never ignored.
 cost_leftover_summary=""
 cost_service_run "$FAKE_SERVICE_PID" --rss-kib --serivce
@@ -2826,7 +3102,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=662
+EXPECTED_ROWS=677
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
