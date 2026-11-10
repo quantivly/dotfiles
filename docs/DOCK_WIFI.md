@@ -24,7 +24,12 @@ dock-wifi-setup            # install all three, root-owned copies (needs sudo); 
 dock-wifi-setup --check    # read-only: files match, unit loads and is enabled, radio matches the wired state
 dock-wifi-setup --remove   # uninstall, and turn the radio back ON
 ~/.dotfiles/scripts/dock-wifi.sh --status   # the deciding device, the radio, the wanted state
+~/.dotfiles/scripts/dock-wifi-report.py     # is it working? Wi-Fi disconnects by cause, last 7 days (--days N, --list)
 ```
+
+**Whether it works is the `docked, Wi-Fi still on` line of `dock-wifi-report.py`, and it should
+be 0.** Never count raw `CTRL-EVENT-DISCONNECTED` lines: each dock event's radio-off is one of
+them, and so is every undocked drop and every suspend (see "Measuring it" below).
 
 There is no per-session override: `nmcli radio wifi on` while docked makes a Wi-Fi profile
 autoconnect, that is an `up` event, and the dispatcher turns the radio off again within seconds.
@@ -81,7 +86,7 @@ the unit. A symlink into a user-writable checkout hands root a file the user can
 CLAUDE.md names for every root-consumed file here; `--check` refuses a symlink even when its
 bytes match.
 
-**State table.** `scripts/test-dock-wifi.sh` (100 checks, run in CI). `nmcli` is a **stateful
+**State table.** `scripts/test-dock-wifi.sh` (121 checks, run in CI). `nmcli` is a **stateful
 stub**, a device table and a radio state under a directory each row chooses, because a row that
 reached the real one would cut this laptop's Wi-Fi mid-suite; `sudo`, `systemctl` and
 `systemd-analyze` are the stubs of `scripts/test-dock-lid.sh`, with the sudo stub running
@@ -100,3 +105,54 @@ the race the unit's ordering left open (NetworkManager "active" before its devic
 override the doc promised and the dispatcher took straight back, and a row that verified the
 shipped unit against the real `systemd-analyze` and would have gone red on this laptop the
 moment the guard was installed; all three are fixed above and pinned.
+
+## Measuring it
+
+**The week-one check counted the wrong thing (2026-11-10, ESC-37).** It reported "Wi-Fi
+disconnects while the dock's wired link was up: 61" for the week to 2026-11-04 and 31 for the
+week to 2026-11-10, and that looked like a guard that did not fire. It was
+`journalctl -u wpa_supplicant | grep -c CTRL-EVENT-DISCONNECTED`, which counts **every**
+disconnect. The heading said "while docked" but nothing in the check looked at the wired link.
+Three kinds of disconnect that are not failures were in the count:
+
+- **The guard's own action.** `nmcli radio wifi off` makes wpa_supplicant log
+  `CTRL-EVENT-DISCONNECTED ... reason=3 locally_generated=1`, about 100 ms *before*
+  NetworkManager logs its `op="radio-control" arg="wireless-enabled:off"` audit line. That gap is
+  why the report's match window is two-sided.
+- **Undocked drops**, which the guard does not try to prevent.
+- **Suspend and shutdown**, a `reason=3` disconnect in the same second as `sleep requested` or
+  `caught SIGTERM`.
+
+`scripts/dock-wifi-report.py` puts each disconnect into one of five classes: radio-off, sleep,
+unknown, docked or undocked. It reproduces both reported numbers exactly from the same journal:
+
+| window (the check's) | total | docked, Wi-Fi on | guard radio-off | undocked | suspend/shutdown |
+|---|---|---|---|---|---|
+| 2026-10-28 09:00 → 11-04 09:00 | 61 | **0** | 15 | 42 | 4 |
+| 2026-11-03 17:16 → 11-10 17:16 | 31 | **0** | 23 | 6 | 2 |
+| before the guard, 2026-10-27 17:29 → 10-28 14:32 (21 h) | 125 | **104** | 0 | 20 | 1 |
+| since the guard, 2026-10-28 14:33 → 11-10 17:29 | 83 | **0** | 37 | 41 | 5 |
+
+**The guard has fired at every dock event since it was installed.** There were 37
+`wireless-enabled:off` audit lines: one at install time, while already docked, and one for
+each of the 36 wired activations. Each undock produced one of the 37 `wireless-enabled:on` lines.
+The dispatcher logs each toggle as `nm-dispatcher: dock-wifi: wifi off (wired: enx8c3b4a256b7a)`.
+The grace period never had to wait (no `waited for the wired device` line).
+
+**Two traps the report pins with state-table rows:**
+
+- **The undock line is `activated -> unmanaged (... managed-type: 'removed')`, not `'full'`.**
+  The first draft filtered every wired transition on `'full'` so that docker's bridges and
+  `tun0` (`'external'`) would not count. That filter also dropped the undock line, so the dock
+  stayed "up" for days and 42 undocked drops read as docked. Now only an *activation* must be
+  `'full'`, and leaving `activated` counts whatever the managed-type.
+- **The audit line follows the disconnect**, so a window that only looks *after* the toggle
+  misses all 37 toggles and reports each one as a docked drop.
+
+**Mutation sweep of the report, 2026-11-10: fourteen mutants, each confirmed to apply exactly
+once, all killed.** The mutants: the toggle window made one-sided, the undock filtered on `'full'`,
+an `'external'` activation counted, the sleep window unbounded, no reset at a NetworkManager
+start, the before-first-transition inference dropped and inverted, the window start ignored, and
+each of the five could-not-run checks dropped in turn. One mutant, the parser-fault check
+dropped, first SURVIVED: its fixture also had no NetworkManager line, so the next check exited 2
+for it. That row now asserts the diagnosis as well as the exit code.

@@ -501,6 +501,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The dock Wi-Fi guard is measured by cause, not by a raw disconnect count
+  (`scripts/dock-wifi-report.py`).** The week-one check reported 61 and then 31 "Wi-Fi
+  disconnects while docked", which read as a guard that never fired. The check actually counted
+  every `CTRL-EVENT-DISCONNECTED`: the guard's own radio-off at each dock event, every undocked
+  drop and every suspend. The new report sorts each disconnect into radio-off, sleep, unknown,
+  docked or undocked, and reproduces both numbers from the journal. Docked drops with Wi-Fi on:
+  0 in 83 disconnects since the guard went in on 2026-10-28, against 104 in the 21 hours before
+  it. 21 new rows in `scripts/test-dock-wifi.sh`; record in `docs/DOCK_WIFI.md`, "Measuring it".
+
 - **A host with one GitHub account and no clauth can take the tenant table and the memory stores
   (DO-897).** Four fixes measured on dev before step 7 of the shared-configuration design brings it
   level (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, amendments M9-M11 and
