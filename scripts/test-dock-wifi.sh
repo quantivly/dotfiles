@@ -529,7 +529,11 @@ check "--list prints one line per disconnect, with its class" "$(grep -c -P '^20
 printf '\ndock-wifi-report.py: could not run is exit 2, never a quiet week\n'
 check "a journal file that cannot be read" "$(classes "$T/no-such-journal")" "2:::::"
 printf 'not a journal line\nnor this\n' >"$T/j.garbage"
-check "lines and not one parsed: a parser fault" "$(classes "$T/j.garbage")" "2:::::"
+# Nothing parsed also means no NetworkManager line, which exits 2 by itself: the row pins the
+# DIAGNOSIS, because "the parser is wrong" and "NetworkManager logged nothing" send you to
+# different places.
+check "lines and not one parsed: exit 2, named as a parser fault" \
+  "$(classes "$T/j.garbage"):$(grep -c -F 'not one parsed' "$T/report.err")" "2::::::1"
 drop 09:10:00.000000 >"$T/j.no-nm"
 check "no NetworkManager line at all: docked and undocked cannot be told apart" "$(classes "$T/j.no-nm")" "2:::::"
 check "a DOCK_WIFI_REPORT_NOW that is not epoch seconds" "$(REPORT_NOW_OVERRIDE=noon classes "$J_DOCKED")" "2:::::"

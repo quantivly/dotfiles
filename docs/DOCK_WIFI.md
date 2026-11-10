@@ -148,3 +148,11 @@ The grace period never had to wait (no `waited for the wired device` line).
   `'full'`, and leaving `activated` counts whatever the managed-type.
 - **The audit line follows the disconnect**, so a window that only looks *after* the toggle
   misses all 37 toggles and reports each one as a docked drop.
+
+**Mutation sweep of the report, 2026-11-10: fourteen mutants, each confirmed to apply exactly
+once, all killed.** The mutants: the toggle window made one-sided, the undock filtered on `'full'`,
+an `'external'` activation counted, the sleep window unbounded, no reset at a NetworkManager
+start, the before-first-transition inference dropped and inverted, the window start ignored, and
+each of the five could-not-run checks dropped in turn. One mutant, the parser-fault check
+dropped, first SURVIVED: its fixture also had no NetworkManager line, so the next check exited 2
+for it. That row now asserts the diagnosis as well as the exit code.
