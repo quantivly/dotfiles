@@ -2752,6 +2752,13 @@ section "W. Pools — members that are real, distinct and swappable (DO-793)"
 #
 # The doctor reads the tenant table from the FILE, so every row writes
 # $FHOME/.config/claude-tenants.zsh (run_doctor sets HOME to the fixture).
+#
+# CLAUTH IS ON PATH FOR THIS SECTION AND SECTION X. The checks of a pool's members
+# run only where clauth is installed (DO-897): without it the picker never runs,
+# so the section says once that the pools pick nothing. Every row here builds
+# clauth profile stores and is about a machine that has clauth; the rows about one
+# that does not say WITH_CLAUTH=0 themselves. Reset before section Y.
+WITH_CLAUTH=1
 
 # A registered profile with a healthy account dir (mk_account_dir's `linked`
 # shape, so the account-dirs section stays quiet and a want_rc row measures the
@@ -3218,6 +3225,65 @@ want_out "a registered profile whose name looks retired is checked as a profile"
          "x.retired-20260917: credential shared with the clauth store"
 no_out   "...and is not called a tombstone"   "a tombstone, not an account dir"
 
+# --- a machine without clauth (DO-897) -------------------------------------------
+# A tenant table installed on a server with no clauth: claude() and hspawn never
+# run the picker there, so its pools pick nothing, and one ✗ per member that has
+# no profile store (every one, on such a machine) was noise about nothing. The
+# checks that a launch refuses on WITH or without clauth still run.
+NO_CLAUTH_POOLS='typeset -gA CLAUDE_TENANT_POOL CLAUDE_TENANT_SPILL
+CLAUDE_TENANT_POOL=( w "a b" )
+CLAUDE_TENANT_SPILL=( w "c" )
+CLAUDE_TENANT_DEFAULT=w'
+# pools_section_of_output — the doctor's "Pools" section, up to the next header.
+pools_section_of_output() {
+    printf '%s\n' "$OUT" | sed -n '/^--- Pools ---$/,/^--- Linear ---$/p'
+}
+
+new_home nc1; write_cred; mk_tenants "$NO_CLAUTH_POOLS"
+WITH_CLAUTH=0 run_doctor
+want_out "no clauth, a tenant table with pools and spill seats: one note" \
+         "clauth is not installed — the pools pick no account on this machine"
+# Every ✗ in the section, not one needle: the member lines AND the
+# "spill for … (nostore)" lines. A section that was not found is not a clean one.
+POOLS_SECTION="$(pools_section_of_output)"
+POOLS_FAIL_LINES="$(printf '%s\n' "$POOLS_SECTION" | grep -c '^[[:space:]]*✗' || true)"
+if [[ "$POOLS_SECTION" != *"--- Pools ---"* ]]; then
+    bad "...and the Pools section prints no ✗ — the section is not in the output"
+elif [[ "$POOLS_FAIL_LINES" == 0 ]]; then
+    ok "...and the Pools section prints no ✗"
+else
+    bad "...and the Pools section prints no ✗ — found $POOLS_FAIL_LINES"
+fi
+
+# PIN: catches the early return moved ABOVE the parse check — a launch refuses an
+# unparseable table whether or not clauth is installed.
+new_home nc2; write_cred; mk_tenants 'typeset -gA CLAUDE_TENANT_POOL; CLAUDE_TENANT_POOL=( w "a"'
+WITH_CLAUTH=0 run_doctor
+want_out "no clauth, a tenant table that does not parse is still a ✗" \
+         "cannot be read or does not parse — pool checks NOT RUN"
+
+# PIN: the same, for the run check. The table parses (zsh -n passes, or the needle
+# below could not print) and fails when sourced.
+new_home nc3; write_cred
+mk_tenants "$NO_CLAUTH_POOLS
+nonexistent_cmd_typo"
+WITH_CLAUTH=0 run_doctor
+want_out "no clauth, a tenant table that parses and fails when run is still a ✗" \
+         "did not run cleanly — pool checks NOT RUN"
+
+# PIN: the same table as nc1 with clauth installed. Catches a return that fires
+# whether or not clauth is there, and a note printed where the members are checked.
+new_home nc4; write_cred; mk_tenants "$NO_CLAUTH_POOLS"
+WITH_CLAUTH=1 run_doctor
+NC4_ROW="clauth installed, a member with no profile store is still a ✗, and there is no note"
+if [[ "$OUT" != *"which has no clauth profile store"* ]]; then
+    bad "$NC4_ROW — expected output to contain 'which has no clauth profile store'"
+elif [[ "$OUT" == *"clauth is not installed"* ]]; then
+    bad "$NC4_ROW — output must NOT contain 'clauth is not installed'"
+else
+    ok "$NC4_ROW"
+fi
+
 #-----------------------------------------------------------------------------
 section "X. Plugin MCP sign-ins, per pool member (DO-794)"
 #-----------------------------------------------------------------------------
@@ -3522,6 +3588,9 @@ new_home y12; write_cred '.mcpOAuth["plugin:linear:linear|abc"] = {serverName: "
 run_doctor
 want_out "the discovery-record remedy warns off the connector route" "NOT through the claude.ai connector"
 no_out   "...and no longer recommends it"                            "in favour of the"
+
+# The pool sections are over: no clauth on PATH again, as before section W.
+WITH_CLAUTH=0
 
 #-----------------------------------------------------------------------------
 section "Y. The Linear API-key plugin (DO-801)"
@@ -4075,7 +4144,7 @@ no_out "timer: stores with no origin are no ⚠: nothing has anywhere to sync to
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=603
+EXPECTED_ROWS=608
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \

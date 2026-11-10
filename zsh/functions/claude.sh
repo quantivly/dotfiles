@@ -903,6 +903,17 @@ _claude_doctor_pools() {
     return 0
   fi
 
+  # NO CLAUTH, NO PICKER (DO-897). claude() and hspawn run the account picker only
+  # where `whence -p clauth` finds the binary, so on a machine without it the pools
+  # pick nothing, and every member reads as "no clauth profile store" — one ✗ each
+  # about a mechanism that never runs. Said once instead. Only AFTER the checks
+  # above: a launch refuses a table that cannot be read or run with or without
+  # clauth. PATH, not `command -v`: zshrc.herdr defines a clauth FUNCTION.
+  if ! whence -p clauth >/dev/null 2>&1; then
+    _doctor_note "clauth is not installed — the pools pick no account on this machine; member checks skipped"
+    return 0
+  fi
+
   # THE TABLE AS A LAUNCH VALIDATES IT, its pool-shaped half. A tenant that a
   # route, the default or an overflow key names must have members: an empty pool
   # is indistinguishable from "no pool", so the picker refuses the whole table.
