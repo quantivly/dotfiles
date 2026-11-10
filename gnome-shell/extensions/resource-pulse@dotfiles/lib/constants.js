@@ -224,3 +224,17 @@ export const STAT_ONLY_PATH_FRAGMENTS = [
  * share cannot stall the mounts source.
  */
 export const FILESYSTEM_QUERY_TIMEOUT_MS = 2000;
+/**
+ * The cockpit grid at its reference size, in logical pixels (the spec's numbers at 1920 x 1080): every length scales
+ * with the cockpit monitor's work area. `columns` and `rows` are the most cells a group's block holds across and down.
+ */
+export const COCKPIT_GRID_REFERENCE = Object.freeze({
+    widthPx: 1920, heightPx: 1080, cellWidthPx: 420, cellHeightPx: 300,
+    innerGutterPx: 24, groupGapPx: 48, rowGutterPx: 24, captionHeightPx: 28, columns: 4, rows: 3,
+});
+/** The smallest factor the cockpit grid shrinks to, however small the monitor. */
+export const COCKPIT_GRID_MIN_SCALE = 0.5;
+/** The largest factor the cockpit grid grows to, however large the monitor. */
+export const COCKPIT_GRID_MAX_SCALE = 2;
+/** The card ids the cockpit draws; any other id in the layout still gets a cell, drawn as a placeholder. */
+export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'sessions'];

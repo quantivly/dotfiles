@@ -15,6 +15,8 @@ import './visibility.test.js';
 import './protocol.test.js';
 import './cockpitProtocol.test.js';
 import './cockpitConfig.test.js';
+import './cockpitGrid.test.js';
+import './cockpitMonitor.test.js';
 import './nameGuard.test.js';
 import './sessions.test.js';
 import './network.test.js';
