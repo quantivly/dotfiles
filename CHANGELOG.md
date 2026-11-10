@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`claude-settings-render.sh --check` on a host with a profile marker; `--apply` renders); `links`
   (every link either checkout's `install.conf.yaml` declares; `--apply` runs that repo's `./install`
   once per run, and the row names the backup dotbot leaves of a regular file whose content
-  differed); `marketplace` and `plugin` (the declaration is the live `settings.json`: marketplaces
+  differed; a link that points elsewhere is a person's step, ⚠, since dotbot's `backup: true`
+  refuses to replace an existing link); `marketplace` and `plugin` (the declaration is the live `settings.json`: marketplaces
   added and refreshed, missing plugins installed, `linear-key` updated, nothing ever enabled or
   disabled, every call with `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`); `skill` (the herdr and spawn skills
   regenerated from this host's own binaries); `memory` (git 2.40 or later, the stores that serve the
@@ -27,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public `scripts/check-links.sh`, with `--tsv`, `--root` and `--config`, and a check that could not
   run is now exit 2 rather than 1 (state table `scripts/test-check-links.sh`, 69 rows, CI
   `check-links-test`). `claude-memory-sync.sh` fetches with `--prune`, so a branch deleted on origin
-  leaves the store's remote-tracking refs too. `scripts/test-host-sync.sh` goes from 441 to 643 rows,
+  leaves the store's remote-tracking refs too. `scripts/test-host-sync.sh` goes from 441 to 649 rows,
   `scripts/test-claude-memory-sync.sh` from 109 to 111.
 
 - **Resource Pulse, an opt-in GNOME Shell 50 extension: a top-bar CPU/memory indicator and a desktop

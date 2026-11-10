@@ -221,11 +221,18 @@ STORE_TABLE_SHAPE_FILTER='.stores | type == "object" and all(to_entries[]; (.key
 TENANT_SEPARATOR=$'\x1f'
 MEMORY_LINK_SUMMARY_RE='^claude-memory-link: ([0-9]+) linked, ([0-9]+) to fix, ([0-9]+) unmapped, ([0-9]+) without a store$'
 # scripts/check-links.sh's states, by who acts on them: the ones in place, the drift the repo's
-# ./install fixes, and a source the manifest names that is not in the checkout, which only a
-# person can fix. Any other first field on its output is not an entry.
+# ./install fixes, and the two only a person can fix: a source the manifest names that is not in
+# the checkout, and a link that points elsewhere. dotbot's `backup: true` (install.conf.yaml's link
+# default) answers "nothing to back up" for any existing link, which skips the relink, and its link
+# step then refuses one pointing elsewhere ("Incorrect link", exit 1;
+# dotbot/src/dotbot/plugins/link.py, _backup and _link), so ./install never fixes it. Any other
+# first field on its output is not an entry.
 LINK_STATES_IN_PLACE=(ok conditional-absent)
-LINK_STATES_TO_FIX=(missing wrong-target regular-identical regular-differs)
-LINK_STATES_FOR_A_PERSON=(source-missing)
+LINK_STATES_TO_FIX=(missing regular-identical regular-differs)
+LINK_STATES_FOR_A_PERSON=(source-missing wrong-target)
+LINK_STATE_WRONG_TARGET="wrong-target"
+LINK_POINTING_ELSEWHERE_REMEDY="dotbot's backup rule will not replace a link, so point it right by hand (rm it, then ./install)"
+LINK_DESTINATION_UNREADABLE="<unreadable>"
 # The one whose content is not the repo's: ./install backs it up, and the row names that backup.
 LINK_STATE_REGULAR_DIFFERS="regular-differs"
 # dotbot's name for the backup of a regular file it replaces with a link (install.conf.yaml's
@@ -1242,17 +1249,19 @@ renderer_could_not_run_row() {   # $1 = the renderer's status
 # Every link each checkout's install.conf.yaml declares is in place (H8): ~/.dotfiles always, and
 # ~/.dotfiles-local under the overlay's own gate (overlay_is_managed): with no marker, host-sync
 # neither checks nor installs it. One checker for both, the public checkout's own: a host whose
-# checkout predates it gets ⚠ (exit 127). A link that is missing, points elsewhere or is a regular
-# file is drift that repo's ./install fixes, run once per repo per run; dotbot backs a regular file
-# up beside it before relinking (`backup: true`), and the row names that backup when its content
-# was not the repo's. A source the manifest names that is not in the checkout is a person's step.
+# checkout predates it gets ⚠ (exit 127). A link that is missing or a regular file is drift that
+# repo's ./install fixes, run once per repo per run; dotbot backs a regular file up beside it before
+# relinking (`backup: true`), and the row names that backup when its content was not the repo's. A
+# source the manifest names that is not in the checkout, and a link that points elsewhere (dotbot
+# refuses to replace it; see LINK_STATES_FOR_A_PERSON), are a person's step: ./install never runs
+# for them alone.
 here_links() {
     links_of_checkout dotfiles "$DOTFILES"
     overlay_is_managed && links_of_checkout dotfiles-local "$DOTFILES_LOCAL"
     return 0
 }
 links_of_checkout() {   # $1 = the repo's name in the rows, $2 = its checkout
-    local label="$1" dir="$2" rc source
+    local label="$1" dir="$2" rc steps_for_a_person
     run_link_checker "$dir"; rc=$?
     if (( rc != 0 && rc != 1 )); then
         links_could_not_run_row "$label" "$rc"
@@ -1263,11 +1272,10 @@ links_of_checkout() {   # $1 = the repo's name in the rows, $2 = its checkout
         unknown_link_fault_row "$label"
         return
     fi
-    for source in ${LINK_SOURCES_FOR_A_PERSON[@]+"${LINK_SOURCES_FOR_A_PERSON[@]}"}; do
-        row oper links "$label: $source is declared but not in the checkout"
-    done
+    report_link_steps_for_a_person "$label"
     if (( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} == 0 )); then
-        (( ${#LINK_SOURCES_FOR_A_PERSON[@]} )) || row ok links "$label: $LINKS_DECLARED declared links in place"
+        steps_for_a_person=$(( ${#LINK_SOURCES_FOR_A_PERSON[@]} + ${#LINK_TARGETS_POINTING_ELSEWHERE[@]} ))
+        (( steps_for_a_person )) || row ok links "$label: $LINKS_DECLARED declared links in place"
         return
     fi
     explain_links_left_this_run "$label" && return
@@ -1295,13 +1303,16 @@ links_could_not_run_row() {   # $1 = the repo's name, $2 = check-links' status
     return 0
 }
 # Sort LINK_CHECK_OUTPUT's lines by who acts on them, into LINKS_DECLARED (every entry, the
-# conditional-absent included), LINK_TARGETS_TO_FIX and LINK_TARGETS_DIFFERING (targets, as ~/…) and
-# LINK_SOURCES_FOR_A_PERSON (sources, as the manifest names them).
+# conditional-absent included), LINK_TARGETS_TO_FIX and LINK_TARGETS_DIFFERING (targets, as ~/…),
+# LINK_SOURCES_FOR_A_PERSON (sources, as the manifest names them), and LINK_TARGETS_POINTING_ELSEWHERE
+# (targets, as ~/…) beside LINK_TARGETS_POINTED_TO (where each of those points, at the same index).
 classify_link_states() {
-    local state target source shown
+    local state target source live shown
     LINKS_DECLARED=0; LINK_TARGETS_TO_FIX=(); LINK_TARGETS_DIFFERING=(); LINK_SOURCES_FOR_A_PERSON=()
+    LINK_TARGETS_POINTING_ELSEWHERE=(); LINK_TARGETS_POINTED_TO=()
     while IFS=$'\t' read -r state target source; do
-        shown="$(tilde_path "$(expand_home_path "$target")")"
+        live="$(expand_home_path "$target")"
+        shown="$(tilde_path "$live")"
         if list_has "$state" "${LINK_STATES_TO_FIX[@]}"; then
             if [[ "$state" == "$LINK_STATE_REGULAR_DIFFERS" ]]; then
                 LINK_TARGETS_DIFFERING+=("$shown")
@@ -1309,18 +1320,44 @@ classify_link_states() {
                 LINK_TARGETS_TO_FIX+=("$shown")
             fi
         elif list_has "$state" "${LINK_STATES_FOR_A_PERSON[@]}"; then
-            LINK_SOURCES_FOR_A_PERSON+=("$source")
+            if [[ "$state" == "$LINK_STATE_WRONG_TARGET" ]]; then
+                LINK_TARGETS_POINTING_ELSEWHERE+=("$shown")
+                LINK_TARGETS_POINTED_TO+=("$(link_destination_shown "$live")")
+            else
+                LINK_SOURCES_FOR_A_PERSON+=("$source")
+            fi
         elif ! list_has "$state" "${LINK_STATES_IN_PLACE[@]}"; then
             continue
         fi
         LINKS_DECLARED=$((LINKS_DECLARED + 1))
     done <<<"$LINK_CHECK_OUTPUT"
 }
+# Where the link at $1 points, as the rows print it: the link's own text (what `ls -l` shows), as
+# ~/… under $HOME. A link gone or replaced since the checker read it prints a placeholder instead.
+link_destination_shown() {
+    local destination
+    if ! destination="$(readlink -- "$1" 2>/dev/null)"; then
+        printf '%s' "$LINK_DESTINATION_UNREADABLE"
+        return 0
+    fi
+    tilde_path "$destination"
+}
+# ⚠ rows for the link faults only a person can fix; ./install is never run for them. $1 = the repo's name.
+report_link_steps_for_a_person() {
+    local label="$1" source i
+    for source in ${LINK_SOURCES_FOR_A_PERSON[@]+"${LINK_SOURCES_FOR_A_PERSON[@]}"}; do
+        row oper links "$label: $source is declared but not in the checkout"
+    done
+    for (( i = 0; i < ${#LINK_TARGETS_POINTING_ELSEWHERE[@]}; i++ )); do
+        row oper links "$label: ${LINK_TARGETS_POINTING_ELSEWHERE[i]} links to ${LINK_TARGETS_POINTED_TO[i]}, not into the checkout; $LINK_POINTING_ELSEWHERE_REMEDY"
+    done
+}
 # check-links exited 1, yet no line names a fault this script knows (a state added to the checker
 # after it): never read as level. $1 = check-links' status.
 unknown_link_fault() {
-    local faults_known=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} + ${#LINK_SOURCES_FOR_A_PERSON[@]} ))
-    (( $1 == 1 && faults_known == 0 ))
+    local faults_to_fix=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
+    local steps_for_a_person=$(( ${#LINK_SOURCES_FOR_A_PERSON[@]} + ${#LINK_TARGETS_POINTING_ELSEWHERE[@]} ))
+    (( $1 == 1 && faults_to_fix + steps_for_a_person == 0 ))
 }
 unknown_link_fault_row() {   # $1 = the repo's name
     row oper links "$1: check-links reports a fault in a state host-sync does not know (exit 1)"

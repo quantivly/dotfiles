@@ -270,9 +270,12 @@ STUB
 # refuses on its fail flag, then does dotbot's link step in miniature for the `~/target: source`
 # lines of its own install.conf.yaml. A regular file at a target is first moved aside under dotbot's
 # backup name (install.conf.yaml's `backup: true`; dotbot/src/dotbot/plugins/link.py, _backup:
-# <path>.dotbot-backup.<YYYYMMDD-HHMMSS>, local time). Two more flags, named by its install-order
-# word: <word>-install-links-nothing (exit 0, nothing linked) and <word>-install-fails-after-linking
-# (exit 1 once every link is made, as a later step of a real ./install can).
+# <path>.dotbot-backup.<YYYYMMDD-HHMMSS>, local time). A link already at a target is left as it is,
+# as that backup rule leaves it, and one that resolves elsewhere is refused as dotbot's _link
+# refuses it: "Incorrect link" ("Invalid link" when it dangles), the other entries still linked,
+# then exit 1. Two more flags, named by its install-order word: <word>-install-links-nothing (exit
+# 0, nothing linked) and <word>-install-fails-after-linking (exit 1 once every link is made, as a
+# later step of a real ./install can).
 write_install_stub() {   # $1 = the file, $2 = its fail flag, $3 = its install-order word, $4 = its ran log
     {
         printf '#!/usr/bin/env bash\nFAIL_FLAG=%q ORDER_WORD=%q RAN_LOG=%q\n' "$2" "$3" "$4"
@@ -282,12 +285,22 @@ echo ran >>"$HOME/stub/$RAN_LOG"
 [[ -e "$HOME/stub/$FAIL_FLAG" ]] && exit 1
 [[ -e "$HOME/stub/$ORDER_WORD-install-links-nothing" ]] && exit 0
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
+refused_links=0
 while IFS=$'\t' read -r target source; do
     live="$HOME/${target#\~/}"
     mkdir -p "$(dirname "$live")"
-    [[ -e "$live" && ! -L "$live" ]] && mv "$live" "$live.dotbot-backup.$(date +%Y%m%d-%H%M%S)"
+    if [[ -L "$live" ]]; then
+        if [[ "$(readlink -f -- "$live")" != "$(readlink -f -- "$PWD/$source")" ]]; then
+            if [[ -e "$live" ]]; then terminology=Incorrect; else terminology=Invalid; fi
+            echo "$terminology link $target -> $(readlink -- "$live")"
+            refused_links=$((refused_links + 1))
+        fi
+        continue
+    fi
+    [[ -e "$live" ]] && mv "$live" "$live.dotbot-backup.$(date +%Y%m%d-%H%M%S)"
     ln -sfn "$PWD/$source" "$live"
 done < <(awk '/^ +~\// { sub(/^ +/, ""); i = index($0, ": "); print substr($0, 1, i - 1) "\t" substr($0, i + 2) }' install.conf.yaml)
+(( refused_links == 0 )) || exit 1
 if [[ -e "$HOME/stub/$ORDER_WORD-install-fails-after-linking" ]]; then exit 1; fi
 STUB
     } >"$1"
@@ -628,7 +641,9 @@ run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     local memory_config_override=()
     [[ -n "${MEMORY_CONFIG_PATH:-}" ]] && memory_config_override=(CLAUDE_MEMORY_CONFIG="$MEMORY_CONFIG_PATH")
     # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
-    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" "${memory_config_override[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
+    # GIT_SSH_COMMAND=false: every remote is file://, so a git call that reaches for ssh (a mutant's
+    # remote URL, say) fails at once, never resolving a host or touching the network.
+    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" "${memory_config_override[@]}" HOME="$H" GIT_SSH_COMMAND=false HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
         HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" TMPDIR="$C/tmp" \
         CLAUDE_SETTINGS_RENDER_MARKER="${PROFILE_MARKER_PATH:-$H/.config/claude-host-profile}" \
         CLAUDE_MEMORY_STORES_ROOT="${STORES_ROOT_PATH:-$H/$STORES_REL}" \
@@ -1217,7 +1232,7 @@ has   "links: a fault in a state host-sync does not know is ⚠, never ✓" "$OU
     "${LINKS_OPER}dotfiles: check-links reports a fault in a state host-sync does not know (exit 1)"
 
 new_case
-rm "$H/.x"; ln -sfn "$C/elsewhere" "$H/.config/fixture/y.conf"; rm "$H/.claude/CLAUDE.md"
+rm "$H/.x" "$H/.config/fixture/y.conf"; cp "$H/.dotfiles/config/y.conf" "$H/.config/fixture/y.conf"; rm "$H/.claude/CLAUDE.md"
 run_level --check
 has   "links: several faults in one repo are one ✗ row" "$OUT" \
     "${LINKS_DRIFT}dotfiles: 2 link(s) to fix: ~/.x, ~/.config/fixture/y.conf"
@@ -1226,6 +1241,30 @@ check "links: ./install runs once per repo per run even with several faults" \
     "$(ran_count install-ran)/$(ran_count local-install-ran)" 1/1
 has   "links: ./install runs once per repo per run even with several faults: both relinked" "$OUT" \
     "${LINKS_OK}dotfiles: 2 link(s) relinked"
+
+# A link that points elsewhere: with `backup: true` dotbot leaves any existing link in place and its
+# link step refuses one pointing elsewhere ("Incorrect link", exit 1), so ./install cannot fix it.
+LINK_POINTING_ELSEWHERE_REMEDY="dotbot's backup rule will not replace a link, so point it right by hand (rm it, then ./install)"
+new_case
+ln -sfn "$C/elsewhere" "$H/.config/fixture/y.conf"
+run_level --check
+has   "links: a link pointing elsewhere is a person's step: ⚠ naming where it points" "$OUT" \
+    "${LINKS_OPER}dotfiles: ~/.config/fixture/y.conf links to $C/elsewhere, not into the checkout; $LINK_POINTING_ELSEWHERE_REMEDY"
+check "links: a link pointing elsewhere is a person's step: --check is ⚠, neither ✗ nor ✓ in place: exit 0" \
+    "$RC/$(line_of "${LINKS_OK}dotfiles:")" 0/0
+run_level --apply
+check "links: a link pointing elsewhere is a person's step: --apply runs no ./install for it alone, exit 0" \
+    "$(ran_count install-ran)/$RC" 0/0
+check "links: a link pointing elsewhere is a person's step: the link unchanged after --apply" \
+    "$(readlink "$H/.config/fixture/y.conf")" "$C/elsewhere"
+# Beside a missing link, ./install runs for the missing one; the stub refuses the other, as dotbot does.
+new_case
+rm "$H/.x"; ln -sfn "$C/elsewhere" "$H/.config/fixture/y.conf"
+run_level --apply
+check "links: a link pointing elsewhere beside a missing one: the missing one linked, the other left" \
+    "$(readlink "$H/.x")|$(readlink "$H/.config/fixture/y.conf")" "$H/.dotfiles/config/x|$C/elsewhere"
+has   "links: a link pointing elsewhere beside a missing one: ✓ for the one relinked, never ✗ still to fix" "$OUT" \
+    "${LINKS_OK}dotfiles: 1 link(s) relinked"
 
 new_case
 rm "$H/.x"; touch "$H/stub/install-fails"
@@ -2972,7 +3011,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=643
+EXPECTED_ROWS=649
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2
