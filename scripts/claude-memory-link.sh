@@ -38,13 +38,24 @@
 #   1. every directory matching a checkout_globs entry that holds .git, and every populated
 #      submodule of it, recursively. `git submodule status --recursive` lists the same submodules
 #      but has no NUL form and prints paths that cannot be told from its trailing `(describe)`, so
-#      this asks `git submodule foreach`. An unpopulated submodule has no .git, so it is no checkout.
+#      this asks `git submodule foreach`. An unpopulated submodule has no .git, so it is no checkout,
+#      and neither is a match whose .git file names a git directory that does not exist (below).
 #   2. every plain_dirs entry that exists on this host.
 #
-# A .git FILE is resolved through its gitdir: line, which may be relative to the checkout:
+# A .git FILE is resolved through its gitdir: line, which may be relative to the checkout, and which
+# loses every trailing CR and LF first, as git reads it:
 #   .../.git/worktrees/<n>                    a worktree of an ordinary repo: skipped, since Claude
 #                                             Code keys it by the main checkout
 #   <super>/.git/modules/<name>/worktrees/<n> a worktree of a submodule: skipped likewise
+#   any other path that does not exist        no checkout, git says so too (exit 128): a stray copy of
+#                                             a working tree, which would otherwise stop every key on
+#                                             the host. A checkout_globs match is skipped with one
+#                                             line on stderr, once a run however many globs reach
+#                                             it; anywhere else it is still exit 2. Only a regular
+#                                             .git file, and only a path KNOWN to have nothing at
+#                                             it: the deepest part of it that exists is a directory
+#                                             this user may search. Behind one it may not, -e cannot
+#                                             tell, and that is still exit 2
 #   <super>/.git/modules/<name>               a submodule (<name> may hold /): a second key, from
 #                                             that git dir, where sessions in a worktree of the
 #                                             submodule key; both keys share one store directory
@@ -171,8 +182,10 @@
 #
 # Overrides: CLAUDE_MEMORY_PROJECTS_DIR (default ~/.claude/projects), CLAUDE_MEMORY_STORES_ROOT
 # (~/.local/share/claude-memory), CLAUDE_MEMORY_CONFIG (~/.dotfiles-local/claude/memory-stores.json),
-# CLAUDE_MEMORY_STATE_DIR (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (hostname -s, the
-# host in a conflict copy's name), CLAUDE_MEMORY_TENANT_ROUTE (the sibling scripts/tenant-route),
+# CLAUDE_MEMORY_STATE_DIR (~/.local/state/claude-memory-sync), CLAUDE_MEMORY_HOST (the host in a
+# conflict copy's name: else the profile marker's first line when it is a usable name, else
+# hostname -s), CLAUDE_SETTINGS_RENDER_MARKER (~/.config/claude-host-profile, the profile marker, by
+# the renderer's and host-sync's name), CLAUDE_MEMORY_TENANT_ROUTE (the sibling scripts/tenant-route),
 # CLAUDE_MEMORY_LOCK_WAIT_SECONDS (120, how long --apply waits for link.lock; a whole number above 0).
 
 set -uo pipefail
@@ -185,6 +198,8 @@ PROJECTS_DIR_RELATIVE='.claude/projects'
 STORES_ROOT_RELATIVE='.local/share/claude-memory'
 CONFIG_RELATIVE='.dotfiles-local/claude/memory-stores.json'
 STATE_DIR_RELATIVE='.local/state/claude-memory-sync'
+# The host's profile marker: one line naming the machine, the renderer's and host-sync's path.
+PROFILE_MARKER_RELATIVE='.config/claude-host-profile'
 TENANT_ROUTE_RELATIVE='scripts/tenant-route'
 MEMORY_ENTRY_NAME='memory'
 # A replaced real directory is memory.replaced-<stamp>; it counts as merged once it holds the marker.
@@ -216,6 +231,10 @@ REPOS_DIR_NAME='repos'
 DIRS_DIR_NAME='dirs'
 HOME_SLUG='home'
 GITDIR_LINE_PREFIX='gitdir: '
+# What git drops from the end of a .git file before it reads the path there: every CR and LF.
+GITFILE_LINE_END_CHARS=$'\r\n'
+# Said after the directory's path, of a checkout_globs match whose .git file names a missing git dir.
+MISSING_GIT_DIR_NOTE='is not a checkout: its .git names a git directory that does not exist; skipped'
 SUBMODULE_GIT_DIR_INFIX='/.git/modules/'
 WORKTREE_GIT_DIR_RE='/\.git/(modules/.+/)?worktrees/[^/]+$'
 # shellcheck disable=SC2016  # expanded by the shell `git submodule foreach` starts, not this one
@@ -235,6 +254,7 @@ PROJECTS_DIR="${CLAUDE_MEMORY_PROJECTS_DIR:-${HOME:-}/$PROJECTS_DIR_RELATIVE}"
 STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-${HOME:-}/$STORES_ROOT_RELATIVE}"
 CONFIG_PATH="${CLAUDE_MEMORY_CONFIG:-${HOME:-}/$CONFIG_RELATIVE}"
 STATE_DIR="${CLAUDE_MEMORY_STATE_DIR:-${HOME:-}/$STATE_DIR_RELATIVE}"
+PROFILE_MARKER="${CLAUDE_SETTINGS_RENDER_MARKER:-${HOME:-}/$PROFILE_MARKER_RELATIVE}"
 TENANT_ROUTE="${CLAUDE_MEMORY_TENANT_ROUTE:-$DOTFILES/$TENANT_ROUTE_RELATIVE}"
 
 MODE=''                       # check | list | apply
@@ -247,11 +267,12 @@ PLAIN_DIRS=()
 # The candidates, as parallel arrays in discovery order, and who claimed each key.
 declare -A SOURCE_DIR_OF_KEY=()
 declare -A STORE_OF_KEY=()
+declare -A NOTED_STRAY_DIRS=()   # each skipped stray directory already named on stderr this run
 CANDIDATE_KEYS=()
 CANDIDATE_STORES=()
 CANDIDATE_RELATIVE_DIRS=()
 CANDIDATE_SOURCE_DIRS=()
-CHECKOUT_KIND=''              # what classify_directory found: plain | ordinary | submodule | worktree
+CHECKOUT_KIND=''              # what classify_directory found: plain | ordinary | submodule | worktree | missing-git-dir
 SUBMODULE_GIT_DIR=''          # and, for a submodule, its git dir
 GLOB_MATCHES=()               # what expand_home_glob found
 # The report, as parallel arrays: each row's key, its state, its store, and its line as printed.
@@ -474,7 +495,22 @@ store_dir_of_candidate() {
     printf '%s/%s' "$store" "$relative_dir"
 }
 
+# absence_is_known PATH — true when a test that finds nothing at PATH can be believed: the deepest
+# part of PATH that exists is a directory this user may search. Behind one it may not, -e and -L
+# answer "nothing there" for whatever is there, so that is "cannot tell", never "does not exist".
+absence_is_known() {
+    local existing_ancestor=$1
+    while [[ -n "$existing_ancestor" ]] && path_is_free "$existing_ancestor"; do
+        existing_ancestor=${existing_ancestor%/*}
+    done
+    # Stripping the last component of /name leaves the empty string, which is the root.
+    existing_ancestor=${existing_ancestor:-/}
+    [[ -d "$existing_ancestor" && -x "$existing_ancestor" ]]
+}
+
 # classify_directory DIR — set CHECKOUT_KIND and SUBMODULE_GIT_DIR from DIR's .git entry.
+# missing-git-dir is a regular .git file whose gitdir: line names nothing, as far as this user can
+# tell (absence_is_known), except a worktree's, which stays worktree.
 classify_directory() {
     local dir=$1 dot_git="$1/.git" gitfile_text git_dir
     CHECKOUT_KIND=plain
@@ -486,12 +522,16 @@ classify_directory() {
     fi
     # The whole file, not its first line: git reads it whole, and a path may hold a newline.
     gitfile_text=$(< "$dot_git") || die "could not read $dot_git"
+    # $(<) drops only the trailing LFs; a CR left behind would end the path and name nothing.
+    while [[ "$gitfile_text" == *["$GITFILE_LINE_END_CHARS"] ]]; do gitfile_text=${gitfile_text%?}; done
     [[ "$gitfile_text" == "$GITDIR_LINE_PREFIX"* ]] || die "$dot_git has no gitdir: line"
     git_dir=${gitfile_text#"$GITDIR_LINE_PREFIX"}
     [[ "$git_dir" == /* ]] || git_dir="$dir/$git_dir"
     git_dir=$(lexically_normal_path "$git_dir")
     if [[ "$git_dir" =~ $WORKTREE_GIT_DIR_RE ]]; then
         CHECKOUT_KIND=worktree
+    elif is_regular_file "$dot_git" && path_is_free "$git_dir" && absence_is_known "$git_dir"; then
+        CHECKOUT_KIND=missing-git-dir
     elif [[ "$git_dir" == *"$SUBMODULE_GIT_DIR_INFIX"?* ]]; then
         CHECKOUT_KIND=submodule
         SUBMODULE_GIT_DIR=$git_dir
@@ -537,13 +577,24 @@ add_candidate() {
 }
 
 # add_checkout_and_submodules DIR — a checkout_globs match: when it holds .git, DIR and each of its
-# populated submodules, recursively. A worktree brings no submodules with it.
+# populated submodules, recursively. A worktree brings no submodules with it. A match whose .git file
+# names a git directory that does not exist (a stray copy of a working tree) adds nothing and says so
+# on stderr: git refuses it, and stopping the run there would leave every other key unlinked.
 add_checkout_and_submodules() {
     local dir submodule_paths=() submodule_path
     [[ -d "$1" ]] || return 0
     if [[ ! -e "$1/.git" && ! -L "$1/.git" ]]; then return 0; fi
     # It dies inside the command substitution, having said why; pass the exit on.
     dir=$(physical_path_of "$1") || exit "$EXIT_COULD_NOT_RUN"
+    classify_directory "$dir"
+    if [[ "$CHECKOUT_KIND" == missing-git-dir ]]; then
+        # Two globs, or a glob and a symlink, can reach one stray: it is named once a run.
+        if [[ -z "${NOTED_STRAY_DIRS[$dir]:-}" ]]; then
+            NOTED_STRAY_DIRS[$dir]=1
+            printf '%s: %s %s\n' "$SCRIPT_NAME" "$dir" "$MISSING_GIT_DIR_NOTE" >&2
+        fi
+        return 0
+    fi
     add_candidate "$dir"
     [[ "$CHECKOUT_KIND" != worktree ]] || return 0
     read_nul_items submodule_paths git -C "$dir" submodule --quiet foreach --recursive "$PRINT_SUBMODULE_PATH" \
@@ -1153,12 +1204,34 @@ apply_all_keys() {
     fi
 }
 
+# resolve_host_name — print the host's name: CLAUDE_MEMORY_HOST when it is set and not empty, else the
+# profile marker's first line when the marker is a readable file and that line passes HOST_NAME_RE,
+# else `hostname -s`. Readability is tested before the read, so an unreadable marker puts nothing on
+# stderr; the caller still checks whichever name this prints.
+resolve_host_name() {
+    local marker_line=''
+    if [[ -n "${CLAUDE_MEMORY_HOST:-}" ]]; then
+        printf '%s\n' "$CLAUDE_MEMORY_HOST"
+        return 0
+    fi
+    if [[ -f "$PROFILE_MARKER" && -r "$PROFILE_MARKER" ]]; then
+        # read's status is not looked at: a last line with no newline still sets marker_line, and the
+        # rule below decides either way.
+        IFS= read -r marker_line < "$PROFILE_MARKER"
+        if [[ "$marker_line" =~ $HOST_NAME_RE ]]; then
+            printf '%s\n' "$marker_line"
+            return 0
+        fi
+    fi
+    hostname -s
+}
+
 # prepare_apply — settle the host name and, on a real run, wait for the lock. Everything that reads a
 # key's state happens after this, so a run that waited sees what the previous run left.
 prepare_apply() {
     local lock_path="$STATE_DIR/$LINK_LOCK_FILE_NAME" link_lock_fd flock_status
     local lock_wait_seconds="${CLAUDE_MEMORY_LOCK_WAIT_SECONDS:-$LOCK_WAIT_SECONDS_DEFAULT}"
-    HOST_NAME=${CLAUDE_MEMORY_HOST:-$(hostname -s)}
+    HOST_NAME=$(resolve_host_name)
     [[ "$HOST_NAME" =~ $HOST_NAME_RE ]] || die "host name '$HOST_NAME' cannot go in a file name"
     [[ "$lock_wait_seconds" =~ $LOCK_WAIT_SECONDS_RE ]] \
         || die "CLAUDE_MEMORY_LOCK_WAIT_SECONDS '$lock_wait_seconds' is not a whole number of seconds above 0"

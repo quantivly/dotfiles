@@ -188,6 +188,14 @@ switch. What its findings mean:
 | `'<b>' is not signed in to plugin:…, which another member uses` | that seat never signed in to a plugin server its pool uses | `scripts/claude-seat mcp <b>`, or `claude-as <b>`, then `/mcp` |
 | `'<b>' has broken plugin MCP sign-ins: …` | a token blanked by a lost write, or one with no refresh token | `scripts/claude-seat mcp <b>`, then §2.4 |
 
+The `differs from`, member (`compat symlink`, `retired name`, `no clauth profile
+store`), organisation and plugin sign-in rows are reported only where clauth is
+installed. A machine without it runs no picker, so its Pools section prints one
+note in their place. The `SAME account` row is checked either way, and so is the
+tenant table's shape (a tenant the table routes to that has no members, an empty
+pool, a member name the picker rejects): `scripts/tenant-route` refuses the first
+and the last with or without clauth, and memory linking with them.
+
 ---
 
 ## 4. When an MCP server is dead

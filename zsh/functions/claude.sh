@@ -794,6 +794,17 @@ _claude_plugins_disabled() {
 #     Those are the pool-shaped checks of _claude_tenant_table_ok in zshrc.herdr;
 #     the route-syntax checks stay there, with the launcher that applies them.
 #
+# The checks that read clauth's profile stores run ONLY WHERE CLAUTH IS INSTALLED
+# (`whence -p clauth`, DO-897): a member that is a compat symlink, a retired name
+# or has no store, settings parity, organisation and the plugin MCP sign-ins.
+# claude() and hspawn run no picker without clauth, so the section prints one note
+# in their place. Everything else runs either way: the duplicate-account check,
+# the table's read, parse, run and finish checks, and its shape (a tenant named by
+# a route, the default, an overflow or a spill entry that has no members, an empty
+# pool, a member or overflow/spill entry the picker rejects). scripts/tenant-route
+# refuses a routed tenant with no members and a rejected member name with no
+# clauth gate, so either stops memory linking on a machine without clauth too.
+#
 # A separate function because claude-doctor is one long scope in which every
 # `local` is shared. The table is read FRESH from the file, the way a launch reads
 # it (claude-tenants-check): this shell's own copy dates from whenever it started.
@@ -808,7 +819,7 @@ _claude_doctor_pools() {
   local -a lines members valid swap_diff other_diff unknown_org no_id unread_id
   local -a ovf spill vspill refs errs bad_json unread_cfg cmp mbad missing damaged oddexp
   local -A cfg_ref cfg_m seen_ids keys otypes ouuids pool_of bad_j mstate munion seenk poff ignored
-  local store kk m_issue st hit pseg sep=$'\x1f'
+  local store kk m_issue st hit pseg sep=$'\x1f' member_problem clauth_installed=1
   # clauth's defaults for the keys whose ABSENCE means a value (`ProfileConfig`,
   # profile.rs, clauth v0.16.0). Without them, a file that leaves a key out and one
   # that spells out the default would read as a difference.
@@ -903,6 +914,15 @@ _claude_doctor_pools() {
     return 0
   fi
 
+  # NO CLAUTH, NO PICKER (DO-897). claude() and hspawn run the account picker only
+  # where `whence -p clauth` finds the binary, so on a machine without it the pools
+  # pick nothing, and every member reads as "no clauth profile store" — one ✗ each
+  # about a mechanism that never runs. Those checks are skipped and said once, at
+  # the end of the section. The table's SHAPE is still checked, below: tenant-route
+  # refuses most shape faults with or without clauth, and every memory-link verb
+  # with it. PATH, not `command -v`: zshrc.herdr defines a clauth FUNCTION.
+  whence -p clauth >/dev/null 2>&1 || clauth_installed=0
+
   # THE TABLE AS A LAUNCH VALIDATES IT, its pool-shaped half. A tenant that a
   # route, the default or an overflow key names must have members: an empty pool
   # is indistinguishable from "no pool", so the picker refuses the whole table.
@@ -942,7 +962,11 @@ _claude_doctor_pools() {
     fi
 
     for m in $members; do
-      case "$(_claude_pool_member_problem "$adroot" "$pdir" "$m")" in
+      member_problem="$(_claude_pool_member_problem "$adroot" "$pdir" "$m")"
+      # Without clauth only a member's GRAMMAR is judged, as tenant-route judges
+      # it: compat, retired and nostore read clauth's profile stores.
+      (( clauth_installed )) || [[ "$member_problem" == charset ]] || continue
+      case "$member_problem" in
         charset)
           _doctor_bad "pool '$t' names '$m' — a member may only contain letters, digits, - _ and ."
           echo "    The picker refuses the whole table until it is fixed."
@@ -967,6 +991,8 @@ _claude_doctor_pools() {
       esac
       valid+=( "$m" )
     done
+    # Everything below reads clauth's profile stores or the account dirs it keeps.
+    (( clauth_installed )) || continue
     # SPILL members (DO-800) take the pool's sessions once it is spent, so they are
     # held to its settings too. One the picker cannot use is dropped by it without
     # a word, so it is named here.
@@ -1192,6 +1218,11 @@ _claude_doctor_pools() {
       fi
     fi
   done
+
+  # Once, after the shape checks above, for the checks the loop skipped.
+  if (( ! clauth_installed )); then
+    _doctor_note "clauth is not installed — the pools pick no account on this machine; pool checks skipped"
+  fi
 }
 
 # The rendered settings, the "--- Rendered settings ---" section of claude-doctor

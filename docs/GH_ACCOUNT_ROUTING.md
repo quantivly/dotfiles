@@ -149,11 +149,13 @@ registers it with `secrets.register_value`, so `result.md` and the record carry
 `[redacted:minted-token]`. If the file can no longer be read by then, the output tails are withheld.
 
 The resolver copies nothing. It sources `github.sh` for `_gh_route_for`, `zshrc.herdr` (the tenants
-file and `claude-tenants-apply-gh`), then `zshrc.gh-routes`, then applies the tenant-derived routes:
-the shell's own order, assuming the machine's overlay calls `claude-tenants-apply-gh` as this
-laptop's does. A machine whose overlay does not would get tenant-derived routes in the tick and not
-in the shell. That is why the tables and `_GH_TOKEN_CACHE` left `zshrc.company`. A second reader
-would otherwise have to source that whole file, token refresher and hooks included, or keep a copy.
+file and `claude-tenants-apply-gh`), then `zshrc.gh-routes`, then applies the tenant-derived routes,
+of which there are none on a machine where none of the tenants' gh dirs is present (DO-897: such a
+machine has one GitHub account). That is the shell's own order, assuming the machine's overlay calls
+`claude-tenants-apply-gh` as this laptop's does. A machine whose overlay does not would get
+tenant-derived routes in the tick and not in the shell. That is why the tables and `_GH_TOKEN_CACHE`
+left `zshrc.company`. A second reader would otherwise have to source that whole file, token
+refresher and hooks included, or keep a copy.
 
 - **`~/.zshrc.local` is the one layer it skips.** That file holds secrets, and an answer that goes
   into a unit must not come from sourcing them. A route written there directly, not in the tenants
@@ -314,7 +316,7 @@ Traps this area has, each of which produced a green tick or a confident wrong an
   records the parse state per remote; `unparsable` counts as a GitHub remote, blocks the path
   table, and the doctor lists it as a ⚠.
 
-State table: `scripts/test-gh-routing.sh` (231 checks, run in CI, hermetic — `gh` is
+State table: `scripts/test-gh-routing.sh` (240 checks, run in CI, hermetic — `gh` is
 stubbed, so it needs no network, no keyring and no GitHub account; the stub reproduces the
 keyring collapse, which a real `gh` cannot be made to do on demand). Each trap above is a
 row, and each is pinned by mutation: reverting the fix in a copy of the tree has to make

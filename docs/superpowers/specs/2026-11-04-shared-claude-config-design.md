@@ -368,6 +368,33 @@ they win. M7 reverses a recorded answer; Zvi confirmed it on 2026-11-08.
   file from the working tree while it replays, and a session writing in that window stops it in a
   state `--abort` cannot leave (probed). The sync integrates with one `git merge`.
 
+**Amended 2026-11-10 (DO-897):** three amendments, from the plan
+`docs/superpowers/plans/2026-11-10-claude-dev-level.md`, for a host with one GitHub account and a
+stray directory among its checkouts (dev). Where they differ from the text above, they win.
+
+- **(M9) A host with one GitHub account syncs with its own git credential.** `claude-tenants-apply-gh`
+  derives tenant gh routes only where at least one value of `CLAUDE_TENANT_GH_DIR` is present: not
+  empty, and either an existing directory (a symlink to one counts) or not an absolute path (a
+  relative dir is passed on, and `gh-route` refuses it as the fault it is). Where none is present, it
+  adds no route, no path route and no default: `scripts/gh-route` answers `none` for a store, and the
+  sync uses the host's own git credential helpers. Where at least one is present nothing changes: every
+  entry is derived, the missing dirs included, so M7's routed token cache applies and a store whose
+  tenant's dir is missing stays pinned to it and is reported (`skipped-no-token`).
+- **(M10) The host's name** in a conflict copy, a commit message and the `stale_after_minutes` lookup is
+  `CLAUDE_MEMORY_HOST` when set and not empty, else the first line of the profile marker
+  (`~/.config/claude-host-profile`, or `CLAUDE_SETTINGS_RENDER_MARKER`) when the marker is a regular,
+  readable file and that line is a usable host name, else `hostname -s`. A marker that is missing,
+  unreadable, a directory or holds an unusable line falls back without a word on stderr.
+- **(M11) A directory whose `.git` file names a missing git directory is not a checkout** for the link
+  script. A `checkout_globs` match whose regular `.git` file has a `gitdir:` line naming a path known
+  to have nothing at it, a worktree's excepted, is skipped and named on stderr once a run, however
+  many globs reach it; the run goes on for every other key. Known means the deepest part of the path
+  that exists is a directory this user may search: behind one it may not, absent cannot be told from
+  hidden, and the directory is not skipped (exit 2). The line is read as git reads it, every trailing
+  CR and LF dropped first. A `plain_dirs` entry in that state and every other failure to read a
+  candidate are still exit 2. So is a populated submodule of a match whose `.git/modules/<name>` is
+  gone: `git submodule foreach` exits 128 there, and that case is left for step 10.
+
 **User memories.** Cross-repo memories about Zvi are curated, low-churn data about this
 person, which is dotfiles-local's charter: `~/.dotfiles-local/claude/memory-user/MEMORY.md`
 (+ topic files), linked to `~/.claude/memory-user/` and imported by the user-level
@@ -458,6 +485,16 @@ the table's `stale_after_minutes`".
   backup dotbot leaves beside it. A source missing from the checkout is a person's step. The private
   copy is replaced by the public one in step 7's dotfiles-local PR.
 
+**Amended 2026-11-10 (DO-897):** one amendment, from the plan
+`docs/superpowers/plans/2026-11-10-claude-dev-level.md`.
+
+- **(H11) A first run needs the marker first.** The marker is written by hand on the host before its
+  first `--apply`. host-sync clones and installs the overlay only on a host with a marker, and the
+  overlay's install, finding none, writes `hostname -s` into it, which on an EC2 host is no profile
+  name. The overlay's per-tenant links carry `if:` conditions on the host profile, and the links rows
+  count a conditional link that is absent as in place (`check-links.sh` state `conditional-absent`,
+  which does not say whether the link should be there).
+
 ### D9. The doctor says whether the live config is the declared one
 
 `claude-doctor` gains a "config" section on every host: every declared link is a symlink
@@ -467,6 +504,19 @@ installed plugins equal the declaration. `verify-tools.sh` asserts the two new t
 ran, succeeded and are still firing (the TIMER_HEALTH rule). Failure modes that look clean
 are the ones to test: a real `memory/` dir where a link belongs, a render that silently
 drops a key, a sync that commits nothing because `git add` saw an ignored path.
+
+**Amended 2026-11-10 (DO-897),** from the plan `docs/superpowers/plans/2026-11-10-claude-dev-level.md`:
+the doctor's pool checks apply where clauth is installed (`whence -p clauth`), since `claude()` and
+`hspawn` run the account picker only there. On a host without it, the Pools section prints one note,
+`clauth is not installed — the pools pick no account on this machine; pool checks skipped`, in place
+of the checks that read clauth's profile stores: a member that is a compat symlink, a retired name or
+has no store, settings parity, organisation and plugin sign-ins. The duplicate-account check, the
+table's read, parse, run and finish checks, and its shape checks (a tenant named by a route, the
+default, an overflow or a spill entry that has no members, an empty pool, a member or overflow/spill
+name the picker rejects) run either way. A launch refuses a table that fails the read, parse, run or
+finish check with or without clauth, and `scripts/tenant-route` refuses a routed tenant with no
+members and a rejected member name with no clauth gate, so either fault stops memory linking on such
+a host too.
 
 ### D10. nanoclaw leaves herdr
 

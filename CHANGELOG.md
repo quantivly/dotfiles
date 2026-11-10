@@ -501,6 +501,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A host with one GitHub account and no clauth can take the tenant table and the memory stores
+  (DO-897).** Four fixes measured on dev before step 7 of the shared-configuration design brings it
+  level (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, amendments M9-M11 and
+  H11, and the D9 note). `claude-tenants-apply-gh` derives no gh route, path route or default where
+  no value of `CLAUDE_TENANT_GH_DIR` is present (not empty, and an existing directory or a relative
+  path), so `scripts/gh-route` answers `none` for a store there and the memory sync uses the host's
+  own git credential instead of skipping every push for a token file nobody writes; a machine with
+  any of the dirs is unchanged. `claude-doctor`'s Pools section prints one note where clauth is not
+  installed, in place of a ✗ per pool member about a picker that never runs there; the table's read,
+  parse, run and finish checks, its shape checks (a tenant routed to with no members, an empty pool,
+  a member name the picker rejects; `scripts/tenant-route` refuses the first and the last with no
+  clauth gate) and the duplicate-account check still run. Both memory scripts name the host from the
+  profile marker when `CLAUDE_MEMORY_HOST` is unset or empty (a regular, readable file whose first
+  line is a usable name), so a conflict copy, a commit and the `stale_after_minutes` lookup say the
+  profile rather than an `ip-…` hostname. `claude-memory-link.sh` skips a `checkout_globs` match
+  whose `.git` file names a git directory known to be missing (one behind a directory this user
+  cannot search is still exit 2), naming it once a run on stderr, where before that one directory
+  stopped every verb on the host. `docs/CLAUDE_SETUP.md` gains "A host's first run": the preflight,
+  the marker written by hand, the run and the three reads that prove it. State tables:
+  `scripts/test-gh-routing.sh` 231 to 240 rows, `scripts/test-claude-doctor.sh` 603 to 611,
+  `scripts/test-hspawn.sh` 454 to 456, `scripts/test-claude-memory-link.sh` 206 to 223,
+  `scripts/test-claude-memory-sync.sh` 111 to 117.
+
 - **`scripts/vpn-log-report.py` no longer reads a quiet journal window that spans a reboot as NOT
   CHECKED.** journalctl 259 answers a `-g` query with no match by printing one `-- Boot <id> --`
   line per boot before `-- No entries --` (exit 1); the report compared the whole of stdout to the
