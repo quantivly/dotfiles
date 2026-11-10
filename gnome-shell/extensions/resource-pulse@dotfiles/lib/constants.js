@@ -136,3 +136,20 @@ export const PRESSURE_METER_FILL_RGBA = [1, 1, 1, 1];
 export const PRESSURE_METER_TRACK_RGBA = [1, 1, 1, 0.25];
 /** Most apps the sampler publishes in each app ranking (by CPU, by memory): what the apps card can show. */
 export const APP_RANKING_LENGTH = 10;
+/**
+ * A cockpit source whose sampledAtUsec is older than this many of its own intervalSeconds is stale: its card draws
+ * "no data since HH:MM" rather than its numbers as live.
+ */
+export const COCKPIT_SOURCE_STALE_INTERVALS = 3;
+/**
+ * Longest name, in characters, a cockpit source publishes (a session slug or branch, a workspace label, an account, a
+ * mount label); a longer one is published as COCKPIT_REDACTED_NAME.
+ */
+export const COCKPIT_NAME_MAX_CHARS = 64;
+/**
+ * What a cockpit source publishes in place of a name it rejects: one that is empty, too long (COCKPIT_NAME_MAX_CHARS),
+ * holds a control character or matches a secret shape.
+ */
+export const COCKPIT_REDACTED_NAME = '—';
+/** Prefix of every journal line the cockpit service writes. */
+export const COCKPIT_LOG_PREFIX = 'cockpit:';
