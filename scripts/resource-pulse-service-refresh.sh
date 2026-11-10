@@ -7,7 +7,8 @@
 # install.conf.yaml and never enabled: the sampler (systemd/resource-pulse.service,
 # which the GNOME Shell extension starts on demand) and the cockpit
 # (systemd/cockpit.service, which systemd skips without
-# ~/.config/resource-pulse/cockpit.json). It reloads systemd once, then restarts
+# ~/.config/resource-pulse/cockpit.json, or that file under $XDG_CONFIG_HOME
+# when it is set). It reloads systemd once, then restarts
 # each service only when its own code changed after it started.
 #
 # Why only then: a restart resets the sampler's histories (the top-bar graph

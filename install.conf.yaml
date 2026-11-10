@@ -325,16 +325,19 @@
         bash scripts/reconcile-systemd-units.sh
       fi
     - |
-      # Resource Pulse's sampler service (linked above, never enabled): reload
-      # systemd, then try-restart the service only when a module it runs
-      # (service/main.js and what it imports) or its unit file changed after it
-      # started, because a restart resets its histories and most deploys leave
-      # the data side alone. Silent and successful with no user manager (a
-      # server) or with the service not running. A failure (the reload, reading
-      # its start time, working out or searching what it runs, the restart)
-      # prints a ⚠ line naming the step and what to run, and still exits 0,
+      # Resource Pulse's two services (both linked above, neither enabled): the
+      # sampler (resource-pulse.service) and the cockpit (cockpit.service).
+      # Reload systemd once, then try-restart each service only when its own
+      # code changed after it started: a module it runs (its entry,
+      # service/main.js or service/cockpit.js, and what that imports) or its
+      # unit file. A restart resets the sampler's histories, and most deploys
+      # leave the data side alone. Silent and successful with no user manager
+      # (a server) or with a service not running, the cockpit skipped for want
+      # of its layout file included. A failure (the reload, reading a start
+      # time, working out or searching what a service runs, a restart) prints a
+      # ⚠ line naming the unit, the step and what to run, and still exits 0,
       # like the reconcile step above: an exit 1 would abort the rest of this
-      # install for every desktop user, for a service that at worst keeps its
+      # install for every desktop user, for services that at worst keep their
       # previous code. Relative path, for the reason the reconcile step gives.
       if [ -f scripts/resource-pulse-service-refresh.sh ]; then
         bash scripts/resource-pulse-service-refresh.sh

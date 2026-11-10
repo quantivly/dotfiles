@@ -169,7 +169,8 @@ the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
 - `GetState`: the layout, the config error (null when there is none), and three sources, each stamped with
   when it was sampled (`sampledAtUsec`) and its interval (`intervalSeconds`): `sessions` (the Claude Code
   sessions in herdr), `network` (the uplink, the VPN tunnel and the SSH control masters) and `mounts`
-  (network shares and removable disks). Their fields are defined in [Every number, defined](#every-number-defined).
+  (network shares and removable disks). Their fields are defined in
+  [Every number, defined](#every-number-defined).
 - `Changed`: the sources, or the layout, that changed; never sent on a timer.
 - `WatchCockpit` / `UnwatchCockpit`: held while the cockpit can be seen. Watches are counted per caller and
   dropped when the caller leaves the bus, as the sampler's are.
@@ -180,10 +181,9 @@ the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
   `internal` (a fault in the service). herdr's own message goes to the journal, never to the bus:
   `cockpit: focus: <id>: <message>`.
 
-**Stale.** The service sends `Changed` only when something changed, so a quiet source is not a dead one: a
-source is stale when its `sampledAtUsec` is older than 3 of its own `intervalSeconds`
-(`COCKPIT_SOURCE_STALE_INTERVALS`), and the drawing side will pull `GetState` once before it calls a source
-stale.
+**Stale.** The service sends `Changed` only when something changed, so a quiet source is not a dead one.
+A source is stale once its `sampledAtUsec` is older than 3 of its own `intervalSeconds`
+(`COCKPIT_SOURCE_STALE_INTERVALS`); the drawing side will pull `GetState` once before drawing one stale.
 
 It runs in `background.slice` at `Nice=10`, capped at `CPUQuota=10%`, `MemoryHigh=64M` and
 `MemoryMax=96M`; systemd restarts it 5 s after a crash, at most 5 times in 5 minutes. Its budgets are in
@@ -194,8 +194,8 @@ changed after it started, as it does the sampler; a cockpit that is not running 
 **Opt-in by file: `~/.config/resource-pulse/cockpit.json`** (under `$XDG_CONFIG_HOME` instead when that is
 set). `./install` links the unit for everyone and enables it for no one: it has no `[Install]` section. Its
 `ConditionPathExists` (on `%E`, which is `$XDG_CONFIG_HOME` or `~/.config`, where the service reads the
-file too) makes systemd skip every start while that file is absent. The unit stays inactive, and that is not a failure. To opt in, copy the
-template, then start the service once by hand, since nothing starts it yet:
+file too) makes systemd skip every start while that file is absent. The unit stays inactive, and that is
+not a failure. To opt in, copy the template and start the service once by hand: nothing starts it yet.
 
 ```bash
 mkdir -p ~/.config/resource-pulse
@@ -222,10 +222,11 @@ publishes the `configError` `missing`. The sources are served either way.
 | `network` | 10 s | a change to NetworkManager's primary connection, its type, the connectivity or whether Wi-Fi is enabled |
 | `mounts` | 30 s | a mount or an unmount (the mount monitor's `mounts-changed`) |
 
+- `network` reads the route table and lists the SSH control sockets together, every 10 s: one cadence for
+  both, so the listing costs one directory read per 10 s.
 - On battery (UPower's `OnBattery`), every interval triples.
-- A signal within 2 s of a source's last signal-driven sample gives one more sample at the end of those
-  2 s, not one per signal. The 2 s are counted on the monotonic clock, so setting the clock does not stretch
-  them.
+- A signal within 2 s of a source's last signal-driven sample gives one more sample at the end of those 2 s,
+  not one per signal, counted on the monotonic clock so that setting the clock cannot stretch them.
 - A signal while the source's sample is still running gives one more sample once that one ends, and at the
   earliest 1 s after the signal: a change made mid-sample does not wait for the next interval.
 - A source whose signal cannot be watched logs one line and is still sampled on its interval.
@@ -261,15 +262,19 @@ publishes the `configError` `missing`. The sources are served either way.
   line is `inactive (not running)`, and a ⚠ says to start it.
 - `active` comes from `GetState`. The last publish is the latest `Changed`, or the start, so a quiet
   service's can be long ago, which is no fault. `stale:` names each stale source (`stale: sessions, mounts`).
-- Each other form comes with a ⚠ naming its remedy:
+- These come with a ⚠ naming the remedy:
   - `failed (not running)` and `activating (auto-restart: restarting after a failure)`: its journal;
   - `active, no answer`, when `GetState` did not answer within 3 s: its journal;
-  - while the file exists: `not installed (LoadState=not-found)` (run `./install`), `cannot load (…)`
-    (`systemctl --user status`), and any other state, such as `activating (start)` (its journal);
+  - while the file exists: `inactive (not running)` (start it), `not installed (LoadState=not-found)`
+    (run `./install`), `cannot load (…)` (`systemctl --user status`), and any other state, such as
+    `activating (start)` (its journal). Without the file, none of these four warns;
   - `cockpit: config invalid: <configError>`, while the service runs: fix the file, which it rereads;
   - it **runs older code**: a module `service/cockpit.js` runs changed after it started (`systemctl --user
     try-restart cockpit.service`).
-- `unknown (no systemd user manager answered)` has no ⚠.
+- These have no ⚠: `unknown (no systemd user manager answered)`;
+  `active (gdbus not found, so not asked)`, an active unit not asked for `GetState` for want of `gdbus`;
+  and `inactive (not running)` while the file is absent and `ConditionResult` is not `no`, a unit whose
+  last start found the file (stopped since, and the file deleted).
 
 ### Every number, defined
 
@@ -433,7 +438,9 @@ scripts/resource-pulse-cost.sh --rss-check <kib>            # exit 1 if gnome-sh
 
 It reads only `comm`, `stat` and `status` under `/proc`. `--cockpit` measures the cockpit service by
 its unit's `MainPID`, as `--service` does the sampler. Either may stand anywhere on the line; the two
-together are a usage error, and so is any other word left over (exit 2), never ignored. To meet these
+together are a usage error, and so is any other word left over (exit 2), never ignored. `--rss-check` is
+gnome-shell's growth tripwire alone: `--cockpit --rss-check` (or `--service --rss-check`) is a usage error
+too, which names that service's absolute budget, the figure its `--rss-kib` must stay under. To meet these
 budgets the app scan's interval moved from v1's 10 s to 20 s while a detail watch is held and 60 s with
 none. Over a budget, the remedy is a longer interval, or pruning slices that cannot beat the current
 leader; never a shorter history. Before the service existed the sampling ran inside gnome-shell, measured in plain
