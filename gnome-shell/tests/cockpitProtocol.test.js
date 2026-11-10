@@ -64,6 +64,73 @@ const FULL_STATE = {
         },
     },
 };
+/** One field name no reader lists per object level of a state; withUnlistedFieldAtEveryLevel plants each. */
+const UNLISTED_FIELD_NAME_BY_LEVEL = {
+    state: 'unlistedInState',
+    layout: 'unlistedInLayout',
+    monitor: 'unlistedInMonitor',
+    layoutGroup: 'unlistedInLayoutGroup',
+    sources: 'unlistedInSources',
+    sessions: 'unlistedInSessions',
+    counts: 'unlistedInCounts',
+    sessionRow: 'unlistedInSessionRow',
+    network: 'unlistedInNetwork',
+    uplink: 'unlistedInUplink',
+    vpn: 'unlistedInVpn',
+    mounts: 'unlistedInMounts',
+    mountRow: 'unlistedInMountRow',
+};
+const UNLISTED_FIELD_NAMES = Object.values(UNLISTED_FIELD_NAME_BY_LEVEL);
+/** The field no reader lists, planted in a FocusSession reply. */
+const UNLISTED_REPLY_FIELD_NAME = 'unlistedInReply';
+
+/**
+ * A copy of a state with one unlisted field planted at every object level: the state, the layout, its monitor and
+ * each group, the sources object, each source, the session counts, each session row, the uplink, the VPN tunnel and
+ * each mount row.
+ *
+ * @param {object} state - A state shaped as FULL_STATE.
+ * @returns {object} The copy.
+ */
+function withUnlistedFieldAtEveryLevel(state) {
+    const unlistedField = level => ({[UNLISTED_FIELD_NAME_BY_LEVEL[level]]: 'leaked'});
+    const {layout, sources: {sessions, network, mounts}} = state;
+    return {
+        ...state, ...unlistedField('state'),
+        layout: {
+            ...layout, ...unlistedField('layout'),
+            monitor: {...layout.monitor, ...unlistedField('monitor')},
+            groups: layout.groups.map(group => ({...group, ...unlistedField('layoutGroup')})),
+        },
+        sources: {
+            ...unlistedField('sources'),
+            sessions: {
+                ...sessions, ...unlistedField('sessions'),
+                counts: {...sessions.counts, ...unlistedField('counts')},
+                rows: sessions.rows.map(row => ({...row, ...unlistedField('sessionRow')})),
+            },
+            network: {
+                ...network, ...unlistedField('network'),
+                uplink: {...network.uplink, ...unlistedField('uplink')},
+                vpn: {...network.vpn, ...unlistedField('vpn')},
+            },
+            mounts: {
+                ...mounts, ...unlistedField('mounts'),
+                rows: mounts.rows.map(row => ({...row, ...unlistedField('mountRow')})),
+            },
+        },
+    };
+}
+
+/**
+ * The planted unlisted field names a text holds.
+ *
+ * @param {string} text - Built JSON.
+ * @returns {string[]} Those of UNLISTED_FIELD_NAMES found in it, in their order.
+ */
+function unlistedFieldNamesIn(text) {
+    return UNLISTED_FIELD_NAMES.filter(fieldName => text.includes(fieldName));
+}
 
 test('cockpitProtocol: the names and the interface', () => {
     assertEqual(cockpitProtocol.COCKPIT_BUS_NAME, 'io.github.quantivly.dotfiles.Cockpit1');
@@ -109,6 +176,31 @@ test('cockpitProtocol: a field no reader lists never leaves the builder', () => 
     const text = cockpitProtocol.buildCockpitStatePayload({...FULL_STATE, sources: {...FULL_STATE.sources, sessions}});
     assertEqual(text.includes('lastText'), false);
     assertEqual(text.includes('"cwd"'), false);
+    // The same at every object level. The input is checked to hold every planted field, so the row cannot pass on a
+    // plant that went nowhere.
+    const plantedState = withUnlistedFieldAtEveryLevel(FULL_STATE);
+    assertEqual(unlistedFieldNamesIn(JSON.stringify(plantedState)), UNLISTED_FIELD_NAMES);
+    assertEqual(unlistedFieldNamesIn(cockpitProtocol.buildCockpitStatePayload(plantedState)), []);
+});
+test('cockpitProtocol: a field no reader lists, at any level, never leaves the Changed builder', () => {
+    const plantedState = withUnlistedFieldAtEveryLevel(FULL_STATE);
+    const plantedChange = {
+        publishedAtUsec: 5, sources: plantedState.sources, layout: plantedState.layout,
+        configError: plantedState.configError, [UNLISTED_FIELD_NAME_BY_LEVEL.state]: 'leaked',
+    };
+    assertEqual(unlistedFieldNamesIn(JSON.stringify(plantedChange)), UNLISTED_FIELD_NAMES);
+    assertEqual(unlistedFieldNamesIn(cockpitProtocol.buildChangedPayload(plantedChange)), []);
+});
+test('cockpitProtocol: a field no reader lists never leaves the FocusSession reply builder', () => {
+    const text = cockpitProtocol.buildFocusSessionReply(
+        {focused: true, windowPid: 4242, error: null, [UNLISTED_REPLY_FIELD_NAME]: 'leaked'});
+    assertEqual(text.includes(UNLISTED_REPLY_FIELD_NAME), false);
+});
+test('cockpitProtocol: a session row with an empty id or an empty name is dropped, the others kept', () => {
+    const [firstRow] = FULL_STATE.sources.sessions.rows;
+    const rows = [...FULL_STATE.sources.sessions.rows, {...firstRow, id: ''}, {...firstRow, id: 'x', name: ''}];
+    const parsed = cockpitProtocol.parseSessionsSource({...FULL_STATE.sources.sessions, rows});
+    assertEqual(parsed.rows, FULL_STATE.sources.sessions.rows);
 });
 test('cockpitProtocol: text that is not a JSON object parses to null as a whole', () => {
     assertEqual(cockpitProtocol.parseCockpitStatePayload('[]'), null);

@@ -360,19 +360,21 @@ function parseSessionStateCounts(value) {
 }
 
 /**
- * Reads one session row: a herdr pane running Claude. Its id, name and state are needed to show it at all.
+ * Reads one session row: a herdr pane running Claude. Its id, name and state are needed to show it at all. An empty
+ * id or name is never valid: FocusSession finds a row by its id, and a source publishes COCKPIT_REDACTED_NAME in place
+ * of a name it rejects, never an empty one.
  *
  * @param {*} value - A parsed JSON value.
  * @returns {{id: string, name: string, state: string, idleSeconds: number|null, idleFromProcessAge: boolean|null,
  *     memoryBytes: number|null, workspaceId: string|null, paneId: string|null, account: string|null,
- *     contextPercent: number|null}|null} The row; null unless an object with a string id, a string name and a state
- *     from SESSION_STATES.
+ *     contextPercent: number|null}|null} The row; null unless an object with a non-empty string id, a non-empty
+ *     string name and a state from SESSION_STATES.
  */
 function parseSessionRow(value) {
     if (!isPlainObject(value))
         return null;
-    const id = stringOrNull(value.id);
-    const name = stringOrNull(value.name);
+    const id = nonEmptyStringOrNull(value.id);
+    const name = nonEmptyStringOrNull(value.name);
     const state = enumOrNull(value.state, SESSION_STATES);
     if (id === null || name === null || state === null)
         return null;
@@ -475,6 +477,15 @@ function parseLayoutGroup(value) {
     if (id === null || caption === null || columns === null || cards === null)
         return null;
     return {id, caption, columns, cards};
+}
+
+/**
+ * @param {*} value - A parsed JSON value.
+ * @returns {string|null} The value when it is a string of at least one character; null otherwise.
+ */
+function nonEmptyStringOrNull(value) {
+    const text = stringOrNull(value);
+    return text === '' ? null : text;
 }
 
 /**
