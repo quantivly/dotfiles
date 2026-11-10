@@ -56,6 +56,8 @@ const STATE_SNAPSHOT = {
     apps: {
         topCpu: {groupKey: 'app:org.example.Editor', name: 'Editor', cpuPercent: 31},
         topMemory: {groupKey: 'herdr-server', name: 'herdr agents', memoryBytes: 15_700_000_000},
+        cpuRanking: [{groupKey: 'app:org.example.Editor', name: 'Editor', cpuPercent: 31}],
+        memoryRanking: [{groupKey: 'herdr-server', name: 'herdr agents', memoryBytes: 15_700_000_000}],
     },
     isComplete: true,
 };

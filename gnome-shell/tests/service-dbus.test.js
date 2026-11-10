@@ -53,6 +53,8 @@ const TICK_SNAPSHOT = {
     apps: {
         topCpu: {groupKey: 'app:org.example.Editor', name: 'Editor', cpuPercent: 31},
         topMemory: {groupKey: 'app:org.example.Editor', name: 'Editor', memoryBytes: 2_000_000_000},
+        cpuRanking: [{groupKey: 'app:org.example.Editor', name: 'Editor', cpuPercent: 31}],
+        memoryRanking: [{groupKey: 'app:org.example.Editor', name: 'Editor', memoryBytes: 2_000_000_000}],
     },
     isComplete: true,
 };

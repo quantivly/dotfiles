@@ -36,6 +36,14 @@ const FULL_SNAPSHOT = {
     apps: {
         topCpu: {groupKey: 'app:org.example.Editor', name: 'Editor', cpuPercent: 31},
         topMemory: {groupKey: 'herdr-server', name: 'herdr agents', memoryBytes: 15_700_000_000},
+        cpuRanking: [
+            {groupKey: 'app:org.example.Editor', name: 'Editor', cpuPercent: 31},
+            {groupKey: 'pseudo:kernel', name: 'kernel', cpuPercent: 4.5},
+        ],
+        memoryRanking: [
+            {groupKey: 'herdr-server', name: 'herdr agents', memoryBytes: 15_700_000_000},
+            {groupKey: 'app:org.example.Editor', name: 'Editor', memoryBytes: 900_000_000},
+        ],
     },
     isComplete: true,
 };
@@ -246,7 +254,7 @@ test('protocol skew: a mistyped field is null for that field only (a history val
             ...FULL_SNAPSHOT,
             cpuClusters: {performancePercent: 41, efficiencyPercent: null},
             memory: null,
-            apps: {topCpu: FULL_SNAPSHOT.apps.topCpu, topMemory: null},
+            apps: {...FULL_SNAPSHOT.apps, topMemory: null},
         },
         histories: {cpu: [0.25, null, 0.5], memory: null},
         serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
@@ -279,7 +287,7 @@ test('protocol skew: an app entry without a groupKey is null, so two such entrie
         delete payloadObject.snapshot.apps.topCpu.groupKey;
         delete payloadObject.snapshot.apps.topMemory.groupKey;
     });
-    assertEqual(parseSamplePayload(payloadWithoutGroupKeys).snapshot.apps, {topCpu: null, topMemory: null});
+    assertEqual(parseSamplePayload(payloadWithoutGroupKeys).snapshot.apps, {...FULL_SNAPSHOT.apps, topCpu: null, topMemory: null});
 });
 
 test('protocol skew: a sequence or protocol that is not a whole number of zero or more is null', () => {
@@ -316,7 +324,7 @@ test('protocol skew: a negative byte count or percentage is null for its own fie
         memory: null,
         swap: null,
         pressureAvg10: {cpu: 1.5, memory: 0, io: null},
-        apps: {topCpu: null, topMemory: null},
+        apps: {...FULL_SNAPSHOT.apps, topCpu: null, topMemory: null},
     });
 });
 
@@ -412,4 +420,36 @@ test('protocol skew: "not json", a JSON non-object and a non-string all parse to
         state: unparseableInputs.map(() => null),
         sample: unparseableInputs.map(() => null),
     });
+});
+
+/**
+ * Parses the state payload of FULL_SNAPSHOT with its apps replaced.
+ *
+ * @param {object} apps - The apps field to publish.
+ * @returns {object} The parsed apps field.
+ */
+function parsedAppsOfStateWith(apps) {
+    const payload = buildStatePayload({
+        snapshot: {...FULL_SNAPSHOT, apps}, histories: HISTORIES, serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
+        latestSampledAtUsec: LATEST_SAMPLED_AT_USEC, sequence: SEQUENCE,
+    });
+    return parseStatePayload(payload).snapshot.apps;
+}
+
+test('protocol: parseStatePayload reads the app rankings and drops a malformed entry', () => {
+    const parsed = parsedAppsOfStateWith(
+        {...FULL_SNAPSHOT.apps, cpuRanking: [FULL_SNAPSHOT.apps.topCpu, {name: 'no key'}]});
+    assertEqual(parsed.cpuRanking, [FULL_SNAPSHOT.apps.topCpu]);
+    assertEqual(parsed.memoryRanking, FULL_SNAPSHOT.apps.memoryRanking);
+});
+test('protocol: a payload from before the rankings reads them as null', () => {
+    const {cpuRanking, memoryRanking, ...oldApps} = FULL_SNAPSHOT.apps;
+    const parsed = parsedAppsOfStateWith(oldApps);
+    assertEqual([parsed.cpuRanking, parsed.memoryRanking], [null, null]);
+    assertEqual(parsed.topCpu, FULL_SNAPSHOT.apps.topCpu);
+});
+test('protocol: a ranking that is not a list reads as null', () => {
+    const parsed = parsedAppsOfStateWith(
+        {...FULL_SNAPSHOT.apps, cpuRanking: 'Editor', memoryRanking: {0: FULL_SNAPSHOT.apps.topMemory}});
+    assertEqual([parsed.cpuRanking, parsed.memoryRanking], [null, null]);
 });

@@ -134,3 +134,5 @@ export const PRESSURE_METER_NO_DATA_DASH_THICKNESS_PX = 2;
 export const PRESSURE_METER_FILL_RGBA = [1, 1, 1, 1];
 /** Empty pressure-meter cells, and the no-data dash, as [red, green, blue, alpha], each 0–1: a visible groove. */
 export const PRESSURE_METER_TRACK_RGBA = [1, 1, 1, 0.25];
+/** Most apps the sampler publishes in each app ranking (by CPU, by memory): what the apps card can show. */
+export const APP_RANKING_LENGTH = 10;

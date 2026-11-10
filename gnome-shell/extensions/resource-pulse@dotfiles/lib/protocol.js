@@ -212,10 +212,25 @@ function parseRankedApp(value, valueFieldName) {
 }
 
 /**
+ * Reads a ranked list of apps.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @param {string} valueFieldName - The field each entry carries its value in.
+ * @returns {Array<object>|null} The entries parseRankedApp accepts, in order; null unless the value is an array
+ *     (so a service from before the rankings reads as no list).
+ */
+function parseRankedAppList(value, valueFieldName) {
+    if (!Array.isArray(value))
+        return null;
+    return value.map(entry => parseRankedApp(entry, valueFieldName)).filter(entry => entry !== null);
+}
+
+/**
  * Reads an app ranking.
  *
  * @param {*} value - A parsed JSON value.
- * @returns {{topCpu: object|null, topMemory: object|null}|null} Each half on its own; null unless an object.
+ * @returns {{topCpu: object|null, topMemory: object|null, cpuRanking: Array<object>|null,
+ *     memoryRanking: Array<object>|null}|null} Each part on its own; null unless an object.
  */
 function parseAppRanking(value) {
     if (!isPlainObject(value))
@@ -223,6 +238,8 @@ function parseAppRanking(value) {
     return {
         topCpu: parseRankedApp(value.topCpu, TOP_CPU_VALUE_FIELD),
         topMemory: parseRankedApp(value.topMemory, TOP_MEMORY_VALUE_FIELD),
+        cpuRanking: parseRankedAppList(value.cpuRanking, TOP_CPU_VALUE_FIELD),
+        memoryRanking: parseRankedAppList(value.memoryRanking, TOP_MEMORY_VALUE_FIELD),
     };
 }
 

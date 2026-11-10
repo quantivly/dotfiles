@@ -207,7 +207,7 @@ function tickRootAThenRootB(sampler, clock) {
  * tick's on the given root.
  *
  * @param {string} secondRootName - The root of the second scan.
- * @returns {{ranking: object, logged: string[]}} The second tick's ranking and what was logged.
+ * @returns {{ranking: object, logged: string[]}} The second tick's two winners (topCpu, topMemory) and what was logged.
  */
 function scanTwice(secondRootName) {
     const {sampler, clock, logged} = makeSampler('root-a');
@@ -216,9 +216,9 @@ function scanTwice(secondRootName) {
     clock.nowUsec += APP_SCAN_SPACING_USEC;
     sampler.fsRoot = fixtureRoot(secondRootName);
     sampler.runTick(1);
-    const ranking = sampler.latestSnapshot.apps;
+    const {topCpu, topMemory} = sampler.latestSnapshot.apps;
     sampler.destroy();
-    return {ranking, logged};
+    return {ranking: {topCpu, topMemory}, logged};
 }
 
 /**

@@ -1,5 +1,5 @@
 // Naming, grouping and ranking apps from systemd cgroup leaves. Pure logic: no file IO.
-import {KERNEL_LABEL, SHORT_JOBS_LABEL, UNIT_DISPLAY_ALIASES} from './constants.js';
+import {APP_RANKING_LENGTH, KERNEL_LABEL, SHORT_JOBS_LABEL, UNIT_DISPLAY_ALIASES} from './constants.js';
 
 const SYSTEMD_HEX_ESCAPE_PATTERN = /\\x([0-9a-fA-F]{2})/g;
 const HEX_RADIX = 16;
@@ -124,21 +124,35 @@ function addToGroup(totals, group, amount) {
 }
 
 /**
- * Picks the entry with the largest value; equal values go to the name that sorts first, so the
- * answer never depends on Map insertion order.
+ * Sorts entries largest value first; equal values go to the name that sorts first, then to the group key, so the
+ * order never depends on Map insertion order.
  *
  * @param {Iterable<{groupKey: string, name: string, value: number}>} entries - candidates.
- * @returns {{groupKey: string, name: string, value: number}|null} The winner, or null when there are none.
+ * @returns {Array<{groupKey: string, name: string, value: number}>} A new list, largest first.
  */
-function pickLargest(entries) {
-    let best = null;
-    for (const entry of entries) {
-        const beatsBest = best === null || entry.value > best.value ||
-            (entry.value === best.value && entry.name < best.name);
-        if (beatsBest)
-            best = entry;
-    }
-    return best;
+function sortLargestFirst(entries) {
+    const compareEntries = (first, second) => {
+        if (first.value !== second.value)
+            return second.value - first.value;
+        if (first.name !== second.name)
+            return first.name < second.name ? -1 : 1;
+        return first.groupKey < second.groupKey ? -1 : Number(first.groupKey > second.groupKey);
+    };
+    return [...entries].sort(compareEntries);
+}
+
+/**
+ * Turns the largest entries into a published ranking.
+ *
+ * @param {Iterable<{groupKey: string, name: string, value: number}>} entries - candidates.
+ * @param {string} valueFieldName - the field each published entry carries its value in.
+ * @param {(value: number) => number} publishedValueOf - turns an entry's summed value into the published one.
+ * @returns {Array<object>} At most APP_RANKING_LENGTH entries as {groupKey, name, [valueFieldName]}, largest first.
+ */
+function rankingOf(entries, valueFieldName, publishedValueOf) {
+    return sortLargestFirst(entries).slice(0, APP_RANKING_LENGTH).map(entry => ({
+        groupKey: entry.groupKey, name: entry.name, [valueFieldName]: publishedValueOf(entry.value),
+    }));
 }
 
 /**
@@ -214,8 +228,11 @@ function unattributedCpuUsec(scan, leafDeltaByParent) {
  * @param {Map<string, number>} [scan.parentCpuDeltaUsec] - usage_usec delta of each parent read in both scans.
  * @param {(cgroupPath: string) => {groupKey: string, name: string}} scan.nameOfCgroup - grouping and naming.
  * @returns {{topCpu: {groupKey: string, name: string, cpuPercent: number}|null,
- *     topMemory: {groupKey: string, name: string, memoryBytes: number}|null}} The two winners; topCpu is null when
- *     nothing has a delta.
+ *     topMemory: {groupKey: string, name: string, memoryBytes: number}|null,
+ *     cpuRanking: Array<{groupKey: string, name: string, cpuPercent: number}>,
+ *     memoryRanking: Array<{groupKey: string, name: string, memoryBytes: number}>}} The two winners and the
+ *     largest APP_RANKING_LENGTH of each, largest first (each winner is its list's first entry); topCpu is null
+ *     and cpuRanking empty when nothing has a delta. memoryRanking holds real apps only.
  */
 export function rankApps(scan) {
     const rankingScan = {
@@ -243,16 +260,14 @@ export function rankApps(scan) {
     }
 
     const canRankCpu = rankingScan.elapsedUsec > 0 && rankingScan.cpuCount > 0;
-    const topCpuEntry = canRankCpu ? pickLargest(cpuDeltaByGroup.values()) : null;
-    const topMemoryEntry = pickLargest(memoryByGroup.values());
     const machineCapacityUsec = rankingScan.elapsedUsec * rankingScan.cpuCount;
+    const cpuRanking = canRankCpu ? rankingOf(cpuDeltaByGroup.values(), 'cpuPercent',
+        deltaUsec => deltaUsec / machineCapacityUsec * PERCENT_SCALE) : [];
+    const memoryRanking = rankingOf(memoryByGroup.values(), 'memoryBytes', memoryBytes => memoryBytes);
     return {
-        topCpu: topCpuEntry && {
-            groupKey: topCpuEntry.groupKey, name: topCpuEntry.name,
-            cpuPercent: topCpuEntry.value / machineCapacityUsec * PERCENT_SCALE,
-        },
-        topMemory: topMemoryEntry && {
-            groupKey: topMemoryEntry.groupKey, name: topMemoryEntry.name, memoryBytes: topMemoryEntry.value,
-        },
+        topCpu: cpuRanking[0] ?? null,
+        topMemory: memoryRanking[0] ?? null,
+        cpuRanking,
+        memoryRanking,
     };
 }

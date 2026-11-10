@@ -101,6 +101,11 @@ const APP_NAME_LOOKUP_FAILURE_LOG_KEY = 'cannot look up app names';
  *     delta.
  * @property {{groupKey: string, name: string, memoryBytes: number}|null} topMemory - The real app holding the most
  *     memory that is not page cache; never "kernel" or "short jobs".
+ * @property {Array<{groupKey: string, name: string, cpuPercent: number}>} cpuRanking - The groups using the most
+ *     CPU, largest first, at most APP_RANKING_LENGTH; its first entry is topCpu, and it is empty when topCpu is
+ *     null.
+ * @property {Array<{groupKey: string, name: string, memoryBytes: number}>} memoryRanking - The real apps holding the
+ *     most memory that is not page cache, largest first, at most APP_RANKING_LENGTH; its first entry is topMemory.
  */
 
 /**
