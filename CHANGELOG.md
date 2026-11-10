@@ -501,6 +501,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`scripts/vpn-log-report.py` no longer reads a quiet journal window that spans a reboot as NOT
+  CHECKED.** journalctl 259 answers a `-g` query with no match by printing one `-- Boot <id> --`
+  line per boot before `-- No entries --` (exit 1); the report compared the whole of stdout to the
+  marker, so the first seven-day crash check after the 6.x client fix (2026-11-10) could not run.
+  Separator-only stdout with the marker now reads as zero events; three state-table rows cover it.
+
 - **Two state-table rows failed on Ubuntu 26.04, which CI's `ubuntu-latest` became on 2026-11-08
   and this laptop already runs.** `scripts/test-vpn-failfast.sh`'s system-unit `systemd-analyze`
   row now reads only the lines about its own unit, as the user-unit row already did: verify also

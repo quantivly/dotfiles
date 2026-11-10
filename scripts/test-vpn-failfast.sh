@@ -2133,24 +2133,30 @@ cat > "$STUBBIN/journalctl" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${IPSTATE:-}" ] || exit 99
 printf '%s\n' "$*" >> "$IPSTATE/journal.calls"
+# The no-match answer. With journal-boots present it is the shape systemd 259
+# prints when the window spans two boots: a separator per boot, THEN the marker.
+no_entries() {
+  [ -e "$IPSTATE/journal-boots" ] && printf '%s\n' '-- Boot c616f8730d2743de97f7de429f327627 --' '-- Boot 45907b3e8a4a49a7bdee2041753f3dbd --'
+  echo '-- No entries --'; exit 1
+}
 case " $* " in
   *" --user "*)
     [ -e "$IPSTATE/journal-user-fail" ] && exit 2
     if [ -r "$IPSTATE/journal-user.out" ]; then cat "$IPSTATE/journal-user.out"; exit 0; fi
-    echo '-- No entries --'; exit 1 ;;
+    no_entries ;;
   *" -u aws-client-vpn-daemon.service "*)
     if [ -e "$IPSTATE/journal-system-hint" ]; then
       echo 'Hint: You are currently not seeing messages from other users and the system.' >&2
-      echo '-- No entries --'; exit 1
+      no_entries
     fi
     [ -e "$IPSTATE/journal-daemon-fail" ] && exit 2
     if [ -r "$IPSTATE/journal-daemon.out" ]; then cat "$IPSTATE/journal-daemon.out"; exit 0; fi
-    echo '-- No entries --'; exit 1 ;;
+    no_entries ;;
 esac
 if [ -e "$IPSTATE/journal-system-hint" ]; then
   echo 'Hint: You are currently not seeing messages from other users and the system.' >&2
 fi
-echo '-- No entries --'; exit 1
+no_entries
 STUB
 chmod +x "$STUBBIN/journalctl" || fatal setup
 rep_journal() { PATH="$STUBBIN:$PATH" VPN_REPORT_NOW="$FIXTURE_WINDOW_END" \
@@ -2198,6 +2204,17 @@ check "a system journal this user cannot read: daemon failures NOT CHECKED, not 
       "$(jfield "$J_HINT" daemon_failures_6x)" "NOT CHECKED"
 check "...and so are the kernel resumes" "$(jfield "$J_HINT" resume_split)" "NOT CHECKED"
 
+# MEASURED 2026-11-10 on systemd 259: a window that spans a reboot answers no-match
+# with one `-- Boot <id> --` line per boot BEFORE `-- No entries --`, still rc 1.
+# Read as "could not ask", that turned the first quiet week after the 6.x fix into
+# NOT CHECKED (scheduled run s-41ba0d5b).
+reset; touch "$IPSTATE/journal-boots"
+J_BOOTS="$(rep_journal)"
+check "no match across two boots (separators then No entries): daemon failures 0, not NOT CHECKED" \
+      "$(jfield "$J_BOOTS" daemon_failures_6x)" "0"
+check "...and the user-journal crashes 0" "$(jfield "$J_BOOTS" client_crashes)" "0"
+check "...and the kernel resumes 0" "$(jfield "$J_BOOTS" resume_split)" "0"
+
 # --- the 6.x daemon log ----------------------------------------------------
 # 6.x moved the tunnel into a root daemon with its own, root-owned log. The
 # fixture is in its measured line shapes: a 5 s first connect, then one drop that
@@ -2226,7 +2243,7 @@ TOTAL=$(( PASS + FAIL ))
 printf '\n'
 # The suite asserts its own size: a row silently deleted, or a fixture helper
 # that stopped emitting one, is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=340
+EXPECTED_ROWS=343
 if (( TOTAL != EXPECTED_ROWS )); then
     printf '\033[1;31mFATAL\033[0m: ran %d checks, expected %d — a row was added or lost.\n' \
         "$TOTAL" "$EXPECTED_ROWS" >&2
