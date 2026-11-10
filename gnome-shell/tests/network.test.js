@@ -51,6 +51,11 @@ test('network: a default route on a tunnel without the gateway flag is up', () =
     const routes = [{interfaceName: 'tap1', destinationHex: '00000000', gatewayHex: '00000000', flags: 1}];
     assertEqual(network.tunnelFromRoutes(routes), {isUp: true, interfaceName: 'tap1'});
 });
+test('network: a non-default tunnel route is up only through the gateway flag, tested as a bit', () => {
+    const nonDefaultTunnelRoute = {interfaceName: 'tun0', destinationHex: '0100000A', gatewayHex: '0100000A'};
+    assertEqual(network.tunnelFromRoutes([{...nonDefaultTunnelRoute, flags: 3}]), {isUp: true, interfaceName: 'tun0'});
+    assertEqual(network.tunnelFromRoutes([{...nonDefaultTunnelRoute, flags: 1}]), {isUp: false, interfaceName: 'tun0'});
+});
 test('network: NetworkManager values map to the uplink enums', () => {
     assertEqual(network.uplinkFromNetworkManager({primaryConnectionType: '802-3-ethernet', connectivity: 4, wirelessEnabled: false}), {kind: 'wired', connectivity: 'full', wifiEnabled: false});
     assertEqual(network.uplinkFromNetworkManager({primaryConnectionType: null, connectivity: 1, wirelessEnabled: null}), {kind: 'none', connectivity: 'none', wifiEnabled: null});
