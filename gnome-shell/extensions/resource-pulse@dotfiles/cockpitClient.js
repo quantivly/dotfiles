@@ -1065,9 +1065,10 @@ export class CockpitClient {
     }
 
     /**
-     * Stamps now as the completion of each pull named. A pull whose source was refreshed while it was in flight (a
-     * Changed carried a later stamp, which cleared its request stamp) belongs to a cycle that has ended, and is not
-     * stamped: its answer is no evidence about the new stamp.
+     * Stamps now as the completion of each pull named (ruling D5). A pull whose source was refreshed, by this very
+     * answer or by a Changed while the pull was in flight, had its request stamp cleared with the rest of its cycle
+     * (_storeSources), and is not stamped: a stamp would make the refreshed source read stale at its next suspicion,
+     * before any pull of the new cycle answered.
      *
      * @param {string[]} pulledSourceNames - The sources whose pulls completed.
      * @returns {void}
@@ -1104,10 +1105,10 @@ export class CockpitClient {
     }
 
     /**
-     * Takes a state whole: the pulled sources' completion is stamped, the layout, the config error and every source
-     * replace the client's (a source the answer refreshed has both pull stamps cleared, its completion with them), and
-     * the client is LIVE. Then tells, in order, the state, the layout (if it changed) and the sources that changed or
-     * were pulled.
+     * Takes a state whole: the layout, the config error and every source replace the client's (a source the answer
+     * refreshed has both pull stamps cleared), the pulled sources' completion is stamped (except where that clearing
+     * ended the pull's cycle), and the client is LIVE. Then tells, in order, the state, the layout (if it changed) and
+     * the sources that changed or were pulled.
      *
      * @param {object} state - lib/cockpitProtocol.js parseCockpitStatePayload's result.
      * @param {string[]} pulledSourceNames - The sources whose pulls this answer completes.
@@ -1116,11 +1117,8 @@ export class CockpitClient {
     _applyState(state, pulledSourceNames) {
         this._hasStateFromOwner = true;
         const isLayoutChanged = this._storeLayout(state.layout, state.configError);
-        // Stamped before the sources are stored, so that storing a refreshed source clears this completion with the
-        // rest of the cycle it ends (ruling D5); stamped after, it would make that source read stale at its next
-        // suspicion, before any pull of the new cycle answered.
-        this._stampPullCompletions(pulledSourceNames);
         const changedSourceNames = this._storeSources(state.sources);
+        this._stampPullCompletions(pulledSourceNames);
         const toldSourceNames = COCKPIT_SOURCE_NAMES.filter(sourceName =>
             changedSourceNames.includes(sourceName) || pulledSourceNames.includes(sourceName));
         this._setState(CockpitClientState.LIVE);
