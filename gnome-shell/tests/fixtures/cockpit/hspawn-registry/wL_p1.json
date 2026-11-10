@@ -1,0 +1,12 @@
+{
+  "branch": "zvi/host-sync",
+  "created_at": "2026-11-01T09:00:00Z",
+  "creator_session": "sess-lead",
+  "name": "host-sync",
+  "pane_id": "p_1",
+  "path": "/home/user/dev/host-sync",
+  "profile": "quantivly-1",
+  "repo": "example/repo",
+  "slug": "host-sync",
+  "workspace_id": "w_1"
+}

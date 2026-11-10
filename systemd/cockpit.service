@@ -1,0 +1,85 @@
+# systemd/cockpit.service
+# ========================
+# The Resource Pulse cockpit service: samples the cockpit's sources (the agent
+# sessions, the network and the mounts), each on its own cadence, and serves
+# them, with the layout read from ~/.config/resource-pulse/cockpit.json (under
+# $XDG_CONFIG_HOME instead when that is set), on the session bus as
+# io.github.quantivly.dotfiles.Cockpit1, so the GNOME Shell extension
+# (gnome-shell/extensions/resource-pulse@dotfiles) only draws. It runs
+# the extension's own service/cockpit.js, under plain gjs, never inside
+# gnome-shell, and apart from the sampler (systemd/resource-pulse.service), so
+# a fault in one never stops the other.
+# Design: docs/superpowers/specs/2026-11-09-desktop-cockpit-design.md;
+# guide: docs/GNOME_CONFIGURATION_GUIDE.md.
+#
+# OPT-IN BY FILE: INERT WITHOUT ~/.config/resource-pulse/cockpit.json. The
+# ConditionPathExists in [Unit] makes systemd skip every start while that file
+# is absent. It names it under %E, which is $XDG_CONFIG_HOME or ~/.config, the
+# same directory GLib's user config dir gives the service, so the condition and
+# the file the service reads cannot disagree. The unit then stays inactive,
+# nothing runs, and that is not a failure (`systemctl --user status
+# cockpit.service` says the condition was unmet).
+# The file is created by hand, from examples/resource-pulse-cockpit.json.template,
+# never by ./install, so the cockpit runs only for someone who wrote one.
+#
+# NEVER ENABLED. There is no [Install] section, so nothing can enable it. It is
+# started on demand (StartUnit, "replace"): by the extension's enable() once its
+# drawing side knows the unit (the design's Lifecycle), and by hand until then:
+#   systemctl --user start cockpit.service
+# A start with the file absent is accepted and skipped, so it costs one job and
+# nothing more. It stops at logout; this stops it at once:
+#   systemctl --user stop cockpit.service
+# Never `systemctl --user enable` or `reenable` it: there is nothing to enable,
+# and reenable's disable half deletes the dotbot symlink that IS this unit (see
+# systemd/herdr-server.service's [Install] note).
+#
+# Symlinked to ~/.config/systemd/user/ by ./install (install.conf.yaml), which
+# also reloads systemd and try-restarts this unit when, and only when, a module
+# it runs (service/cockpit.js, or one it imports) or this file changed after it
+# started (scripts/resource-pulse-service-refresh.sh). A skipped (inactive)
+# unit is left alone.
+#
+# ExecStart runs the checkout at ~/.dotfiles, because that checkout IS the
+# deployment (CLAUDE.md, "The checkout IS the deployment").
+#
+# A CRASH LOOP ENDS IN `failed`, as for the sampler: Restart=on-failure
+# restarts a crash after 5 s, and the start limit in [Unit] stops that after 5
+# starts in 300 s, where `systemctl --user --failed` shows it. Without the
+# limit it would never get there: one start per 5 s never reaches systemd's
+# default of 5 in 10 s.
+#
+# Watch it:  journalctl --user -u cockpit.service -e
+#
+# Comments must be on their own lines: systemd treats text after a value as part
+# of the value.
+
+[Unit]
+Description=Cockpit sources: sessions, network and mounts for the GNOME Shell extension
+# Stops at logout, with the session it serves.
+PartOf=graphical-session.target
+# IN [Unit], NOT [Service]: in [Service] systemd ignores StartLimitIntervalSec
+# (see systemd/vpn-notify.service). At most 5 starts in 300 s; see the header.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# The opt-in: without the layout file every start is skipped; see the header.
+# %E is $XDG_CONFIG_HOME, or ~/.config when that is unset.
+ConditionPathExists=%E/resource-pulse/cockpit.json
+
+[Service]
+# Ready once it owns its bus name. service/cockpit.js exports its object before
+# it asks for the name, so a client that sees the name can call it at once.
+Type=dbus
+BusName=io.github.quantivly.dotfiles.Cockpit1
+ExecStart=/usr/bin/gjs -m %h/.dotfiles/gnome-shell/extensions/resource-pulse@dotfiles/service/cockpit.js
+# A crash restarts it; a clean exit (a stop, SIGTERM) stays stopped.
+Restart=on-failure
+RestartSec=5
+# In background.slice it is scanned like any app, and shows in "heaviest" when
+# it is the heaviest, which is honest.
+Slice=background.slice
+Nice=10
+# Hard caps, so a bug costs at most a tenth of a core and 96 MiB. Its budget is
+# 48 MiB resident (scripts/resource-pulse-cost.sh --cockpit --rss-kib).
+CPUQuota=10%
+MemoryHigh=64M
+MemoryMax=96M

@@ -1,6 +1,7 @@
 import {test, assertEqual} from './harness.js';
 import {unescapeSystemdName, describeCgroup, displayNameFor, rankApps}
     from '../extensions/resource-pulse@dotfiles/lib/apps.js';
+import {APP_RANKING_LENGTH} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const GIB = 1024 ** 3;
 const ELAPSED_USEC = 2_000_000;
@@ -194,8 +195,53 @@ test('a real app tied with kernel (always ranked last) wins or loses by name, no
     assertEqual([tie('alpha').topCpu.name, tie('zeta').topCpu.name], ['alpha', 'kernel']);
 });
 test('nothing scanned gives null rankings, not zeros', () =>
-    assertEqual(rankApps(input({})), {topCpu: null, topMemory: null}));
+    assertEqual(rankApps(input({})), {topCpu: null, topMemory: null, cpuRanking: [], memoryRanking: []}));
 test('no cgroup with a delta gives topCpu null while memory still ranks', () => {
     const ranking = rankApps(input({'fresh': [null, 5_000_000, 2 * GIB]}));
-    assertEqual(ranking, {topCpu: null, topMemory: {groupKey: 'fresh', name: 'fresh', memoryBytes: 2 * GIB}});
+    const freshMemory = {groupKey: 'fresh', name: 'fresh', memoryBytes: 2 * GIB};
+    assertEqual(ranking, {topCpu: null, topMemory: freshMemory, cpuRanking: [], memoryRanking: [freshMemory]});
+});
+
+const EXTRA_GROUP_COUNT = 2;
+
+/**
+ * Builds a rankApps input of more groups than a ranking holds, each with distinct CPU and memory.
+ *
+ * @returns {object} The argument for rankApps.
+ */
+const inputWithMoreGroupsThanTheRankingHolds = () => {
+    const spec = {};
+    for (let groupIndex = 0; groupIndex < APP_RANKING_LENGTH + EXTRA_GROUP_COUNT; groupIndex++)
+        spec[`app-${groupIndex}`] = [0, (groupIndex + 1) * 100_000, (groupIndex + 1) * GIB];
+    return input(spec);
+};
+
+test('apps: rankApps lists every group by CPU and by memory, largest first, at most APP_RANKING_LENGTH', () => {
+    const ranking = rankApps(inputWithMoreGroupsThanTheRankingHolds());
+    const isSortedDescending = (entries, valueField) =>
+        entries.every((entry, i) => i === 0 || entry[valueField] <= entries[i - 1][valueField]);
+    assertEqual([ranking.cpuRanking.length, ranking.memoryRanking.length], [APP_RANKING_LENGTH, APP_RANKING_LENGTH]);
+    assertEqual(ranking.cpuRanking[0], ranking.topCpu);
+    assertEqual(ranking.memoryRanking[0], ranking.topMemory);
+    assertEqual([isSortedDescending(ranking.cpuRanking, 'cpuPercent'),
+        isSortedDescending(ranking.memoryRanking, 'memoryBytes')], [true, true]);
+});
+test('apps: equal values rank by name, then group key, so the order never depends on insertion', () => {
+    const ranking = rankApps(input({'b': [0, 1_000_000, 1], 'a': [0, 1_000_000, 1]}));
+    assertEqual(ranking.cpuRanking.map(entry => entry.groupKey), ['a', 'b']);
+    assertEqual(ranking.cpuRanking[0], ranking.topCpu);
+});
+test('apps: the memory ranking never names kernel or short jobs', () => {
+    const ranking = rankApps(input({'app': [0, 1_000_000, 1]},
+        {rootCpuDeltaUsec: 12_000_000, ...parents({'app': 'p'}, {'p': 11_000_000})}));
+    assertEqual(ranking.memoryRanking.some(entry => entry.groupKey.startsWith('pseudo:')), false);
+    assertEqual(ranking.cpuRanking.some(entry => entry.groupKey === 'pseudo:short-jobs'), true);
+});
+test('apps: rankApps with nothing to rank gives empty lists', () => {
+    const ranking = rankApps(input({}));
+    assertEqual([ranking.cpuRanking, ranking.memoryRanking], [[], []]);
+});
+test('apps: the CPU ranking is empty whenever the CPU cannot be ranked', () => {
+    const ranking = rankApps(input({'app': [0, 1_000_000, GIB]}, {elapsedUsec: 0}));
+    assertEqual([ranking.topCpu, ranking.cpuRanking, ranking.memoryRanking.length], [null, [], 1]);
 });

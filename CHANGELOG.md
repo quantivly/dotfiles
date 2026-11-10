@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Resource Pulse's desktop cockpit, data side: a second service, `cockpit.service`, serves the
+  Claude Code sessions, the network and the mounts on the session bus; nothing is drawn yet.** Built
+  from `docs/superpowers/plans/2026-11-09-desktop-cockpit-data-side.md` (design:
+  `docs/superpowers/specs/2026-11-09-desktop-cockpit-design.md`); the drawing side is the next plan.
+  - **The service.** `gjs -m service/cockpit.js`, apart from the sampler so that a cockpit deploy never
+    resets the sampler's histories, owns `io.github.quantivly.dotfiles.Cockpit1` (protocol 1:
+    `GetState`, a `Changed` signal sent only on a change, a watch counted per caller, and
+    `FocusSession`, which focuses a session's herdr pane). Three sources, each on its own cadence:
+    `sessions` (herdr's Claude agents: state, name, idle age from the transcript's mtime, memory,
+    account, context; 10 s watched, 60 s not), `network` (the uplink from NetworkManager, the VPN tunnel
+    from `/proc/net/route`, the SSH control masters; 10 s) and `mounts` (network shares and removable
+    disks with their free space; 30 s). Every cadence triples on battery, and a NetworkManager change or
+    a mount samples its source at once. A source is stale past three of its own intervals.
+  - **Secrets.** Every published field passes a reader, so nothing else leaves the service; the sources
+    refuse to open `~/.aws`, `~/.ssh`, credential files and the `.local` secret files (they may only be
+    stat'ed); and every name is replaced by `—` when it is longer than 64 characters, holds a control
+    character or matches one of `scripts/redact-secrets.sh`'s secret shapes.
+  - **Opt-in by file.** `systemd/cockpit.service` is linked by `./install`, never enabled, and skipped
+    (not failed) without `~/.config/resource-pulse/cockpit.json`, made by hand from the new
+    `examples/resource-pulse-cockpit.json.template`. The service watches that file and republishes the
+    layout, or its error, with no restart. `./install`'s refresh step now try-restarts each of the two
+    units only when its own code or unit file changed.
+  - **The sampler** adds one field, the first 10 apps of each ranking (`cpuRanking`, `memoryRanking`),
+    additive within `ResourcePulse1`.
+  - **Status, cost and the nested shell.** `gnome-status` gains a `cockpit:` line (skipped; active, with
+    the last publish and the stale sources; or each fault, with a ⚠ naming its remedy, plus a
+    config-invalid and an older-code ⚠), and `examples/gnome-settings.local.template` the cockpit's
+    commented background lines. `scripts/resource-pulse-cost.sh --cockpit` measures it (48 MiB resident
+    at most). `scripts/resource-pulse-nested.sh` starts it beside the sampler, with the template in the
+    run's config home, and `stop` ends both.
+
+  Guide: `docs/GNOME_CONFIGURATION_GUIDE.md` ("The cockpit service"). State table:
+  `scripts/test-resource-pulse.sh` (691 checks).
+
 - **`scripts/host-sync` keeps a host's declared Claude Code configuration level, not only its tools
   (DO-895).** The second half of step 6 of the shared-configuration design
   (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, D8, amendments H5-H8). New

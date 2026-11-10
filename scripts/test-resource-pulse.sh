@@ -498,14 +498,29 @@ sorted_closure() {
   closure_exit=$?
   printf '%sexit=%s' "$(LC_ALL=C sort <<<"$closure_output" | tr '\n' ' ')" "$closure_exit"
 }
-# Read from the import lines of today's tree, by hand: the shell side's sixteen
-# modules and the service side's fifteen, six of them (constants, errorLog,
-# history, pressure, protocol, teardown) on both.
-EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
-EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/main.js service/sampler.js '
+# Read from the import lines of today's tree, by hand: the shell side's
+# seventeen modules and the service side's seventeen, seven of them (constants,
+# errorLog, history, jsonFields, pressure, protocol, teardown) on both.
+EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
+EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/jsonFields.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/fileIo.js service/main.js service/sampler.js '
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
   "shell=[${EXPECTED_SHELL_CLOSURE}exit=0] service=[${EXPECTED_SERVICE_CLOSURE}exit=0]"
+# cockpit.service's closure decides its own restarts: it holds the file helpers
+# both services share (service/fileIo.js), never the sampler's modules, so a
+# sampler-only change never restarts the cockpit (ruling R13).
+cockpit_closure="$(sorted_closure "$EXT_DIR" service/cockpit.js)"
+cockpit_closure_summary="exit=${cockpit_closure##*exit=}"
+for closure_probe in service/cockpit.js service/fileIo.js service/main.js service/sampler.js service/dbusService.js; do
+  if [[ " $cockpit_closure" == *" $closure_probe "* ]]; then
+    cockpit_closure_summary+=" +$closure_probe"
+  else
+    cockpit_closure_summary+=" -$closure_probe"
+  fi
+done
+check "closure: on the real tree, service/cockpit.js holds itself and the shared service/fileIo.js, never the sampler's service/main.js, sampler.js or dbusService.js" \
+  "$cockpit_closure_summary" \
+  "exit=0 +service/cockpit.js +service/fileIo.js -service/main.js -service/sampler.js -service/dbusService.js"
 
 # A fixture of every shape it follows, and of what it must not: a JSDoc type
 # and a comment naming import('./x.js') are no imports; a multi-line import
@@ -592,9 +607,10 @@ gnome_status_hints() {
   printf '%s\n' "$1" >"$STUB_STATE/$SHELL_SCHEMA/enabled-extensions"
   printf '%s\n' "$2" >"$STUB_STATE/$SHELL_SCHEMA/allow-extension-installation"
   printf '%s\n' "$3" >"$STUB_STATE/$SHELL_SCHEMA/disable-user-extensions"
+  # XDG_CONFIG_HOME pinned empty, as in gnome_status_run below.
   # shellcheck disable=SC2016  # Expanded by zsh.
-  status_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_STUB_BIN:$PATH" \
-    STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" \
+  status_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" XDG_CONFIG_HOME= \
+    PATH="$GNOME_STATUS_STUB_BIN:$PATH" STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" \
     GNOME_STATUS_SHELL_STATE="$4" zsh -c 'source "$1" && gnome-status' gnome-status \
     "$DOTFILES/zsh/functions/system.sh" 2>&1)"
   status_exit=$?
@@ -612,10 +628,13 @@ check "gnome-status names the setting that keeps an enabled Resource Pulse from 
 # The service half of the block: systemctl, gdbus, pgrep and date are stubs too.
 # Each answers from GNOME_STATUS_* variables and logs its call to
 # GNOME_STATUS_CALLS; systemctl answers only the properties gnome-status reads
-# (in systemd's own order, measured: LoadState, ActiveState, SubState, whatever
-# order -p names them) or hangs; gdbus answers GetState in its own text form,
-# ('<json>',), or a given reply word for word; and date answers `+%s%N` with a
-# fixed now (anything else goes to the real date).
+# (in systemd's own order, measured: LoadState, ActiveState, SubState,
+# ConditionResult, whatever order -p names them) or hangs; gdbus answers
+# GetState in its own text form, ('<json>',), or a given reply word for word;
+# and date answers `+%s%N` with a fixed now (anything else goes to the real
+# date). The cockpit unit answers from GNOME_STATUS_COCKPIT_* variables, and
+# unset it is skipped, as for anyone without its config file: loaded, inactive,
+# ConditionResult=no.
 GNOME_STATUS_CALLS="$WIRING_TMP/gnome-status-calls"
 REAL_DATE_PATH="$(command -v date)" || fatal "date is required"
 GNOME_STATUS_SYSTEMCTL_STUB="$(cat <<'STUB'
@@ -623,20 +642,36 @@ GNOME_STATUS_SYSTEMCTL_STUB="$(cat <<'STUB'
 printf 'systemctl %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
 [[ "${GNOME_STATUS_SYSTEMCTL_MODE:-}" != hang ]] || exec sleep 30
 [[ "${GNOME_STATUS_SYSTEMCTL_MODE:-}" != hang-on-start-time || "$*" != *ActiveEnterTimestamp* ]] || exec sleep 30
+# default_sub_state <ActiveState>: the SubState systemd shows beside it.
+default_sub_state() {
+  case "$1" in
+    active) echo running ;;
+    failed) echo failed ;;
+    activating) echo start ;;
+    *) echo dead ;;
+  esac
+}
+# default_condition_result <ActiveState>: no while inactive (skipped, or never
+# started: systemd's default before any check), yes once a start got past it.
+default_condition_result() {
+  if [[ "$1" == inactive ]]; then echo no; else echo yes; fi
+}
 active_state="${GNOME_STATUS_SERVICE_ACTIVE_STATE-inactive}"
-case "$active_state" in
-  active) default_sub_state=running ;;
-  failed) default_sub_state=failed ;;
-  activating) default_sub_state=start ;;
-  *) default_sub_state=dead ;;
-esac
+cockpit_active_state="${GNOME_STATUS_COCKPIT_ACTIVE_STATE-inactive}"
 case "$*" in
   "--user show -p LoadState -p ActiveState -p SubState resource-pulse.service")
     [[ -z "${GNOME_STATUS_NO_MANAGER:-}" ]] || { echo "Failed to connect to user scope bus" >&2; exit 1; }
     printf 'LoadState=%s\nActiveState=%s\nSubState=%s\n' "${GNOME_STATUS_SERVICE_LOAD_STATE:-loaded}" \
-      "$active_state" "${GNOME_STATUS_SERVICE_SUB_STATE:-$default_sub_state}" ;;
+      "$active_state" "${GNOME_STATUS_SERVICE_SUB_STATE:-$(default_sub_state "$active_state")}" ;;
   "--user show -p ActiveEnterTimestamp --value --timestamp=unix resource-pulse.service")
     printf '%s\n' "${GNOME_STATUS_SERVICE_STARTED_AT-}" ;;
+  "--user show -p LoadState -p ActiveState -p SubState -p ConditionResult cockpit.service")
+    [[ -z "${GNOME_STATUS_NO_MANAGER:-}" ]] || { echo "Failed to connect to user scope bus" >&2; exit 1; }
+    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nConditionResult=%s\n' "${GNOME_STATUS_COCKPIT_LOAD_STATE:-loaded}" \
+      "$cockpit_active_state" "${GNOME_STATUS_COCKPIT_SUB_STATE:-$(default_sub_state "$cockpit_active_state")}" \
+      "${GNOME_STATUS_COCKPIT_CONDITION_RESULT:-$(default_condition_result "$cockpit_active_state")}" ;;
+  "--user show -p ActiveEnterTimestamp --value --timestamp=unix cockpit.service")
+    printf '%s\n' "${GNOME_STATUS_COCKPIT_STARTED_AT-}" ;;
   *) printf 'unexpected systemctl call: %s\n' "$*" >&2; exit 64 ;;
 esac
 STUB
@@ -644,12 +679,23 @@ STUB
 install_stub "$GNOME_STATUS_STUB_BIN" systemctl "$GNOME_STATUS_SYSTEMCTL_STUB"
 GNOME_STATUS_GDBUS_STUB="$(cat <<'STUB'
 #!/usr/bin/env bash
-# answer: GetState's JSON as gdbus prints it when no string holds an apostrophe;
-# verbatim: GNOME_STATUS_GDBUS_REPLY as it is; hang: never answers; anything else: no owner.
+# answer: GetState's JSON as gdbus prints it when no string holds an apostrophe
+# or a backslash; verbatim: the given reply as it is; hang: never answers;
+# anything else: no owner. The sampler's call answers from GNOME_STATUS_GDBUS_MODE,
+# GNOME_STATUS_STATE_JSON and GNOME_STATUS_GDBUS_REPLY, the cockpit's (its
+# --dest) from the GNOME_STATUS_COCKPIT_ variables of the same names.
 printf 'gdbus %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
-case "${GNOME_STATUS_GDBUS_MODE:-fail}" in
-  answer) printf "('%s',)\n" "$GNOME_STATUS_STATE_JSON" ;;
-  verbatim) printf '%s\n' "$GNOME_STATUS_GDBUS_REPLY" ;;
+gdbus_mode="${GNOME_STATUS_GDBUS_MODE:-fail}"
+state_json="${GNOME_STATUS_STATE_JSON-}"
+verbatim_reply="${GNOME_STATUS_GDBUS_REPLY-}"
+if [[ " $* " == *" --dest io.github.quantivly.dotfiles.Cockpit1 "* ]]; then
+  gdbus_mode="${GNOME_STATUS_COCKPIT_GDBUS_MODE:-fail}"
+  state_json="${GNOME_STATUS_COCKPIT_STATE_JSON-}"
+  verbatim_reply="${GNOME_STATUS_COCKPIT_GDBUS_REPLY-}"
+fi
+case "$gdbus_mode" in
+  answer) printf "('%s',)\n" "$state_json" ;;
+  verbatim) printf '%s\n' "$verbatim_reply" ;;
   hang) exec sleep 30 ;;
   *) echo "Error: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable" >&2; exit 1 ;;
 esac
@@ -701,9 +747,13 @@ ln -s "$STATUS_EXTENSION_DIR" "$GNOME_STATUS_LINKED_HOME/.local/share/gnome-shel
 # other lib/ modules are always older than the shell, and the stylesheet is too
 # unless given. The modules import one another as the real ones do, in small:
 # extension.js imports card.js (which imports lib/format.js), lib/visibility.js
-# and lib/protocol.js; service/main.js imports lib/protocol.js and lib/cadence.js.
-# So lib/format.js and lib/visibility.js are the shell's alone, lib/cadence.js the
-# service's alone, and lib/protocol.js both sides'.
+# and lib/protocol.js; service/main.js imports lib/protocol.js, lib/cadence.js,
+# service/sampler.js and service/fileIo.js; service/cockpit.js imports
+# lib/cockpitProtocol.js and service/fileIo.js. So lib/format.js and
+# lib/visibility.js are the shell's alone, lib/cadence.js and service/sampler.js
+# the sampler's alone, lib/cockpitProtocol.js the cockpit's alone,
+# lib/protocol.js the shell's and the sampler's, and service/fileIo.js both
+# services'.
 reset_status_extension() {
   local stylesheet_mtime="${4:-$BEFORE_SHELL_START_EPOCH}"
   rm -rf "$STATUS_EXTENSION_DIR"
@@ -717,10 +767,18 @@ reset_status_extension() {
   : >"$STATUS_EXTENSION_DIR/lib/visibility.js"
   : >"$STATUS_EXTENSION_DIR/lib/protocol.js"
   : >"$STATUS_EXTENSION_DIR/lib/cadence.js"
+  : >"$STATUS_EXTENSION_DIR/lib/cockpitProtocol.js"
+  : >"$STATUS_EXTENSION_DIR/service/sampler.js"
+  : >"$STATUS_EXTENSION_DIR/service/fileIo.js"
   printf '%s\n' "import {PROTOCOL_VERSION} from '../lib/protocol.js';" "import {decideAppScan} from '../lib/cadence.js';" \
+    "import {Sampler} from './sampler.js';" "import {readTextFile} from './fileIo.js';" \
     >"$STATUS_EXTENSION_DIR/service/main.js"
+  printf '%s\n' "import {COCKPIT_BUS_NAME} from '../lib/cockpitProtocol.js';" "import {readTextFile} from './fileIo.js';" \
+    >"$STATUS_EXTENSION_DIR/service/cockpit.js"
   touch -d "@$BEFORE_SHELL_START_EPOCH" "$STATUS_EXTENSION_DIR/extension.js" "$STATUS_EXTENSION_DIR/metadata.json" \
     "$STATUS_EXTENSION_DIR/lib/visibility.js" "$STATUS_EXTENSION_DIR/lib/protocol.js" "$STATUS_EXTENSION_DIR/lib/cadence.js" \
+    "$STATUS_EXTENSION_DIR/lib/cockpitProtocol.js" "$STATUS_EXTENSION_DIR/service/sampler.js" \
+    "$STATUS_EXTENSION_DIR/service/fileIo.js" "$STATUS_EXTENSION_DIR/service/cockpit.js" \
     || fatal "touch -d failed"
   touch -d "@$1" "$STATUS_EXTENSION_DIR/card.js" || fatal "touch -d @$1 failed"
   touch -d "@$2" "$STATUS_EXTENSION_DIR/lib/format.js" || fatal "touch -d @$2 failed"
@@ -762,9 +820,41 @@ state_json_sampled() {
     *) state_json_usec_before "$(( $1 * STATUS_USEC_PER_SECOND ))" ;;
   esac
 }
+# The cockpit's GetState, shaped as gnome-shell/tests/cockpitProtocol.test.js's
+# FULL_STATE (synthetic values), with each source stamped some whole seconds
+# before the fixed now. Its sources sample every 5, 10 and 30 s, so each is
+# stale past 15, 30 and 90 s (three intervals).
+COCKPIT_FRESH_PUBLISH_AGE_SECONDS=4
+# cockpit_usec_before <seconds>: the fixed now less that many seconds, in microseconds.
+cockpit_usec_before() { printf '%s' "$(( STATUS_NOW_USEC - $1 * STATUS_USEC_PER_SECOND ))"; }
+# cockpit_state_json <sessions age> <network age> <mounts age> [<configError as JSON> [<latest publish age>]]:
+# ages in seconds before now; "absent" leaves that source out, as a service from
+# before it would. configError defaults to null, the latest publish to 4 s ago.
+cockpit_state_json() {
+  local config_error_json="${4:-null}" publish_age_seconds="${5:-$COCKPIT_FRESH_PUBLISH_AGE_SECONDS}"
+  local sessions_json network_json mounts_json source_list
+  local -a source_entries=()
+  if [[ "$1" != absent ]]; then
+    sessions_json="\"sessions\":{\"sampledAtUsec\":$(cockpit_usec_before "$1"),\"intervalSeconds\":5,\"herdrRunning\":true,\"totalMemoryBytes\":4000000000,\"counts\":{\"working\":1,\"blocked\":1,\"idle\":0,\"done\":0,\"unknown\":0},\"rows\":[{\"id\":\"w1:p1\",\"name\":\"host-sync\",\"state\":\"working\",\"idleSeconds\":12,\"idleFromProcessAge\":false,\"memoryBytes\":3000000000,\"workspaceId\":\"w1\",\"paneId\":\"p1\",\"account\":\"quantivly-1\",\"contextPercent\":42}]}"
+    source_entries+=("$sessions_json")
+  fi
+  if [[ "$2" != absent ]]; then
+    network_json="\"network\":{\"sampledAtUsec\":$(cockpit_usec_before "$2"),\"intervalSeconds\":10,\"uplink\":{\"kind\":\"wired\",\"connectivity\":\"full\",\"wifiEnabled\":false},\"vpn\":{\"isUp\":true,\"interfaceName\":\"tun0\"},\"sshMasterCount\":2}"
+    source_entries+=("$network_json")
+  fi
+  if [[ "$3" != absent ]]; then
+    mounts_json="\"mounts\":{\"sampledAtUsec\":$(cockpit_usec_before "$3"),\"intervalSeconds\":30,\"rows\":[{\"mountPoint\":\"/media/user/BACKUP\",\"label\":\"BACKUP\",\"kind\":\"removable\",\"filesystemType\":\"ext4\",\"freeBytes\":500000000000,\"totalBytes\":2000000000000}]}"
+    source_entries+=("$mounts_json")
+  fi
+  source_list="$(IFS=,; printf '%s' "${source_entries[*]}")"
+  printf '{"protocol":1,"serviceStartedAtUsec":1793990000000000,"latestPublishedAtUsec":%s,"layout":{"monitor":{"vendor":"DEL","product":"DELL U2723QE"},"groups":[{"id":"machine","caption":"MACHINE","columns":2,"cards":["system","apps"]},{"id":"agents","caption":"AGENTS","columns":1,"cards":["sessions"]}]},"configError":%s,"sources":{%s}}' \
+    "$(cockpit_usec_before "$publish_age_seconds")" "$config_error_json" "$source_list"
+}
 # DOTFILES_ROOT is this checkout, where gnome-status finds the closure helper.
+# The cockpit unit keeps the stub's default (skipped) unless a row says otherwise.
 GNOME_STATUS_STUB_DEFAULTS=("DOTFILES_ROOT=$DOTFILES" GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
   GNOME_STATUS_GDBUS_MODE=answer "GNOME_STATUS_STATE_JSON=$(state_json_sampled 3)"
+  GNOME_STATUS_COCKPIT_GDBUS_MODE=answer "GNOME_STATUS_COCKPIT_STATE_JSON=$(cockpit_state_json 3 3 2)"
   "GNOME_STATUS_NOW_NSEC=$STATUS_NOW_NSEC" "GNOME_STATUS_SERVICE_STARTED_AT=@$SERVICE_STARTED_LONG_AFTER_EPOCH"
   "GNOME_STATUS_SHELL_PID=$$")
 # gnome_status_run <enabled-extensions> <allow-extension-installation> [NAME=value...]
@@ -783,7 +873,10 @@ gnome_status_run() {
   shift 2
   : >"$GNOME_STATUS_CALLS"
   # shellcheck disable=SC2016  # Expanded by zsh.
-  GNOME_STATUS_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_STUB_BIN:$PATH" \
+  # XDG_CONFIG_HOME is pinned empty, so the cockpit's config file is looked for
+  # under the row's HOME, never the caller's config home; a row may set it.
+  GNOME_STATUS_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" XDG_CONFIG_HOME= \
+    PATH="$GNOME_STATUS_STUB_BIN:$PATH" \
     STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" \
     GNOME_STATUS_CALLS="$GNOME_STATUS_CALLS" "${GNOME_STATUS_STUB_DEFAULTS[@]}" "$@" \
     zsh -c 'source "$1" && gnome-status' gnome-status "$DOTFILES/zsh/functions/system.sh" 2>&1)"
@@ -791,6 +884,7 @@ gnome_status_run() {
 # The parts of GNOME_STATUS_OUTPUT the rows compare.
 status_enabled_field() { sed -n 's/^Resource Pulse: linked=[a-z]* enabled=\(.*\) state=.*$/\1/p' <<<"$GNOME_STATUS_OUTPUT"; }
 status_service_line() { sed -n 's/^  service: //p' <<<"$GNOME_STATUS_OUTPUT"; }
+status_cockpit_line() { sed -n 's/^  cockpit: //p' <<<"$GNOME_STATUS_OUTPUT"; }
 status_warnings_naming() { grep -F '  ⚠ ' <<<"$GNOME_STATUS_OUTPUT" | grep -c -F "$1"; }
 status_warning_count() { grep -c -F '  ⚠ ' <<<"$GNOME_STATUS_OUTPUT"; }
 status_gdbus_calls() { grep -c '^gdbus ' "$GNOME_STATUS_CALLS"; }
@@ -1011,6 +1105,146 @@ not_running_beside_older_copy_summary+=" current-copy=$(status_warnings_naming "
 check "gnome-status: while the desktop runs an older copy (which may be the previous release, sampling by itself), a service not running is not blamed; with the current copy it is" \
   "$not_running_beside_older_copy_summary" "older-copy=1/0 current-copy=0/1"
 
+# The cockpit unit, cockpit.service: opt-in by file, so for anyone without
+# ~/.config/resource-pulse/cockpit.json systemd skips every start (loaded,
+# inactive, ConditionResult=no), which is no fault. A unit never started reads
+# ConditionResult=no too (systemd's default before any check, measured on a
+# system unit), so with the file present that state is a unit not started.
+GNOME_STATUS_COCKPIT_HOME="$WIRING_TMP/gnome-status-cockpit-home"
+if ! mkdir -p "$GNOME_STATUS_COCKPIT_HOME/.config/resource-pulse" ||
+  ! cp "$DOTFILES/examples/resource-pulse-cockpit.json.template" "$GNOME_STATUS_COCKPIT_HOME/.config/resource-pulse/cockpit.json"; then
+  fatal "cannot create gnome-status's opted-in fixture home"
+fi
+COCKPIT_DEST_NEEDLE='--dest io.github.quantivly.dotfiles.Cockpit1 '
+COCKPIT_JOURNAL_HINT='journalctl --user -u cockpit.service -e'
+status_cockpit_gdbus_calls() { grep -c -F -e "$COCKPIT_DEST_NEEDLE" "$GNOME_STATUS_CALLS"; }
+cockpit_skipped_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true
+cockpit_skipped_summary+="no-config=[$(status_cockpit_line)]/$(status_warning_count)/$(status_cockpit_gdbus_calls)"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_COCKPIT_HOME"
+cockpit_skipped_summary+=" config-never-started=[$(status_cockpit_line)]/$(status_warnings_naming 'cockpit.service is not running though ~/.config/resource-pulse/cockpit.json exists — systemctl --user start cockpit.service')/$(status_cockpit_gdbus_calls)"
+check "gnome-status: a cockpit unit skipped by its condition reads skipped while the config file is absent, and warns nothing; with the file, the same state is a unit not started, with the start remedy" \
+  "$cockpit_skipped_summary" \
+  "no-config=[skipped (no ~/.config/resource-pulse/cockpit.json)]/0/0 config-never-started=[inactive (not running)]/1/0"
+# The unit's condition (%E) and the service (GLib's user config dir) both look
+# under $XDG_CONFIG_HOME when it is set, so gnome-status does too: the file under
+# it opts in from a HOME without one, and a HOME's file does not count past it.
+cockpit_config_home_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true "XDG_CONFIG_HOME=$GNOME_STATUS_COCKPIT_HOME/.config"
+cockpit_config_home_summary+="file-under-it=[$(status_cockpit_line)]"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_COCKPIT_HOME" "XDG_CONFIG_HOME=$WIRING_TMP/no-such-config-home"
+cockpit_config_home_summary+=" file-only-in-home=[$(status_cockpit_line)]"
+check "gnome-status: with XDG_CONFIG_HOME set, the cockpit's config file is the one under it, as the unit's %E and the service read it" \
+  "$cockpit_config_home_summary" \
+  "file-under-it=[inactive (not running)] file-only-in-home=[skipped (no ~/.config/resource-pulse/cockpit.json)]"
+
+# Fresh: sources 3, 3 and 2 s old, the latest publish 4 s ago. The latest
+# publish is the latest Changed (or the start), so a quiet service's is old,
+# and that is no fault.
+QUIET_PUBLISH_AGE_SECONDS=2100
+cockpit_fresh_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active
+cockpit_fresh_summary+="fresh=[$(status_cockpit_line)]/$(status_warning_count)"
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active \
+  "GNOME_STATUS_COCKPIT_STATE_JSON=$(cockpit_state_json 3 3 2 null "$QUIET_PUBLISH_AGE_SECONDS")"
+cockpit_fresh_summary+=" quiet=[$(status_cockpit_line)]/$(status_warning_count)"
+check "gnome-status: an active cockpit shows its protocol, the age of its last publish and no stale source, from GetState; a quiet one's old publish is no fault" \
+  "$cockpit_fresh_summary" \
+  "fresh=[active, protocol 1, last publish 4 s ago, stale: none]/0 quiet=[active, protocol 1, last publish 35 min ago, stale: none]/0"
+
+# A source is stale past three of its own intervals (mounts: 3 × 30 s = 90 s),
+# each read from its own object: mounts comes last, so a read of the first
+# stamp in the sources for every source would find none stale.
+cockpit_stale_summary=""
+for stale_case in "at-limit:3 3 90" "past-limit:3 3 91" "two:16 3 91" "network-absent:3 absent 91"; do
+  read -r -a stale_case_ages <<<"${stale_case#*:}"
+  gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active \
+    "GNOME_STATUS_COCKPIT_STATE_JSON=$(cockpit_state_json "${stale_case_ages[@]}")"
+  cockpit_stale_summary+="${stale_case%%:*}=[$(status_cockpit_line)]/$(status_warning_count) "
+done
+check "gnome-status: a cockpit source last sampled more than three of its intervals ago is listed as stale, read from its own object; exactly three is not, and one GetState does not carry is not listed" \
+  "$cockpit_stale_summary" \
+  "at-limit=[active, protocol 1, last publish 4 s ago, stale: none]/0 past-limit=[active, protocol 1, last publish 4 s ago, stale: mounts]/0 two=[active, protocol 1, last publish 4 s ago, stale: sessions, mounts]/0 network-absent=[active, protocol 1, last publish 4 s ago, stale: mounts]/0 "
+
+# configError is the parser's text (FULL_STATE's holds apostrophes, so gdbus
+# prints the reply in double quotes; another holds JSON-escaped quotes), or
+# "missing" when the file vanished while the service runs. Each reply is
+# printed by GLib itself, as gdbus prints it.
+APOSTROPHE_CONFIG_ERROR="groups[2].cards[0]: unknown card id 'weather'"
+QUOTED_CONFIG_ERROR='groups[0]: "caption" must be a string'
+QUOTED_CONFIG_ERROR_JSON='"groups[0]: \"caption\" must be a string"'
+COCKPIT_CONFIG_INVALID_NEEDLE='cockpit: config invalid: '
+# cockpit_config_run <configError as JSON>: gnome-status with an active cockpit whose GetState carries it.
+cockpit_config_run() {
+  local glib_printed_reply
+  # shellcheck disable=SC2016  # JavaScript source.
+  glib_printed_reply="$(gjs -c 'const {GLib} = imports.gi; print(new GLib.Variant("(s)", [ARGV[0]]).print(true));' \
+    "$(cockpit_state_json 3 3 2 "$1")")"
+  gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active \
+    GNOME_STATUS_COCKPIT_GDBUS_MODE=verbatim "GNOME_STATUS_COCKPIT_GDBUS_REPLY=$glib_printed_reply"
+}
+cockpit_config_summary=""
+cockpit_config_run "\"$APOSTROPHE_CONFIG_ERROR\""
+cockpit_config_summary+="apostrophe=$(status_warnings_naming "$COCKPIT_CONFIG_INVALID_NEEDLE$APOSTROPHE_CONFIG_ERROR — ")/[$(status_cockpit_line)]"
+cockpit_config_run "$QUOTED_CONFIG_ERROR_JSON"
+cockpit_config_summary+=" quote=$(status_warnings_naming "$COCKPIT_CONFIG_INVALID_NEEDLE$QUOTED_CONFIG_ERROR — ")"
+cockpit_config_run '"missing"'
+cockpit_config_summary+=" missing=$(status_warnings_naming "${COCKPIT_CONFIG_INVALID_NEEDLE}missing — ")"
+cockpit_config_run null
+cockpit_config_summary+=" valid=$(status_warnings_naming "$COCKPIT_CONFIG_INVALID_NEEDLE")"
+check "gnome-status: a configError in the cockpit's GetState is a ⚠ quoting it whole (apostrophes, escaped quotes, or missing), beside its line; none without one" \
+  "$cockpit_config_summary" \
+  "apostrophe=1/[active, protocol 1, last publish 4 s ago, stale: none] quote=1 missing=1 valid=0"
+
+cockpit_not_installed_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_LOAD_STATE=not-found
+cockpit_not_installed_summary+="no-config=[$(status_cockpit_line)]/$(status_warning_count)"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_COCKPIT_HOME" GNOME_STATUS_COCKPIT_LOAD_STATE=not-found
+cockpit_not_installed_summary+=" config=[$(status_cockpit_line)]/$(status_warnings_naming 'cockpit.service is not installed though ~/.config/resource-pulse/cockpit.json exists — run ./install')"
+check "gnome-status: a cockpit unit not found reads not installed, never skipped, and says to run ./install only while the config file exists" \
+  "$cockpit_not_installed_summary" \
+  "no-config=[not installed (LoadState=not-found)]/0 config=[not installed (LoadState=not-found)]/1"
+
+cockpit_fault_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=failed
+cockpit_fault_summary+="failed=[$(status_cockpit_line)]/$(status_warnings_naming "cockpit.service failed — $COCKPIT_JOURNAL_HINT")/$(status_cockpit_gdbus_calls) "
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=activating GNOME_STATUS_COCKPIT_SUB_STATE=auto-restart
+cockpit_fault_summary+="restarting=[$(status_cockpit_line)]/$(status_warnings_naming "cockpit.service is restarting after a failure — $COCKPIT_JOURNAL_HINT")/$(status_cockpit_gdbus_calls) "
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active GNOME_STATUS_COCKPIT_GDBUS_MODE=fail
+cockpit_fault_summary+="no-answer=[$(status_cockpit_line)]/$(status_warnings_naming "cockpit.service is active but did not answer GetState within 3 s — $COCKPIT_JOURNAL_HINT")/$(status_cockpit_gdbus_calls)"
+check "gnome-status: a failed, restarting or silent cockpit is a ⚠ naming its journal, as for the sampler; only the active one is asked GetState" \
+  "$cockpit_fault_summary" \
+  "failed=[failed (not running)]/1/0 restarting=[activating (auto-restart: restarting after a failure)]/1/0 no-answer=[active, no answer]/1/1"
+
+# The cockpit's side is service/cockpit.js and what it imports (ruling R13):
+# its own lib/cockpitProtocol.js and the shared service/fileIo.js count, the
+# sampler's service/main.js and service/sampler.js do not. The sampler's count
+# beside each shows the change was seen, so a cockpit zero is not a blind one.
+cockpit_older_code_summary=""
+COCKPIT_STARTED_AT="GNOME_STATUS_COCKPIT_STARTED_AT=@$SUITE_STARTED_AT_EPOCH"
+for changed_module in service/cockpit.js lib/cockpitProtocol.js service/fileIo.js service/sampler.js service/main.js; do
+  status_extension_with_change "$changed_module"
+  gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT" \
+    GNOME_STATUS_COCKPIT_ACTIVE_STATE=active "$COCKPIT_STARTED_AT"
+  cockpit_older_code_summary+="$changed_module=$(status_warnings_naming "cockpit.service runs older code: $changed_module changed after it started — systemctl --user try-restart cockpit.service")/$(status_warnings_naming 'cockpit.service runs older code')/sampler:$(status_warnings_naming 'resource-pulse.service runs older code') "
+done
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT" \
+  GNOME_STATUS_COCKPIT_ACTIVE_STATE=active "$COCKPIT_STARTED_AT"
+cockpit_older_code_summary+="unchanged=$(status_warnings_naming 'runs older code')"
+check "gnome-status: a module service/cockpit.js runs (itself, lib/cockpitProtocol.js, or the shared service/fileIo.js) changed after the cockpit started is a ⚠ that it runs older code; a sampler-only module is not" \
+  "$cockpit_older_code_summary" \
+  "service/cockpit.js=1/1/sampler:0 lib/cockpitProtocol.js=1/1/sampler:0 service/fileIo.js=1/1/sampler:1 service/sampler.js=0/0/sampler:1 service/main.js=0/0/sampler:1 unchanged=0"
+
+cockpit_gdbus_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true
+cockpit_gdbus_summary+="skipped=$(status_gdbus_calls)"
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active
+cockpit_gdbus_summary+=" active=$(status_gdbus_calls) cockpit-call=[$(grep -F -e "$COCKPIT_DEST_NEEDLE" "$GNOME_STATUS_CALLS")]"
+check "gnome-status: an active cockpit makes exactly one more gdbus call than a skipped one, Cockpit1's GetState with gdbus's reply timeout" \
+  "$cockpit_gdbus_summary" \
+  "skipped=1 active=2 cockpit-call=[gdbus call --session --dest io.github.quantivly.dotfiles.Cockpit1 --object-path /io/github/quantivly/dotfiles/Cockpit1 --method io.github.quantivly.dotfiles.Cockpit1.GetState --timeout 2]"
+
 # Spelled by pieces so this row's own source is not what it finds.
 GNOME_STATUS_FORBIDDEN_PATTERN="cmd""line|env""iron\\b|\\bps -|pgre""p -[a-z]*[al]\\b"
 gnome_status_source="$(sed -n '/^gnome-status() {$/,/^}$/p' "$DOTFILES/zsh/functions/system.sh")"
@@ -1024,6 +1258,12 @@ check "install.conf.yaml links the extension directory" \
   "$(grep -c -x -F "    ~/.local/share/gnome-shell/extensions/$EXTENSION_UUID: gnome-shell/extensions/$EXTENSION_UUID" "$DOTFILES/install.conf.yaml")" 1
 check "the template carries a commented genable_extension line" \
   "$(grep -c -x -F "# genable_extension $EXTENSION_UUID" "$DOTFILES/examples/gnome-settings.local.template")" 1
+# The cockpit's background, for the desktop and the lock screen, in gset's own
+# value form (as `gsettings get` prints it, so a second gnome-apply is a no-op).
+COCKPIT_BACKGROUND_LINE_PATTERN="^# gset org\\.gnome\\.desktop\\.(background|screensaver) +(picture-options +\"'none'\"|primary-color +\"'#121a1a'\")\$"
+check "the template carries the cockpit's background lines for the desktop and the lock screen, commented, and points at the cockpit's config template" \
+  "background=$(grep -c -E "$COCKPIT_BACKGROUND_LINE_PATTERN" "$DOTFILES/examples/gnome-settings.local.template") pointer=$(grep -c -F 'examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json' "$DOTFILES/examples/gnome-settings.local.template")" \
+  "background=4 pointer=1"
 
 # ---------------------------------------------------------------------------
 # The sampler service: its D-Bus face, its entry point, its unit and its
@@ -1191,7 +1431,8 @@ for real_bus_stubbed_tool in gsettings gnome-extensions gnome-shell systemctl pg
 done
 GNOME_STATUS_REAL_BUS_OUTPUT="$WIRING_TMP/gnome-status-real-bus.out"
 # shellcheck disable=SC2016  # Expanded by zsh.
-GNOME_STATUS_REAL_BUS_COMMAND=(env HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_REAL_BUS_STUB_BIN:$PATH"
+# XDG_CONFIG_HOME pinned empty, as in gnome_status_run.
+GNOME_STATUS_REAL_BUS_COMMAND=(env HOME="$GNOME_STATUS_HOME" XDG_CONFIG_HOME= PATH="$GNOME_STATUS_REAL_BUS_STUB_BIN:$PATH"
   STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG"
   GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
   zsh -c 'source "$1" && gnome-status' gnome-status "$DOTFILES/zsh/functions/system.sh")
@@ -1282,6 +1523,431 @@ if [[ "$service_first_summary" != "$SERVICE_FIRST_EXPECTED" ]]; then
   sed 's/^/    service log: /' "$SERVICE_LOG"
 fi
 
+printf '\nservice/cockpit.js on a private bus (the real sources, under a home of this run and no system bus)\n'
+# The cockpit's entry point runs twice, each time under a HOME, XDG_CONFIG_HOME
+# and XDG_STATE_HOME of this run: the config home holds the shipped template as
+# resource-pulse/cockpit.json, the state home no hspawn registry, the home no
+# ~/.ssh. DBUS_SYSTEM_BUS_ADDRESS names a socket that does not exist, so
+# NetworkManager and UPower are absent, as on a runner with no system bus at
+# all. The first run has no herdr socket; the second has a fake herdr at
+# <config home>/herdr/herdr.sock, so FocusSession never reaches the live herdr.
+COCKPIT_MAIN_PATH="$EXT_DIR/service/cockpit.js"
+COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
+COCKPIT_OBJECT_PATH='/io/github/quantivly/dotfiles/Cockpit1'
+COCKPIT_CONFIG_TEMPLATE="$DOTFILES/examples/resource-pulse-cockpit.json.template"
+COCKPIT_CONFIG_RELATIVE_PATH='resource-pulse/cockpit.json'
+COCKPIT_NO_SYSTEM_BUS="unix:path=$WIRING_TMP/cockpit-no-system-bus"
+COCKPIT_RUN_DIR="$WIRING_TMP/cockpit"
+COCKPIT_SERVE_LOG="$COCKPIT_RUN_DIR/cockpit-serve.log"
+COCKPIT_FOCUS_LOG="$COCKPIT_RUN_DIR/cockpit-focus.log"
+COCKPIT_HERDR_REQUEST_LOG="$COCKPIT_RUN_DIR/herdr-requests.log"
+COCKPIT_FAKE_HERDR_LOG="$COCKPIT_RUN_DIR/fake-herdr.log"
+for cockpit_run_name in serve focus; do
+  for cockpit_home_kind in home config state; do
+    mkdir -p "$COCKPIT_RUN_DIR/$cockpit_run_name-$cockpit_home_kind" \
+      || fatal "cannot create $COCKPIT_RUN_DIR/$cockpit_run_name-$cockpit_home_kind"
+  done
+  cockpit_config_path="$COCKPIT_RUN_DIR/$cockpit_run_name-config/$COCKPIT_CONFIG_RELATIVE_PATH"
+  if ! mkdir -p "$(dirname "$cockpit_config_path")" || ! cp "$COCKPIT_CONFIG_TEMPLATE" "$cockpit_config_path"; then
+    fatal "cannot place the config template at $cockpit_config_path"
+  fi
+done
+mkdir -p "$COCKPIT_RUN_DIR/focus-config/herdr" || fatal "cannot create the fake herdr's directory"
+: >"$COCKPIT_SERVE_LOG"; : >"$COCKPIT_FOCUS_LOG"; : >"$COCKPIT_HERDR_REQUEST_LOG"; : >"$COCKPIT_FAKE_HERDR_LOG"
+# Decodes a gdbus call's reply (GLib.Variant text, as gdbus prints it, holding
+# one JSON string). For `reply` it prints the JSON compactly (FocusSession's);
+# for `state` it prints the GetState fields named after the text, as
+# <name>=<value> separated by spaces, in the order asked.
+# shellcheck disable=SC2016  # JavaScript source: $ and backticks are gjs's, not bash's.
+COCKPIT_REPLY_DECODER_JS='
+const {GLib} = imports.gi;
+const [replyKind, gdbusReplyText, ...fieldNames] = ARGV;
+const SOURCE_NAMES = ["sessions", "network", "mounts"];
+const SINGLE_STRING_TYPE = new GLib.VariantType("(s)");
+function kindOf(value) {
+    if (value === null || value === undefined)
+        return "null";
+    return Array.isArray(value) ? "list" : typeof value;
+}
+function stateFieldTexts(state) {
+    const sources = state.sources ?? {};
+    const sessions = sources.sessions ?? {};
+    const uplink = sources.network?.uplink ?? {};
+    const sourceKinds = SOURCE_NAMES.map(sourceName => kindOf(sources[sourceName]));
+    const uplinkValues = [uplink.kind, uplink.connectivity, uplink.wifiEnabled].map(String);
+    const intervals = SOURCE_NAMES.map(sourceName => String(sources[sourceName]?.intervalSeconds));
+    const groupCount = state.layout?.groups?.length;
+    return {
+        protocol: String(state.protocol),
+        sources: sourceKinds.join("/"),
+        layout: kindOf(state.layout),
+        groups: String(groupCount ?? "none"),
+        configError: JSON.stringify(state.configError ?? null),
+        published: String(state.latestPublishedAtUsec),
+        herdrRunning: String(sessions.herdrRunning),
+        sessionRows: String(sessions.rows?.length),
+        mounts: kindOf(sources.mounts),
+        mountsRows: kindOf(sources.mounts?.rows),
+        uplink: uplinkValues.join("/"),
+        intervals: intervals.join("/"),
+    };
+}
+let decoded;
+try {
+    const [replyJson] = GLib.Variant.parse(SINGLE_STRING_TYPE, gdbusReplyText, null, null).deepUnpack();
+    const reply = JSON.parse(replyJson);
+    if (replyKind === "reply") {
+        decoded = JSON.stringify(reply);
+    } else {
+        const fieldTexts = stateFieldTexts(reply);
+        decoded = fieldNames.map(fieldName => `${fieldName}=${fieldTexts[fieldName]}`).join(" ");
+    }
+} catch (error) {
+    decoded = `unreadable reply: ${error.message}`;
+}
+print(decoded);
+'
+# A fake herdr on <socket path>, speaking herdr's framing (one JSON request
+# line {id, method, params}, one reply line, then close: see
+# service/herdrSocket.js). It logs each request as `<method> <params JSON>` to
+# <request log>. Its snapshot holds four claude panes: w1:p1; w1:p2, whose
+# pane.focus it rejects as herdr does a pane that is gone; p3, in no
+# workspace; and one with no pane at all, whose row id is its session id.
+# shellcheck disable=SC2016  # JavaScript source: $ and backticks are gjs's, not bash's.
+COCKPIT_FAKE_HERDR_JS='
+const {Gio, GLib} = imports.gi;
+const [socketPath, requestLogPath] = ARGV;
+const PANE_HERDR_REJECTS = "p2";
+const SNAPSHOT = {
+    workspaces: [{workspace_id: "w1", label: "alpha"}],
+    agents: [
+        {agent: "claude", agent_status: "working", workspace_id: "w1", pane_id: "p1", agent_session: {value: "s1"}},
+        {agent: "claude", agent_status: "idle", workspace_id: "w1", pane_id: PANE_HERDR_REJECTS,
+            agent_session: {value: "s2"}},
+        {agent: "claude", agent_status: "idle", pane_id: "p3", cwd: "/work/beta", agent_session: {value: "s3"}},
+        {agent: "claude", agent_status: "idle", cwd: "/work/gamma", agent_session: {value: "s4"}},
+    ],
+};
+const requestLines = [];
+function answerFor(method, params) {
+    switch (method) {
+    case "session.snapshot":
+        return {result: {type: "session_snapshot", snapshot: SNAPSHOT}};
+    case "pane.process_info":
+        return {result: {type: "pane_process_info", process_info: {pane_id: params.pane_id, foreground_processes: []}}};
+    case "workspace.focus":
+        return {result: {type: "ok"}};
+    case "pane.focus":
+        if (params.pane_id === PANE_HERDR_REJECTS)
+            return {error: {code: "pane_not_found", message: "pane not found"}};
+        return {result: {type: "ok"}};
+    default:
+        return {error: {code: "invalid_request", message: "unknown method"}};
+    }
+}
+function replyTextFor(requestLine) {
+    const request = JSON.parse(requestLine);
+    const params = request.params ?? {};
+    requestLines.push(`${request.method} ${JSON.stringify(params)}`);
+    GLib.file_set_contents(requestLogPath, `${requestLines.join("\n")}\n`);
+    return JSON.stringify({id: request.id, ...answerFor(request.method, params)});
+}
+const socketService = new Gio.SocketService();
+socketService.add_address(Gio.UnixSocketAddress.new(socketPath), Gio.SocketType.STREAM, Gio.SocketProtocol.DEFAULT,
+    null);
+socketService.connect("incoming", (_service, connection) => {
+    const lineReader = new Gio.DataInputStream({base_stream: connection.get_input_stream()});
+    lineReader.read_line_async(GLib.PRIORITY_DEFAULT, null, (_stream, readResult) => {
+        let replyText = "";
+        try {
+            const [requestLine] = lineReader.read_line_finish_utf8(readResult);
+            replyText = replyTextFor(requestLine);
+        } catch (error) {
+            printerr(`fake herdr: cannot answer: ${error.message}`);
+        }
+        const replyBytes = new GLib.Bytes(new TextEncoder().encode(`${replyText}\n`));
+        connection.get_output_stream().write_bytes_async(replyBytes, GLib.PRIORITY_DEFAULT, null,
+            (outputStream, writeResult) => {
+                try {
+                    if (outputStream.write_bytes_finish(writeResult) !== replyBytes.get_size())
+                        printerr("fake herdr: a reply went out in part");
+                } catch (error) {
+                    printerr(`fake herdr: cannot reply: ${error.message}`);
+                }
+                connection.close(null);
+            });
+    });
+    return true;
+});
+socketService.start();
+new GLib.MainLoop(null, false).run();
+'
+# The driver. The serve run: owns the name, answers GetState, a second copy
+# exits 1, then the config is rewritten unchanged (GetState's latest publish
+# time read around it), overwritten with "{", deleted and renamed back into
+# place, each followed by GetState for up to 3 s; then SIGTERM. The focus run: a fake herdr first, then the service, then one
+# FocusSession per kind of row, each followed by the focus requests the fake
+# herdr saw for it; then the fake herdr stopped and one more FocusSession, which
+# finds herdr unreachable; then SIGTERM. Every wait is bounded.
+# shellcheck disable=SC2016  # The driver's own source: its variables expand when it runs.
+COCKPIT_DRIVER_OUTPUT="$(on_private_bus bash -c '
+set -u
+cockpit_main="$1" decoder_js="$2" fake_herdr_js="$3" bus_name="$4" object_path="$5" run_dir="$6"
+config_template="$7" config_relative_path="$8" no_system_bus="$9"
+serve_log="${10}" focus_log="${11}" request_log="${12}" fake_herdr_log="${13}"
+is_private_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "${RESOURCE_PULSE_TEST_BUS_DIR:-}" \
+  || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
+USEC_PER_SECOND=1000000
+FOCUS_REQUEST_PATTERN="^(workspace|pane)\.focus "
+# still_running <pid>: the process exists and is not a zombie (the state after the last ") " of its stat).
+still_running() {
+  local stat_line process_state
+  read -r stat_line 2>/dev/null <"/proc/$1/stat" || return 1
+  process_state="${stat_line##*) }"
+  [[ "${process_state%% *}" != Z ]]
+}
+now_usec() { printf "%s" "${EPOCHREALTIME/./}"; }
+# layout_changed_count <file>: the Changed signals gdbus monitor wrote to <file>
+# that carry the key configError, which only a layout change adds.
+layout_changed_count() {
+  grep -c -E 'Changed.*configError' "$1"
+}
+# probe_state <seconds> <needle> <field...>: asks GetState through gdbus until
+# the decoded fields hold <needle>, for at most <seconds>; prints the last
+# decoding, or "no answer" when gdbus never answered.
+probe_state() {
+  local wait_seconds="$1" needle="$2" deadline_usec decoded="no answer" reply
+  shift 2
+  deadline_usec=$(( $(now_usec) + wait_seconds * USEC_PER_SECOND ))
+  while :; do
+    if reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
+        --method "$bus_name.GetState" --timeout 2 2>/dev/null)"; then
+      decoded="$(gjs -c "$decoder_js" state "$reply" "$@")"
+      [[ "$decoded" == *"$needle"* ]] && break
+    fi
+    (( $(now_usec) >= deadline_usec )) && break
+    sleep 0.1
+  done
+  printf "%s" "$decoded"
+}
+# stop_process <label> <pid>: SIGTERM, then at most 10 s; prints <label>=<exit status>, or hung.
+stop_process() {
+  local label="$1" pid="$2" attempt
+  kill -TERM "$pid" 2>/dev/null
+  for (( attempt = 0; attempt < 100; attempt++ )); do
+    still_running "$pid" || break
+    sleep 0.1
+  done
+  if still_running "$pid"; then
+    kill -KILL "$pid"
+    wait "$pid"
+    printf "%s=hung\n" "$label"
+  else
+    wait "$pid"
+    printf "%s=%s\n" "$label" "$?"
+  fi
+}
+# focus_session <id> [label]: one FocusSession through gdbus; prints, under
+# "focus <label>" (the id by default), the reply and the focus requests the fake
+# herdr saw for it, joined by |.
+focus_session() {
+  local session_id="$1" label="${2:-$1}" requests_before reply decoded requests
+  requests_before="$(grep -c -E "$FOCUS_REQUEST_PATTERN" "$request_log")"
+  if reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
+      --method "$bus_name.FocusSession" "\"$session_id\"" --timeout 5 2>&1)"; then
+    decoded="$(gjs -c "$decoder_js" reply "$reply")"
+  else
+    decoded="D-Bus error: ${reply%%$'"'"'\n'"'"'*}"
+  fi
+  requests="$(grep -E "$FOCUS_REQUEST_PATTERN" "$request_log" | tail -n "+$(( requests_before + 1 ))" | tr "\n" "|")"
+  printf "focus %s=reply=%s requests=[%s]\n" "$label" "$decoded" "${requests%|}"
+}
+
+serve_config="$run_dir/serve-config/$config_relative_path"
+serve_environment=(env HOME="$run_dir/serve-home" XDG_CONFIG_HOME="$run_dir/serve-config"
+  XDG_STATE_HOME="$run_dir/serve-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+"${serve_environment[@]}" gjs -m "$cockpit_main" >>"$serve_log" 2>&1 &
+serve_pid=$!
+printf "served=%s\n" "$(probe_state 15 "sources=object/object/object" \
+  protocol sources groups configError herdrRunning mountsRows)"
+printf "no-system-bus=%s\n" "$(probe_state 2 "uplink=" uplink intervals)"
+"${serve_environment[@]}" timeout 30 gjs -m "$cockpit_main" >>"$serve_log" 2>&1
+printf "second-exit=%s\n" "$?"
+printf "after-second=%s\n" "$(probe_state 5 "protocol=1" protocol)"
+# A monitor on the the service bus name, attached (its first output line, the
+# "Monitoring signals" banner, is the readiness signal) before any rewrite. Only a
+# layout change adds the key configError to Changed, so counting those lines
+# says whether a rewrite published a layout; a mounts resample cannot move it.
+monitor_log="$run_dir/layout-monitor.log"
+: >"$monitor_log"
+gdbus monitor --session --dest "$bus_name" >"$monitor_log" 2>&1 &
+monitor_pid=$!
+trap '"'"'kill "$monitor_pid" 2>/dev/null'"'"' EXIT
+for (( attempt = 0; attempt < 50; attempt++ )); do
+  [[ -s "$monitor_log" ]] && break
+  sleep 0.1
+done
+cp -- "$config_template" "$serve_config"
+sleep 1
+layout_changes_after_same_text="$(layout_changed_count "$monitor_log")"
+printf "{" >"$serve_config"
+printf "malformed=%s\n" "$(probe_state 3 "layout=null" layout configError mounts)"
+for (( attempt = 0; attempt < 30; attempt++ )); do
+  (( $(layout_changed_count "$monitor_log") >= 1 )) && break
+  sleep 0.1
+done
+layout_changes_after_new_text="$(layout_changed_count "$monitor_log")"
+kill "$monitor_pid" 2>/dev/null
+printf "layout-changes=same-text=%s new-text=%s\n" \
+  "$layout_changes_after_same_text" "$layout_changes_after_new_text"
+rm -f -- "$serve_config"
+printf "deleted=%s\n" "$(probe_state 3 "configError=\"missing\"" layout configError mounts)"
+cp -- "$config_template" "$serve_config.new" && mv -- "$serve_config.new" "$serve_config"
+printf "renamed-in=%s\n" "$(probe_state 3 "groups=3" layout groups configError)"
+stop_process serve-exit "$serve_pid"
+
+herdr_socket="$run_dir/focus-config/herdr/herdr.sock"
+gjs -c "$fake_herdr_js" "$herdr_socket" "$request_log" >>"$fake_herdr_log" 2>&1 &
+fake_herdr_pid=$!
+for (( attempt = 0; attempt < 50; attempt++ )); do
+  [[ -S "$herdr_socket" ]] && break
+  sleep 0.1
+done
+focus_environment=(env HOME="$run_dir/focus-home" XDG_CONFIG_HOME="$run_dir/focus-config"
+  XDG_STATE_HOME="$run_dir/focus-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+"${focus_environment[@]}" gjs -m "$cockpit_main" >>"$focus_log" 2>&1 &
+focus_pid=$!
+printf "focus-ready=%s\n" "$(probe_state 15 "sessionRows=4" herdrRunning sessionRows)"
+for session_id in w1:p1 p3 w1:p2 w1:p9 s4; do
+  focus_session "$session_id"
+done
+# The rows stay those of the start sample: unwatched, sessions resamples only
+# after 60 s, so w1:p1 is still a row once herdr is gone.
+kill -TERM "$fake_herdr_pid" 2>/dev/null
+wait "$fake_herdr_pid" 2>/dev/null
+focus_session w1:p1 "w1:p1 without herdr"
+stop_process focus-exit "$focus_pid"
+' cockpit-driver "$COCKPIT_MAIN_PATH" "$COCKPIT_REPLY_DECODER_JS" "$COCKPIT_FAKE_HERDR_JS" "$COCKPIT_BUS_NAME" \
+  "$COCKPIT_OBJECT_PATH" "$COCKPIT_RUN_DIR" "$COCKPIT_CONFIG_TEMPLATE" "$COCKPIT_CONFIG_RELATIVE_PATH" \
+  "$COCKPIT_NO_SYSTEM_BUS" "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_HERDR_REQUEST_LOG" \
+  "$COCKPIT_FAKE_HERDR_LOG" 2>&1)"
+declare -A cockpit_driver_said=()
+while IFS= read -r driver_line; do
+  [[ "$driver_line" == *=* ]] && cockpit_driver_said["${driver_line%%=*}"]="${driver_line#*=}"
+done <<<"$COCKPIT_DRIVER_OUTPUT"
+cockpit_fail_count_before=$FAIL
+check "service/cockpit.js owns Cockpit1 within 15 s and its GetState says protocol 1, the template's three groups, herdr not running and a list of mount rows" \
+  "${cockpit_driver_said[served]-}" "protocol=1 sources=object/object/object groups=3 configError=null herdrRunning=false mountsRows=list"
+check "with no system bus it serves all the same: no uplink known, and every cadence off battery (sessions 60 s unwatched, network 10 s, mounts 30 s)" \
+  "${cockpit_driver_said[no-system-bus]-}" "uplink=null/null/null intervals=60/10/30"
+check "a second service/cockpit.js finds the name taken and exits 1, while the first keeps serving" \
+  "second-exit=${cockpit_driver_said[second-exit]-} after-second=${cockpit_driver_said[after-second]-}" \
+  "second-exit=1 after-second=protocol=1"
+check "the config rewritten with the same text publishes no layout change, and with a new text publishes one (Changed signals carrying configError, watched on the bus)" \
+  "${cockpit_driver_said[layout-changes]-}" "same-text=0 new-text=1"
+check "the config overwritten with '{' reads within 3 s as no layout and the parse error, and the sources keep serving" \
+  "${cockpit_driver_said[malformed]-}" 'layout=null configError="config: malformed JSON" mounts=object'
+check "the config deleted reads within 3 s as no layout and the error missing, and the sources keep serving" \
+  "${cockpit_driver_said[deleted]-}" 'layout=null configError="missing" mounts=object'
+check "the config renamed back into place (an atomic editor's save) reads within 3 s as the layout again" \
+  "${cockpit_driver_said[renamed-in]-}" "layout=object groups=3 configError=null"
+check "SIGTERM ends service/cockpit.js with exit 0, in both runs" \
+  "serve=${cockpit_driver_said[serve-exit]-} focus=${cockpit_driver_said[focus-exit]-}" "serve=0 focus=0"
+check "service/cockpit.js logged its serving line once, with the protocol" \
+  "$(grep -c -F "cockpit: serving $COCKPIT_BUS_NAME (protocol 1)" "$COCKPIT_SERVE_LOG")" 1
+check "service/cockpit.js logged no gjs or GLib warning, critical or uncaught error, in either run" \
+  "$(cat "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" | grep -c -E "$ENGINE_WARNING_PATTERN")" 0
+check "FocusSession focuses the row's own workspace, then its pane, over the herdr socket: focused true, windowPid null" \
+  "ready=${cockpit_driver_said[focus-ready]-} ${cockpit_driver_said[focus w1:p1]-}" \
+  'ready=herdrRunning=true sessionRows=4 reply={"focused":true,"windowPid":null,"error":null} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p1"}]'
+check "FocusSession on a row in no workspace sends pane.focus alone" \
+  "${cockpit_driver_said[focus p3]-}" \
+  'reply={"focused":true,"windowPid":null,"error":null} requests=[pane.focus {"pane_id":"p3"}]'
+# A herdr rejection is an answer, not a fault: the cockpit replies with its
+# code itself, so the D-Bus face's fault line never appears for it. herdr's own
+# text goes to the journal alone (ruling R18).
+check "a herdr rejection of pane.focus answers focused false and the code herdr-rejected, not a D-Bus error nor herdr's text, which is logged, not as a fault" \
+  "${cockpit_driver_said[focus w1:p2]-} logged=$(grep -c -F 'cockpit: focus: w1:p2: herdr: pane_not_found: pane not found' "$COCKPIT_FOCUS_LOG") faults=$(grep -c -F 'cockpit: FocusSession failed' "$COCKPIT_FOCUS_LOG")" \
+  'reply={"focused":false,"windowPid":null,"error":"herdr-rejected"} requests=[workspace.focus {"workspace_id":"w1"}|pane.focus {"pane_id":"p2"}] logged=1 faults=0'
+check "an unknown id, and a row with no pane, answer focused false with the codes unknown-session and no-pane and ask herdr nothing" \
+  "unknown: ${cockpit_driver_said[focus w1:p9]-} no-pane: ${cockpit_driver_said[focus s4]-}" \
+  'unknown: reply={"focused":false,"windowPid":null,"error":"unknown-session"} requests=[] no-pane: reply={"focused":false,"windowPid":null,"error":"no-pane"} requests=[]'
+check "with the fake herdr stopped, a row answers focused false and the code herdr-unreachable, and herdr's text goes to the journal" \
+  "${cockpit_driver_said[focus w1:p1 without herdr]-} logged=$(grep -c -F 'cockpit: focus: w1:p1: herdr: ' "$COCKPIT_FOCUS_LOG")" \
+  'reply={"focused":false,"windowPid":null,"error":"herdr-unreachable"} requests=[] logged=1'
+if (( FAIL > cockpit_fail_count_before )); then
+  printf '    (driver said: %s)\n' "$COCKPIT_DRIVER_OUTPUT"
+  sed 's/^/    serve log: /' "$COCKPIT_SERVE_LOG"
+  sed 's/^/    focus log: /' "$COCKPIT_FOCUS_LOG"
+  sed 's/^/    fake herdr log: /' "$COCKPIT_FAKE_HERDR_LOG"
+fi
+
+printf '\nthe stat-only paths (named nowhere under service/ or lib/ but their list)\n'
+# The cockpit service may stat these files, never open them (the spec's "stat,
+# never open" list): its file reader (service/sources/sourceIo.js) refuses a
+# path holding a fragment of lib/constants.js's STAT_ONLY_PATH_FRAGMENTS. So no
+# file under service/ or lib/ may name one anywhere else, in a path it reads or
+# one it builds; the list itself is the one place that does, and only its own
+# lines are passed over. The names are the spec's, so the row does not lean on
+# the list it guards.
+# shellcheck disable=SC2088  # The ~ is text the row searches for, never a path to expand.
+STAT_ONLY_NAMES=('.credentials' '.aws/' '.zshrc.local' '.gitconfig.local' '.backup.local' '~/.ssh/')
+STAT_ONLY_LIST_FIRST_LINE='export const STAT_ONLY_PATH_FRAGMENTS = ['
+STAT_ONLY_LIST_LAST_LINE='];'
+STAT_ONLY_LIST_MODULE='lib/constants.js'
+# stat_only_mentions <extension dir>: "named-in=[<file> ...] list=<state>": the
+# files under service/ and lib/ (relative, sorted) naming one of STAT_ONLY_NAMES
+# outside the list, and whether lib/constants.js held the list, closed. A tree
+# that cannot be listed, or holds no file, says so instead of naming none.
+stat_only_mentions() {
+  local extension_dir="$1" listing_path="$WIRING_TMP/stat-only-listing" module_path relative_path
+  local module_line stat_only_name list_state="absent" inside_list named_in=""
+  local -a module_paths=()
+  find "$extension_dir/service" "$extension_dir/lib" -type f -print0 >"$listing_path" 2>/dev/null \
+    || { printf 'cannot list service/ and lib/ under %s' "$extension_dir"; return; }
+  mapfile -d '' module_paths < <(LC_ALL=C sort -z "$listing_path")
+  (( ${#module_paths[@]} > 0 )) || { printf 'no file under service/ or lib/ in %s' "$extension_dir"; return; }
+  for module_path in "${module_paths[@]}"; do
+    relative_path="${module_path#"$extension_dir"/}"
+    inside_list=false
+    while IFS= read -r module_line || [[ -n "$module_line" ]]; do
+      if [[ "$relative_path" == "$STAT_ONLY_LIST_MODULE" ]]; then
+        if [[ "$module_line" == "$STAT_ONLY_LIST_FIRST_LINE" ]]; then
+          inside_list=true; list_state="unclosed"; continue
+        fi
+        if [[ "$inside_list" == true ]]; then
+          [[ "$module_line" == "$STAT_ONLY_LIST_LAST_LINE" ]] && { inside_list=false; list_state="closed"; }
+          continue
+        fi
+      fi
+      for stat_only_name in "${STAT_ONLY_NAMES[@]}"; do
+        if [[ "$module_line" == *"$stat_only_name"* ]]; then
+          named_in+="$relative_path "
+          continue 3
+        fi
+      done
+    done <"$module_path"
+  done
+  printf 'named-in=[%s] list=%s' "${named_in% }" "$list_state"
+}
+# The fixture: the real lib/constants.js with one name planted after its list,
+# a source that load_contents a planted path, and a clean module beside it.
+STAT_ONLY_FIXTURE_DIR="$WIRING_TMP/stat-only-fixture"
+mkdir -p "$STAT_ONLY_FIXTURE_DIR/lib" "$STAT_ONLY_FIXTURE_DIR/service/sources" \
+  || fatal "cannot create $STAT_ONLY_FIXTURE_DIR"
+cp "$EXT_DIR/$STAT_ONLY_LIST_MODULE" "$STAT_ONLY_FIXTURE_DIR/$STAT_ONLY_LIST_MODULE" \
+  || fatal "cannot copy $STAT_ONLY_LIST_MODULE into $STAT_ONLY_FIXTURE_DIR"
+printf '%s\n' "export const PLANTED_CONFIG_PATH = '${STAT_ONLY_NAMES[5]}config';" \
+  >>"$STAT_ONLY_FIXTURE_DIR/$STAT_ONLY_LIST_MODULE"
+printf '%s\n' "import Gio from 'gi://Gio';" "import GLib from 'gi://GLib';" \
+  "const plantedPath = GLib.build_filenamev([GLib.get_home_dir(), '${STAT_ONLY_NAMES[1]}config']);" \
+  "const [, plantedBytes] = Gio.File.new_for_path(plantedPath).load_contents(null);" \
+  >"$STAT_ONLY_FIXTURE_DIR/service/sources/planted.js"
+printf '%s\n' "export const CLEAN_INTERVAL_SECONDS = 10;" >"$STAT_ONLY_FIXTURE_DIR/service/clean.js"
+check "no file under service/ or lib/ names a stat-only path outside lib/constants.js's list; a planted load_contents of one, or a name after the list, is found" \
+  "real: $(stat_only_mentions "$EXT_DIR") fixture: $(stat_only_mentions "$STAT_ONLY_FIXTURE_DIR")" \
+  "real: named-in=[] list=closed fixture: named-in=[lib/constants.js service/sources/planted.js] list=closed"
+
 printf '\nthe unit (systemd/resource-pulse.service)\n'
 SERVICE_UNIT="$DOTFILES/systemd/resource-pulse.service"
 SERVICE_MAIN_RELATIVE_PATH='gnome-shell/extensions/resource-pulse@dotfiles/service/main.js'
@@ -1303,10 +1969,18 @@ EXPECTED_UNIT_SETTINGS=(
   '[Service]MemoryHigh=96M'
   '[Service]MemoryMax=128M'
 )
-# Each setting is read as "[Section]Key=value", comments and blank lines aside;
-# a Description's text is not pinned, only that it is set.
-unit_sections=""; unit_section=""; unit_settings=(); unit_exec_start=""
-if [[ -r "$SERVICE_UNIT" ]]; then
+# read_unit_settings <unit file>: reads each setting as "[Section]Key=value",
+# comments and blank lines aside, into unit_settings; the section headers, in
+# order, into unit_sections; and the ExecStart value into unit_exec_start. A
+# Description's text is not pinned, only that it is set. An unreadable file
+# leaves no settings and says so in unit_sections.
+read_unit_settings() {
+  local unit_path="$1" unit_section="" unit_line
+  unit_sections=""; unit_settings=(); unit_exec_start=""
+  if [[ ! -r "$unit_path" ]]; then
+    unit_sections="cannot read $unit_path"
+    return
+  fi
   while IFS= read -r unit_line || [[ -n "$unit_line" ]]; do
     case "$unit_line" in
       ''|'#'*|';'*) ;;
@@ -1317,26 +1991,24 @@ if [[ -r "$SERVICE_UNIT" ]]; then
         [[ "$unit_line" == ExecStart=* ]] && unit_exec_start="${unit_line#ExecStart=}"
         ;;
     esac
-  done <"$SERVICE_UNIT"
-else
-  unit_sections="cannot read $SERVICE_UNIT"
-fi
-check "the unit has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
-  "$unit_sections" "[Unit] [Service] "
+  done <"$unit_path"
+}
 sorted_settings() { printf '%s\n' "$@" | LC_ALL=C sort | tr '\n' '|'; }
-check "the unit's settings are exactly the design's: Type=dbus on its bus name, PartOf, restart and its limit, caps" \
-  "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_UNIT_SETTINGS[@]}")"
-# The ExecStart above is pinned as text; this row resolves it: the script it
-# names under ~/.dotfiles must be this checkout's service/main.js.
-unit_exec_script="${unit_exec_start#"$UNIT_INTERPRETER "}"
-unit_exec_script_in_checkout="$DOTFILES/${unit_exec_script#"$UNIT_DOTFILES_PREFIX"}"
-unit_exec_resolution="unresolved"
-if [[ "$unit_exec_script" == "$UNIT_DOTFILES_PREFIX"* && -f "$unit_exec_script_in_checkout" \
-  && "$unit_exec_script_in_checkout" -ef "$DOTFILES/$SERVICE_MAIN_RELATIVE_PATH" ]]; then
-  unit_exec_resolution="service/main.js"
-fi
-check "the unit's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own service/main.js" \
-  "${unit_exec_start%% "$UNIT_DOTFILES_PREFIX"*}|$unit_exec_resolution" "$UNIT_INTERPRETER|service/main.js"
+# unit_exec_resolution <entry path relative to the checkout>: resolves the
+# unit_exec_start that read_unit_settings left: the script it names under
+# ~/.dotfiles, found in this checkout, is that entry. Prints the entry relative
+# to the extension directory when it is, "unresolved" otherwise.
+unit_exec_resolution() {
+  local expected_entry_path="$1" exec_script exec_script_in_checkout
+  exec_script="${unit_exec_start#"$UNIT_INTERPRETER "}"
+  exec_script_in_checkout="$DOTFILES/${exec_script#"$UNIT_DOTFILES_PREFIX"}"
+  if [[ "$exec_script" == "$UNIT_DOTFILES_PREFIX"* && -f "$exec_script_in_checkout" \
+    && "$exec_script_in_checkout" -ef "$DOTFILES/$expected_entry_path" ]]; then
+    printf '%s' "${expected_entry_path#"gnome-shell/extensions/$EXTENSION_UUID/"}"
+  else
+    printf 'unresolved'
+  fi
+}
 # verify checks that ExecStart's command exists, and ~/.dotfiles is not this
 # checkout on a runner, so it verifies a copy pointed at this checkout: the same
 # unit text with a command that exists. The rows above pin the real path.
@@ -1344,35 +2016,103 @@ check "the unit's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own se
 # RuntimeDirectory path", measured), which a CI runner need not have, so it runs
 # behind the barrier, whose private runtime dir is all it needs. It still exits
 # 1 for an unknown key and for a missing command (both measured).
-if command -v systemd-analyze >/dev/null 2>&1; then
-  UNIT_COPY_DIR="$WIRING_TMP/unit-copy"
-  mkdir -p "$UNIT_COPY_DIR" || fatal "cannot create $UNIT_COPY_DIR"
-  sed -e "/^ExecStart=/s#$UNIT_DOTFILES_PREFIX#$DOTFILES/#" "$SERVICE_UNIT" >"$UNIT_COPY_DIR/resource-pulse.service" 2>/dev/null
-  unit_verify_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" systemd-analyze --user verify --man=no \
-    --recursive-errors=no "$UNIT_COPY_DIR/resource-pulse.service" 2>&1)"
-  unit_verify_exit=$?
-  check "systemd-analyze --user verify accepts the unit (ExecStart pointed at this checkout) and says nothing of it" \
-    "$unit_verify_exit:[$(grep -F 'resource-pulse' <<<"$unit_verify_output")]" "0:[]"
-elif [[ -n "${CI:-}" ]]; then
-  # CI is where this row is meant to run, so a runner without the tool is a failure, never a skip.
-  bad "systemd-analyze --user verify accepts the unit — systemd-analyze is missing on CI"
-else
-  ok "systemd-analyze absent here; CI verifies the unit"
-fi
+UNIT_COPY_DIR="$WIRING_TMP/unit-copy"
+# check_unit_verifies <unit file> <what verify's complaints about it contain> <row name>:
+# one row, systemd-analyze --user verify on that copy.
+check_unit_verifies() {
+  local unit_path="$1" complaint_needle="$2" row_name="$3" unit_copy_path verify_output verify_exit
+  # An empty copy of a missing unit is not one that verifies.
+  if [[ ! -r "$unit_path" ]]; then
+    bad "$row_name — cannot read $unit_path"
+  elif command -v systemd-analyze >/dev/null 2>&1; then
+    unit_copy_path="$UNIT_COPY_DIR/${unit_path##*/}"
+    mkdir -p "$UNIT_COPY_DIR" || fatal "cannot create $UNIT_COPY_DIR"
+    sed -e "/^ExecStart=/s#$UNIT_DOTFILES_PREFIX#$DOTFILES/#" "$unit_path" >"$unit_copy_path" 2>/dev/null
+    verify_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" systemd-analyze --user verify --man=no \
+      --recursive-errors=no "$unit_copy_path" 2>&1)"
+    verify_exit=$?
+    check "$row_name" "$verify_exit:[$(grep -F "$complaint_needle" <<<"$verify_output")]" "0:[]"
+  elif [[ -n "${CI:-}" ]]; then
+    # CI is where this row is meant to run, so a runner without the tool is a failure, never a skip.
+    bad "$row_name — systemd-analyze is missing on CI"
+  else
+    ok "systemd-analyze absent here; CI verifies ${unit_path##*/}"
+  fi
+}
+read_unit_settings "$SERVICE_UNIT"
+check "the unit has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
+  "$unit_sections" "[Unit] [Service] "
+check "the unit's settings are exactly the design's: Type=dbus on its bus name, PartOf, restart and its limit, caps" \
+  "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_UNIT_SETTINGS[@]}")"
+# The ExecStart above is pinned as text; this row resolves it: the script it
+# names under ~/.dotfiles must be this checkout's service/main.js.
+check "the unit's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own service/main.js" \
+  "${unit_exec_start%% "$UNIT_DOTFILES_PREFIX"*}|$(unit_exec_resolution "$SERVICE_MAIN_RELATIVE_PATH")" \
+  "$UNIT_INTERPRETER|service/main.js"
+check_unit_verifies "$SERVICE_UNIT" 'resource-pulse' \
+  "systemd-analyze --user verify accepts the unit (ExecStart pointed at this checkout) and says nothing of it"
+
+printf '\nthe cockpit unit (systemd/cockpit.service)\n'
+COCKPIT_UNIT="$DOTFILES/systemd/cockpit.service"
+COCKPIT_MAIN_RELATIVE_PATH="gnome-shell/extensions/$EXTENSION_UUID/service/cockpit.js"
+# The opt-in: for anyone without the layout file, systemd skips the unit.
+COCKPIT_UNIT_CONDITION_KEY='ConditionPathExists'
+# %E is $XDG_CONFIG_HOME (or ~/.config), where GLib's user config dir, and so the
+# service, looks for the file too.
+COCKPIT_UNIT_CONDITION="$COCKPIT_UNIT_CONDITION_KEY=%E/$COCKPIT_CONFIG_RELATIVE_PATH"
+EXPECTED_COCKPIT_UNIT_SETTINGS=(
+  '[Unit]Description=<set>'
+  '[Unit]PartOf=graphical-session.target'
+  '[Unit]StartLimitIntervalSec=300'
+  '[Unit]StartLimitBurst=5'
+  "[Unit]$COCKPIT_UNIT_CONDITION"
+  '[Service]Type=dbus'
+  "[Service]BusName=$COCKPIT_BUS_NAME"
+  "[Service]ExecStart=$UNIT_INTERPRETER $UNIT_DOTFILES_PREFIX$COCKPIT_MAIN_RELATIVE_PATH"
+  '[Service]Restart=on-failure'
+  '[Service]RestartSec=5'
+  '[Service]Slice=background.slice'
+  '[Service]Nice=10'
+  '[Service]CPUQuota=10%'
+  '[Service]MemoryHigh=64M'
+  '[Service]MemoryMax=96M'
+)
+read_unit_settings "$COCKPIT_UNIT"
+check "cockpit.service has a [Unit] and a [Service] section and no [Install], so nothing can ever enable it" \
+  "$unit_sections" "[Unit] [Service] "
+check "cockpit.service's settings are exactly the design's: Type=dbus on Cockpit1, PartOf, its condition, restart and its limit, caps" \
+  "$(sorted_settings "${unit_settings[@]}")" "$(sorted_settings "${EXPECTED_COCKPIT_UNIT_SETTINGS[@]}")"
+# Counted over every section, so a second condition anywhere (a stricter or a
+# looser one, in [Service] by mistake) shows, and so does the right one missing.
+cockpit_condition_count=0; cockpit_exact_condition_count=0
+for unit_setting in "${unit_settings[@]}"; do
+  [[ "$unit_setting" == *"]$COCKPIT_UNIT_CONDITION_KEY="* ]] && cockpit_condition_count=$((cockpit_condition_count + 1))
+  [[ "$unit_setting" == "[Unit]$COCKPIT_UNIT_CONDITION" ]] && cockpit_exact_condition_count=$((cockpit_exact_condition_count + 1))
+done
+check "cockpit.service has exactly one $COCKPIT_UNIT_CONDITION_KEY, in [Unit], on %E/$COCKPIT_CONFIG_RELATIVE_PATH (\$XDG_CONFIG_HOME, or ~/.config)" \
+  "conditions=$cockpit_condition_count exact=$cockpit_exact_condition_count" "conditions=1 exact=1"
+check "cockpit.service's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own service/cockpit.js" \
+  "${unit_exec_start%% "$UNIT_DOTFILES_PREFIX"*}|$(unit_exec_resolution "$COCKPIT_MAIN_RELATIVE_PATH")" \
+  "$UNIT_INTERPRETER|service/cockpit.js"
+check_unit_verifies "$COCKPIT_UNIT" 'cockpit.service' \
+  "systemd-analyze --user verify accepts cockpit.service (ExecStart pointed at this checkout) and says nothing of it"
 
 printf '\nthe service'"'"'s install wiring\n'
 check "install.conf.yaml links the service unit" \
   "$(grep -c -x -F '    ~/.config/systemd/user/resource-pulse.service: systemd/resource-pulse.service' \
     "$DOTFILES/install.conf.yaml")" 1
+check "install.conf.yaml links the cockpit unit" \
+  "$(grep -c -x -F '    ~/.config/systemd/user/cockpit.service: systemd/cockpit.service' \
+    "$DOTFILES/install.conf.yaml")" 1
 # Linked and started by the extension, never enabled: no line of ./install or of
-# its config (comments aside) may enable it.
+# its config (comments aside) may enable either unit.
 if [[ -r "$DOTFILES/install" && -r "$DOTFILES/install.conf.yaml" ]]; then
   service_enabling_lines="$(cat "$DOTFILES/install" "$DOTFILES/install.conf.yaml" | grep -v '^[[:space:]]*#' \
-    | grep -c 'enable.*resource-pulse')"
+    | grep -c -E 'enable.*(resource-pulse|cockpit)')"
 else
   service_enabling_lines="install or install.conf.yaml is unreadable"
 fi
-check "install.conf.yaml runs the refresh step, and nothing in ./install or its config enables the unit" \
+check "install.conf.yaml runs the refresh step, and nothing in ./install or its config enables either unit" \
   "refresh=$(grep -c -x -F '        bash scripts/resource-pulse-service-refresh.sh' "$DOTFILES/install.conf.yaml") enabling=$service_enabling_lines" \
   "refresh=1 enabling=0"
 
@@ -1387,15 +2127,19 @@ REFRESH_STUB_BIN="$WIRING_TMP/refresh-bin"
 REFRESH_NO_SYSTEMCTL_BIN="$WIRING_TMP/refresh-no-systemctl-bin"
 REFRESH_CALLS="$WIRING_TMP/refresh-systemctl-calls"
 REFRESH_EXTENSION_DIR="$WIRING_TMP/refresh-extension"
-# The fixture's own copy of systemd/resource-pulse.service, with a chosen mtime.
+# The fixture's own copies of systemd/resource-pulse.service and
+# systemd/cockpit.service, with chosen mtimes.
 REFRESH_UNIT_FILE="$WIRING_TMP/refresh-unit/resource-pulse.service"
+REFRESH_COCKPIT_UNIT_FILE="$WIRING_TMP/refresh-unit/cockpit.service"
 UNIT_STARTED_AT_EPOCH=1700000100
 BEFORE_START_EPOCH=1700000000
 AFTER_START_EPOCH=1700000200
 mkdir -p "$REFRESH_NO_SYSTEMCTL_BIN" || fatal "cannot create $REFRESH_NO_SYSTEMCTL_BIN"
 # shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
 install_stub "$REFRESH_STUB_BIN" systemctl '#!/usr/bin/env bash
-# Records each call, and answers from the REFRESH_STUB_* variables.
+# Records each call, and answers from the REFRESH_STUB_* variables. cockpit.service
+# is inactive unless REFRESH_STUB_COCKPIT_ACTIVE_STATE says otherwise, as for
+# anyone without its layout file, whose unit systemd skips.
 printf "%s\n" "$*" >>"$REFRESH_CALLS"
 case "$*" in
   "--user show-environment") exit "$REFRESH_STUB_MANAGER_EXIT" ;;
@@ -1406,23 +2150,36 @@ case "$*" in
   "--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix")
     printf "%s\n" "$REFRESH_STUB_STARTED_AT" ;;
   "--user try-restart resource-pulse.service") exit "$REFRESH_STUB_RESTART_EXIT" ;;
+  "--user show cockpit.service -p ActiveState --value")
+    printf "%s\n" "${REFRESH_STUB_COCKPIT_ACTIVE_STATE:-inactive}" ;;
+  "--user show cockpit.service -p ActiveEnterTimestamp --value --timestamp=unix")
+    printf "%s\n" "${REFRESH_STUB_COCKPIT_STARTED_AT:-}" ;;
+  "--user try-restart cockpit.service") exit "${REFRESH_STUB_COCKPIT_RESTART_EXIT:-0}" ;;
   *) printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64 ;;
 esac'
 # reset_refresh_extension <service/main.js mtime> <lib/protocol.js mtime> <outside mtime>:
 # a fixture extension directory whose service/main.js, lib/protocol.js, and files
 # outside service/ and lib/ carry those epoch mtimes ('' leaves that file out).
 # Its modules import one another as the real ones do, in small: service/main.js
-# imports lib/protocol.js and lib/cadence.js, extension.js imports lib/protocol.js
-# and lib/visibility.js; those two lib/ modules are older than the start.
+# imports lib/protocol.js, lib/cadence.js and service/fileIo.js; service/cockpit.js
+# (cockpit.service's entry) imports service/fileIo.js and lib/sessions.js;
+# extension.js imports lib/protocol.js and lib/visibility.js. All but the three
+# chosen are older than the start, and so is the cockpit unit's file.
 reset_refresh_extension() {
   rm -rf "$REFRESH_EXTENSION_DIR"
-  mkdir -p "$REFRESH_EXTENSION_DIR/lib" || fatal "cannot create $REFRESH_EXTENSION_DIR"
+  mkdir -p "$REFRESH_EXTENSION_DIR/lib" "$REFRESH_EXTENSION_DIR/service" || fatal "cannot create $REFRESH_EXTENSION_DIR"
   if [[ -n "$1" ]]; then
-    mkdir -p "$REFRESH_EXTENSION_DIR/service"
     printf '%s\n' "import {PROTOCOL_VERSION} from '../lib/protocol.js';" \
-      "import {decideAppScan} from '../lib/cadence.js';" >"$REFRESH_EXTENSION_DIR/service/main.js"
+      "import {decideAppScan} from '../lib/cadence.js';" \
+      "import {readFileToEnd} from './fileIo.js';" >"$REFRESH_EXTENSION_DIR/service/main.js"
     touch -d "@$1" "$REFRESH_EXTENSION_DIR/service/main.js" || fatal "touch -d @$1 failed"
   fi
+  printf '%s\n' "import {readFileToEnd} from './fileIo.js';" \
+    "import {buildSessionRows} from '../lib/sessions.js';" >"$REFRESH_EXTENSION_DIR/service/cockpit.js"
+  : >"$REFRESH_EXTENSION_DIR/service/fileIo.js"
+  : >"$REFRESH_EXTENSION_DIR/lib/sessions.js"
+  touch -d "@$BEFORE_START_EPOCH" "$REFRESH_EXTENSION_DIR/service/cockpit.js" "$REFRESH_EXTENSION_DIR/service/fileIo.js" \
+    "$REFRESH_EXTENSION_DIR/lib/sessions.js" || fatal "touch -d @$BEFORE_START_EPOCH failed"
   if [[ -n "$2" ]]; then
     : >"$REFRESH_EXTENSION_DIR/lib/protocol.js"
     touch -d "@$2" "$REFRESH_EXTENSION_DIR/lib/protocol.js" || fatal "touch -d @$2 failed"
@@ -1438,7 +2195,9 @@ reset_refresh_extension() {
     || fatal "touch -d @$3 failed"
   mkdir -p "${REFRESH_UNIT_FILE%/*}" || fatal "cannot create ${REFRESH_UNIT_FILE%/*}"
   : >"$REFRESH_UNIT_FILE"
-  touch -d "@$BEFORE_START_EPOCH" "$REFRESH_UNIT_FILE" || fatal "touch -d @$BEFORE_START_EPOCH failed"
+  : >"$REFRESH_COCKPIT_UNIT_FILE"
+  touch -d "@$BEFORE_START_EPOCH" "$REFRESH_UNIT_FILE" "$REFRESH_COCKPIT_UNIT_FILE" \
+    || fatal "touch -d @$BEFORE_START_EPOCH failed"
 }
 # refresh_extension_with_change <module>: the fixture with every file older than
 # the unit's start but that one module, which is newer.
@@ -1447,7 +2206,9 @@ refresh_extension_with_change() {
   touch -d "@$AFTER_START_EPOCH" "$REFRESH_EXTENSION_DIR/$1" || fatal "touch -d @$AFTER_START_EPOCH failed"
 }
 # run_refresh <manager exit> <reload exit> <ActiveState> <ActiveEnterTimestamp> <try-restart exit> [stub bin]
-# prints "exit=<n> calls=[<call>;...] output=[<stdout+stderr>]".
+# prints "exit=<n> calls=[<call>;...] output=[<stdout+stderr>]". The arguments
+# answer for resource-pulse.service; cockpit.service answers from the
+# REFRESH_STUB_COCKPIT_* variables of the caller's environment (inactive without).
 run_refresh() {
   local refresh_output refresh_exit stub_bin="${6:-$REFRESH_STUB_BIN}"
   : >"$REFRESH_CALLS"
@@ -1455,6 +2216,7 @@ run_refresh() {
     REFRESH_STUB_MANAGER_EXIT="$1" REFRESH_STUB_RELOAD_EXIT="$2" REFRESH_STUB_ACTIVE_STATE="$3" \
     REFRESH_STUB_STARTED_AT="$4" REFRESH_STUB_RESTART_EXIT="$5" \
     RESOURCE_PULSE_EXTENSION_DIR="$REFRESH_EXTENSION_DIR" RESOURCE_PULSE_UNIT_FILE="$REFRESH_UNIT_FILE" \
+    RESOURCE_PULSE_COCKPIT_UNIT_FILE="$REFRESH_COCKPIT_UNIT_FILE" \
     "$BASH" "$REFRESH_SCRIPT" 2>&1)"
   refresh_exit=$?
   printf 'exit=%s calls=[%s] output=[%s]' "$refresh_exit" "$(tr '\n' ';' <"$REFRESH_CALLS")" "$refresh_output"
@@ -1462,9 +2224,20 @@ run_refresh() {
 STARTED_AT="@$UNIT_STARTED_AT_EPOCH"
 # warnings_naming <summary> <step>: how many ⚠ lines of a run name that step.
 warnings_naming() { grep -F '⚠' <<<"$1" | grep -c -F "$2"; }
-CALLS_UP_TO_STATE='--user show-environment;--user daemon-reload;--user show resource-pulse.service -p ActiveState --value;'
-CALLS_UP_TO_START_TIME="$CALLS_UP_TO_STATE--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix;"
-CALLS_WITH_RESTART="$CALLS_UP_TO_START_TIME--user try-restart resource-pulse.service;"
+# Each unit's calls in the order the script makes them: its state, then (active)
+# its start time, then (changed) its try-restart; resource-pulse.service first.
+REFRESH_PREAMBLE_CALLS='--user show-environment;--user daemon-reload;'
+SAMPLER_STATE_CALL='--user show resource-pulse.service -p ActiveState --value;'
+SAMPLER_START_TIME_CALL='--user show resource-pulse.service -p ActiveEnterTimestamp --value --timestamp=unix;'
+SAMPLER_RESTART_CALL='--user try-restart resource-pulse.service;'
+COCKPIT_STATE_CALL='--user show cockpit.service -p ActiveState --value;'
+COCKPIT_START_TIME_CALL='--user show cockpit.service -p ActiveEnterTimestamp --value --timestamp=unix;'
+COCKPIT_RESTART_CALL='--user try-restart cockpit.service;'
+# The sampler's rows below leave cockpit.service inactive, so each run that gets
+# past the reload ends with its one state call, and says nothing of it.
+CALLS_UP_TO_STATE="$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$COCKPIT_STATE_CALL"
+CALLS_UP_TO_START_TIME="$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$SAMPLER_START_TIME_CALL$COCKPIT_STATE_CALL"
+CALLS_WITH_RESTART="$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$SAMPLER_START_TIME_CALL$SAMPLER_RESTART_CALL$COCKPIT_STATE_CALL"
 
 reset_refresh_extension "$AFTER_START_EPOCH" "$AFTER_START_EPOCH" "$AFTER_START_EPOCH"
 check "refresh: no user manager (a server) is silent and exits 0, asking nothing more" \
@@ -1518,9 +2291,10 @@ reload_failed_summary="$(run_refresh 0 1 active "$STARTED_AT" 0)"
 # Every failure below warns with a ⚠ line naming the step, restarts nothing, and
 # still returns 0: under `set -e` an exit 1 would abort the rest of ./install
 # for every desktop user (ruling R12; reconcile-systemd-units.sh does the same).
-check "refresh: a failed daemon-reload warns, naming it, restarts nothing and returns 0" \
-  "${reload_failed_summary%% output=*} warned=$(warnings_naming "$reload_failed_summary" daemon-reload)" \
-  "exit=0 calls=[--user show-environment;--user daemon-reload;] warned=1"
+# The reload is one step for both units, so its one line names both.
+check "refresh: a failed daemon-reload warns once, naming it and both units, restarts nothing and returns 0" \
+  "${reload_failed_summary%% output=*} warned=$(warnings_naming "$reload_failed_summary" daemon-reload) names-both=$(grep -c -F '⚠ resource-pulse.service, cockpit.service: daemon-reload failed' <<<"$reload_failed_summary")" \
+  "exit=0 calls=[$REFRESH_PREAMBLE_CALLS] warned=1 names-both=1"
 # A state that cannot be read must not pass for "not active", which is silent.
 state_unreadable_summary="$(REFRESH_STUB_STATE_EXIT=1 run_refresh 0 0 active "$STARTED_AT" 0)"
 check "refresh: a state it cannot read warns, naming it, restarts nothing and returns 0" \
@@ -1580,6 +2354,79 @@ find_warning_summary="$(run_refresh 0 0 active "$STARTED_AT" 0 "$REFRESH_FIND_WA
 check "refresh: a warning find prints on stderr while succeeding is shown, and never read as a changed file" \
   "${find_warning_summary%% output=*} shown=$(grep -c -F 'stand-in warning' <<<"$find_warning_summary")" \
   "exit=0 calls=[$CALLS_UP_TO_START_TIME] shown=1"
+
+# cockpit.service is the step's second unit: its own entry (service/cockpit.js),
+# its own closure and its own unit file, decided alone after the one reload, and
+# every line names its unit. A module both closures hold (service/fileIo.js)
+# restarts both; one only the sampler runs never restarts the cockpit, nor the
+# reverse.
+# run_refresh_both_active [sampler state exit] [cockpit start time]: both units
+# active since UNIT_STARTED_AT_EPOCH, every call succeeding.
+run_refresh_both_active() {
+  REFRESH_STUB_STATE_EXIT="${1:-0}" REFRESH_STUB_COCKPIT_ACTIVE_STATE=active \
+    REFRESH_STUB_COCKPIT_STARTED_AT="${2:-$STARTED_AT}" run_refresh 0 0 active "$STARTED_AT" 0
+}
+SAMPLER_CHECKED_CALLS="$SAMPLER_STATE_CALL$SAMPLER_START_TIME_CALL"
+COCKPIT_CHECKED_CALLS="$COCKPIT_STATE_CALL$COCKPIT_START_TIME_CALL"
+CALLS_BOTH_UNCHANGED="$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$COCKPIT_CHECKED_CALLS"
+CALLS_COCKPIT_RESTARTED="$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$COCKPIT_CHECKED_CALLS$COCKPIT_RESTART_CALL"
+CALLS_SAMPLER_RESTARTED="$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$SAMPLER_RESTART_CALL$COCKPIT_CHECKED_CALLS"
+CALLS_BOTH_RESTARTED="$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$SAMPLER_RESTART_CALL$COCKPIT_CHECKED_CALLS$COCKPIT_RESTART_CALL"
+# restart_lines <summary>: the ✓ lines of a run's output (what follows
+# "output=[", its closing bracket dropped), joined by |.
+restart_lines() {
+  local run_output="${1#* output=\[}"
+  grep -F '✓' <<<"${run_output%]}" | tr '\n' '|'
+}
+COCKPIT_ENTRY_RESTART_LINE='  ✓ cockpit.service restarted: service/cockpit.js changed since it started|'
+SAMPLER_ENTRY_RESTART_LINE='  ✓ resource-pulse.service restarted: service/main.js changed since it started (its histories start again)|'
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+both_unchanged_run="$(run_refresh_both_active)"
+check "refresh: both units active and nothing changed since their starts: one reload, both checked, neither restarted, nothing said" \
+  "${both_unchanged_run%% output=*} said=[$(restart_lines "$both_unchanged_run")]" \
+  "exit=0 calls=[$CALLS_BOTH_UNCHANGED] said=[]"
+refresh_extension_with_change service/cockpit.js
+cockpit_entry_changed_run="$(run_refresh_both_active)"
+check "refresh: service/cockpit.js newer than cockpit.service's start try-restarts cockpit.service and leaves resource-pulse.service alone, in a line naming cockpit.service" \
+  "${cockpit_entry_changed_run%% output=*} said=[$(restart_lines "$cockpit_entry_changed_run")]" \
+  "exit=0 calls=[$CALLS_COCKPIT_RESTARTED] said=[$COCKPIT_ENTRY_RESTART_LINE]"
+refresh_extension_with_change service/main.js
+sampler_entry_changed_run="$(run_refresh_both_active)"
+check "refresh: service/main.js newer than resource-pulse.service's start try-restarts it and leaves an active cockpit.service alone" \
+  "${sampler_entry_changed_run%% output=*} said=[$(restart_lines "$sampler_entry_changed_run")]" \
+  "exit=0 calls=[$CALLS_SAMPLER_RESTARTED] said=[$SAMPLER_ENTRY_RESTART_LINE]"
+refresh_by_closure_summary=""
+for changed_module in service/fileIo.js lib/sessions.js lib/cadence.js; do
+  refresh_extension_with_change "$changed_module"
+  refresh_closure_run="$(run_refresh_both_active)"
+  refresh_by_closure_summary+="$changed_module:${refresh_closure_run%% output=*} "
+done
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+touch -d "@$AFTER_START_EPOCH" "$REFRESH_COCKPIT_UNIT_FILE" || fatal "touch -d @$AFTER_START_EPOCH failed"
+refresh_closure_run="$(run_refresh_both_active)"
+refresh_by_closure_summary+="cockpit-unit-file:${refresh_closure_run%% output=*} said=[$(restart_lines "$refresh_closure_run")]"
+check "refresh: a module both run (service/fileIo.js) restarts both units; one only the cockpit runs (lib/sessions.js), or cockpit.service's own unit file, restarts only it; one only the sampler runs (lib/cadence.js) only the sampler" \
+  "$refresh_by_closure_summary" \
+  "service/fileIo.js:exit=0 calls=[$CALLS_BOTH_RESTARTED] lib/sessions.js:exit=0 calls=[$CALLS_COCKPIT_RESTARTED] lib/cadence.js:exit=0 calls=[$CALLS_SAMPLER_RESTARTED] cockpit-unit-file:exit=0 calls=[$CALLS_COCKPIT_RESTARTED] said=[  ✓ cockpit.service restarted: its unit file changed since it started|]"
+# Without ~/.config/resource-pulse/cockpit.json, systemd skips cockpit.service
+# on its condition and reports it inactive: however new its code, the step
+# leaves it alone and says nothing of it, while the sampler is still decided.
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+touch -d "@$AFTER_START_EPOCH" "$REFRESH_EXTENSION_DIR/service/cockpit.js" "$REFRESH_COCKPIT_UNIT_FILE" \
+  || fatal "touch -d @$AFTER_START_EPOCH failed"
+check "refresh: an inactive (condition-skipped) cockpit.service, with newer code and unit file, is left alone, silently, after the sampler is decided" \
+  "$(run_refresh 0 0 active "$STARTED_AT" 0)" "exit=0 calls=[$REFRESH_PREAMBLE_CALLS$SAMPLER_CHECKED_CALLS$COCKPIT_STATE_CALL] output=[]"
+# A failure on one unit warns naming that unit, and the other is still decided.
+refresh_failure_isolation_summary=""
+refresh_extension_with_change service/cockpit.js
+refresh_isolation_run="$(run_refresh_both_active 1)"
+refresh_failure_isolation_summary+="sampler-state-unreadable:${refresh_isolation_run%% output=*} warned=$(grep -c -F '⚠ resource-pulse.service: cannot read its state' <<<"$refresh_isolation_run") said=[$(restart_lines "$refresh_isolation_run")]"
+refresh_extension_with_change service/main.js
+refresh_isolation_run="$(run_refresh_both_active 0 'n/a')"
+refresh_failure_isolation_summary+=" cockpit-start-unparseable:${refresh_isolation_run%% output=*} warned=$(grep -c -F '⚠ cockpit.service: cannot parse when it started' <<<"$refresh_isolation_run") said=[$(restart_lines "$refresh_isolation_run")]"
+check "refresh: a failure deciding one unit warns in a line naming that unit, and the other is still decided and restarted" \
+  "$refresh_failure_isolation_summary" \
+  "sampler-state-unreadable:exit=0 calls=[$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$COCKPIT_CHECKED_CALLS$COCKPIT_RESTART_CALL] warned=1 said=[$COCKPIT_ENTRY_RESTART_LINE] cockpit-start-unparseable:exit=0 calls=[$CALLS_SAMPLER_RESTARTED] warned=1 said=[$SAMPLER_ENTRY_RESTART_LINE]"
 
 printf '\nresource-pulse-cost.sh (fake PROC_ROOT)\n'
 # make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry.
@@ -1667,9 +2514,11 @@ COST_SYSTEMCTL_CALLS="$WIRING_TMP/cost-systemctl-calls"
 # shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
 install_stub "$COST_SYSTEMCTL_STUB_BIN" systemctl '#!/usr/bin/env bash
 printf "%s\n" "$*" >>"$COST_SYSTEMCTL_CALLS"
-[[ "$*" == "--user show -p MainPID --value resource-pulse.service" ]] \
-  || { printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64; }
-printf "%s\n" "$COST_SERVICE_MAIN_PID"
+case "$*" in
+  "--user show -p MainPID --value resource-pulse.service") printf "%s\n" "$COST_SERVICE_MAIN_PID" ;;
+  "--user show -p MainPID --value cockpit.service") printf "%s\n" "${COST_COCKPIT_MAIN_PID:-0}" ;;
+  *) printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64 ;;
+esac
 exit "${COST_SYSTEMCTL_EXIT:-0}"'
 # cost_service_run <MainPID answer> <args...> [-- with COST_SYSTEMCTL_EXIT in the
 # caller's environment]; leaves COST_OUTPUT, COST_EXIT and the systemctl calls.
@@ -1722,6 +2571,25 @@ cost_service_run "$FAKE_SERVICE_PID" --cpu-percent "$COST_WINDOW_SECONDS" --serv
 cost_flag_order_summary+=" cpu-percent=$COST_EXIT/$COST_OUTPUT"
 check "cost: --service after the mode still measures the service" \
   "$cost_flag_order_summary" "rss-kib=0/$FAKE_SERVICE_RSS_KIB cpu-percent=0/9.00"
+# --cockpit measures cockpit.service the same way, by its own unit's MainPID:
+# the fake root holds the sampler's process as well as gnome-shell, and the
+# stub answers both units, so measuring either neighbour shows as its number.
+FAKE_COCKPIT_PID=6161
+FAKE_COCKPIT_RSS_KIB=31000
+# The design's budget for the cockpit's resident memory, 48 MiB, written out.
+COCKPIT_RSS_BUDGET_KIB=49152
+make_fake_proc "$SERVICE_PROC_ROOT" "$FAKE_COCKPIT_PID" gjs "$FAKE_COCKPIT_RSS_KIB"
+COST_COCKPIT_MAIN_PID="$FAKE_COCKPIT_PID" cost_service_run "$FAKE_SERVICE_PID" --cockpit --rss-kib
+check "cost: --cockpit --rss-kib prints cockpit.service's VmRSS, found by its own unit's MainPID, never the sampler's or gnome-shell's" \
+  "exit=$COST_EXIT rss=$COST_OUTPUT calls=[$(tr '\n' ';' <"$COST_SYSTEMCTL_CALLS")]" \
+  "exit=0 rss=$FAKE_COCKPIT_RSS_KIB calls=[--user show -p MainPID --value cockpit.service;]"
+cost_cockpit_usage_summary=""
+COST_COCKPIT_MAIN_PID="$FAKE_COCKPIT_PID" cost_service_run "$FAKE_SERVICE_PID" --cockpit --rss-check 30000
+cost_cockpit_usage_summary+="rss-check=$COST_EXIT/$(grep -c -F -- "--cockpit --rss-kib must read at most $COCKPIT_RSS_BUDGET_KIB" <<<"$COST_OUTPUT")"
+COST_COCKPIT_MAIN_PID="$FAKE_COCKPIT_PID" cost_service_run "$FAKE_SERVICE_PID" --service --cockpit --rss-kib
+cost_cockpit_usage_summary+=" both-flags=$COST_EXIT/$(grep -c -F 'usage:' <<<"$COST_OUTPUT")"
+check "cost: --cockpit --rss-check is refused, naming the cockpit's own budget ($COCKPIT_RSS_BUDGET_KIB KiB), and --service with --cockpit is a usage error" \
+  "$cost_cockpit_usage_summary calls=$(wc -l <"$COST_SYSTEMCTL_CALLS")" "rss-check=2/1 both-flags=2/1 calls=0"
 # Anything left over is a usage error, never ignored.
 cost_leftover_summary=""
 cost_service_run "$FAKE_SERVICE_PID" --rss-kib --serivce
@@ -2284,27 +3152,39 @@ check "nested: the in-bus stage refuses a live environment and a missing private
   "$in_bus_summary" "live-env=2/1 no-private-bus=2/1 stub-calls=0 address=none"
 
 # The in-bus stage's service step, run for real against stubs: gsettings
-# succeeds; gjs stands in for the service (it records its arguments, the names
-# in its environment and the bus it was given, then waits, or exits at once);
-# busctl says the name is owned once the stand-in has started; gnome-shell
-# records whether the service was recorded before it, then exits. The stage runs
-# in its isolated environment with the run's private bus address (a socket
-# nobody listens on), inside `setsid timeout`, from a caller whose own
-# environment carries a display, the live bus and a token.
+# succeeds; gjs stands in for each service (it records its arguments, the names
+# in its environment and the bus it was given, under its entry module's file
+# name, then waits, or exits at once; like gjs, it exits at once when its module
+# is not there); busctl says a name is owned once the stand-in for the module
+# that owns it has started; gnome-shell records whether each service was
+# recorded before it, then exits. The stage runs in its isolated environment
+# with the run's private bus address (a socket nobody listens on), inside
+# `setsid timeout`, from a caller whose own environment carries a display, the
+# live bus and a token.
 NESTED_SERVICE_STUB_BIN="$WIRING_TMP/nested-service-bin"
 NESTED_SERVICE_CALLS="$WIRING_TMP/nested-service-calls"
+# Each of the next three is a prefix: a stand-in writes <prefix>.<its entry module's file name>.
 NESTED_SERVICE_ENV_NAMES="$WIRING_TMP/nested-service-env-names"
 NESTED_SERVICE_BUS_SEEN="$WIRING_TMP/nested-service-bus-seen"
 NESTED_SERVICE_STARTED="$WIRING_TMP/nested-service-started"
 NESTED_SERVICE_RUN_LIMIT_SECONDS=30
 NESTED_SERVICE_STAND_IN_TEXT='stand-in service started'
-# Pinned here, not read from the script: the run's own copy of the service.
-NESTED_SERVICE_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/main.js"
-# nested_constant <name>: one of the script's readonly numbers, read by sourcing it.
+SAMPLER_ENTRY_FILE_NAME='main.js'
+COCKPIT_ENTRY_FILE_NAME='cockpit.js'
+# Which bus name the stand-in for each entry module owns once started (file name=bus name, space-separated).
+NESTED_SERVICE_BUS_NAME_BY_ENTRY="$SAMPLER_ENTRY_FILE_NAME=$RESOURCE_PULSE_BUS_NAME $COCKPIT_ENTRY_FILE_NAME=$COCKPIT_BUS_NAME"
+# Pinned here, not read from the script: the run's own copies of the two services.
+NESTED_SERVICE_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/$SAMPLER_ENTRY_FILE_NAME"
+NESTED_COCKPIT_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/$COCKPIT_ENTRY_FILE_NAME"
+# nested_constant_text <name>: one of the script's readonly values, read by sourcing it; empty when it has none.
+nested_constant_text() {
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  bash -c 'source "$1" || exit 99; printf "%s" "${!2:-}"' nested-constant "$NESTED_SCRIPT" "$1"
+}
+# nested_constant <name>: one of the script's readonly numbers; exits 2 unless it is one.
 nested_constant() {
   local constant_value
-  # shellcheck disable=SC2016  # Expanded by the child bash.
-  constant_value="$(bash -c 'source "$1" || exit 99; printf "%s" "${!2}"' nested-constant "$NESTED_SCRIPT" "$1")"
+  constant_value="$(nested_constant_text "$1")"
   [[ "$constant_value" =~ ^[0-9]+$ ]] || fatal "cannot read $1 from $NESTED_SCRIPT"
   printf '%s' "$constant_value"
 }
@@ -2315,23 +3195,31 @@ install_stub "$NESTED_SERVICE_STUB_BIN" gsettings '#!/usr/bin/env bash
 printf "gsettings %s\n" "$*" >>"$NESTED_SERVICE_CALLS"'
 # shellcheck disable=SC2016
 install_stub "$NESTED_SERVICE_STUB_BIN" gjs '#!/usr/bin/env bash
-# Stands in for the sampler service: records how it was started, then waits to be signalled (or exits at once).
+# Stands in for a service: records how it was started, then waits to be signalled (or exits at once).
+entry_file_name="${2##*/}"
 printf "gjs %s\n" "$*" >>"$NESTED_SERVICE_CALLS"
-compgen -e >"$NESTED_SERVICE_ENV_NAMES"
-printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS" >"$NESTED_SERVICE_BUS_SEEN"
+compgen -e >"$NESTED_SERVICE_ENV_NAMES.$entry_file_name"
+printf "%s\n" "$DBUS_SESSION_BUS_ADDRESS" >"$NESTED_SERVICE_BUS_SEEN.$entry_file_name"
+# As gjs -m does with a module it cannot load.
+[[ -r "$2" ]] || { printf "stand-in: no module at %s\n" "$2"; exit 1; }
 printf "%s\n" "$NESTED_SERVICE_STAND_IN_TEXT"
 [[ "$NESTED_SERVICE_MODE" == exits ]] && exit 1
-: >"$NESTED_SERVICE_STARTED"
+for entry_and_bus_name in $NESTED_SERVICE_BUS_NAME_BY_ENTRY; do
+  [[ "${entry_and_bus_name%%=*}" == "$entry_file_name" ]] && : >"$NESTED_SERVICE_STARTED.${entry_and_bus_name#*=}"
+done
 exec sleep 60'
 # shellcheck disable=SC2016
 install_stub "$NESTED_SERVICE_STUB_BIN" busctl '#!/usr/bin/env bash
+# The name asked about is the last argument of NameHasOwner.
 printf "busctl %s\n" "$*" >>"$NESTED_SERVICE_CALLS"
-if [[ -e "$NESTED_SERVICE_STARTED" ]]; then echo "b true"; else echo "b false"; fi'
+if [[ -e "$NESTED_SERVICE_STARTED.${!#}" ]]; then echo "b true"; else echo "b false"; fi'
 # shellcheck disable=SC2016
 install_stub "$NESTED_SERVICE_STUB_BIN" gnome-shell '#!/usr/bin/env bash
 printf "gnome-shell %s\n" "$*" >>"$NESTED_SERVICE_CALLS"
-printf "service-recorded-before-the-shell=%s\n" "$(grep -c "^service=" "$RESOURCE_PULSE_NESTED_DIR/state/run.values")" \
-  >>"$NESTED_SERVICE_CALLS"'
+for process_name in service cockpit; do
+  printf "%s-recorded-before-the-shell=%s\n" "$process_name" \
+    "$(grep -c "^$process_name=" "$RESOURCE_PULSE_NESTED_DIR/state/run.values")" >>"$NESTED_SERVICE_CALLS"
+done'
 # make_service_run <suffix>: a run directory laid out as `start` lays it out, with
 # the nested dconf already written (the gsettings stub writes nothing).
 make_service_run() {
@@ -2348,9 +3236,12 @@ make_service_run() {
 # run_in_bus_stage_with_service <run dir> <stand-in mode: waits | exits>; leaves
 # NESTED_SERVICE_EXIT and NESTED_SERVICE_ELAPSED_SECONDS.
 run_in_bus_stage_with_service() {
-  local run_dir="$1" started_seconds=$SECONDS
-  rm -f "$NESTED_SERVICE_STARTED"
-  : >"$NESTED_SERVICE_CALLS"; : >"$NESTED_SERVICE_ENV_NAMES"; : >"$NESTED_SERVICE_BUS_SEEN"
+  local run_dir="$1" started_seconds=$SECONDS entry_file_name
+  rm -f "$NESTED_SERVICE_STARTED".*
+  : >"$NESTED_SERVICE_CALLS"
+  for entry_file_name in "$SAMPLER_ENTRY_FILE_NAME" "$COCKPIT_ENTRY_FILE_NAME"; do
+    : >"$NESTED_SERVICE_ENV_NAMES.$entry_file_name"; : >"$NESTED_SERVICE_BUS_SEEN.$entry_file_name"
+  done
   # shellcheck disable=SC2016  # Expanded by the child bash.
   WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 GH_TOKEN=poison-not-a-token DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
     setsid --wait timeout "$NESTED_SERVICE_RUN_LIMIT_SECONDS" \
@@ -2359,87 +3250,148 @@ run_in_bus_stage_with_service() {
     PATH="$NESTED_SERVICE_STUB_BIN:/usr/bin:/bin" NESTED_SERVICE_CALLS="$NESTED_SERVICE_CALLS" \
     NESTED_SERVICE_ENV_NAMES="$NESTED_SERVICE_ENV_NAMES" NESTED_SERVICE_BUS_SEEN="$NESTED_SERVICE_BUS_SEEN" \
     NESTED_SERVICE_STARTED="$NESTED_SERVICE_STARTED" NESTED_SERVICE_STAND_IN_TEXT="$NESTED_SERVICE_STAND_IN_TEXT" \
+    NESTED_SERVICE_BUS_NAME_BY_ENTRY="$NESTED_SERVICE_BUS_NAME_BY_ENTRY" \
     NESTED_SERVICE_MODE="$2" bash "$NESTED_SCRIPT" __inside-session-bus "$run_dir" >/dev/null 2>&1
   NESTED_SERVICE_EXIT=$?
   NESTED_SERVICE_ELAPSED_SECONDS=$((SECONDS - started_seconds))
 }
-# end_recorded_stand_in <run dir>: the stand-in waits after the stage ends; end it,
-# only while it is still the process the run recorded.
-end_recorded_stand_in() {
-  local service_pid service_starttime
-  service_pid="$(grep '^service=' "$1/state/run.values" 2>/dev/null | cut -d= -f2)"
-  service_starttime="$(grep '^service-starttime=' "$1/state/run.values" 2>/dev/null | cut -d= -f2)"
-  [[ -n "$service_pid" ]] && kill_sacrifice "$service_pid" sleep "$service_starttime"
+# end_recorded_stand_ins <run dir>: the stand-ins wait after the stage ends; end
+# each, only while it is still the process the run recorded.
+end_recorded_stand_ins() {
+  local process_name stand_in_pid stand_in_starttime
+  for process_name in service cockpit; do
+    stand_in_pid="$(grep "^$process_name=" "$1/state/run.values" 2>/dev/null | cut -d= -f2)"
+    stand_in_starttime="$(grep "^$process_name-starttime=" "$1/state/run.values" 2>/dev/null | cut -d= -f2)"
+    [[ -n "$stand_in_pid" ]] && kill_sacrifice "$stand_in_pid" sleep "$stand_in_starttime"
+  done
   return 0
 }
 
 SERVICE_RUN="$(make_service_run Service1)"
 run_in_bus_stage_with_service "$SERVICE_RUN" waits
 SERVICE_RUN_PRIVATE_BUS="unix:path=$SERVICE_RUN/bus/session.sock"
-# What the service may see: the allowlist, the private bus, and what this row
+SAMPLER_ENV_NAMES_SEEN="$NESTED_SERVICE_ENV_NAMES.$SAMPLER_ENTRY_FILE_NAME"
+COCKPIT_ENV_NAMES_SEEN="$NESTED_SERVICE_ENV_NAMES.$COCKPIT_ENTRY_FILE_NAME"
+# What a service may see: the allowlist, the private bus, and what this row
 # itself passes the stubs (PWD, SHLVL and _ are bash's own). Byte order for both
 # sort and comm: uutils comm compares bytes whatever the locale's collation.
 ALLOWED_SERVICE_ENV_NAMES="$( { nested_call nested_environment_assignments "$SERVICE_RUN" | cut -d= -f1
   printf '%s\n' DBUS_SESSION_BUS_ADDRESS GSETTINGS_BACKEND NESTED_SERVICE_CALLS NESTED_SERVICE_ENV_NAMES \
-    NESTED_SERVICE_BUS_SEEN NESTED_SERVICE_STARTED NESTED_SERVICE_STAND_IN_TEXT NESTED_SERVICE_MODE PWD SHLVL _
+    NESTED_SERVICE_BUS_SEEN NESTED_SERVICE_STARTED NESTED_SERVICE_STAND_IN_TEXT NESTED_SERVICE_BUS_NAME_BY_ENTRY \
+    NESTED_SERVICE_MODE PWD SHLVL _
 } | LC_ALL=C sort -u)"
-unexpected_service_env_names="$(LC_ALL=C sort -u "$NESTED_SERVICE_ENV_NAMES" \
-  | LC_ALL=C comm -23 - <(printf '%s\n' "$ALLOWED_SERVICE_ENV_NAMES") | tr '\n' ' ')"
-# An empty record would have no unexpected name either: the whole allowlist must be there.
-allowlist_names_seen="$(LC_ALL=C sort -u "$NESTED_SERVICE_ENV_NAMES" \
-  | LC_ALL=C comm -12 - <(nested_call nested_environment_assignments "$SERVICE_RUN" | cut -d= -f1 | LC_ALL=C sort -u) \
-  | wc -l)"
+ALLOWLIST_ENV_NAMES="$(nested_call nested_environment_assignments "$SERVICE_RUN" | cut -d= -f1 | LC_ALL=C sort -u)"
+# unexpected_env_names <env names file>: the names in it that are not allowed, space-separated.
+unexpected_env_names() {
+  LC_ALL=C sort -u "$1" | LC_ALL=C comm -23 - <(printf '%s\n' "$ALLOWED_SERVICE_ENV_NAMES") | tr '\n' ' '
+}
+# allowlist_names_seen_in <env names file>: how many of the allowlist's names it holds. An empty
+# record would have no unexpected name either: the whole allowlist must be there.
+allowlist_names_seen_in() {
+  LC_ALL=C sort -u "$1" | LC_ALL=C comm -12 - <(printf '%s\n' "$ALLOWLIST_ENV_NAMES") | wc -l
+}
 service_start_summary="exit=$NESTED_SERVICE_EXIT"
-service_start_summary+=" gjs=[$(grep '^gjs ' "$NESTED_SERVICE_CALLS")]"
-service_start_summary+=" bus=$([[ "$(<"$NESTED_SERVICE_BUS_SEEN")" == "$SERVICE_RUN_PRIVATE_BUS" ]] && printf private || printf other)"
-service_start_summary+=" allowlist-seen=$allowlist_names_seen unexpected=[$unexpected_service_env_names]"
+service_start_summary+=" gjs=[$(grep -m 1 '^gjs ' "$NESTED_SERVICE_CALLS")]"
+service_start_summary+=" bus=$([[ "$(<"$NESTED_SERVICE_BUS_SEEN.$SAMPLER_ENTRY_FILE_NAME")" == "$SERVICE_RUN_PRIVATE_BUS" ]] && printf private || printf other)"
+service_start_summary+=" allowlist-seen=$(allowlist_names_seen_in "$SAMPLER_ENV_NAMES_SEEN") unexpected=[$(unexpected_env_names "$SAMPLER_ENV_NAMES_SEEN")]"
 service_start_summary+=" recorded=$(grep -c -E '^service(-starttime)?=[0-9]+$' "$SERVICE_RUN/state/run.values")"
 service_start_summary+=" $(grep '^service-recorded-before-the-shell=' "$NESTED_SERVICE_CALLS")"
 service_start_summary+=" asked-the-private-bus=$(grep -c -x -F "busctl --address=$SERVICE_RUN_PRIVATE_BUS call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s $RESOURCE_PULSE_BUS_NAME" "$NESTED_SERVICE_CALLS" | sed 's/^[1-9][0-9]*$/yes/')"
 service_start_summary+=" logged=$(grep -c -x -F "$NESTED_SERVICE_STAND_IN_TEXT" "$SERVICE_RUN/log/service.log" 2>/dev/null)"
-end_recorded_stand_in "$SERVICE_RUN"
 check "nested: the in-bus stage starts the run's copy of the service on the private bus, with only the allowlist, before the shell" \
   "$service_start_summary" \
   "exit=0 gjs=[gjs -m $SERVICE_RUN/$NESTED_SERVICE_MAIN_RELATIVE_PATH] bus=private allowlist-seen=22 unexpected=[] recorded=2 service-recorded-before-the-shell=1 asked-the-private-bus=yes logged=1"
 
+# The same run, for the cockpit: started second, from the run's copy of
+# service/cockpit.js, with the same allowlist and bus, recorded as `cockpit`
+# before the shell, its own name asked for, and its own log.
+cockpit_start_summary="exit=$NESTED_SERVICE_EXIT"
+cockpit_start_summary+=" starts=[$(grep '^gjs ' "$NESTED_SERVICE_CALLS" | sed "s|^gjs -m $SERVICE_RUN/||" | tr '\n' ' ')]"
+cockpit_start_summary+=" bus=$([[ "$(<"$NESTED_SERVICE_BUS_SEEN.$COCKPIT_ENTRY_FILE_NAME")" == "$SERVICE_RUN_PRIVATE_BUS" ]] && printf private || printf other)"
+cockpit_start_summary+=" allowlist-seen=$(allowlist_names_seen_in "$COCKPIT_ENV_NAMES_SEEN") unexpected=[$(unexpected_env_names "$COCKPIT_ENV_NAMES_SEEN")]"
+cockpit_start_summary+=" recorded=$(grep -c -E '^cockpit(-starttime)?=[0-9]+$' "$SERVICE_RUN/state/run.values")"
+cockpit_start_summary+=" $(grep '^cockpit-recorded-before-the-shell=' "$NESTED_SERVICE_CALLS")"
+cockpit_start_summary+=" asked-the-private-bus=$(grep -c -x -F "busctl --address=$SERVICE_RUN_PRIVATE_BUS call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s $COCKPIT_BUS_NAME" "$NESTED_SERVICE_CALLS" | sed 's/^[1-9][0-9]*$/yes/')"
+cockpit_start_summary+=" logged=$(grep -c -x -F "$NESTED_SERVICE_STAND_IN_TEXT" "$SERVICE_RUN/log/cockpit.log" 2>/dev/null)"
+end_recorded_stand_ins "$SERVICE_RUN"
+check "nested: the in-bus stage starts the run's copy of service/cockpit.js after the sampler, on the private bus, before the shell" \
+  "$cockpit_start_summary" \
+  "exit=0 starts=[$NESTED_SERVICE_MAIN_RELATIVE_PATH $NESTED_COCKPIT_MAIN_RELATIVE_PATH ] bus=private allowlist-seen=22 unexpected=[] recorded=2 cockpit-recorded-before-the-shell=1 asked-the-private-bus=yes logged=1"
+
+check "nested: the harness names the run's copy of service/cockpit.js and the cockpit's bus name, beside the sampler's" \
+  "entry=$(nested_constant_text COCKPIT_MAIN_RELATIVE_PATH) bus=$(nested_constant_text COCKPIT_BUS_NAME)" \
+  "entry=$NESTED_COCKPIT_MAIN_RELATIVE_PATH bus=$COCKPIT_BUS_NAME"
+
+# The cockpit reads its layout from <XDG_CONFIG_HOME>/resource-pulse/cockpit.json:
+# the run's config home, as the run's environment names it, holds the template.
+SERVICE_RUN_CONFIG_HOME="$(nested_call nested_environment_assignments "$SERVICE_RUN" | sed -n 's/^XDG_CONFIG_HOME=//p')"
+check "nested: the run's XDG_CONFIG_HOME holds the cockpit config template as resource-pulse/cockpit.json" \
+  "$(cmp -s "$COCKPIT_CONFIG_TEMPLATE" "$SERVICE_RUN_CONFIG_HOME/$COCKPIT_CONFIG_RELATIVE_PATH" && printf same || printf differs-or-missing)" \
+  same
+
+# A run whose copy of the extension has no service/cockpit.js: the cockpit's
+# stand-in exits at once, as gjs does, and the run must refuse, naming it.
+MISSING_COCKPIT_RUN="$(make_service_run Service3)"
+rm -f -- "${MISSING_COCKPIT_RUN:?}/$NESTED_COCKPIT_MAIN_RELATIVE_PATH" || fatal "cannot remove the run's service/cockpit.js"
+run_in_bus_stage_with_service "$MISSING_COCKPIT_RUN" waits
+missing_cockpit_summary="exit=$NESTED_SERVICE_EXIT"
+missing_cockpit_summary+=" refused=$(grep -c -F "the service at $NESTED_COCKPIT_MAIN_RELATIVE_PATH did not take $COCKPIT_BUS_NAME" "$MISSING_COCKPIT_RUN/state/refused" 2>/dev/null)"
+missing_cockpit_summary+=" shell-started=$(grep -c '^gnome-shell ' "$NESTED_SERVICE_CALLS")"
+missing_cockpit_summary+=" address=$([[ -e "$MISSING_COCKPIT_RUN/state/session.addr" ]] && printf recorded || printf none)"
+missing_cockpit_summary+=" at-once=$( (( NESTED_SERVICE_ELAPSED_SECONDS < NESTED_SERVICE_START_TIMEOUT_SECONDS )) && printf yes || printf 'no-%ss' "$NESTED_SERVICE_ELAPSED_SECONDS")"
+end_recorded_stand_ins "$MISSING_COCKPIT_RUN"
+check "nested: a run with no service/cockpit.js refuses at once, naming the cockpit, and the shell never starts" \
+  "$missing_cockpit_summary" "exit=2 refused=1 shell-started=0 address=none at-once=yes"
+
 EXITING_SERVICE_RUN="$(make_service_run Service2)"
 run_in_bus_stage_with_service "$EXITING_SERVICE_RUN" exits
 exiting_service_summary="exit=$NESTED_SERVICE_EXIT"
-exiting_service_summary+=" refused=$(grep -c -F 'the sampler service did not take' "$EXITING_SERVICE_RUN/state/refused" 2>/dev/null)"
+exiting_service_summary+=" refused=$(grep -c -F "the service at $NESTED_SERVICE_MAIN_RELATIVE_PATH did not take $RESOURCE_PULSE_BUS_NAME" "$EXITING_SERVICE_RUN/state/refused" 2>/dev/null)"
 exiting_service_summary+=" shell-started=$(grep -c '^gnome-shell ' "$NESTED_SERVICE_CALLS")"
 exiting_service_summary+=" address=$([[ -e "$EXITING_SERVICE_RUN/state/session.addr" ]] && printf recorded || printf none)"
 exiting_service_summary+=" at-once=$( (( NESTED_SERVICE_ELAPSED_SECONDS < NESTED_SERVICE_START_TIMEOUT_SECONDS )) && printf yes || printf 'no-%ss' "$NESTED_SERVICE_ELAPSED_SECONDS")"
 check "nested: a service that exits before owning its name refuses the run at once, and the shell never starts" \
   "$exiting_service_summary" "exit=2 refused=1 shell-started=0 address=none at-once=yes"
 
+# stop_with_recorded_sleep_in_session <process name> <run suffix>: a session led
+# by the run's timeout, whose child bash runs a `sleep` recorded as <process
+# name>, is stopped. Prints stop's exit, whether that sleep ended, and whether
+# stop returned before STOP_GRACE_SECONDS: without its own SIGTERM the sleep
+# would linger that long, until the session sweep.
+stop_with_recorded_sleep_in_session() {
+  local process_name="$1" run_dir="$NESTED_BASE/rpn.$2" sleep_pid_file="$SACRIFICE_DIR/$1-sleep.pid"
+  local session_id session_starttime sleep_pid sleep_starttime stop_started_seconds stop_elapsed_seconds
+  local sleep_fate stop_timing
+  # shellcheck disable=SC2016  # Expanded by the sacrificial session's own bash.
+  session_id="$(start_sacrificial_session timeout 60 bash -c 'sleep 60 & printf "%s\n" "$!" >"$1"; wait' \
+    "sacrificial-$process_name" "$sleep_pid_file")"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$sleep_pid_file" && "$(cat "/proc/$session_id/comm" 2>/dev/null)" == timeout ]] && break
+    sleep 0.1
+  done
+  sleep_pid="$(cat "$sleep_pid_file")"
+  session_starttime="$(starttime_of "$session_id")"
+  sleep_starttime="$(starttime_of "$sleep_pid")"
+  make_run_dir "$run_dir" "launcher=$session_id" "launcher-starttime=$session_starttime" \
+    "session=$session_id" "supervisor=$session_id" "supervisor-starttime=$session_starttime" \
+    "$process_name=$sleep_pid" "$process_name-starttime=$sleep_starttime"
+  stop_started_seconds=$SECONDS
+  NESTED_RUN_DIR="$run_dir" nested_run stop
+  stop_elapsed_seconds=$((SECONDS - stop_started_seconds))
+  sleep_fate="$(is_running "$sleep_pid" && printf left-running || printf ended)"
+  stop_timing="$( (( stop_elapsed_seconds < NESTED_STOP_GRACE_SECONDS )) && printf at-once || printf 'after-%ss' "$stop_elapsed_seconds")"
+  kill_sacrifice "$sleep_pid" sleep "$sleep_starttime"
+  kill_sacrifice "$session_id" timeout "$session_starttime"
+  rm -rf "$run_dir"
+  printf '%s/%s/%s' "$NESTED_EXIT" "$sleep_fate" "$stop_timing"
+}
+
 # `stop` ends the recorded service in the run's session at once, and never one
 # outside it. (1) A session led by the run's timeout, whose child bash runs a
-# `sleep` recorded as the service: without its own SIGTERM it would linger the
-# whole STOP_GRACE_SECONDS. (2) A session led by the run's timeout (also
+# `sleep` recorded as the service. (2) A session led by the run's timeout (also
 # recorded as its gnome-shell, so it ends at once), whose recorded service is a
 # process of ANOTHER session: that one must be left running.
-SERVICE_SLEEP_PID_FILE="$SACRIFICE_DIR/service-sleep.pid"
-# shellcheck disable=SC2016  # Expanded by the sacrificial session's own bash.
-service_session_id="$(start_sacrificial_session timeout 60 bash -c 'sleep 60 & printf "%s\n" "$!" >"$1"; wait' \
-  sacrificial-service "$SERVICE_SLEEP_PID_FILE")"
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [[ -s "$SERVICE_SLEEP_PID_FILE" && "$(cat "/proc/$service_session_id/comm" 2>/dev/null)" == timeout ]] && break
-  sleep 0.1
-done
-service_sleep_pid="$(cat "$SERVICE_SLEEP_PID_FILE")"
-service_session_starttime="$(starttime_of "$service_session_id")"
-service_sleep_starttime="$(starttime_of "$service_sleep_pid")"
-IN_SESSION_SERVICE_RUN="$NESTED_BASE/rpn.SvcStop1"
-make_run_dir "$IN_SESSION_SERVICE_RUN" "launcher=$service_session_id" "launcher-starttime=$service_session_starttime" \
-  "session=$service_session_id" "supervisor=$service_session_id" "supervisor-starttime=$service_session_starttime" \
-  "service=$service_sleep_pid" "service-starttime=$service_sleep_starttime"
-stop_started_seconds=$SECONDS
-NESTED_RUN_DIR="$IN_SESSION_SERVICE_RUN" nested_run stop
-stop_elapsed_seconds=$((SECONDS - stop_started_seconds))
-service_stop_summary="in-session=$NESTED_EXIT/$(is_running "$service_sleep_pid" && printf left-running || printf ended)"
-service_stop_summary+="/$( (( stop_elapsed_seconds < NESTED_STOP_GRACE_SECONDS )) && printf at-once || printf 'after-%ss' "$stop_elapsed_seconds")"
-kill_sacrifice "$service_sleep_pid" sleep "$service_sleep_starttime"
-kill_sacrifice "$service_session_id" timeout "$service_session_starttime"
+service_stop_summary="in-session=$(stop_with_recorded_sleep_in_session service SvcStop1)"
 outside_service_id="$(start_sacrificial_session sleep 60)"
 outside_service_starttime="$(starttime_of "$outside_service_id")"
 outside_run_session_id="$(start_sacrificial_session timeout 60 sleep 60)"
@@ -2460,7 +3412,10 @@ kill_sacrifice "$outside_service_id" sleep "$outside_service_starttime"
 kill_sacrifice "$outside_run_session_id" timeout "$outside_run_session_starttime"
 check "nested: stop ends the run's recorded service in its session at once, and leaves one in another session alone" \
   "$service_stop_summary" "in-session=0/ended/at-once outside=0/left-running"
-rm -rf "$IN_SESSION_SERVICE_RUN" "$OUTSIDE_SERVICE_RUN"
+rm -rf "$OUTSIDE_SERVICE_RUN"
+
+check "nested: stop ends the run's recorded cockpit in its session at once" \
+  "$(stop_with_recorded_sleep_in_session cockpit CkptStop1)" "0/ended/at-once"
 
 printf '\nthe stub, never the real session, answered gsettings\n'
 run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
@@ -2476,7 +3431,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=474
+EXPECTED_ROWS=701
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

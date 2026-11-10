@@ -1,0 +1,162 @@
+{
+  "id": "cli:api:snapshot",
+  "result": {
+    "snapshot": {
+      "agents": [
+        {
+          "agent": "claude",
+          "agent_session": {
+            "value": "sess-aaa"
+          },
+          "agent_status": "working",
+          "cwd": "/home/user/dev/host-sync",
+          "focused": false,
+          "foreground_cwd": "/home/user/dev/host-sync",
+          "pane_id": "p_1",
+          "revision": 3,
+          "state_change_seq": 11,
+          "tab_id": "w_1:t1",
+          "terminal_id": "term-p_1",
+          "terminal_title": "✳ claude",
+          "terminal_title_stripped": "claude",
+          "tokens": {
+            "acct": "quantivly-1",
+            "mdl": "✻ Model 1M",
+            "ctx_ok": "▅ 62%"
+          },
+          "workspace_id": "w_1"
+        },
+        {
+          "agent": "claude",
+          "agent_session": {
+            "value": "sess-bbb"
+          },
+          "agent_status": "blocked",
+          "cwd": "/home/user/dev/fix-it",
+          "focused": false,
+          "foreground_cwd": "/home/user/dev/fix-it",
+          "pane_id": "p_2",
+          "revision": 3,
+          "state_change_seq": 12,
+          "tab_id": "w_2:t1",
+          "terminal_id": "term-p_2",
+          "terminal_title": "✳ claude",
+          "terminal_title_stripped": "claude",
+          "tokens": {
+            "acct": "quantivly-2",
+            "ctx_warn": "▇ 80%"
+          },
+          "workspace_id": "w_2"
+        },
+        {
+          "agent": "claude",
+          "agent_session": {
+            "value": "sess-ccc"
+          },
+          "agent_status": "idle",
+          "cwd": "/home/user/dev/reports",
+          "focused": false,
+          "foreground_cwd": "/home/user/dev/reports",
+          "pane_id": "p_3",
+          "revision": 3,
+          "state_change_seq": 13,
+          "tab_id": "w_3:t1",
+          "terminal_id": "term-p_3",
+          "terminal_title": "✳ claude",
+          "terminal_title_stripped": "claude",
+          "tokens": {
+            "acct": "personal",
+            "ctx_crit": "█ 95%"
+          },
+          "workspace_id": "w_3"
+        },
+        {
+          "agent": "claude",
+          "agent_session": {
+            "value": "sess-ddd"
+          },
+          "agent_status": "done",
+          "cwd": "/home/user/dev/notes",
+          "focused": false,
+          "foreground_cwd": "/home/user/dev/notes",
+          "pane_id": "p_4",
+          "revision": 3,
+          "state_change_seq": 14,
+          "tab_id": "w_4:t1",
+          "terminal_id": "term-p_4",
+          "terminal_title": "✳ claude",
+          "terminal_title_stripped": "claude",
+          "tokens": {},
+          "workspace_id": "w_4"
+        },
+        {
+          "agent": "claude",
+          "agent_session": {
+            "value": "sess-eee"
+          },
+          "cwd": "/home/user/dev/ghost",
+          "focused": false,
+          "foreground_cwd": "/home/user/dev/ghost",
+          "pane_id": "p_5",
+          "revision": 3,
+          "state_change_seq": 15,
+          "tab_id": "w_5:t1",
+          "terminal_id": "term-p_5",
+          "terminal_title": "✳ claude",
+          "terminal_title_stripped": "claude",
+          "tokens": {},
+          "workspace_id": "w_5"
+        },
+        {
+          "agent": "codex",
+          "agent_session": {
+            "value": "sess-fff"
+          },
+          "agent_status": "working",
+          "cwd": "/home/user/dev/editor",
+          "focused": false,
+          "foreground_cwd": "/home/user/dev/editor",
+          "pane_id": "p_6",
+          "revision": 3,
+          "state_change_seq": 16,
+          "tab_id": "w_6:t1",
+          "terminal_id": "term-p_6",
+          "terminal_title": "✳ codex",
+          "terminal_title_stripped": "codex",
+          "tokens": {},
+          "workspace_id": "w_6"
+        }
+      ],
+      "workspaces": [
+        {
+          "workspace_id": "w_1",
+          "label": "Host sync",
+          "worktree": {
+            "checkout_path": "/home/user/dev/host-sync"
+          }
+        },
+        {
+          "workspace_id": "w_2",
+          "label": "Fix it",
+          "worktree": {
+            "checkout_path": "/home/user/dev/fix-it"
+          }
+        },
+        {
+          "workspace_id": "w_3",
+          "label": "Reports",
+          "worktree": {
+            "checkout_path": "/home/user/dev/reports"
+          }
+        },
+        {
+          "workspace_id": "w_6",
+          "label": "Editor",
+          "worktree": {
+            "checkout_path": "/home/user/dev/editor"
+          }
+        }
+      ]
+    }
+  }
+}

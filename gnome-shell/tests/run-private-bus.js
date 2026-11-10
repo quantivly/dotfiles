@@ -8,6 +8,7 @@ import GLib from 'gi://GLib';
 import {runAll} from './harness.js';
 import {requirePrivateBusAddress} from './service-dbus.test.js';
 import './client-dbus.test.js';
+import './cockpit-dbus.test.js';
 
 const EXIT_CODE_TEST_FAILURE = 1;
 const EXIT_CODE_HARNESS_ERROR = 2;

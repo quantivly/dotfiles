@@ -72,8 +72,8 @@ to answer "why is this machine slow right now". It lives in
 `gnome-shell/extensions/resource-pulse@dotfiles/` (GNOME Shell 50 only). The design, and why the
 sampling left the shell: [the service design](superpowers/specs/2026-11-08-resource-pulse-service-design.md).
 The approved design for growing it into a desktop cockpit (a second service, a grid of cards on the 27",
-ding off, tooltips and a focus click): [the cockpit design](superpowers/specs/2026-11-09-desktop-cockpit-design.md);
-nothing of it is built yet.
+ding off, tooltips and a focus click): [the cockpit design](superpowers/specs/2026-11-09-desktop-cockpit-design.md).
+Its data side is built ([The cockpit service](#the-cockpit-service)); nothing of it is drawn yet.
 
 ### How it runs
 
@@ -154,6 +154,128 @@ open, and an **Open Resources** button (Resources, else System Monitor; hidden w
 installed). Resting the pointer on the graphs shows a one-line summary, never while the dropdown is
 open.
 
+### The cockpit service
+
+A third part, opt-in: the data side of [the cockpit design](superpowers/specs/2026-11-09-desktop-cockpit-design.md),
+built from [its plan](superpowers/plans/2026-11-09-desktop-cockpit-data-side.md). **Nothing is drawn yet: the
+drawing side is the next plan.** Until it lands, nothing starts the service but you, and nothing reads it but
+`gnome-status`.
+
+**What it serves.** `cockpit.service` (`gjs -m service/cockpit.js`) is a second systemd user unit, apart
+from the sampler, so a cockpit deploy never restarts the sampler or resets its histories. It serves JSON on
+the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
+`/io/github/quantivly/dotfiles/Cockpit1`:
+
+- `GetState`: the layout, the config error (null when there is none), and three sources, each stamped with
+  when it was sampled (`sampledAtUsec`) and its interval (`intervalSeconds`): `sessions` (the Claude Code
+  sessions in herdr), `network` (the uplink, the VPN tunnel and the SSH control masters) and `mounts`
+  (network shares and removable disks). Their fields are defined in
+  [Every number, defined](#every-number-defined).
+- `Changed`: the sources, or the layout, that changed; never sent on a timer.
+- `WatchCockpit` / `UnwatchCockpit`: held while the cockpit can be seen. Watches are counted per caller and
+  dropped when the caller leaves the bus, as the sampler's are.
+- `FocusSession(id)`: focuses that session's herdr workspace, then its pane, and answers whether it did. A
+  failure is an answer, never a D-Bus error: `focused: false` and an `error` code, one of `unknown-session`
+  (no row has that id), `no-pane` (the row has no herdr pane), `herdr-rejected` (herdr refused, or its
+  reply could not be read), `herdr-unreachable` (no socket, a refused connection, or no reply in 2 s) and
+  `internal` (a fault in the service). herdr's own message goes to the journal, never to the bus:
+  `cockpit: focus: <id>: <message>`.
+
+**Stale.** The service sends `Changed` only when something changed, so a quiet source is not a dead one.
+A source is stale once its `sampledAtUsec` is older than 3 of its own `intervalSeconds`
+(`COCKPIT_SOURCE_STALE_INTERVALS`); the drawing side will pull `GetState` once before drawing one stale.
+
+It runs in `background.slice` at `Nice=10`, capped at `CPUQuota=10%`, `MemoryHigh=64M` and
+`MemoryMax=96M`; systemd restarts it 5 s after a crash, at most 5 times in 5 minutes. Its budgets are in
+[What it costs](#what-it-costs). It logs to `journalctl --user -u cockpit.service`, every line prefixed
+`cockpit:`. `./install` try-restarts it when `service/cockpit.js`, a module it imports, or its unit file
+changed after it started, as it does the sampler; a cockpit that is not running is left alone, silently.
+
+**Opt-in by file: `~/.config/resource-pulse/cockpit.json`** (under `$XDG_CONFIG_HOME` instead when that is
+set). `./install` links the unit for everyone and enables it for no one: it has no `[Install]` section. Its
+`ConditionPathExists` (on `%E`, which is `$XDG_CONFIG_HOME` or `~/.config`, where the service reads the
+file too) makes systemd skip every start while that file is absent. The unit stays inactive, and that is
+not a failure. To opt in, copy the template and start the service once by hand: nothing starts it yet.
+
+```bash
+mkdir -p ~/.config/resource-pulse
+cp ~/.dotfiles/examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json
+systemctl --user start cockpit.service
+gnome-status        # cockpit: active, protocol 1, last publish …
+```
+
+The file names the monitor the cockpit will be drawn on (`monitor`, by `vendor` and `product`) and its card
+groups (`groups`). Each group has an `id`, a `caption`, 1 or 2 `columns` and its `cards`, from `system`,
+`apps`, `connections`, `sessions`, `health`, `seats`, `sol` and `work`; the groups' columns add up to at
+most 4. `version` must be 1. Keys it does not know, such as the template's `_comment`, are ignored.
+
+The service watches the file. An edit, a save that renames into place, a move or a delete is read again
+200 ms after its first event, with no restart. A malformed file publishes no layout, and a `configError`
+that names its first fault (`config: malformed JSON` for text that is not JSON at all); a deleted one
+publishes the `configError` `missing`. The sources are served either way.
+
+**Cadence.** Each source samples once at start, then on its own interval:
+
+| Source | Interval | Also sampled at once on |
+|---|---|---|
+| `sessions` | 10 s while a watch is held, 60 s otherwise | nothing |
+| `network` | 10 s | a change to NetworkManager's primary connection, its type, the connectivity or whether Wi-Fi is enabled |
+| `mounts` | 30 s | a mount or an unmount (the mount monitor's `mounts-changed`) |
+
+- `network` reads the route table and lists the SSH control sockets together, every 10 s: one cadence for
+  both, so the listing costs one directory read per 10 s.
+- On battery (UPower's `OnBattery`), every interval triples.
+- A signal within 2 s of a source's last signal-driven sample gives one more sample at the end of those 2 s,
+  not one per signal, counted on the monotonic clock so that setting the clock cannot stretch them.
+- A signal while the source's sample is still running gives one more sample once that one ends, and at the
+  earliest 1 s after the signal: a change made mid-sample does not wait for the next interval.
+- A source whose signal cannot be watched logs one line and is still sampled on its interval.
+- A sample still running when the next one is due is not started twice.
+- A source that fails keeps its last object, stamp included, and logs one line; the others go on.
+- Each request to herdr gives up after 2 s. With no herdr socket (`~/.config/herdr/herdr.sock`), or one that
+  refuses connections, `sessions` has no rows and `herdrRunning` is false; that is not an error.
+
+**The secrets rule.** The service hands the drawing side only fields it chose:
+
+- **An allowlist.** Every source, the layout and every reply pass through a reader in
+  `lib/cockpitProtocol.js`, and each builder writes only what its reader returns. A field no reader lists
+  never leaves the service. The readers cap lengths too: a herdr workspace or pane id longer than 128
+  characters reads as null, and a mount whose mount point is longer than 1024 is dropped.
+- **Stat, never open.** The sources' file reader refuses, before opening it, any path holding `/.aws/`,
+  `/.ssh/`, `/.credentials`, `/.zshrc.local`, `/.gitconfig.local` or `/.backup.local`
+  (`STAT_ONLY_PATH_FRAGMENTS`). Those may be stat'ed, or listed when a directory: the SSH control sockets are
+  counted, never opened, and a transcript is only stat'ed. It matches the path as given, so it is a guard,
+  not a boundary. A table row also forbids those names anywhere in `service/` and `lib/` outside that list.
+- **The name guard.** Every name published (a session name, an account, a mount label, a value quoted in a
+  config error) is replaced by `—` when it is empty, longer than 64 characters, holds a control character,
+  or matches one of `scripts/redact-secrets.sh`'s secret shapes (`lib/nameGuard.js`).
+
+**What `gnome-status` says.** Under the `service:` line, one `cockpit:` line. The two you will usually see:
+
+```
+  cockpit: skipped (no ~/.config/resource-pulse/cockpit.json)
+  cockpit: active, protocol 1, last publish 4 s ago, stale: none
+```
+
+- `skipped` needs the unit loaded and inactive with its condition unmet, **and** the file absent, because a
+  unit that never ran also reads `ConditionResult=no`. With the file there and the unit never started, the
+  line is `inactive (not running)`, and a ⚠ says to start it.
+- `active` comes from `GetState`. The last publish is the latest `Changed`, or the start, so a quiet
+  service's can be long ago, which is no fault. `stale:` names each stale source (`stale: sessions, mounts`).
+- These come with a ⚠ naming the remedy:
+  - `failed (not running)` and `activating (auto-restart: restarting after a failure)`: its journal;
+  - `active, no answer`, when `GetState` did not answer within 3 s: its journal;
+  - while the file exists: `inactive (not running)` (start it), `not installed (LoadState=not-found)`
+    (run `./install`), `cannot load (…)` (`systemctl --user status`), and any other state, such as
+    `activating (start)` (its journal). Without the file, none of these four warns;
+  - `cockpit: config invalid: <configError>`, while the service runs: fix the file, which it rereads;
+  - it **runs older code**: a module `service/cockpit.js` runs changed after it started (`systemctl --user
+    try-restart cockpit.service`).
+- These have no ⚠: `unknown (no systemd user manager answered)`;
+  `active (gdbus not found, so not asked)`, an active unit not asked for `GetState` for want of `gdbus`;
+  and `inactive (not running)` while the file is absent and `ConditionResult` is not `no`, a unit whose
+  last start found the file (stopped since, and the file deleted).
+
 ### Every number, defined
 
 | Number | Definition | Source |
@@ -168,9 +290,20 @@ open.
 | App memory | Each leaf cgroup's memory **minus reclaimable page cache**: `memory.current − (active_file + inactive_file)`. This matches the MemAvailable semantics, so cache never counts as used. A leaf at or under 64 MiB (`APP_MEMORY_STAT_MIN_BYTES`) ranks by `memory.current` as it is: too small to top the ranking, so its `memory.stat` is not read. | cgroup v2 `memory.current`, `memory.stat` |
 | "kernel" | A computed CPU-only entry: the root `/sys/fs/cgroup/cpu.stat` Δ minus the Σ of the scanned **parent slices'** Δ, clamped at 0. The parents are listed afresh every scan: every slice directly under `user@<uid>.service` (`app.slice`, `session.slice`, `background.slice`, and any a `systemd-run --user --slice=` job makes) and every top-level slice but `user.slice` (`system.slice`, `machine.slice`, and any other), so a VM, a rootless container or such a job is named, not counted here. That leaves kernel threads, irq, reclaim, zram compression, PID 1, the user managers and login-session scopes. It is ranked only when every parent has a delta and both listings succeeded: with none read, "root minus zero parents" would name the whole machine. It is **not a memory candidate** (the user's decision): the memory half of "heaviest" names real apps only, and unattributed memory still counts in the MEM total. | root and parent cgroups |
 | "short jobs" | A computed CPU-only entry: Σ over the scanned parents of max(0, the parent's Δ minus the Σ of its leaves' Δ). These are units that started and ended between two scans (timers, oneshots); a parent whose leaves exceed its Δ (read skew) adds 0. A leaf whose counter went backwards (a unit recreated at the same path) counts its current value; a leaf absent from the previous scan counts its full usage only when its parent was listed in that scan. | parent cgroups |
-| Heaviest | **One line**, as in the mockup: the top entry by CPU (an app, "kernel" or "short jobs"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. Names ellipsize to fit the card's fixed width; the numbers are never cut. When the top CPU entry is below 1% of the machine the CPU half reads `idle`. The halves collapse into one (`herdr agents 31% · 15.7 GiB`) only when they are the same group, never merely the same name: `docker.service` and `docker-x.scope` stay separate. | the two rankings above |
+| Heaviest | **One line**, as in the mockup: the top entry by CPU (an app, "kernel" or "short jobs"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. Names ellipsize to fit the card's fixed width; the numbers are never cut. When the top CPU entry is below 1% of the machine the CPU half reads `idle`. The halves collapse into one (`herdr agents 31% · 15.7 GiB`) only when they are the same group, never merely the same name: `docker.service` and `docker-x.scope` stay separate. The service also publishes the first 10 of each ranking (`cpuRanking`, `memoryRanking`, `APP_RANKING_LENGTH`) for the cockpit's apps card, which is not drawn yet. | the two rankings above |
 | Names | The launcher prefix is matched before unescaping, so `app-gnome\x2dcalculator-1234.scope` is the app `gnome-calculator`. `org.gnome.SettingsDaemon.Power.service` is `gsd-power`; any other reverse-DNS unit drops its first two segments (`org.freedesktop.IBus.session.GNOME.service` is `IBus.session.GNOME`). A snap is named through `<snap>_<app>.desktop` when that exists, else by its snap name. | cgroup names |
+| Session state | herdr's `agent_status` for the session's Claude agent: `working`, `blocked`, `idle` or `done`; anything else, or none, is `unknown`. A session is one herdr agent whose `agent` is `claude`. The source also counts the sessions in each state. | herdr's `session.snapshot`, over its socket |
+| Session name | The first that is set of: the hspawn registry entry's `slug`, its `branch`, the herdr workspace's label, and the last segment of the session's cwd, through the name guard ([The cockpit service](#the-cockpit-service)). | `~/.local/state/hspawn/*.json` (by `pane_id`), herdr's snapshot |
+| Session idle | `idleSeconds`: the age of the session's transcript, which Claude Code appends to while it works, in whole seconds. With no transcript found it is the age of the session's Claude process instead, and `idleFromProcessAge` is true: that is an upper bound. Null when neither is known. The transcript is stat'ed at `~/.claude/projects/<project>/<session id>.jsonl`, where `<project>` is the cwd with every `/` and `.` turned into `-`, else looked for in every `~/.claude/projects/*` and `~/.clauth/profiles/*/runtime-*/projects/*` (each directory listed at most once per sample). It is never opened. | the transcript's mtime; `/proc/<pid>/stat` field 22 and `/proc/stat` `btime` |
+| Session memory | `memoryBytes`: VmRSS + VmSwap of the pane's Claude process, picked from herdr's `pane.process_info` as `hreap` picks it (its `argv[0]`'s file name is `claude`, or its `argv[0]` holds `/claude/versions/`, or its name is `claude`). Null when that process is gone. Sessions sort by it, largest first, and the source's total is the sum of the known ones. | `/proc/<pid>/status` |
+| Session account | `account`: the session's `acct` sidebar token (the status-line hook publishes it), through the name guard. Null without one. | herdr's snapshot |
+| Session context | `contextPercent`: the percent in whichever of the `ctx_ok`, `ctx_warn` and `ctx_crit` sidebar tokens the session has (`▅ 62%` gives 62). Null without one. | herdr's snapshot |
+| VPN up | True when a route on a tunnel interface (`tun*`, `tap*`, `wg*`) goes via a gateway or is a default route. The interface named is the first tunnel interface in the table, up or not. | `/proc/net/route` |
+| Uplink | `kind`: `wired` when NetworkManager's primary connection is `802-3-ethernet`, `wifi` when it is `802-11-wireless`, `none` otherwise. `connectivity`: NetworkManager's own verdict, `full`, `limited`, `portal` or `none`, and `unknown` for anything else. Beside them, whether Wi-Fi is enabled. With no NetworkManager on the system bus, all three are null. | NetworkManager's `PrimaryConnectionType`, `Connectivity`, `WirelessEnabled` |
+| SSH masters | The number of entries in `~/.ssh/sockets`, listed and never opened: 0 when the directory is missing, null when it cannot be listed. | the directory's names |
+| Mounts | Network shares (a filesystem type of `cifs`, `smb3`, `nfs`, `nfs4`, `fuse.sshfs`, `fuse.rclone`, `davfs` or `afp`) and removable disks (mounted under `/media/`, `/run/media/` or `/mnt/`); a network type wins. Sorted by mount point. The label is GIO's guess at the mount's name, else the mount point's last segment, through the name guard. Free and total are the filesystem's own, from a query that counts as failed after 2 s, as on a hung share: that row's sizes are then null, and the row stays. One query per mount point runs at a time. | the mount table (`GioUnix`), `filesystem::free` and `filesystem::size` |
 
+The rows from Session state on are the cockpit service's, in `GetState`; nothing draws them yet.
 
 ### Enabling it
 
@@ -197,6 +330,7 @@ runs on until logout; `systemctl --user stop resource-pulse.service` ends it at 
 ```
 Resource Pulse: linked=yes enabled=yes state=ACTIVE
   service: active, protocol 1, last sample 1 s ago
+  cockpit: skipped (no ~/.config/resource-pulse/cockpit.json)
 ```
 
 - `enabled=` reads `enabled-extensions` itself, and says `yes (starts at next login)` while the shell
@@ -208,6 +342,7 @@ Resource Pulse: linked=yes enabled=yes state=ACTIVE
 - `service:` is the unit's state, from its `LoadState`, `ActiveState` and `SubState`: for an active
   service, also the protocol and the age of its last sample, asked with `GetState` through `gdbus`.
   Every call to `systemctl` and `gdbus` is bounded at 3 s ("no answer", or "unknown", otherwise).
+- `cockpit:` is the cockpit service's line; its forms are in [The cockpit service](#the-cockpit-service).
 - A ⚠ line follows, with its own remedy, for each of:
   - the service **failed**, or is **restarting after a failure** (`auto-restart`): its journal;
   - while the extension is enabled (and not also disabled), from the first login after linking on:
@@ -237,7 +372,8 @@ Never restart the live shell to test a change, and never use the plain
 writes the live session's crash-guard file, takes a logind inhibitor and sets the live session's
 locked hint, registers with GDM and GeoClue, and posts your extension list to extensions.gnome.org.
 Use `scripts/resource-pulse-nested.sh`, which starts a headless nested shell that can reach none of
-that, with a copy of the checkout's extension enabled and its sampler service on the same private bus:
+that, with a copy of the checkout's extension enabled and its sampler and cockpit services on the same
+private bus:
 
 ```bash
 scripts/resource-pulse-nested.sh start        # prints the nested shell's private bus address
@@ -252,15 +388,18 @@ other access): a private runtime dir, HOME and XDG dirs, a private session bus t
 only dconf and a fake empty system bus with a fake GDM, both on path sockets inside the run
 directory (never abstract sockets, which any local process could reach), an `env -i` allowlist (no
 tokens, no live display or bus), nested settings that never lock, blank, use the network or check
-for extension updates, and the extension-update apps masked. The run's own copy of the sampler
-service starts on the private session bus before the shell, with the same allowlist, and the run
-refuses to go on when it does not own its name within 15 s (its log is `log/service.log`, its pid
-`service=` in `state/run.values`). The extension's `StartUnit` finds no systemd there; that is
-expected, since it draws from the service's samples whatever `StartUnit` answers. Unsafe mode (which
+for extension updates, and the extension-update apps masked. The run's own copies of the sampler
+service and then the cockpit service start on the private session bus before the shell, with the same
+allowlist, and the run refuses to go on when either does not own its name within 15 s (their logs are
+`log/service.log` and `log/cockpit.log`, their pids `service=` and `cockpit=` in `state/run.values`).
+The cockpit reads the config template, copied into the run's config home as
+`resource-pulse/cockpit.json`; it finds no herdr there, and no NetworkManager or UPower on the fake
+system bus. The extension's `StartUnit` finds no systemd there; that is expected, since it draws from
+the service's samples whatever `StartUnit` answers. Unsafe mode (which
 `eval` and `screenshot` need) comes from a throwaway helper extension that exists only in that
 directory and refuses to act anywhere else, and `eval` and `screenshot` refuse a run whose
 supervisor and recorded gnome-shell are not both running in its own session. A run lives at most 20
-minutes (`setsid timeout`). `stop` ends the shell and the service, and signals only processes in the
+minutes (`setsid timeout`). `stop` ends the shell and both services, and signals only processes in the
 run's own session, only while that session is still led by the run's own `timeout`: a run that
 already ended is just cleaned up, since its session id may since belong to something else. Any
 isolation step that fails stops the run with exit 2, and a shell whose unsafe-mode helper did not
@@ -277,6 +416,9 @@ The budgets, at idle:
 | the service, with a detail watch held | under 0.25% of one core |
 | the service, with no watch | under 0.1% of one core |
 | the service's resident memory | at most 64 MiB, flat over 24 h |
+| the cockpit service, with a cockpit watch held | under 0.1% of one core |
+| the cockpit service, with no watch | under 0.05% of one core |
+| the cockpit service's resident memory | at most 48 MiB, flat over 24 h |
 | gnome-shell's resident memory | flat over 24 h |
 
 `scripts/resource-pulse-cost.sh` measures them. The extension's cost lands in gnome-shell, so take a
@@ -288,29 +430,37 @@ dropdown open) and once with none (the card covered), each over 10 idle minutes:
 scripts/resource-pulse-cost.sh --cpu-percent 600            # gnome-shell CPU over 10 min, % of one core
 scripts/resource-pulse-cost.sh --service --cpu-percent 600  # the service's
 scripts/resource-pulse-cost.sh --service --rss-kib          # the service's resident memory: at most 65536
+scripts/resource-pulse-cost.sh --cockpit --cpu-percent 600  # the cockpit service's
+scripts/resource-pulse-cost.sh --cockpit --rss-kib          # the cockpit's resident memory: at most 49152
 scripts/resource-pulse-cost.sh --rss-kib                    # gnome-shell's resident memory
 scripts/resource-pulse-cost.sh --rss-check <kib>            # exit 1 if gnome-shell grew more than 64 MiB since <kib>
 ```
 
-It reads only `comm`, `stat` and `status` under `/proc`. `--service` may stand anywhere on the line,
-and any other word left over is a usage error (exit 2), never ignored. To meet these budgets the app
-scan's interval moved from v1's 10 s to 20 s while a detail watch is held and 60 s with none. Over a
-budget, the remedy is a longer interval, or pruning slices that cannot beat the current leader; never a
-shorter history. Before the service existed the sampling ran inside gnome-shell, measured in plain
+It reads only `comm`, `stat` and `status` under `/proc`. `--cockpit` measures the cockpit service by
+its unit's `MainPID`, as `--service` does the sampler. Either may stand anywhere on the line; the two
+together are a usage error, and so is any other word left over (exit 2), never ignored. `--rss-check` is
+gnome-shell's growth tripwire alone: `--cockpit --rss-check` (or `--service --rss-check`) is a usage error
+too, which names that service's absolute budget, the figure its `--rss-kib` must stay under. To meet these
+budgets the app scan's interval moved from v1's 10 s to 20 s while a detail watch is held and 60 s with
+none. Over a budget, the remedy is a longer interval, or pruning slices that cannot beat the current
+leader; never a shorter history. Before the service existed the sampling ran inside gnome-shell, measured in plain
 `gjs` at about 0.5% of one core on the reference laptop: that work is the service's now. In plain
 `gjs`, a full garbage collection after every scan held the service's resident memory flat at about
 52 MB, where natural collection let it pile up to about 480 MB.
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (474 checks) runs the `gjs -m` unit tests of `lib/`, of the
-service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
-version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
-runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the
-Shell glue, enforces the no-blocking and `metadata.json` rules, and covers `genable_extension`,
-`gnome-status`, the unit and its install step, the cost script and the nested harness against stubs.
-It never touches the live session, but it is **not fully hermetic**: the `service/main.js` rows sample
-this machine's real `/proc` and `/sys`. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
+`scripts/test-resource-pulse.sh` (701 checks) runs the `gjs -m` unit tests of `lib/`, of the
+service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
+version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
+framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
+runs the service's D-Bus face, the client against it, the real `service/main.js`, the cockpit's D-Bus
+face, and the real `service/cockpit.js` (under a temp home, with no system bus, and a fake herdr for
+`FocusSession`). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
+covers `genable_extension`, `gnome-status`, the unit and its install step, the cost script and the
+nested harness against stubs. It never touches the live session, but it is **not fully hermetic**: the
+`service/main.js` rows sample this machine's real `/proc` and `/sys`, and the `service/cockpit.js` rows
+its real mount and route tables. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
 (package `dbus-daemon`) and `gdbus` (`libglib2.0-bin`): without any of them it stops with exit 2. The
 card-width row also needs Pango's typelibs (`gir1.2-pango-1.0`) and the card's font, Ubuntu Sans
 (`fonts-ubuntu`): without them that row fails. Neither is ever a pass.

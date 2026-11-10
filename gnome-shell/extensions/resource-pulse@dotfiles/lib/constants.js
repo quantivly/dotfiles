@@ -117,6 +117,8 @@ export const CPU_IDLE_THRESHOLD_PERCENT = 1;
 export const UNIT_DISPLAY_ALIASES = {'herdr-server': 'herdr agents', 'org.gnome.Shell': 'GNOME Shell'};
 /** Bytes in one gibibyte (the memory unit shown everywhere). */
 export const BYTES_PER_GIBIBYTE = 1024 ** 3;
+/** Microseconds in one second: GLib's clocks and every `*Usec` value count in microseconds. */
+export const MICROSECONDS_PER_SECOND = 1_000_000;
 /** Number of cells in the pressure meter (one more than the number of band thresholds). */
 export const PRESSURE_METER_CELLS = 3;
 /** Width of one drawn pressure-meter cell, in logical pixels: whole pixels keep its edges crisp. */
@@ -134,3 +136,91 @@ export const PRESSURE_METER_NO_DATA_DASH_THICKNESS_PX = 2;
 export const PRESSURE_METER_FILL_RGBA = [1, 1, 1, 1];
 /** Empty pressure-meter cells, and the no-data dash, as [red, green, blue, alpha], each 0–1: a visible groove. */
 export const PRESSURE_METER_TRACK_RGBA = [1, 1, 1, 0.25];
+/** Most apps the sampler publishes in each app ranking (by CPU, by memory): what the apps card can show. */
+export const APP_RANKING_LENGTH = 10;
+/**
+ * A cockpit source whose sampledAtUsec is older than this many of its own intervalSeconds is stale: its card draws
+ * "no data since HH:MM" rather than its numbers as live.
+ */
+export const COCKPIT_SOURCE_STALE_INTERVALS = 3;
+/**
+ * Longest name, in characters, a cockpit source publishes (a session slug or branch, a workspace label, an account, a
+ * mount label); a longer one is published as COCKPIT_REDACTED_NAME.
+ */
+export const COCKPIT_NAME_MAX_CHARS = 64;
+/**
+ * What a cockpit source publishes in place of a name it rejects: one that is empty, too long (COCKPIT_NAME_MAX_CHARS),
+ * holds a control character or matches a secret shape.
+ */
+export const COCKPIT_REDACTED_NAME = '—';
+/**
+ * Longest id, in characters, a cockpit reader passes (a session row's herdr workspace and pane ids); a longer one
+ * reads as null, so another program's runaway string cannot ride an id onto the bus.
+ */
+export const COCKPIT_ID_MAX_CHARS = 128;
+/** Longest path, in characters, a cockpit reader passes (a mount row's mount point); a longer one drops its row. */
+export const COCKPIT_PATH_MAX_CHARS = 1024;
+/** Prefix of every journal line the cockpit service writes. */
+export const COCKPIT_LOG_PREFIX = 'cockpit:';
+/** The card ids a cockpit layout config may name, in the order the cockpit draws them by default. */
+export const COCKPIT_CARD_IDS = ['system', 'apps', 'connections', 'sessions', 'health', 'seats', 'sol', 'work'];
+/** Columns of the cockpit grid: the most the groups' `columns` may add up to. */
+export const COCKPIT_GRID_COLUMNS = 4;
+/** The cockpit layout config's path under the user's config home (XDG_CONFIG_HOME). */
+export const COCKPIT_CONFIG_RELATIVE_PATH = 'resource-pulse/cockpit.json';
+/** A session row idle at least this many seconds is drawn dimmed (the drawing side reads it). */
+export const SESSION_IDLE_DIM_SECONDS = 1800;
+/** Interface-name prefixes of VPN tunnels in /proc/net/route (OpenVPN tun and tap, WireGuard wg). */
+export const TUNNEL_INTERFACE_PREFIXES = ['tun', 'tap', 'wg'];
+/** Filesystem types of network shares, as /proc/self/mountinfo names them. */
+export const NETWORK_FILESYSTEM_TYPES = ['cifs', 'smb3', 'nfs', 'nfs4', 'fuse.sshfs', 'fuse.rclone', 'davfs', 'afp'];
+/** Mount-point prefixes under which removable disks are mounted. */
+export const REMOVABLE_MOUNT_PREFIXES = ['/media/', '/run/media/', '/mnt/'];
+/** The RTF_GATEWAY bit of a /proc/net/route `Flags` column: the route goes via a gateway. */
+export const ROUTE_FLAG_GATEWAY = 0x0002;
+/**
+ * Milliseconds the cockpit service waits for herdr to answer one request over its socket: connect, send and the reply
+ * together. A herdr that has not answered by then fails the request, so a hung herdr marks the sessions source stale
+ * instead of stalling the service.
+ */
+export const HERDR_REQUEST_TIMEOUT_MS = 2000;
+/** herdr's API socket's path under the user's config home (XDG_CONFIG_HOME). */
+export const HERDR_SOCKET_RELATIVE_PATH = 'herdr/herdr.sock';
+/**
+ * Most characters of herdr's own error text (its code and message) a rejection's message carries; the rest is cut. An
+ * unknown method's message lists every method herdr has, about 2,000 characters.
+ */
+export const HERDR_ERROR_MESSAGE_MAX_CHARS = 200;
+/**
+ * Longest reply line, in bytes, the herdr client reads (8 MiB); a longer one is rejected as soon as the cap is passed,
+ * so a runaway reply cannot fill the service's memory. A live session snapshot measured about 63 KB.
+ */
+export const HERDR_REPLY_MAX_BYTES = 8 * 1024 * 1024;
+/** Seconds between samples of the sessions source while a client watches the cockpit. */
+export const SESSIONS_WATCHED_INTERVAL_SECONDS = 10;
+/** Seconds between samples of the sessions source while no client watches the cockpit: its standing cost. */
+export const SESSIONS_UNWATCHED_INTERVAL_SECONDS = 60;
+/** Seconds between samples of the network source, watched or not (NetworkManager's signals cover the rest). */
+export const NETWORK_INTERVAL_SECONDS = 10;
+/** Seconds between samples of the mounts source, watched or not (the mount monitor's signal covers the rest). */
+export const MOUNTS_INTERVAL_SECONDS = 30;
+/** Every cockpit source's interval is multiplied by this while UPower reports the machine on battery. */
+export const BATTERY_CADENCE_MULTIPLIER = 3;
+/**
+ * Seconds after a signal-driven sample of a cockpit source during which another signal does not sample it at once;
+ * signals inside it give one sample when it ends.
+ */
+export const SOURCE_SIGNAL_COOLDOWN_SECONDS = 2;
+/**
+ * Path fragments of the files the cockpit service may stat but never open (the spec's "stat, never open" list): the
+ * sources' file reader (service/sources/sourceIo.js) refuses any path containing one, before opening it. Listing a
+ * directory's names is not opening a file, so counting the SSH control sockets stays allowed.
+ */
+export const STAT_ONLY_PATH_FRAGMENTS = [
+    '/.aws/', '/.ssh/', '/.credentials', '/.zshrc.local', '/.gitconfig.local', '/.backup.local',
+];
+/**
+ * Milliseconds a mount's filesystem size query may take before it counts as failed (its sizes null), so a hung network
+ * share cannot stall the mounts source.
+ */
+export const FILESYSTEM_QUERY_TIMEOUT_MS = 2000;

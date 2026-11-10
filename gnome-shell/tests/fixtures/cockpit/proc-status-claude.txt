@@ -1,0 +1,5 @@
+Name:	claude
+VmPeak:	 3500000 kB
+VmRSS:	 3100000 kB
+VmSwap:	  200000 kB
+Threads:	12

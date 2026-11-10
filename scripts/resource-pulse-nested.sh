@@ -34,7 +34,11 @@
 #                on the private session bus before the shell, with the same allowlist and
 #                nothing more; the extension's StartUnit finds no systemd there, and it
 #                draws from the service's Samples whatever StartUnit answered
-#   identity     a run's launcher, supervisor, service and gnome-shell are recorded by pid AND start
+#   cockpit      the run's copy of the cockpit service (service/cockpit.js under gjs), started
+#                the same way after the sampler, reading the config template copied into the
+#                run's XDG_CONFIG_HOME; it finds no herdr (whose socket it looks for under that
+#                config home) and no NetworkManager or UPower on the fake system bus
+#   identity     a run's launcher, supervisor, services and gnome-shell are recorded by pid AND start
 #                time (stat field 22), and count only while both match: a pid alone can be
 #                reused once its process ends
 #   requests     eval and screenshot go only to a live run: its supervisor running, and its
@@ -54,8 +58,8 @@
 # Usage:
 #   scripts/resource-pulse-nested.sh start
 #       start a nested shell with the checkout's Resource Pulse enabled, and its
-#       sampler service on the same private bus; print that bus's address on
-#       stdout and the run directory on stderr
+#       sampler and cockpit services on the same private bus; print that bus's
+#       address on stdout and the run directory on stderr
 #   scripts/resource-pulse-nested.sh eval <javascript>|-
 #       run JavaScript in the nested shell (org.gnome.Shell.Eval) and print the
 #       JSON result; '-' reads the code from stdin
@@ -63,8 +67,9 @@
 #       save the nested stage (or an area of it, in logical pixels) as
 #       <run dir>/shots/<name.png>, and print that path
 #   scripts/resource-pulse-nested.sh stop
-#       stop the nested shell, its sampler service and everything else it started;
-#       logs (log/service.log is the service's) and shots stay
+#       stop the nested shell, its two services and everything else it started;
+#       logs (log/service.log is the sampler's, log/cockpit.log the cockpit's) and
+#       shots stay
 #
 # Environment:
 #   RESOURCE_PULSE_NESTED_DIR     the run directory eval, screenshot and stop act on
@@ -95,6 +100,12 @@ readonly FAKE_DISPLAY_MANAGER_NAME='org.gnome.DisplayManager'
 # The sampler service: the run's own copy of it, and the name it owns on the private session bus.
 readonly SERVICE_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/main.js"
 readonly SERVICE_BUS_NAME='io.github.quantivly.dotfiles.ResourcePulse1'
+# The cockpit service: the run's own copy of it, and the name it owns on the private session bus.
+readonly COCKPIT_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/cockpit.js"
+readonly COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
+# The cockpit's layout config: the checkout's template, copied to this path under the run's XDG_CONFIG_HOME.
+readonly COCKPIT_CONFIG_TEMPLATE="$REPO_ROOT/examples/resource-pulse-cockpit.json.template"
+readonly COCKPIT_CONFIG_RELATIVE_PATH='resource-pulse/cockpit.json'
 
 readonly EXIT_REQUEST_FAILED=1
 readonly EXIT_REFUSED=2
@@ -132,7 +143,7 @@ readonly STARTUP_TIMEOUT_SECONDS=120
 # the other extensions, about a second after the shell does) before start reports that it did not load.
 readonly HELPER_ENABLE_GRACE_SECONDS=15
 readonly FAKE_SYSTEM_BUS_TIMEOUT_SECONDS=10
-# How long the sampler service gets to own its bus name before the run refuses to go on.
+# How long each service gets to own its bus name before the run refuses to go on.
 readonly SERVICE_START_TIMEOUT_SECONDS=15
 readonly STOP_GRACE_SECONDS=15
 readonly SWEEP_GRACE_SECONDS=3
@@ -342,7 +353,7 @@ record_run_value() {
 # its pid.
 # Arguments:
 #   $1 - run directory
-#   $2 - name (launcher, supervisor, service, gnome-shell)
+#   $2 - name (launcher, supervisor, service, cockpit, gnome-shell)
 #   $3 - pid
 #######################################
 record_running_process() {
@@ -482,15 +493,17 @@ render_bus_config() {
 #######################################
 # Lay out a fresh run directory: the private homes and runtime dir, the bus
 # configs, the one dconf service, the session mode, the app masks, the
-# unsafe-mode helper and a copy of the checkout's extension.
+# unsafe-mode helper, a copy of the checkout's extension, and the cockpit's
+# config template in the run's config home.
 # Arguments:
 #   $1 - run directory (exists, empty, 0700)
 #   $2 - run suffix
 #######################################
 prepare_run_directory() {
     local run_dir="$1" run_suffix="$2"
-    local -a subdirectories=(run config cache home tmp data/applications data/gnome-shell/extensions
-        sysdata/gnome-shell/modes bus/session-services state log shots)
+    local cockpit_config_dir="config/${COCKPIT_CONFIG_RELATIVE_PATH%/*}"
+    local -a subdirectories=(run config "$cockpit_config_dir" cache home tmp data/applications
+        data/gnome-shell/extensions sysdata/gnome-shell/modes bus/session-services state log shots)
     # Every directory private to the user, intermediate ones included (the runtime dir must be 0700).
     (umask "$PRIVATE_UMASK" && mkdir -p "${subdirectories[@]/#/$run_dir/}") || return 1
     printf '%s\n' "$run_suffix" >"$run_dir/$RUN_DIR_MARKER_FILE" || return 1
@@ -501,6 +514,7 @@ prepare_run_directory() {
     cp -- "$NESTED_FILES_DIR"/applications/*.desktop "$run_dir/data/applications/" || return 1
     cp -R -- "$NESTED_FILES_DIR/$UNSAFE_MODE_HELPER_UUID" "$run_dir/data/gnome-shell/extensions/" || return 1
     cp -R -- "$EXTENSION_SOURCE_DIR" "$run_dir/data/gnome-shell/extensions/" || return 1
+    cp -- "$COCKPIT_CONFIG_TEMPLATE" "$run_dir/config/$COCKPIT_CONFIG_RELATIVE_PATH" || return 1
 }
 
 #######################################
@@ -950,54 +964,63 @@ write_nested_settings() {
 }
 
 #######################################
-# Succeed once the sampler service owns its name on the private session bus
-# (only ever called inside it, after is_private_session_bus_address).
+# Succeed once a service owns its name on the private session bus (only ever
+# called inside it, after is_private_session_bus_address).
+# Arguments:
+#   $1 - bus name
 #######################################
 does_nested_service_own_its_name() {
     [[ "$(busctl --address="$DBUS_SESSION_BUS_ADDRESS" call org.freedesktop.DBus /org/freedesktop/DBus \
-        org.freedesktop.DBus NameHasOwner s "$SERVICE_BUS_NAME" 2>/dev/null)" == 'b true' ]]
+        org.freedesktop.DBus NameHasOwner s "$1" 2>/dev/null)" == 'b true' ]]
 }
 
 #######################################
-# Wait until the sampler service owns its name. Fail as soon as its recorded
-# process is gone (it exited), or after SERVICE_START_TIMEOUT_SECONDS.
+# Wait until a service owns its name. Fail as soon as its recorded process is
+# gone (it exited), or after SERVICE_START_TIMEOUT_SECONDS.
 # Arguments:
 #   $1 - run directory
+#   $2 - the name the service is recorded under (service, cockpit)
+#   $3 - bus name
 #######################################
 wait_for_nested_service() {
-    local run_dir="$1" deadline=$((SECONDS + SERVICE_START_TIMEOUT_SECONDS))
+    local run_dir="$1" process_name="$2" bus_name="$3" deadline=$((SECONDS + SERVICE_START_TIMEOUT_SECONDS))
     while (( SECONDS < deadline )); do
-        does_nested_service_own_its_name && return 0
-        is_recorded_process_running "$run_dir" service || return 1
+        does_nested_service_own_its_name "$bus_name" && return 0
+        is_recorded_process_running "$run_dir" "$process_name" || return 1
         sleep "$POLL_INTERVAL_SECONDS"
     done
-    does_nested_service_own_its_name
+    does_nested_service_own_its_name "$bus_name"
 }
 
 #######################################
-# Start the run's copy of the sampler service on the private session bus, and
-# wait until it owns its name: the extension then finds it at its first enable.
-# The extension's StartUnit has no systemd to reach here, and it draws from the
-# Samples whatever StartUnit answered. The service inherits this stage's
-# environment, which is the isolated allowlist plus the private bus address and
-# nothing else. Recorded as `service`, by pid and start time, for `stop`.
-# Refuses the run when the service exits before owning its name, or does not
-# own it in time.
+# Start the run's copy of a service (the sampler, or the cockpit) on the private
+# session bus, and wait until it owns its name: the extension then finds the
+# sampler at its first enable. The extension's StartUnit has no systemd to
+# reach here, and it draws from the Samples whatever StartUnit answered. The
+# service inherits this stage's environment, which is the isolated allowlist
+# plus the private bus address and nothing else. Recorded by pid and start
+# time, for `stop`, and logged to log/<recorded name>.log. Refuses the run when
+# the service exits before owning its name (as gjs does at once with a module it
+# cannot load), or does not own it in time.
 # Arguments:
 #   $1 - run directory
+#   $2 - the name to record it under (service, cockpit)
+#   $3 - its entry module, relative to the run directory
+#   $4 - the bus name it owns
 #######################################
 start_nested_service() {
-    local run_dir="$1"
-    gjs -m "$run_dir/$SERVICE_MAIN_RELATIVE_PATH" >"$run_dir/log/service.log" 2>&1 &
-    record_running_process "$run_dir" service "$!"
-    wait_for_nested_service "$run_dir" \
-        || refuse_run "$run_dir" "the sampler service did not take $SERVICE_BUS_NAME (log/service.log)"
+    local run_dir="$1" process_name="$2" main_relative_path="$3" bus_name="$4"
+    local log_relative_path="log/$process_name.log"
+    gjs -m "$run_dir/$main_relative_path" >"$run_dir/$log_relative_path" 2>&1 &
+    record_running_process "$run_dir" "$process_name" "$!"
+    wait_for_nested_service "$run_dir" "$process_name" "$bus_name" \
+        || refuse_run "$run_dir" "the service at $main_relative_path did not take $bus_name ($log_relative_path)"
 }
 
 #######################################
 # Stage 3, inside the private session bus: refuse unless isolated, write the
-# nested settings, start the sampler service, record the bus, then become
-# gnome-shell (same pid).
+# nested settings, start the sampler service and then the cockpit service,
+# record the bus, then become gnome-shell (same pid).
 # Arguments:
 #   $1 - run directory
 #######################################
@@ -1009,7 +1032,8 @@ run_inside_private_session_bus() {
         || refuse_run "$run_dir" "the session bus is not this run's private one: '${DBUS_SESSION_BUS_ADDRESS:-}'"
     write_nested_settings || refuse_run "$run_dir" "a nested setting could not be written"
     [[ -s "$XDG_CONFIG_HOME/dconf/user" ]] || refuse_run "$run_dir" "the settings did not land in the nested dconf"
-    start_nested_service "$run_dir"
+    start_nested_service "$run_dir" service "$SERVICE_MAIN_RELATIVE_PATH" "$SERVICE_BUS_NAME"
+    start_nested_service "$run_dir" cockpit "$COCKPIT_MAIN_RELATIVE_PATH" "$COCKPIT_BUS_NAME"
     record_running_process "$run_dir" gnome-shell "$$"
     printf '%s\n' "$DBUS_SESSION_BUS_ADDRESS" >"$run_dir/state/session.addr"
     exec gnome-shell --headless --wayland --no-x11 --virtual-monitor "$NESTED_MONITOR_SIZE" \
@@ -1193,7 +1217,7 @@ refuse_unstoppable_session() {
 # the process recorded (same pid and start time) and runs in the run's session.
 # Arguments:
 #   $1 - run directory
-#   $2 - name (gnome-shell, service)
+#   $2 - name (gnome-shell, service, cockpit)
 #   $3 - the run's session id
 #######################################
 terminate_recorded_process_in_session() {
@@ -1206,7 +1230,7 @@ terminate_recorded_process_in_session() {
 }
 
 #######################################
-# Stop a run: SIGTERM the nested gnome-shell and the sampler service by their
+# Stop a run: SIGTERM the nested gnome-shell and the two services by their
 # recorded pids, wait for the session to empty (the supervisor's exit sweeps
 # it), then signal whatever is left in that session. It signals only while the
 # session is still led by the run's own launcher
@@ -1225,6 +1249,7 @@ stop_run() {
         if is_session_led_by_run_launcher "$run_dir" "$session_id"; then
             terminate_recorded_process_in_session "$run_dir" gnome-shell "$session_id"
             terminate_recorded_process_in_session "$run_dir" service "$session_id"
+            terminate_recorded_process_in_session "$run_dir" cockpit "$session_id"
             if ! wait_until "$STOP_GRACE_SECONDS" is_session_empty "$session_id"; then
                 signal_session "$session_id" TERM "$SWEEP_GRACE_SECONDS" ||
                     signal_session "$session_id" KILL "$SWEEP_GRACE_SECONDS"
