@@ -303,9 +303,10 @@ shorter history. Before the service existed the sampling ran inside gnome-shell,
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (585 checks) runs the `gjs -m` unit tests of `lib/`, of the
-service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
-version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
+`scripts/test-resource-pulse.sh` (597 checks) runs the `gjs -m` unit tests of `lib/`, of the
+service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
+version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
+framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the
 Shell glue, enforces the no-blocking and `metadata.json` rules, and covers `genable_extension`,
 `gnome-status`, the unit and its install step, the cost script and the nested harness against stubs.

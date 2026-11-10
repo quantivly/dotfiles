@@ -169,3 +169,11 @@ export const NETWORK_FILESYSTEM_TYPES = ['cifs', 'smb3', 'nfs', 'nfs4', 'fuse.ss
 export const REMOVABLE_MOUNT_PREFIXES = ['/media/', '/run/media/', '/mnt/'];
 /** The RTF_GATEWAY bit of a /proc/net/route `Flags` column: the route goes via a gateway. */
 export const ROUTE_FLAG_GATEWAY = 0x0002;
+/**
+ * Milliseconds the cockpit service waits for herdr to answer one request over its socket: connect, send and the reply
+ * together. A herdr that has not answered by then fails the request, so a hung herdr marks the sessions source stale
+ * instead of stalling the service.
+ */
+export const HERDR_REQUEST_TIMEOUT_MS = 2000;
+/** herdr's API socket's path under the user's config home (XDG_CONFIG_HOME). */
+export const HERDR_SOCKET_RELATIVE_PATH = 'herdr/herdr.sock';
