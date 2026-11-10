@@ -37,6 +37,8 @@ test('cockpitMonitor: vendor and product must both match, case-sensitively', () 
 test('cockpitMonitor: without a rule the largest non-primary wins, ties to the lowest index', () => {
     const tied = {...DELL, index: 2};
     assertEqual(chosen([SAMSUNG, DELL, tied], null), 1);
+    // The lower index listed LATER: only the explicit tie-break, not a strict `>`, picks it.
+    assertEqual(chosen([SAMSUNG, tied, DELL], null), 1);
     assertEqual(chosen([SAMSUNG, DELL, {...tied, width: 2560}], null), 2);
 });
 test('cockpitMonitor: only primaries and no rule match falls back to the only monitor, else null-safe', () => {
