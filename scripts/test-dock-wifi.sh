@@ -19,7 +19,7 @@
 #
 # "Could not run" is exit 2, never a pass. The suite asserts its own row total.
 #
-# Requires: bash, git, cmp, stat, systemd-analyze. No sudo, no root, no network.
+# Requires: bash, git, cmp, stat, systemd-analyze, python3. No sudo, no root, no network.
 #
 # Usage: scripts/test-dock-wifi.sh
 
@@ -31,6 +31,7 @@ SCRIPT="${DOCK_WIFI_SH:-$HERE/dock-wifi.sh}"
 SETUP="$HERE/setup-dock-wifi.sh"
 SHIM_SRC="$DOTFILES/networkmanager/50-dock-wifi"
 UNIT_SRC="$DOTFILES/systemd/dock-wifi-sync.service"
+REPORT="$HERE/dock-wifi-report.py"
 
 PASS=0; FAIL=0
 ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
@@ -38,10 +39,10 @@ bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for f in "$SCRIPT" "$SETUP" "$SHIM_SRC" "$UNIT_SRC"; do
+for f in "$SCRIPT" "$SETUP" "$SHIM_SRC" "$UNIT_SRC" "$REPORT"; do
   [[ -r "$f" ]] || fatal "cannot read $f"
 done
-for t in git cmp stat systemd-analyze; do
+for t in git cmp stat systemd-analyze python3; do
   command -v "$t" >/dev/null || fatal "$t is required"
 done
 
@@ -450,6 +451,98 @@ P="$(newprefix)"
 rc="$(run_setup "$T/repo" "$P" "$W")"
 check "the primary checkout of the same repo is not a worktree: installs" "$rc:$(files_in "$P")" "0:3"
 
+# ---------------------------------------------------------------------------
+# dock-wifi-report.py: the measurement. Fixture journals in the shape of
+# `journalctl -o short-iso-precise`, each built so that ONE rule decides its row.
+# Every row asserts the whole tuple rc:docked:radio-off:undocked:sleep:unknown,
+# so a disconnect moved into the wrong class fails it twice over.
+# ---------------------------------------------------------------------------
+REPORT_NOW="$(date -d '2026-11-10T10:00:00Z' +%s)"   # 12:00 in the fixtures' +02:00
+REPORT_LABELS=('docked, Wi-Fi still on' 'radio switched off' 'undocked' 'at suspend or shutdown' 'wired state unknown')
+nm()        { printf '2026-11-10T%s+02:00 host NetworkManager[1]: <info>  [0.0] %s\n' "$1" "$2"; }
+nm_start()  { nm "$1" 'NetworkManager (version 1.54.3) is starting... (boot:x)'; }
+nm_other()  { nm "$1" 'manager: NetworkManager state is now CONNECTED_GLOBAL'; }
+wired()     { nm "$1" "device (enx0011223344): state change: $2 -> $3 (reason 'none', managed-type: '${4:-full}')"; }
+radio_off() { nm "$1" 'audit: op="radio-control" arg="wireless-enabled:off" pid=9 uid=0 result="success"'; }
+sleep_req() { nm "$1" 'manager: sleep: sleep requested (sleeping: no  enabled: yes)'; }
+drop()      { printf '2026-11-10T%s+02:00 host wpa_supplicant[2]: wlp0s20f3: CTRL-EVENT-DISCONNECTED bssid=aa:bb:cc:dd:ee:ff %s\n' "$1" "${2:-reason=8}"; }
+# classes <journal-file|-> [args...] -> rc:docked:radio-off:undocked:sleep:unknown
+# ("-" runs journalctl, the stub, instead of reading a file)
+classes() {
+  local journal="$1" rc label; shift
+  local source_args=(--journal-file "$journal")
+  [[ "$journal" == - ]] && source_args=()
+  # TZ pinned to the fixtures' +02:00 (POSIX spelling, no tzdata needed): the window and
+  # journalctl's --since/--until are local times, and a runner is UTC.
+  TZ=UTC-2 DOCK_WIFI_REPORT_NOW="${REPORT_NOW_OVERRIDE:-$REPORT_NOW}" PATH="$STUBBIN:$PATH" \
+    python3 "$REPORT" --days 1 "${source_args[@]}" "$@" >"$T/report.out" 2>"$T/report.err"; rc=$?
+  printf '%s' "$rc"
+  for label in "${REPORT_LABELS[@]}"; do
+    printf ':%s' "$(sed -n "s/^  ${label}: *\([0-9][0-9]*\).*/\1/p" "$T/report.out")"
+  done
+}
+cat >"$STUBBIN/journalctl" <<'STUB'
+#!/usr/bin/env bash
+printf 'journalctl %s\n' "$*" >>"${STUBLOG:?}"
+[ -n "${STUB_JOURNAL_ERR:-}" ] && printf '%s\n' "$STUB_JOURNAL_ERR" >&2
+[ -n "${STUB_JOURNAL_OUT:-}" ] && cat "$STUB_JOURNAL_OUT"
+exit "${STUB_JOURNAL_RC:-0}"
+STUB
+chmod +x "$STUBBIN/journalctl" || fatal "journalctl stub"
+
+printf '\ndock-wifi-report.py: each disconnect in exactly one class\n'
+J="$T/j.toggle"; { nm_start 09:00:00.000000; wired 09:00:05.000000 secondaries activated
+  drop 09:00:05.200000 'reason=3 locally_generated=1'; radio_off 09:00:05.300000; } >"$J"
+check "a disconnect 100 ms BEFORE the radio-off audit line is the guard's own toggle (the window is two-sided)" "$(classes "$J")" "0:0:1:0:0:0"
+J="$T/j.docked"; { nm_start 09:00:00.000000; wired 09:00:05.000000 secondaries activated; drop 09:10:00.000000; } >"$J"
+check "a disconnect while a wired device is activated, with no toggle near it, is a docked drop" "$(classes "$J")" "0:1:0:0:0:0"
+J_DOCKED="$J"
+J="$T/j.undock"; { nm_start 09:00:00.000000; wired 09:00:05.000000 secondaries activated
+  wired 09:10:00.000000 activated unmanaged removed; drop 09:20:00.000000; } >"$J"
+check "the undock line (managed-type 'removed', not 'full') takes the wired link down" "$(classes "$J")" "0:0:0:1:0:0"
+J="$T/j.external"; { nm_start 09:00:00.000000; wired 09:00:05.000000 ip-check activated external; drop 09:10:00.000000; } >"$J"
+check "an 'external' activation (NetworkManager only watching) is not a wired link" "$(classes "$J")" "0:0:0:1:0:0"
+J="$T/j.sleep"; { nm_start 09:00:00.000000; sleep_req 09:30:00.000000; drop 09:30:00.400000 'reason=3 locally_generated=1'; } >"$J"
+check "a disconnect at a suspend request is a suspend, not a drop" "$(classes "$J")" "0:0:0:0:1:0"
+J="$T/j.sleep-late"; { nm_start 09:00:00.000000; sleep_req 09:30:00.000000; drop 09:35:00.000000; } >"$J"
+check "...and only within the window: five minutes later it is a drop again" "$(classes "$J")" "0:0:0:1:0:0"
+J="$T/j.unknown"; { nm_other 09:00:00.000000; drop 09:10:00.000000; } >"$J"
+check "no wired transition and no NetworkManager start anywhere: unknown, never guessed" "$(classes "$J")" "0:0:0:0:0:1"
+J="$T/j.infer-up"; { nm_other 09:00:00.000000; drop 09:10:00.000000; wired 09:20:00.000000 activated unmanaged removed; } >"$J"
+check "a first transition OUT of activated means the link was up before it: the earlier drop was docked" "$(classes "$J")" "0:1:0:0:0:0"
+J="$T/j.infer-down"; { nm_other 09:00:00.000000; drop 09:10:00.000000; wired 09:20:00.000000 secondaries activated; } >"$J"
+check "a first transition INTO activated means it was down before it: the earlier drop was undocked" "$(classes "$J")" "0:0:0:1:0:0"
+J="$T/j.restart"; { wired 09:00:00.000000 secondaries activated; nm_start 09:05:00.000000; drop 09:06:00.000000; } >"$J"
+check "a NetworkManager start forgets every device: a drop before the dock re-activates is undocked" "$(classes "$J")" "0:0:0:1:0:0"
+J="$T/j.window"; {
+  printf '2026-11-08T09:00:00.000000+02:00 host NetworkManager[1]: <info>  [0.0] NetworkManager (version 1.54.3) is starting... (boot:x)\n'
+  printf "2026-11-08T09:00:05.000000+02:00 host NetworkManager[1]: <info>  [0.0] device (enx0011223344): state change: secondaries -> activated (reason 'none', managed-type: 'full')\n"
+  printf '2026-11-08T09:10:00.000000+02:00 host wpa_supplicant[2]: wlp0s20f3: CTRL-EVENT-DISCONNECTED bssid=aa:bb:cc:dd:ee:ff reason=8\n'
+  wired 09:00:00.000000 activated unmanaged removed; drop 09:10:00.000000; } >"$J"
+check "a docked drop in the lookback, before the window, is not counted" "$(classes "$J")" "0:0:0:1:0:0"
+J="$T/j.offset"; { printf '2026-11-10T09:00:00+0200 host NetworkManager[1]: <info>  [0.0] NetworkManager (version 1.54.3) is starting... (boot:x)\n'
+  printf '2026-11-10T09:10:00+0200 host wpa_supplicant[2]: wlp0s20f3: CTRL-EVENT-DISCONNECTED bssid=aa:bb:cc:dd:ee:ff reason=8\n'; } >"$J"
+check "an older systemd's '+0200' with no fraction parses (a pinned spelling reads zero events)" "$(classes "$J")" "0:0:0:1:0:0"
+classes "$J_DOCKED" --list >/dev/null
+check "--list prints one line per disconnect, with its class" "$(grep -c -P '^2026-11-10 09:10:00\tdocked\tbssid=aa:bb:cc:dd:ee:ff reason=8$' "$T/report.out")" 1
+
+printf '\ndock-wifi-report.py: could not run is exit 2, never a quiet week\n'
+check "a journal file that cannot be read" "$(classes "$T/no-such-journal")" "2:::::"
+printf 'not a journal line\nnor this\n' >"$T/j.garbage"
+check "lines and not one parsed: a parser fault" "$(classes "$T/j.garbage")" "2:::::"
+drop 09:10:00.000000 >"$T/j.no-nm"
+check "no NetworkManager line at all: docked and undocked cannot be told apart" "$(classes "$T/j.no-nm")" "2:::::"
+check "a DOCK_WIFI_REPORT_NOW that is not epoch seconds" "$(REPORT_NOW_OVERRIDE=noon classes "$J_DOCKED")" "2:::::"
+
+printf '\ndock-wifi-report.py: the journalctl it runs (a stub)\n'
+: >"$STUBLOG"
+check "the stub's output is read like a file" "$(STUB_JOURNAL_OUT="$J_DOCKED" classes -)" "0:1:0:0:0:0"
+check "it asks for both units, in the precise ISO format" \
+  "$(grep -c -F -- '-o short-iso-precise --since 2026-11-02 12:00:00 --until 2026-11-10 12:00:00 -u NetworkManager.service -u wpa_supplicant.service' "$STUBLOG")" 1
+check "the 'not seeing messages' hint is could-not-run even at exit 0" \
+  "$(STUB_JOURNAL_OUT="$J_DOCKED" STUB_JOURNAL_ERR='Hint: You are currently not seeing messages from other users and the system.' classes -)" "2:::::"
+check "journalctl exiting non-zero is could-not-run" "$(STUB_JOURNAL_OUT="$J_DOCKED" STUB_JOURNAL_RC=1 classes -)" "2:::::"
+
 printf '\nthe shipped files, against the real parser and exactly\n'
 # verify checks that ExecStart's command exists, and /usr/local/bin/dock-wifi.sh is not
 # installed on a runner, so the unit is verified exactly as the installer verifies it: through
@@ -471,7 +564,7 @@ check "the shim runs under sh" "$(head -1 "$SHIM_SRC")" '#!/bin/sh'
 check "the shim is exactly one command: exec the installed copy's --dispatch with NetworkManager's two arguments" \
   "$(grep -v '^#' "$SHIM_SRC" | tr '\n' ' ')" 'exec /usr/local/bin/dock-wifi.sh --dispatch "$1" "$2" '
 
-EXPECTED_ROWS=100
+EXPECTED_ROWS=121
 
 # --- the count this suite is documented as running ---------------------------
 docs_claim() {
