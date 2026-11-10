@@ -1,12 +1,12 @@
 // The real IO the cockpit's sources default to, in one place: the file reader that refuses the stat-only paths, a
 // directory's entry names, a file's modification time, and a read-only proxy on the system bus. Synchronous, as the
-// sampler service's reads are (service/sampler.js): the cockpit service is its own process, never the shell. Every
+// sampler service's reads are (service/fileIo.js): the cockpit service is its own process, never the shell. Every
 // source takes these as injectable dependencies, so its rows run with fakes.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {COCKPIT_LOG_PREFIX, STAT_ONLY_PATH_FRAGMENTS} from '../../lib/constants.js';
-import {readFileToEnd} from '../sampler.js';
+import {readFileToEnd} from '../fileIo.js';
 
 /** The attribute a directory listing asks for: the name only, never a file's contents. */
 const ENTRY_NAME_ATTRIBUTE = 'standard::name';

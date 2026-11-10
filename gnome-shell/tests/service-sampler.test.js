@@ -3,9 +3,8 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
-import {
-    ServiceSampler, groupOfCgroup, listSubdirectoryNames, readFileToEnd,
-} from '../extensions/resource-pulse@dotfiles/service/sampler.js';
+import {ServiceSampler, groupOfCgroup} from '../extensions/resource-pulse@dotfiles/service/sampler.js';
+import {listSubdirectoryNames, readFileToEnd} from '../extensions/resource-pulse@dotfiles/service/fileIo.js';
 import {cardText} from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {
     CARD_HISTORY_SAMPLES, ERROR_LOG_REPEAT_INTERVAL_USEC, KERNEL_LABEL, LOG_PREFIX, SHORT_JOBS_LABEL,

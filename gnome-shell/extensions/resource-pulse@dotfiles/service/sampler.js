@@ -1,10 +1,10 @@
 // The sampler service's one source of numbers: synchronous reads of /proc, /sys and the cgroup tree on one GLib
 // timer, in its own process (`gjs -m service/main.js` under systemd), never inside gnome-shell. It imports Gio,
-// GioUnix, GLib, system and lib/ only, so it runs under plain gjs.
+// GioUnix, GLib, system, lib/ and service/fileIo.js only, so it runs under plain gjs.
 //
-// - Reads are synchronous (Gio.File.load_contents, which reads to EOF whatever size kernfs reports). A slow read
-//   delays only this process's next tick, and a synchronous scan can never be in flight across ticks, so none of the
-//   in-shell sampler's batching, priorities or stall handling is needed here.
+// - Reads are synchronous (service/fileIo.js: Gio.File.load_contents, which reads to EOF whatever size kernfs
+//   reports). A slow read delays only this process's next tick, and a synchronous scan can never be in flight across
+//   ticks, so none of the in-shell sampler's batching, priorities or stall handling is needed here.
 // - A tick samples, then runs the app scan when lib/cadence.js says one is due, then publishes one snapshot carrying
 //   this tick's ranking. A watch start scans at once, outside the tick, and publishes again. No CPU ranking covers
 //   less than MIN_CPU_RANKING_WINDOW_SECONDS.
@@ -33,6 +33,7 @@ import {memoryUsage, swapSummary, zramSwapDeviceNames} from '../lib/memory.js';
 import {describeCgroup, displayNameFor, rankApps} from '../lib/apps.js';
 import {armsWarmUp, decideAppScan, isTriggeredScan, pressureBandIndex} from '../lib/cadence.js';
 import {RingBuffer} from '../lib/history.js';
+import {listSubdirectoryNames, readFileToEnd} from './fileIo.js';
 
 // Paths, relative to the sampler's fsRoot.
 const PROC_STAT_PATH = 'proc/stat';
@@ -63,13 +64,11 @@ const ROOT_CGROUP_RELATIVE_PATH = '';
 /** How a failure log line names the root cgroup, whose path relative to the cgroup root is empty. */
 const ROOT_CGROUP_LOG_NAME = 'the cgroup root';
 
-const NAME_AND_TYPE_ATTRIBUTES = 'standard::name,standard::type';
 const CLOCK_LABEL_FORMAT = '%H:%M';
 const PERCENT_SCALE = 100;
 const DECIMAL_RADIX = 10;
 const USEC_PER_SECOND = 1_000_000;
 const MIN_CPU_RANKING_WINDOW_USEC = MIN_CPU_RANKING_WINDOW_SECONDS * USEC_PER_SECOND;
-const UTF8_DECODER = new TextDecoder();
 /** The pressure part of a snapshot with no data. Spread into each snapshot, never shared. */
 const NO_DATA_PRESSURE_AVG10 = {cpu: null, memory: null, io: null};
 /**
@@ -143,42 +142,6 @@ const APP_NAME_LOOKUP_FAILURE_LOG_KEY = 'cannot look up app names';
  */
 function joinPath(...segments) {
     return GLib.build_filenamev(segments);
-}
-
-/**
- * Reads a whole file synchronously as UTF-8. Gio.File.load_contents reads until EOF, so the size kernfs reports for a
- * /proc, /sys or cgroup file (0, or a whole page) is never trusted.
- *
- * @param {string} path - Absolute path.
- * @returns {string} The contents.
- * @throws {GLib.Error} When the file cannot be opened or read (G_IO_ERROR_NOT_FOUND when it does not exist).
- */
-export function readFileToEnd(path) {
-    const [, contentBytes] = Gio.File.new_for_path(path).load_contents(null);
-    return UTF8_DECODER.decode(contentBytes);
-}
-
-/**
- * Names the subdirectories of a directory, closing the listing whatever happens.
- *
- * @param {string} directoryPath - Absolute path.
- * @returns {string[]} The names of the entries that are directories, in listing order; files are left out.
- * @throws {GLib.Error} When the directory cannot be listed (G_IO_ERROR_NOT_FOUND when it does not exist).
- */
-export function listSubdirectoryNames(directoryPath) {
-    const enumerator = Gio.File.new_for_path(directoryPath)
-        .enumerate_children(NAME_AND_TYPE_ATTRIBUTES, Gio.FileQueryInfoFlags.NONE, null);
-    try {
-        const subdirectoryNames = [];
-        for (let fileInfo = enumerator.next_file(null); fileInfo !== null; fileInfo = enumerator.next_file(null)) {
-            if (fileInfo.get_file_type() === Gio.FileType.DIRECTORY)
-                subdirectoryNames.push(fileInfo.get_name());
-        }
-        return subdirectoryNames;
-    } finally {
-        // Release the directory's descriptor now, not whenever the garbage collector finalizes the enumerator.
-        enumerator.close(null);
-    }
 }
 
 /**
