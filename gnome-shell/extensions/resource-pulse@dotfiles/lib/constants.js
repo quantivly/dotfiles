@@ -177,3 +177,13 @@ export const ROUTE_FLAG_GATEWAY = 0x0002;
 export const HERDR_REQUEST_TIMEOUT_MS = 2000;
 /** herdr's API socket's path under the user's config home (XDG_CONFIG_HOME). */
 export const HERDR_SOCKET_RELATIVE_PATH = 'herdr/herdr.sock';
+/**
+ * Most characters of herdr's own error text (its code and message) a rejection's message carries; the rest is cut. An
+ * unknown method's message lists every method herdr has, about 2,000 characters.
+ */
+export const HERDR_ERROR_MESSAGE_MAX_CHARS = 200;
+/**
+ * Longest reply line, in bytes, the herdr client reads (8 MiB); a longer one is rejected as soon as the cap is passed,
+ * so a runaway reply cannot fill the service's memory. A live session snapshot measured about 63 KB.
+ */
+export const HERDR_REPLY_MAX_BYTES = 8 * 1024 * 1024;

@@ -8,6 +8,7 @@ import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
 // The member names are read through the namespace, so a missing export fails its row rather than the whole run.
 import * as herdrSocket from '../extensions/resource-pulse@dotfiles/service/herdrSocket.js';
+import * as constants from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const FAKE_CONFIG_HOME_TEMPLATE = 'herdr-socket-test-XXXXXX';
 const HERDR_DIRECTORY_NAME = 'herdr';
@@ -39,6 +40,21 @@ const ROW_GUARD_MS = 2 * LONG_TIMEOUT_MS;
 const NEVER_SETTLED_MESSAGE = `the request did not settle within ${ROW_GUARD_MS} ms`;
 const POLL_INTERVAL_MS = 10;
 const MICROSECONDS_PER_MILLISECOND = 1000;
+/** The codes a rejection may carry, sorted: service/herdrSocket.js's HERDR_ERROR_CODES must hold exactly these. */
+const EXPECTED_ERROR_CODES = ['closed', 'connect-refused', 'malformed', 'no-socket', 'remote-error', 'timeout'];
+const HERDR_ERROR_PREFIX = 'herdr: ';
+/** What the client appends to herdr's error text when it cuts it. */
+const TRUNCATION_MARK = '…';
+/** A remote error message far over HERDR_ERROR_MESSAGE_MAX_CHARS. */
+const LONG_REMOTE_MESSAGE_CHARS = 2000;
+/** Bytes the fake writes at a time when it streams a long reply. */
+const FAKE_STREAM_CHUNK_BYTES = 1024 * 1024;
+/** What a streamed reply is made of: the byte of 'x', never a newline. */
+const FILLER_BYTE = 0x78;
+/** A request padding far over a unix socket's send buffer (about 208 KiB here), so no single write can take it. */
+const LARGE_REQUEST_PADDING_CHARS = 1024 * 1024;
+/** Not UTF-8 in any position. */
+const INVALID_UTF8_BYTES = new Uint8Array([0xff, 0xfe]);
 
 /**
  * True for a JSON object (not null, not an array).
@@ -141,15 +157,22 @@ function makeFakeConfigHome() {
  * @param {object} [behaviour] - How it answers; by default it knows no method.
  * @param {Object<string, object>} [behaviour.resultsByMethod] - The result of each method that succeeds.
  * @param {Object<string, object>} [behaviour.errorsByMethod] - The error of each method that fails.
- * @param {(requestId: string) => string} [behaviour.replyLineFor] - Sends this line (and a newline) to any request
- *     instead of herdr's answer: a malformed reply.
+ * @param {(requestId: string) => (string|Uint8Array)} [behaviour.replyLineFor] - Sends this line (text, or raw bytes)
+ *     and a newline to any request instead of herdr's answer: a malformed or an outsized reply.
  * @param {boolean} [behaviour.isSilent] - Reads the request and never answers.
  * @param {boolean} [behaviour.closesWithoutReply] - Reads the request and closes without answering.
+ * @param {number} [behaviour.streamedReplyByteCount] - Answers with this many FILLER_BYTEs and no newline, written
+ *     FAKE_STREAM_CHUNK_BYTES at a time, then holds the connection open: a reply that never ends.
+ * @param {boolean} [behaviour.closesOnAccept] - Closes each connection at once, reading nothing: a client still
+ *     writing then finds the connection broken.
+ * @param {boolean} [behaviour.closesOnceRequestArrives] - Closes each connection, unread, as soon as the request is in
+ *     its receive queue: the kernel then resets it, so a client waiting for the reply finds its read failing.
  * @returns {object} The server: its socketPath, receivedRequestLines, connectionCount, clientClosedCount, and
  *     stopListening() and stop().
  */
 function startFakeHerdr({
     resultsByMethod = {}, errorsByMethod = {}, replyLineFor = null, isSilent = false, closesWithoutReply = false,
+    streamedReplyByteCount = 0, closesOnAccept = false, closesOnceRequestArrives = false,
 } = {}) {
     const paths = makeFakeConfigHome();
     const cancellable = new Gio.Cancellable();
@@ -160,7 +183,7 @@ function startFakeHerdr({
         /** @type {string[]} Each request line read, without its newline. */
         receivedRequestLines: [],
         connectionCount: 0,
-        /** Connections the client closed while the fake still held them open (a silent fake's). */
+        /** Connections the client closed while the fake still held them open (a silent or streaming fake's). */
         clientClosedCount: 0,
         stopListening: () => {
             socketService.stop();
@@ -208,7 +231,76 @@ function startFakeHerdr({
     }
 
     /**
-     * Answers one request line on a connection, as the behaviour says, and closes it unless silent.
+     * Holds a connection open until the client closes it, counting that close.
+     *
+     * @param {Gio.SocketConnection} connection - The client's connection.
+     * @param {Gio.DataInputStream} lineReader - Its input: a read on it ends only when the client closes.
+     * @returns {void}
+     */
+    function holdOpenUntilClientCloses(connection, lineReader) {
+        readOneLine(lineReader, line => {
+            if (line === null && openConnections.has(connection))
+                server.clientClosedCount++;
+            closeConnection(connection);
+        });
+    }
+
+    /**
+     * Writes bytes, in as many writes as it takes, then calls onWritten; a failed write (the client closed first, or
+     * stop() cancelled it) closes the connection instead. The bytes go out of a GLib.Bytes, which owns a copy:
+     * write_all_async on a JS Uint8Array can find its memory freed or moved mid-write (EFAULT on 8 MiB, gjs 1.88).
+     *
+     * @param {Gio.SocketConnection} connection - The client's connection.
+     * @param {Uint8Array} bytes - What to write.
+     * @param {() => void} onWritten - Called once every byte is written.
+     * @returns {void}
+     */
+    function writeBytes(connection, bytes, onWritten) {
+        const ownedBytes = new GLib.Bytes(bytes);
+        const totalByteCount = ownedBytes.get_size();
+        const writeFrom = writtenByteCount => {
+            if (writtenByteCount === totalByteCount) {
+                onWritten();
+                return;
+            }
+            const unwrittenBytes = GLib.Bytes.new_from_bytes(ownedBytes, writtenByteCount,
+                totalByteCount - writtenByteCount);
+            connection.get_output_stream().write_bytes_async(unwrittenBytes, GLib.PRIORITY_DEFAULT, cancellable,
+                (stream, result) => {
+                    let justWrittenByteCount;
+                    try {
+                        justWrittenByteCount = stream.write_bytes_finish(result);
+                    } catch {
+                        closeConnection(connection);
+                        return;
+                    }
+                    writeFrom(writtenByteCount + justWrittenByteCount);
+                });
+        };
+        writeFrom(0);
+    }
+
+    /**
+     * Writes FILLER_BYTEs, FAKE_STREAM_CHUNK_BYTES at a time.
+     *
+     * @param {Gio.SocketConnection} connection - The client's connection.
+     * @param {number} remainingByteCount - How many are still to write.
+     * @param {() => void} onStreamed - Called once all are written.
+     * @returns {void}
+     */
+    function streamFillerBytes(connection, remainingByteCount, onStreamed) {
+        if (remainingByteCount === 0) {
+            onStreamed();
+            return;
+        }
+        const chunkByteCount = Math.min(remainingByteCount, FAKE_STREAM_CHUNK_BYTES);
+        const fillerChunk = new Uint8Array(chunkByteCount).fill(FILLER_BYTE);
+        writeBytes(connection, fillerChunk,
+            () => streamFillerBytes(connection, remainingByteCount - chunkByteCount, onStreamed));
+    }
+
+    /**
+     * Answers one request line on a connection, as the behaviour says.
      *
      * @param {Gio.SocketConnection} connection - The client's connection.
      * @param {Gio.DataInputStream} lineReader - Its input.
@@ -216,32 +308,27 @@ function startFakeHerdr({
      * @returns {void}
      */
     function answer(connection, lineReader, requestLine) {
-        if (isSilent) {
-            // Hold the connection open; a second read ends only when the client closes it.
-            readOneLine(lineReader, line => {
-                if (line === null && openConnections.has(connection))
-                    server.clientClosedCount++;
-                closeConnection(connection);
-            });
-            return;
-        }
         if (closesWithoutReply) {
             closeConnection(connection);
+            return;
+        }
+        if (isSilent) {
+            holdOpenUntilClientCloses(connection, lineReader);
+            return;
+        }
+        if (streamedReplyByteCount > 0) {
+            streamFillerBytes(connection, streamedReplyByteCount,
+                () => holdOpenUntilClientCloses(connection, lineReader));
             return;
         }
         const replyLine = replyLineFor
             ? replyLineFor(requestIdOf(requestLine))
             : JSON.stringify(herdrReplyFor(requestLine, {resultsByMethod, errorsByMethod}));
-        const replyBytes = new TextEncoder().encode(`${replyLine}\n`);
-        connection.get_output_stream().write_all_async(replyBytes, GLib.PRIORITY_DEFAULT, cancellable,
-            (stream, result) => {
-                try {
-                    stream.write_all_finish(result);
-                } catch (error) {
-                    printerr(`herdrSocket.test: the fake's reply failed: ${error.message}`);
-                }
-                closeConnection(connection);
-            });
+        const lineBytes = replyLine instanceof Uint8Array ? replyLine : new TextEncoder().encode(replyLine);
+        const replyBytes = new Uint8Array(lineBytes.length + 1);
+        replyBytes.set(lineBytes);
+        replyBytes[lineBytes.length] = '\n'.charCodeAt(0);
+        writeBytes(connection, replyBytes, () => closeConnection(connection));
     }
 
     socketService.add_address(Gio.UnixSocketAddress.new(paths.socketPath), Gio.SocketType.STREAM,
@@ -249,6 +336,20 @@ function startFakeHerdr({
     socketService.connect('incoming', (_service, connection) => {
         server.connectionCount++;
         openConnections.add(connection);
+        if (closesOnAccept) {
+            closeConnection(connection);
+            return true;
+        }
+        if (closesOnceRequestArrives) {
+            // The source fires when the request is readable, or when stop() cancels it; either way, close unread.
+            const readableSource = connection.get_input_stream().create_source(cancellable);
+            readableSource.set_callback(() => {
+                closeConnection(connection);
+                return GLib.SOURCE_REMOVE;
+            });
+            readableSource.attach(null);
+            return true;
+        }
         const lineReader = new Gio.DataInputStream({base_stream: connection.get_input_stream()});
         readOneLine(lineReader, requestLine => {
             if (requestLine === null) {
@@ -304,7 +405,7 @@ function waitUntil(isDone, timeoutMs) {
  * A request still unsettled after ROW_GUARD_MS reads as a rejection with NEVER_SETTLED_MESSAGE.
  *
  * @param {Promise<object>} requestPromise - A client request.
- * @returns {Promise<{result?: object, errorMessage?: string, elapsedMs: number}>} The outcome.
+ * @returns {Promise<{result?: object, errorMessage?: string, errorCode?: string, elapsedMs: number}>} The outcome.
  */
 function outcomeOf(requestPromise) {
     const startedAtUsec = GLib.get_monotonic_time();
@@ -325,7 +426,7 @@ function outcomeOf(requestPromise) {
         };
         requestPromise.then(
             result => settle({result, elapsedMs: elapsedMs()}),
-            error => settle({errorMessage: error.message, elapsedMs: elapsedMs()}));
+            error => settle({errorMessage: error.message, errorCode: error.code, elapsedMs: elapsedMs()}));
     });
 }
 
@@ -364,56 +465,129 @@ test('herdrSocket: two requests at once each get their own result, on their own 
             assertEqual(new Set(requestIds).size, 2, `ids ${JSON.stringify(requestIds)}`);
         }));
 
-test('herdrSocket: a server that never answers rejects at the timeout, and the connection is closed', () =>
+test('herdrSocket: a request larger than the socket\'s buffer is sent whole, over several writes, and answered', () =>
+    withFakeHerdr({resultsByMethod: {[PING_METHOD]: PONG_RESULT}}, async server => {
+        const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: LONG_TIMEOUT_MS});
+        const largeParams = {padding: 'p'.repeat(LARGE_REQUEST_PADDING_CHARS)};
+        const {result, errorMessage} = await outcomeOf(client.request(PING_METHOD, largeParams));
+        assertEqual(result, PONG_RESULT, errorMessage);
+        const receivedPaddingLength = JSON.parse(server.receivedRequestLines[0]).params.padding.length;
+        assertEqual(receivedPaddingLength, LARGE_REQUEST_PADDING_CHARS);
+    }));
+
+test('herdrSocket: a server that closes before reading the request rejects as connect-refused (the send breaks)', () =>
+    withFakeHerdr({closesOnAccept: true}, async server => {
+        const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: LONG_TIMEOUT_MS});
+        const largeParams = {padding: 'p'.repeat(LARGE_REQUEST_PADDING_CHARS)};
+        const {errorMessage, errorCode} = await outcomeOf(client.request(PING_METHOD, largeParams));
+        assertEqual(errorMessage?.startsWith('herdr: cannot send the request: '), true, `got ${errorMessage}`);
+        assertEqual(errorCode, 'connect-refused');
+    }));
+
+test('herdrSocket: a connection reset while the reply is awaited rejects as malformed (the read breaks)', () =>
+    withFakeHerdr({closesOnceRequestArrives: true}, async server => {
+        const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: LONG_TIMEOUT_MS});
+        const {errorMessage, errorCode} = await outcomeOf(client.request(PING_METHOD, {}));
+        assertEqual(errorMessage?.startsWith('herdr: cannot read the reply: '), true, `got ${errorMessage}`);
+        assertEqual(errorCode, 'malformed');
+    }));
+
+test('herdrSocket: a server that never answers rejects at the timeout (timeout), and the connection is closed', () =>
     withFakeHerdr({isSilent: true}, async server => {
         const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: SHORT_TIMEOUT_MS});
-        const {errorMessage, elapsedMs} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
-        assertEqual(errorMessage, `herdr: timed out after ${SHORT_TIMEOUT_MS} ms`);
+        const {errorMessage, errorCode, elapsedMs} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
+        assertEqual([errorMessage, errorCode], [`herdr: timed out after ${SHORT_TIMEOUT_MS} ms`, 'timeout']);
         assertEqual(elapsedMs >= SHORT_TIMEOUT_MS, true, `rejected after ${elapsedMs} ms`);
         assertEqual(server.receivedRequestLines.length, 1, 'the request reached the server before the timeout');
         assertEqual(await waitUntil(() => server.clientClosedCount === 1, CLIENT_CLOSE_WAIT_MS), true,
             'the client closed its connection');
     }));
 
-test('herdrSocket: no socket file rejects at once with a herdr: error naming the path', async () => {
+test('herdrSocket: no socket file rejects at once (no-socket) with a herdr: error naming the path', async () => {
     const paths = makeFakeConfigHome();
     try {
         const client = new herdrSocket.HerdrSocketClient({socketPath: paths.socketPath, timeoutMs: LONG_TIMEOUT_MS});
-        const {errorMessage, elapsedMs} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
-        assertEqual(errorMessage, `herdr: no socket at ${paths.socketPath}`);
+        const {errorMessage, errorCode, elapsedMs} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
+        assertEqual([errorMessage, errorCode], [`herdr: no socket at ${paths.socketPath}`, 'no-socket']);
         assertEqual(elapsedMs < PROMPT_FAILURE_BOUND_MS, true, `rejected after ${elapsedMs} ms`);
     } finally {
         paths.remove();
     }
 });
 
-test('herdrSocket: a socket file nothing listens on (herdr gone) rejects at once with a herdr: error', () =>
+test('herdrSocket: a socket file nothing listens on (herdr crashed) rejects at once as connect-refused', () =>
     withFakeHerdr({}, async server => {
         server.stopListening();
         const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: LONG_TIMEOUT_MS});
-        const {errorMessage, elapsedMs} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
+        const {errorMessage, errorCode, elapsedMs} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
         assertEqual(errorMessage?.startsWith(`herdr: cannot connect to ${server.socketPath}: `), true,
             `got ${errorMessage}`);
+        assertEqual(errorCode, 'connect-refused');
         assertEqual(elapsedMs < PROMPT_FAILURE_BOUND_MS, true, `rejected after ${elapsedMs} ms`);
     }));
 
-test('herdrSocket: a reply carrying error rejects with its message and code', () =>
+test('herdrSocket: a plain file at the socket path rejects at once as connect-refused', async () => {
+    const paths = makeFakeConfigHome();
+    try {
+        GLib.file_set_contents(paths.socketPath, 'not a socket');
+        const client = new herdrSocket.HerdrSocketClient({socketPath: paths.socketPath, timeoutMs: LONG_TIMEOUT_MS});
+        const {errorMessage, errorCode, elapsedMs} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
+        assertEqual(errorMessage?.startsWith(`herdr: cannot connect to ${paths.socketPath}: `), true,
+            `got ${errorMessage}`);
+        assertEqual(errorCode, 'connect-refused');
+        assertEqual(elapsedMs < PROMPT_FAILURE_BOUND_MS, true, `rejected after ${elapsedMs} ms`);
+    } finally {
+        paths.remove();
+    }
+});
+
+test('herdrSocket: a reply carrying error rejects as remote-error with herdr\'s code and message', () =>
     withFakeHerdr({errorsByMethod: {[PROCESS_INFO_METHOD]: PANE_NOT_FOUND_ERROR}}, async server => {
         const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath});
-        const {errorMessage} = await outcomeOf(client.request(PROCESS_INFO_METHOD, {pane_id: 'w9:p9'}));
-        assertEqual(errorMessage, 'herdr: pane not found (pane_not_found)');
+        const {errorMessage, errorCode} = await outcomeOf(client.request(PROCESS_INFO_METHOD, {pane_id: 'w9:p9'}));
+        assertEqual([errorMessage, errorCode], ['herdr: pane_not_found: pane not found', 'remote-error']);
     }));
 
-test('herdrSocket: a method herdr does not know rejects with herdr\'s own text (its reply carries an empty id)', () =>
+test('herdrSocket: a method herdr does not know rejects as remote-error (its reply carries an empty id)', () =>
     withFakeHerdr({}, async server => {
         const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath});
-        const {errorMessage} = await outcomeOf(client.request('no.such.method', {}));
-        assertEqual(errorMessage, 'herdr: invalid request: unknown variant `no.such.method` (invalid_request)');
+        const {errorMessage, errorCode} = await outcomeOf(client.request('no.such.method', {}));
+        assertEqual([errorMessage, errorCode],
+            ['herdr: invalid_request: invalid request: unknown variant `no.such.method`', 'remote-error']);
     }));
 
-test('herdrSocket: a malformed reply rejects with herdr: malformed reply, and names what was wrong', async () => {
+test('herdrSocket: a remote error\'s text is cut to HERDR_ERROR_MESSAGE_MAX_CHARS, never inside a character',
+    async () => {
+        const maxChars = constants.HERDR_ERROR_MESSAGE_MAX_CHARS;
+        const codePrefix = `${PANE_NOT_FOUND_ERROR.code}: `;
+        const longMessage = 'y'.repeat(LONG_REMOTE_MESSAGE_CHARS);
+        // Puts the high half of a surrogate pair at the last kept position, so a plain cut would split the character.
+        const fillerBeforePair = 'z'.repeat(maxChars - 1 - codePrefix.length);
+        const splitPairMessage = `${fillerBeforePair}${'\u{1F600}'.repeat(10)}`;
+        const cases = [
+            {remoteMessage: longMessage, keptText: `${codePrefix}${longMessage}`.slice(0, maxChars)},
+            // The lone high half is dropped, so one code unit fewer is kept.
+            {remoteMessage: splitPairMessage, keptText: `${codePrefix}${fillerBeforePair}`},
+        ];
+        for (const {remoteMessage, keptText} of cases) {
+            const expectedMessage = `${HERDR_ERROR_PREFIX}${keptText}${TRUNCATION_MARK}`;
+            const remoteError = {code: PANE_NOT_FOUND_ERROR.code, message: remoteMessage};
+            // One fake per case, in turn.
+            await withFakeHerdr({errorsByMethod: {[PING_METHOD]: remoteError}}, async server => {
+                const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath});
+                const {errorMessage, errorCode} = await outcomeOf(client.request(PING_METHOD, {}));
+                assertEqual([errorMessage, errorCode], [expectedMessage, 'remote-error']);
+                const maxMessageLength = HERDR_ERROR_PREFIX.length + maxChars + TRUNCATION_MARK.length;
+                assertEqual(errorMessage.length <= maxMessageLength && errorMessage.isWellFormed(), true,
+                    `${errorMessage.length} code units`);
+            });
+        }
+    });
+
+test('herdrSocket: a malformed reply rejects as malformed, and names what was wrong', async () => {
     const pong = {type: 'pong'};
     const casesByExpectedMessage = {
+        'herdr: malformed reply: not UTF-8': () => INVALID_UTF8_BYTES,
         'herdr: malformed reply: not JSON': () => 'not json',
         'herdr: malformed reply: not an object': () => '[1, 2]',
         'herdr: malformed reply: not the id of the request': () => JSON.stringify({id: 'cockpit:other', result: pong}),
@@ -428,20 +602,46 @@ test('herdrSocket: a malformed reply rejects with herdr: malformed reply, and na
         // One fake per case, in turn: each answers its own malformed line.
         await withFakeHerdr({replyLineFor}, async server => {
             const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath});
-            const {errorMessage} = await outcomeOf(client.request(PING_METHOD, {}));
-            assertEqual(errorMessage, expectedMessage);
+            const {errorMessage, errorCode} = await outcomeOf(client.request(PING_METHOD, {}));
+            assertEqual([errorMessage, errorCode], [expectedMessage, 'malformed']);
         });
     }
 });
 
-test('herdrSocket: a server that closes without a reply rejects with a herdr: error', () =>
-    withFakeHerdr({closesWithoutReply: true}, async server => {
-        const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath});
-        const {errorMessage} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
-        assertEqual(errorMessage, 'herdr: connection closed before a reply');
+test('herdrSocket: a reply of exactly HERDR_REPLY_MAX_BYTES is read whole', () => {
+    const maxBytes = constants.HERDR_REPLY_MAX_BYTES;
+    let paddingLength = null;
+    // ASCII only, so its length in characters is its length in bytes.
+    const replyLineFor = requestId => {
+        const unpaddedLength = JSON.stringify({id: requestId, result: {type: 'pong', padding: ''}}).length;
+        paddingLength = maxBytes - unpaddedLength;
+        return JSON.stringify({id: requestId, result: {type: 'pong', padding: 'x'.repeat(paddingLength)}});
+    };
+    return withFakeHerdr({replyLineFor}, async server => {
+        const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: LONG_TIMEOUT_MS});
+        const {result, errorMessage} = await outcomeOf(client.request(PING_METHOD, {}));
+        assertEqual(errorMessage, undefined);
+        assertEqual([result.type, result.padding.length], ['pong', paddingLength]);
+    });
+});
+
+test('herdrSocket: one byte over HERDR_REPLY_MAX_BYTES rejects as malformed at once, with no newline or end in sight',
+    () => withFakeHerdr({streamedReplyByteCount: constants.HERDR_REPLY_MAX_BYTES + 1}, async server => {
+        const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: LONG_TIMEOUT_MS});
+        const {errorMessage, errorCode} = await outcomeOf(client.request(PING_METHOD, {}));
+        assertEqual([errorMessage, errorCode], ['herdr: reply too large', 'malformed']);
+        assertEqual(await waitUntil(() => server.clientClosedCount === 1, CLIENT_CLOSE_WAIT_MS), true,
+            'the client closed its connection');
     }));
 
-test('herdrSocket: close() rejects a request in flight and every later one with herdr: closed, twice over', () =>
+test('herdrSocket: a server that closes without a reply rejects as malformed', () =>
+    withFakeHerdr({closesWithoutReply: true}, async server => {
+        const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath});
+        const {errorMessage, errorCode} = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
+        assertEqual([errorMessage, errorCode], ['herdr: connection closed before a reply', 'malformed']);
+    }));
+
+test('herdrSocket: close() rejects a request in flight and every later one as closed, twice over', () =>
     withFakeHerdr({isSilent: true}, async server => {
         const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: LONG_TIMEOUT_MS});
         const inFlightOutcome = outcomeOf(client.request(SNAPSHOT_METHOD, {}));
@@ -449,14 +649,21 @@ test('herdrSocket: close() rejects a request in flight and every later one with 
             'the request reached the server');
         client.close();
         client.close();
-        const {errorMessage, elapsedMs} = await inFlightOutcome;
-        assertEqual(errorMessage, 'herdr: closed');
+        const {errorMessage, errorCode, elapsedMs} = await inFlightOutcome;
+        assertEqual([errorMessage, errorCode], ['herdr: closed', 'closed']);
         assertEqual(elapsedMs < PROMPT_FAILURE_BOUND_MS, true, `rejected after ${elapsedMs} ms`);
-        assertEqual((await outcomeOf(client.request(SNAPSHOT_METHOD, {}))).errorMessage, 'herdr: closed');
+        const laterOutcome = await outcomeOf(client.request(SNAPSHOT_METHOD, {}));
+        assertEqual([laterOutcome.errorMessage, laterOutcome.errorCode], ['herdr: closed', 'closed']);
         assertEqual(await waitUntil(() => server.clientClosedCount === 1, CLIENT_CLOSE_WAIT_MS), true,
             'the client closed its connection');
         assertEqual(server.connectionCount, 1, 'a request after close() never connects');
     }));
+
+test('herdrSocket: HERDR_ERROR_CODES is frozen and holds exactly the six codes', () => {
+    const errorCodes = herdrSocket.HERDR_ERROR_CODES;
+    assertEqual(Object.isFrozen(errorCodes) && typeof errorCodes === 'object', true);
+    assertEqual(Object.values(errorCodes).sort(), EXPECTED_ERROR_CODES);
+});
 
 test('herdrSocket: herdrSocketPath joins the config home', () => {
     assertEqual(herdrSocket.herdrSocketPath('/tmp/c'), '/tmp/c/herdr/herdr.sock');
