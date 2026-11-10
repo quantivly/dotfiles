@@ -627,10 +627,13 @@ check "gnome-status names the setting that keeps an enabled Resource Pulse from 
 # The service half of the block: systemctl, gdbus, pgrep and date are stubs too.
 # Each answers from GNOME_STATUS_* variables and logs its call to
 # GNOME_STATUS_CALLS; systemctl answers only the properties gnome-status reads
-# (in systemd's own order, measured: LoadState, ActiveState, SubState, whatever
-# order -p names them) or hangs; gdbus answers GetState in its own text form,
-# ('<json>',), or a given reply word for word; and date answers `+%s%N` with a
-# fixed now (anything else goes to the real date).
+# (in systemd's own order, measured: LoadState, ActiveState, SubState,
+# ConditionResult, whatever order -p names them) or hangs; gdbus answers
+# GetState in its own text form, ('<json>',), or a given reply word for word;
+# and date answers `+%s%N` with a fixed now (anything else goes to the real
+# date). The cockpit unit answers from GNOME_STATUS_COCKPIT_* variables, and
+# unset it is skipped, as for anyone without its config file: loaded, inactive,
+# ConditionResult=no.
 GNOME_STATUS_CALLS="$WIRING_TMP/gnome-status-calls"
 REAL_DATE_PATH="$(command -v date)" || fatal "date is required"
 GNOME_STATUS_SYSTEMCTL_STUB="$(cat <<'STUB'
@@ -638,20 +641,36 @@ GNOME_STATUS_SYSTEMCTL_STUB="$(cat <<'STUB'
 printf 'systemctl %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
 [[ "${GNOME_STATUS_SYSTEMCTL_MODE:-}" != hang ]] || exec sleep 30
 [[ "${GNOME_STATUS_SYSTEMCTL_MODE:-}" != hang-on-start-time || "$*" != *ActiveEnterTimestamp* ]] || exec sleep 30
+# default_sub_state <ActiveState>: the SubState systemd shows beside it.
+default_sub_state() {
+  case "$1" in
+    active) echo running ;;
+    failed) echo failed ;;
+    activating) echo start ;;
+    *) echo dead ;;
+  esac
+}
+# default_condition_result <ActiveState>: no while inactive (skipped, or never
+# started: systemd's default before any check), yes once a start got past it.
+default_condition_result() {
+  if [[ "$1" == inactive ]]; then echo no; else echo yes; fi
+}
 active_state="${GNOME_STATUS_SERVICE_ACTIVE_STATE-inactive}"
-case "$active_state" in
-  active) default_sub_state=running ;;
-  failed) default_sub_state=failed ;;
-  activating) default_sub_state=start ;;
-  *) default_sub_state=dead ;;
-esac
+cockpit_active_state="${GNOME_STATUS_COCKPIT_ACTIVE_STATE-inactive}"
 case "$*" in
   "--user show -p LoadState -p ActiveState -p SubState resource-pulse.service")
     [[ -z "${GNOME_STATUS_NO_MANAGER:-}" ]] || { echo "Failed to connect to user scope bus" >&2; exit 1; }
     printf 'LoadState=%s\nActiveState=%s\nSubState=%s\n' "${GNOME_STATUS_SERVICE_LOAD_STATE:-loaded}" \
-      "$active_state" "${GNOME_STATUS_SERVICE_SUB_STATE:-$default_sub_state}" ;;
+      "$active_state" "${GNOME_STATUS_SERVICE_SUB_STATE:-$(default_sub_state "$active_state")}" ;;
   "--user show -p ActiveEnterTimestamp --value --timestamp=unix resource-pulse.service")
     printf '%s\n' "${GNOME_STATUS_SERVICE_STARTED_AT-}" ;;
+  "--user show -p LoadState -p ActiveState -p SubState -p ConditionResult cockpit.service")
+    [[ -z "${GNOME_STATUS_NO_MANAGER:-}" ]] || { echo "Failed to connect to user scope bus" >&2; exit 1; }
+    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nConditionResult=%s\n' "${GNOME_STATUS_COCKPIT_LOAD_STATE:-loaded}" \
+      "$cockpit_active_state" "${GNOME_STATUS_COCKPIT_SUB_STATE:-$(default_sub_state "$cockpit_active_state")}" \
+      "${GNOME_STATUS_COCKPIT_CONDITION_RESULT:-$(default_condition_result "$cockpit_active_state")}" ;;
+  "--user show -p ActiveEnterTimestamp --value --timestamp=unix cockpit.service")
+    printf '%s\n' "${GNOME_STATUS_COCKPIT_STARTED_AT-}" ;;
   *) printf 'unexpected systemctl call: %s\n' "$*" >&2; exit 64 ;;
 esac
 STUB
@@ -659,12 +678,23 @@ STUB
 install_stub "$GNOME_STATUS_STUB_BIN" systemctl "$GNOME_STATUS_SYSTEMCTL_STUB"
 GNOME_STATUS_GDBUS_STUB="$(cat <<'STUB'
 #!/usr/bin/env bash
-# answer: GetState's JSON as gdbus prints it when no string holds an apostrophe;
-# verbatim: GNOME_STATUS_GDBUS_REPLY as it is; hang: never answers; anything else: no owner.
+# answer: GetState's JSON as gdbus prints it when no string holds an apostrophe
+# or a backslash; verbatim: the given reply as it is; hang: never answers;
+# anything else: no owner. The sampler's call answers from GNOME_STATUS_GDBUS_MODE,
+# GNOME_STATUS_STATE_JSON and GNOME_STATUS_GDBUS_REPLY, the cockpit's (its
+# --dest) from the GNOME_STATUS_COCKPIT_ variables of the same names.
 printf 'gdbus %s\n' "$*" >>"${GNOME_STATUS_CALLS:-/dev/null}"
-case "${GNOME_STATUS_GDBUS_MODE:-fail}" in
-  answer) printf "('%s',)\n" "$GNOME_STATUS_STATE_JSON" ;;
-  verbatim) printf '%s\n' "$GNOME_STATUS_GDBUS_REPLY" ;;
+gdbus_mode="${GNOME_STATUS_GDBUS_MODE:-fail}"
+state_json="${GNOME_STATUS_STATE_JSON-}"
+verbatim_reply="${GNOME_STATUS_GDBUS_REPLY-}"
+if [[ " $* " == *" --dest io.github.quantivly.dotfiles.Cockpit1 "* ]]; then
+  gdbus_mode="${GNOME_STATUS_COCKPIT_GDBUS_MODE:-fail}"
+  state_json="${GNOME_STATUS_COCKPIT_STATE_JSON-}"
+  verbatim_reply="${GNOME_STATUS_COCKPIT_GDBUS_REPLY-}"
+fi
+case "$gdbus_mode" in
+  answer) printf "('%s',)\n" "$state_json" ;;
+  verbatim) printf '%s\n' "$verbatim_reply" ;;
   hang) exec sleep 30 ;;
   *) echo "Error: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable" >&2; exit 1 ;;
 esac
@@ -716,9 +746,13 @@ ln -s "$STATUS_EXTENSION_DIR" "$GNOME_STATUS_LINKED_HOME/.local/share/gnome-shel
 # other lib/ modules are always older than the shell, and the stylesheet is too
 # unless given. The modules import one another as the real ones do, in small:
 # extension.js imports card.js (which imports lib/format.js), lib/visibility.js
-# and lib/protocol.js; service/main.js imports lib/protocol.js and lib/cadence.js.
-# So lib/format.js and lib/visibility.js are the shell's alone, lib/cadence.js the
-# service's alone, and lib/protocol.js both sides'.
+# and lib/protocol.js; service/main.js imports lib/protocol.js, lib/cadence.js,
+# service/sampler.js and service/fileIo.js; service/cockpit.js imports
+# lib/cockpitProtocol.js and service/fileIo.js. So lib/format.js and
+# lib/visibility.js are the shell's alone, lib/cadence.js and service/sampler.js
+# the sampler's alone, lib/cockpitProtocol.js the cockpit's alone,
+# lib/protocol.js the shell's and the sampler's, and service/fileIo.js both
+# services'.
 reset_status_extension() {
   local stylesheet_mtime="${4:-$BEFORE_SHELL_START_EPOCH}"
   rm -rf "$STATUS_EXTENSION_DIR"
@@ -732,10 +766,18 @@ reset_status_extension() {
   : >"$STATUS_EXTENSION_DIR/lib/visibility.js"
   : >"$STATUS_EXTENSION_DIR/lib/protocol.js"
   : >"$STATUS_EXTENSION_DIR/lib/cadence.js"
+  : >"$STATUS_EXTENSION_DIR/lib/cockpitProtocol.js"
+  : >"$STATUS_EXTENSION_DIR/service/sampler.js"
+  : >"$STATUS_EXTENSION_DIR/service/fileIo.js"
   printf '%s\n' "import {PROTOCOL_VERSION} from '../lib/protocol.js';" "import {decideAppScan} from '../lib/cadence.js';" \
+    "import {Sampler} from './sampler.js';" "import {readTextFile} from './fileIo.js';" \
     >"$STATUS_EXTENSION_DIR/service/main.js"
+  printf '%s\n' "import {COCKPIT_BUS_NAME} from '../lib/cockpitProtocol.js';" "import {readTextFile} from './fileIo.js';" \
+    >"$STATUS_EXTENSION_DIR/service/cockpit.js"
   touch -d "@$BEFORE_SHELL_START_EPOCH" "$STATUS_EXTENSION_DIR/extension.js" "$STATUS_EXTENSION_DIR/metadata.json" \
     "$STATUS_EXTENSION_DIR/lib/visibility.js" "$STATUS_EXTENSION_DIR/lib/protocol.js" "$STATUS_EXTENSION_DIR/lib/cadence.js" \
+    "$STATUS_EXTENSION_DIR/lib/cockpitProtocol.js" "$STATUS_EXTENSION_DIR/service/sampler.js" \
+    "$STATUS_EXTENSION_DIR/service/fileIo.js" "$STATUS_EXTENSION_DIR/service/cockpit.js" \
     || fatal "touch -d failed"
   touch -d "@$1" "$STATUS_EXTENSION_DIR/card.js" || fatal "touch -d @$1 failed"
   touch -d "@$2" "$STATUS_EXTENSION_DIR/lib/format.js" || fatal "touch -d @$2 failed"
@@ -777,9 +819,41 @@ state_json_sampled() {
     *) state_json_usec_before "$(( $1 * STATUS_USEC_PER_SECOND ))" ;;
   esac
 }
+# The cockpit's GetState, shaped as gnome-shell/tests/cockpitProtocol.test.js's
+# FULL_STATE (synthetic values), with each source stamped some whole seconds
+# before the fixed now. Its sources sample every 5, 10 and 30 s, so each is
+# stale past 15, 30 and 90 s (three intervals).
+COCKPIT_FRESH_PUBLISH_AGE_SECONDS=4
+# cockpit_usec_before <seconds>: the fixed now less that many seconds, in microseconds.
+cockpit_usec_before() { printf '%s' "$(( STATUS_NOW_USEC - $1 * STATUS_USEC_PER_SECOND ))"; }
+# cockpit_state_json <sessions age> <network age> <mounts age> [<configError as JSON> [<latest publish age>]]:
+# ages in seconds before now; "absent" leaves that source out, as a service from
+# before it would. configError defaults to null, the latest publish to 4 s ago.
+cockpit_state_json() {
+  local config_error_json="${4:-null}" publish_age_seconds="${5:-$COCKPIT_FRESH_PUBLISH_AGE_SECONDS}"
+  local sessions_json network_json mounts_json source_list
+  local -a source_entries=()
+  if [[ "$1" != absent ]]; then
+    sessions_json="\"sessions\":{\"sampledAtUsec\":$(cockpit_usec_before "$1"),\"intervalSeconds\":5,\"herdrRunning\":true,\"totalMemoryBytes\":4000000000,\"counts\":{\"working\":1,\"blocked\":1,\"idle\":0,\"done\":0,\"unknown\":0},\"rows\":[{\"id\":\"w1:p1\",\"name\":\"host-sync\",\"state\":\"working\",\"idleSeconds\":12,\"idleFromProcessAge\":false,\"memoryBytes\":3000000000,\"workspaceId\":\"w1\",\"paneId\":\"p1\",\"account\":\"quantivly-1\",\"contextPercent\":42}]}"
+    source_entries+=("$sessions_json")
+  fi
+  if [[ "$2" != absent ]]; then
+    network_json="\"network\":{\"sampledAtUsec\":$(cockpit_usec_before "$2"),\"intervalSeconds\":10,\"uplink\":{\"kind\":\"wired\",\"connectivity\":\"full\",\"wifiEnabled\":false},\"vpn\":{\"isUp\":true,\"interfaceName\":\"tun0\"},\"sshMasterCount\":2}"
+    source_entries+=("$network_json")
+  fi
+  if [[ "$3" != absent ]]; then
+    mounts_json="\"mounts\":{\"sampledAtUsec\":$(cockpit_usec_before "$3"),\"intervalSeconds\":30,\"rows\":[{\"mountPoint\":\"/media/user/BACKUP\",\"label\":\"BACKUP\",\"kind\":\"removable\",\"filesystemType\":\"ext4\",\"freeBytes\":500000000000,\"totalBytes\":2000000000000}]}"
+    source_entries+=("$mounts_json")
+  fi
+  source_list="$(IFS=,; printf '%s' "${source_entries[*]}")"
+  printf '{"protocol":1,"serviceStartedAtUsec":1793990000000000,"latestPublishedAtUsec":%s,"layout":{"monitor":{"vendor":"DEL","product":"DELL U2723QE"},"groups":[{"id":"machine","caption":"MACHINE","columns":2,"cards":["system","apps"]},{"id":"agents","caption":"AGENTS","columns":1,"cards":["sessions"]}]},"configError":%s,"sources":{%s}}' \
+    "$(cockpit_usec_before "$publish_age_seconds")" "$config_error_json" "$source_list"
+}
 # DOTFILES_ROOT is this checkout, where gnome-status finds the closure helper.
+# The cockpit unit keeps the stub's default (skipped) unless a row says otherwise.
 GNOME_STATUS_STUB_DEFAULTS=("DOTFILES_ROOT=$DOTFILES" GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
   GNOME_STATUS_GDBUS_MODE=answer "GNOME_STATUS_STATE_JSON=$(state_json_sampled 3)"
+  GNOME_STATUS_COCKPIT_GDBUS_MODE=answer "GNOME_STATUS_COCKPIT_STATE_JSON=$(cockpit_state_json 3 3 2)"
   "GNOME_STATUS_NOW_NSEC=$STATUS_NOW_NSEC" "GNOME_STATUS_SERVICE_STARTED_AT=@$SERVICE_STARTED_LONG_AFTER_EPOCH"
   "GNOME_STATUS_SHELL_PID=$$")
 # gnome_status_run <enabled-extensions> <allow-extension-installation> [NAME=value...]
@@ -806,6 +880,7 @@ gnome_status_run() {
 # The parts of GNOME_STATUS_OUTPUT the rows compare.
 status_enabled_field() { sed -n 's/^Resource Pulse: linked=[a-z]* enabled=\(.*\) state=.*$/\1/p' <<<"$GNOME_STATUS_OUTPUT"; }
 status_service_line() { sed -n 's/^  service: //p' <<<"$GNOME_STATUS_OUTPUT"; }
+status_cockpit_line() { sed -n 's/^  cockpit: //p' <<<"$GNOME_STATUS_OUTPUT"; }
 status_warnings_naming() { grep -F '  ⚠ ' <<<"$GNOME_STATUS_OUTPUT" | grep -c -F "$1"; }
 status_warning_count() { grep -c -F '  ⚠ ' <<<"$GNOME_STATUS_OUTPUT"; }
 status_gdbus_calls() { grep -c '^gdbus ' "$GNOME_STATUS_CALLS"; }
@@ -1026,6 +1101,135 @@ not_running_beside_older_copy_summary+=" current-copy=$(status_warnings_naming "
 check "gnome-status: while the desktop runs an older copy (which may be the previous release, sampling by itself), a service not running is not blamed; with the current copy it is" \
   "$not_running_beside_older_copy_summary" "older-copy=1/0 current-copy=0/1"
 
+# The cockpit unit, cockpit.service: opt-in by file, so for anyone without
+# ~/.config/resource-pulse/cockpit.json systemd skips every start (loaded,
+# inactive, ConditionResult=no), which is no fault. A unit never started reads
+# ConditionResult=no too (systemd's default before any check, measured on a
+# system unit), so with the file present that state is a unit not started.
+GNOME_STATUS_COCKPIT_HOME="$WIRING_TMP/gnome-status-cockpit-home"
+if ! mkdir -p "$GNOME_STATUS_COCKPIT_HOME/.config/resource-pulse" ||
+  ! cp "$DOTFILES/examples/resource-pulse-cockpit.json.template" "$GNOME_STATUS_COCKPIT_HOME/.config/resource-pulse/cockpit.json"; then
+  fatal "cannot create gnome-status's opted-in fixture home"
+fi
+COCKPIT_DEST_NEEDLE='--dest io.github.quantivly.dotfiles.Cockpit1 '
+COCKPIT_JOURNAL_HINT='journalctl --user -u cockpit.service -e'
+status_cockpit_gdbus_calls() { grep -c -F -e "$COCKPIT_DEST_NEEDLE" "$GNOME_STATUS_CALLS"; }
+cockpit_skipped_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true
+cockpit_skipped_summary+="no-config=[$(status_cockpit_line)]/$(status_warning_count)/$(status_cockpit_gdbus_calls)"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_COCKPIT_HOME"
+cockpit_skipped_summary+=" config-never-started=[$(status_cockpit_line)]/$(status_warnings_naming 'cockpit.service is not running though ~/.config/resource-pulse/cockpit.json exists — systemctl --user start cockpit.service')/$(status_cockpit_gdbus_calls)"
+check "gnome-status: a cockpit unit skipped by its condition reads skipped while the config file is absent, and warns nothing; with the file, the same state is a unit not started, with the start remedy" \
+  "$cockpit_skipped_summary" \
+  "no-config=[skipped (no ~/.config/resource-pulse/cockpit.json)]/0/0 config-never-started=[inactive (not running)]/1/0"
+
+# Fresh: sources 3, 3 and 2 s old, the latest publish 4 s ago. The latest
+# publish is the latest Changed (or the start), so a quiet service's is old,
+# and that is no fault.
+QUIET_PUBLISH_AGE_SECONDS=2100
+cockpit_fresh_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active
+cockpit_fresh_summary+="fresh=[$(status_cockpit_line)]/$(status_warning_count)"
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active \
+  "GNOME_STATUS_COCKPIT_STATE_JSON=$(cockpit_state_json 3 3 2 null "$QUIET_PUBLISH_AGE_SECONDS")"
+cockpit_fresh_summary+=" quiet=[$(status_cockpit_line)]/$(status_warning_count)"
+check "gnome-status: an active cockpit shows its protocol, the age of its last publish and no stale source, from GetState; a quiet one's old publish is no fault" \
+  "$cockpit_fresh_summary" \
+  "fresh=[active, protocol 1, last publish 4 s ago, stale: none]/0 quiet=[active, protocol 1, last publish 35 min ago, stale: none]/0"
+
+# A source is stale past three of its own intervals (mounts: 3 × 30 s = 90 s),
+# each read from its own object: mounts comes last, so a read of the first
+# stamp in the sources for every source would find none stale.
+cockpit_stale_summary=""
+for stale_case in "at-limit:3 3 90" "past-limit:3 3 91" "two:16 3 91" "network-absent:3 absent 91"; do
+  read -r -a stale_case_ages <<<"${stale_case#*:}"
+  gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active \
+    "GNOME_STATUS_COCKPIT_STATE_JSON=$(cockpit_state_json "${stale_case_ages[@]}")"
+  cockpit_stale_summary+="${stale_case%%:*}=[$(status_cockpit_line)]/$(status_warning_count) "
+done
+check "gnome-status: a cockpit source last sampled more than three of its intervals ago is listed as stale, read from its own object; exactly three is not, and one GetState does not carry is not listed" \
+  "$cockpit_stale_summary" \
+  "at-limit=[active, protocol 1, last publish 4 s ago, stale: none]/0 past-limit=[active, protocol 1, last publish 4 s ago, stale: mounts]/0 two=[active, protocol 1, last publish 4 s ago, stale: sessions, mounts]/0 network-absent=[active, protocol 1, last publish 4 s ago, stale: mounts]/0 "
+
+# configError is the parser's text (FULL_STATE's holds apostrophes, so gdbus
+# prints the reply in double quotes; another holds JSON-escaped quotes), or
+# "missing" when the file vanished while the service runs. Each reply is
+# printed by GLib itself, as gdbus prints it.
+APOSTROPHE_CONFIG_ERROR="groups[2].cards[0]: unknown card id 'weather'"
+QUOTED_CONFIG_ERROR='groups[0]: "caption" must be a string'
+QUOTED_CONFIG_ERROR_JSON='"groups[0]: \"caption\" must be a string"'
+COCKPIT_CONFIG_INVALID_NEEDLE='cockpit: config invalid: '
+# cockpit_config_run <configError as JSON>: gnome-status with an active cockpit whose GetState carries it.
+cockpit_config_run() {
+  local glib_printed_reply
+  # shellcheck disable=SC2016  # JavaScript source.
+  glib_printed_reply="$(gjs -c 'const {GLib} = imports.gi; print(new GLib.Variant("(s)", [ARGV[0]]).print(true));' \
+    "$(cockpit_state_json 3 3 2 "$1")")"
+  gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active \
+    GNOME_STATUS_COCKPIT_GDBUS_MODE=verbatim "GNOME_STATUS_COCKPIT_GDBUS_REPLY=$glib_printed_reply"
+}
+cockpit_config_summary=""
+cockpit_config_run "\"$APOSTROPHE_CONFIG_ERROR\""
+cockpit_config_summary+="apostrophe=$(status_warnings_naming "$COCKPIT_CONFIG_INVALID_NEEDLE$APOSTROPHE_CONFIG_ERROR — ")/[$(status_cockpit_line)]"
+cockpit_config_run "$QUOTED_CONFIG_ERROR_JSON"
+cockpit_config_summary+=" quote=$(status_warnings_naming "$COCKPIT_CONFIG_INVALID_NEEDLE$QUOTED_CONFIG_ERROR — ")"
+cockpit_config_run '"missing"'
+cockpit_config_summary+=" missing=$(status_warnings_naming "${COCKPIT_CONFIG_INVALID_NEEDLE}missing — ")"
+cockpit_config_run null
+cockpit_config_summary+=" valid=$(status_warnings_naming "$COCKPIT_CONFIG_INVALID_NEEDLE")"
+check "gnome-status: a configError in the cockpit's GetState is a ⚠ quoting it whole (apostrophes, escaped quotes, or missing), beside its line; none without one" \
+  "$cockpit_config_summary" \
+  "apostrophe=1/[active, protocol 1, last publish 4 s ago, stale: none] quote=1 missing=1 valid=0"
+
+cockpit_not_installed_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_LOAD_STATE=not-found
+cockpit_not_installed_summary+="no-config=[$(status_cockpit_line)]/$(status_warning_count)"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_COCKPIT_HOME" GNOME_STATUS_COCKPIT_LOAD_STATE=not-found
+cockpit_not_installed_summary+=" config=[$(status_cockpit_line)]/$(status_warnings_naming 'cockpit.service is not installed though ~/.config/resource-pulse/cockpit.json exists — run ./install')"
+check "gnome-status: a cockpit unit not found reads not installed, never skipped, and says to run ./install only while the config file exists" \
+  "$cockpit_not_installed_summary" \
+  "no-config=[not installed (LoadState=not-found)]/0 config=[not installed (LoadState=not-found)]/1"
+
+cockpit_fault_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=failed
+cockpit_fault_summary+="failed=[$(status_cockpit_line)]/$(status_warnings_naming "cockpit.service failed — $COCKPIT_JOURNAL_HINT")/$(status_cockpit_gdbus_calls) "
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=activating GNOME_STATUS_COCKPIT_SUB_STATE=auto-restart
+cockpit_fault_summary+="restarting=[$(status_cockpit_line)]/$(status_warnings_naming "cockpit.service is restarting after a failure — $COCKPIT_JOURNAL_HINT")/$(status_cockpit_gdbus_calls) "
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active GNOME_STATUS_COCKPIT_GDBUS_MODE=fail
+cockpit_fault_summary+="no-answer=[$(status_cockpit_line)]/$(status_warnings_naming "cockpit.service is active but did not answer GetState within 3 s — $COCKPIT_JOURNAL_HINT")/$(status_cockpit_gdbus_calls)"
+check "gnome-status: a failed, restarting or silent cockpit is a ⚠ naming its journal, as for the sampler; only the active one is asked GetState" \
+  "$cockpit_fault_summary" \
+  "failed=[failed (not running)]/1/0 restarting=[activating (auto-restart: restarting after a failure)]/1/0 no-answer=[active, no answer]/1/1"
+
+# The cockpit's side is service/cockpit.js and what it imports (ruling R13):
+# its own lib/cockpitProtocol.js and the shared service/fileIo.js count, the
+# sampler's service/main.js and service/sampler.js do not. The sampler's count
+# beside each shows the change was seen, so a cockpit zero is not a blind one.
+cockpit_older_code_summary=""
+COCKPIT_STARTED_AT="GNOME_STATUS_COCKPIT_STARTED_AT=@$SUITE_STARTED_AT_EPOCH"
+for changed_module in service/cockpit.js lib/cockpitProtocol.js service/fileIo.js service/sampler.js service/main.js; do
+  status_extension_with_change "$changed_module"
+  gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT" \
+    GNOME_STATUS_COCKPIT_ACTIVE_STATE=active "$COCKPIT_STARTED_AT"
+  cockpit_older_code_summary+="$changed_module=$(status_warnings_naming "cockpit.service runs older code: $changed_module changed after it started — systemctl --user try-restart cockpit.service")/$(status_warnings_naming 'cockpit.service runs older code')/sampler:$(status_warnings_naming 'resource-pulse.service runs older code') "
+done
+reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT" \
+  GNOME_STATUS_COCKPIT_ACTIVE_STATE=active "$COCKPIT_STARTED_AT"
+cockpit_older_code_summary+="unchanged=$(status_warnings_naming 'runs older code')"
+check "gnome-status: a module service/cockpit.js runs (itself, lib/cockpitProtocol.js, or the shared service/fileIo.js) changed after the cockpit started is a ⚠ that it runs older code; a sampler-only module is not" \
+  "$cockpit_older_code_summary" \
+  "service/cockpit.js=1/1/sampler:0 lib/cockpitProtocol.js=1/1/sampler:0 service/fileIo.js=1/1/sampler:1 service/sampler.js=0/0/sampler:1 service/main.js=0/0/sampler:1 unchanged=0"
+
+cockpit_gdbus_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true
+cockpit_gdbus_summary+="skipped=$(status_gdbus_calls)"
+gnome_status_run "$ASKED_FOR_SETTING" true GNOME_STATUS_COCKPIT_ACTIVE_STATE=active
+cockpit_gdbus_summary+=" active=$(status_gdbus_calls) cockpit-call=[$(grep -F -e "$COCKPIT_DEST_NEEDLE" "$GNOME_STATUS_CALLS")]"
+check "gnome-status: an active cockpit makes exactly one more gdbus call than a skipped one, Cockpit1's GetState with gdbus's reply timeout" \
+  "$cockpit_gdbus_summary" \
+  "skipped=1 active=2 cockpit-call=[gdbus call --session --dest io.github.quantivly.dotfiles.Cockpit1 --object-path /io/github/quantivly/dotfiles/Cockpit1 --method io.github.quantivly.dotfiles.Cockpit1.GetState --timeout 2]"
+
 # Spelled by pieces so this row's own source is not what it finds.
 GNOME_STATUS_FORBIDDEN_PATTERN="cmd""line|env""iron\\b|\\bps -|pgre""p -[a-z]*[al]\\b"
 gnome_status_source="$(sed -n '/^gnome-status() {$/,/^}$/p' "$DOTFILES/zsh/functions/system.sh")"
@@ -1039,6 +1243,12 @@ check "install.conf.yaml links the extension directory" \
   "$(grep -c -x -F "    ~/.local/share/gnome-shell/extensions/$EXTENSION_UUID: gnome-shell/extensions/$EXTENSION_UUID" "$DOTFILES/install.conf.yaml")" 1
 check "the template carries a commented genable_extension line" \
   "$(grep -c -x -F "# genable_extension $EXTENSION_UUID" "$DOTFILES/examples/gnome-settings.local.template")" 1
+# The cockpit's background, for the desktop and the lock screen, in gset's own
+# value form (as `gsettings get` prints it, so a second gnome-apply is a no-op).
+COCKPIT_BACKGROUND_LINE_PATTERN="^# gset org\\.gnome\\.desktop\\.(background|screensaver) +(picture-options +\"'none'\"|primary-color +\"'#121a1a'\")\$"
+check "the template carries the cockpit's background lines for the desktop and the lock screen, commented, and points at the cockpit's config template" \
+  "background=$(grep -c -E "$COCKPIT_BACKGROUND_LINE_PATTERN" "$DOTFILES/examples/gnome-settings.local.template") pointer=$(grep -c -F 'examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json' "$DOTFILES/examples/gnome-settings.local.template")" \
+  "background=4 pointer=1"
 
 # ---------------------------------------------------------------------------
 # The sampler service: its D-Bus face, its entry point, its unit and its
@@ -3102,7 +3312,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=677
+EXPECTED_ROWS=686
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

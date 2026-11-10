@@ -2375,20 +2375,36 @@ gnome-status() {
     # sampler service, resource-pulse.service (linked, never enabled), itself.
     # State is the shell's own verdict (ACTIVE / ERROR / OUT OF DATE), so a silent
     # failure after an update shows here. Everything below only reads: settings,
-    # the unit's properties, the service's GetState (under a timeout), file
-    # mtimes, and the desktop shell's /proc/<pid>/stat and /proc/stat. Never an
-    # argument list or an environment, and no `ps`.
+    # the two units' properties, each service's GetState (under a timeout), file
+    # mtimes, whether the cockpit's config file exists, and the desktop shell's
+    # /proc/<pid>/stat and /proc/stat. Never an argument list or an environment,
+    # and no `ps`.
     rp_uuid="resource-pulse@dotfiles"
     rp_extension_dir="$HOME/.local/share/gnome-shell/extensions/$rp_uuid"
     rp_service_unit="resource-pulse.service"
     rp_bus_name="io.github.quantivly.dotfiles.ResourcePulse1"
     rp_object_path="/io/github/quantivly/dotfiles/ResourcePulse1"
-    rp_get_state_method="$rp_bus_name.GetState"
+    # Both services answer GetState on an interface named as their bus name.
+    rp_get_state_method_name="GetState"
+    # The cockpit service (cockpit.service), opt-in by its config file: the
+    # unit's ConditionPathExists names %h/.config, whatever XDG_CONFIG_HOME says.
+    rp_cockpit_unit="cockpit.service"
+    rp_cockpit_bus_name="io.github.quantivly.dotfiles.Cockpit1"
+    rp_cockpit_object_path="/io/github/quantivly/dotfiles/Cockpit1"
+    rp_cockpit_config_path="$HOME/.config/resource-pulse/cockpit.json"
+    rp_cockpit_config_display_path="~/.config/resource-pulse/cockpit.json"
+    # The sources GetState carries, in its order (COCKPIT_SOURCE_NAMES); each
+    # is stale once its last sample is older than this many of its own
+    # intervals (COCKPIT_SOURCE_STALE_INTERVALS in lib/constants.js).
+    rp_cockpit_source_names=(sessions network mounts)
+    rp_cockpit_stale_intervals=3
     # Each side of the extension runs its entry module and every module that
-    # imports, as this checkout's closure helper lists them (ruling R23).
+    # imports, as this checkout's closure helper lists them (ruling R23); so
+    # does the cockpit service, whose closure is its own (ruling R13).
     rp_module_closure_script="${DOTFILES_ROOT:-$HOME/.dotfiles}/scripts/resource-pulse-module-closure.sh"
     rp_shell_entry_module="extension.js"
     rp_service_entry_module="service/main.js"
+    rp_cockpit_entry_module="service/cockpit.js"
     # gdbus's own reply timeout, and the hard bound `timeout` puts on every call
     # to systemctl or gdbus, so gnome-status never hangs on a wedged manager or bus.
     rp_reply_timeout_seconds=2
@@ -2494,6 +2510,63 @@ gnome-status() {
       print -r -- "${${changed_paths%%$'\n'*}#"$rp_extension_dir"/}"
     }
 
+    # rp_warn_when_unit_runs_older_code <unit> <entry module> <restart note>:
+    # adds a ⚠ when a module of the entry's import closure changed after the
+    # active unit started (it runs older code than the checkout), or when the
+    # closure cannot be worked out. The note follows the try-restart remedy.
+    rp_warn_when_unit_runs_older_code() {
+      local unit_name="$1" entry_module="$2" restart_note="$3" started_at changed_file
+      started_at="$("${rp_call_limit[@]}" systemctl --user show -p ActiveEnterTimestamp --value \
+        --timestamp=unix "$unit_name" 2>/dev/null)"
+      [[ "$started_at" == @<-> ]] || return 0
+      if ! changed_file="$(rp_first_module_changed_since "$entry_module" "${started_at#@}")"; then
+        rp_warnings+=("cannot tell whether $unit_name runs older code: what $entry_module imports could not be worked out or searched — bash $rp_module_closure_script $rp_extension_dir $entry_module")
+      elif [ -n "$changed_file" ]; then
+        rp_warnings+=("$unit_name runs older code: $changed_file changed after it started — systemctl --user try-restart $unit_name$restart_note")
+      fi
+    }
+
+    # rp_call_get_state <bus name> <object path>: the service's GetState reply,
+    # its GVariant string escapes undone, so the JSON in it reads as JSON.
+    # Fails when it does not answer within rp_call_limit_seconds.
+    rp_call_get_state() {
+      local bus_name="$1" object_path="$2" state_reply
+      state_reply="$("${rp_call_limit[@]}" gdbus call --session --dest "$bus_name" \
+        --object-path "$object_path" --method "$bus_name.$rp_get_state_method_name" \
+        --timeout "$rp_reply_timeout_seconds" 2>/dev/null)" || return 1
+      rp_unescaped_gvariant_string "$state_reply"
+    }
+
+    # rp_json_string_after <JSON text> <key>: the string value of the first
+    # "<key>":"…" in the text, with JSON's \" \\ and \/ undone and any other
+    # escape left as written. Fails when the key is absent, holds no string
+    # (null), or the string does not end.
+    rp_json_string_after() {
+      emulate -L zsh
+      local text="$1" key_text="\"$2\":\"" after_key string_value="" character
+      local -i character_index=1
+      after_key="${text#*"$key_text"}"
+      [[ "$after_key" != "$text" ]] || return 1
+      while (( character_index <= ${#after_key} )); do
+        character="${after_key[character_index]}"
+        if [[ "$character" == '"' ]]; then
+          print -r -- "$string_value"
+          return 0
+        fi
+        if [[ "$character" == '\' ]]; then
+          (( character_index++ ))
+          character="${after_key[character_index]}"
+          case "$character" in
+            '"' | '\' | '/') ;;
+            *) string_value+='\' ;;
+          esac
+        fi
+        string_value+="$character"
+        (( character_index++ ))
+      done
+      return 1
+    }
+
     # rp_describe_running_service: asks the active service for GetState and sets
     # rp_service_line ("active, protocol 1, last sample 1 s ago"), adding a ⚠
     # line when it does not answer within rp_call_limit_seconds or its last
@@ -2506,16 +2579,13 @@ gnome-status() {
         rp_service_line="active (gdbus not found, so not asked)"
         return 0
       fi
-      if ! state_reply="$("${rp_call_limit[@]}" gdbus call --session --dest "$rp_bus_name" \
-          --object-path "$rp_object_path" --method "$rp_get_state_method" \
-          --timeout "$rp_reply_timeout_seconds" 2>/dev/null)"; then
+      if ! state_reply="$(rp_call_get_state "$rp_bus_name" "$rp_object_path")"; then
         rp_service_line="active, no answer"
         rp_warnings+=("$rp_service_unit is active but did not answer GetState within $rp_call_limit_seconds s — journalctl --user -u $rp_service_unit -e")
         return 0
       fi
       # The service writes protocol, its times and the sequence before the
       # snapshot (lib/protocol.js buildStatePayload): only that part is read.
-      state_reply="$(rp_unescaped_gvariant_string "$state_reply")"
       top_level_fields="${state_reply%%\"snapshot\":*}"
       protocol_version="$(rp_first_number_after "$top_level_fields" protocol)" || protocol_version="unknown"
       if latest_sampled_at_usec="$(rp_first_number_after "$top_level_fields" latestSampledAtUsec)"; then
@@ -2536,6 +2606,78 @@ gnome-status() {
         sample_text="last sample not reported (a service from before it was)"
       fi
       rp_service_line="active, protocol $protocol_version, $sample_text"
+    }
+
+    # rp_cockpit_source_is_stale <sources JSON> <source name> <now usec>:
+    # succeeds when that source's last sample is older than
+    # rp_cockpit_stale_intervals of its own intervals. The service writes each
+    # source's sampledAtUsec and intervalSeconds first in its object
+    # (lib/cockpitProtocol.js), so they are read between "<name>":{ and the
+    # next brace, and a field of another source is never read. A source the
+    # JSON does not carry (an older service), or one not stamped, is not stale.
+    rp_cockpit_source_is_stale() {
+      local sources_text="$1" anchor_text="\"$2\":{" now_usec="$3" after_anchor source_timing_fields
+      local sampled_at_usec interval_seconds stale_after_usec
+      after_anchor="${sources_text#*"$anchor_text"}"
+      [[ "$after_anchor" != "$sources_text" ]] || return 1
+      source_timing_fields="${after_anchor%%[\{\}]*}"
+      sampled_at_usec="$(rp_first_number_after "$source_timing_fields" sampledAtUsec)" || return 1
+      interval_seconds="$(rp_first_number_after "$source_timing_fields" intervalSeconds)" || return 1
+      stale_after_usec=$(( rp_cockpit_stale_intervals * interval_seconds * rp_usec_per_second ))
+      (( now_usec - sampled_at_usec > stale_after_usec ))
+    }
+
+    # rp_describe_running_cockpit: asks the active cockpit service for GetState
+    # and sets rp_cockpit_line ("active, protocol 1, last publish 4 s ago,
+    # stale: none"), naming each stale source. Adds a ⚠ when it does not answer
+    # within rp_call_limit_seconds, and one quoting GetState's configError when
+    # it carries one. The service writes protocol and its times before the
+    # layout and the sources (lib/cockpitProtocol.js buildCockpitStatePayload),
+    # and configError before the sources: those are read from the part before
+    # "sources" only.
+    rp_describe_running_cockpit() {
+      local state_reply top_level_fields sources_text protocol_version latest_published_at_usec now_usec=""
+      local publish_age_usec publish_age_seconds publish_age_text publish_text stale_text stale_source_list source_name
+      local config_error
+      local -a stale_source_names=()
+      if ! has_command gdbus; then
+        rp_cockpit_line="active (gdbus not found, so not asked)"
+        return 0
+      fi
+      if ! state_reply="$(rp_call_get_state "$rp_cockpit_bus_name" "$rp_cockpit_object_path")"; then
+        rp_cockpit_line="active, no answer"
+        rp_warnings+=("$rp_cockpit_unit is active but did not answer GetState within $rp_call_limit_seconds s — $rp_cockpit_journal_hint")
+        return 0
+      fi
+      top_level_fields="${state_reply%%\"sources\":*}"
+      sources_text=""
+      [[ "$top_level_fields" != "$state_reply" ]] && sources_text="${state_reply#*\"sources\":}"
+      protocol_version="$(rp_first_number_after "$top_level_fields" protocol)" || protocol_version="unknown"
+      now_usec="$(rp_now_usec)" || now_usec=""
+      if ! latest_published_at_usec="$(rp_first_number_after "$top_level_fields" latestPublishedAtUsec)"; then
+        publish_text="last publish not reported"
+      elif [[ -z "$now_usec" ]]; then
+        publish_text="last publish at a time date cannot compare"
+      else
+        publish_age_usec=$(( now_usec - latest_published_at_usec ))
+        (( publish_age_usec < 0 )) && publish_age_usec=0
+        publish_age_seconds=$(( publish_age_usec / rp_usec_per_second ))
+        publish_age_text="$(rp_age_text "$publish_age_seconds")"
+        publish_text="last publish $publish_age_text ago"
+      fi
+      if [[ -z "$now_usec" ]]; then
+        stale_text="stale: not known (date cannot say the time)"
+      else
+        for source_name in "${rp_cockpit_source_names[@]}"; do
+          rp_cockpit_source_is_stale "$sources_text" "$source_name" "$now_usec" && stale_source_names+=("$source_name")
+        done
+        stale_source_list="${(j:, :)stale_source_names}"
+        stale_text="stale: ${stale_source_list:-none}"
+      fi
+      rp_cockpit_line="active, protocol $protocol_version, $publish_text, $stale_text"
+      if config_error="$(rp_json_string_after "$top_level_fields" configError)"; then
+        rp_warnings+=("cockpit: config invalid: $config_error — fix $rp_cockpit_config_display_path; the service rereads it when it changes")
+      fi
     }
 
     [ -e "$rp_extension_dir" ] && rp_linked="yes"
@@ -2634,15 +2776,93 @@ gnome-status() {
     # ruling R23) changed after the service started means it runs older code
     # than the checkout. A lib/ module only the shell imports does not count.
     if [ "$rp_service_state" = "active" ] && [ "$rp_linked" = "yes" ]; then
-      rp_service_started_at="$("${rp_call_limit[@]}" systemctl --user show -p ActiveEnterTimestamp --value \
-        --timestamp=unix "$rp_service_unit" 2>/dev/null)"
-      if [[ "$rp_service_started_at" == @<-> ]]; then
-        if ! rp_changed_file="$(rp_first_module_changed_since "$rp_service_entry_module" "${rp_service_started_at#@}")"; then
-          rp_warnings+=("cannot tell whether $rp_service_unit runs older code: what $rp_service_entry_module imports could not be worked out or searched — bash $rp_module_closure_script $rp_extension_dir $rp_service_entry_module")
-        elif [ -n "$rp_changed_file" ]; then
-          rp_warnings+=("$rp_service_unit runs older code: $rp_changed_file changed after it started — systemctl --user try-restart $rp_service_unit (its histories start again)")
-        fi
-      fi
+      rp_warn_when_unit_runs_older_code "$rp_service_unit" "$rp_service_entry_module" " (its histories start again)"
+    fi
+
+    # The cockpit service, cockpit.service: linked by ./install for everyone,
+    # never enabled, and opt-in by its config file. While
+    # ~/.config/resource-pulse/cockpit.json is absent its ConditionPathExists
+    # makes systemd skip every start: loaded, inactive, ConditionResult=no, and
+    # no fault. LoadState is read first (a unit not found is inactive too), and
+    # the file itself is tested as well: a unit never started also reads
+    # ConditionResult=no (systemd's default before any check), so that state is
+    # "skipped" only while the file is absent. The file plays the part the
+    # extension being enabled plays for the sampler: with it, a cockpit not
+    # running or not installed is a ⚠. Each form and its remedy:
+    #   skipped (no ~/.config/resource-pulse/cockpit.json)  not opted in; none.
+    #   active, protocol 1, last publish 4 s ago, stale: none  (or stale:
+    #     sessions, mounts): from GetState. The last publish is the latest
+    #     Changed, or the start, so a quiet service's can be long ago, which is
+    #     no fault. A source is stale once its last sample is older than
+    #     rp_cockpit_stale_intervals of its own intervals.
+    #   active, no answer / failed (not running) / activating (auto-restart:
+    #     restarting after a failure)  always a ⚠ naming its journal.
+    #   inactive (not running)  a ⚠ to start it while the file exists.
+    #   activating (start), or any other state  a ⚠ naming its journal while
+    #     the file exists.
+    #   not installed (LoadState=not-found)  a ⚠ to run ./install while the
+    #     file exists; cannot load (LoadState=…) one to read its status.
+    #   unknown (no systemd user manager answered)  none.
+    # GetState's configError ("missing" when the file vanished while the
+    # service runs, the parser's text when it is malformed) is a ⚠ to fix the
+    # file, which the service rereads when it changes. A module service/cockpit.js
+    # runs (and nothing only the sampler runs) changed after it started is a ⚠
+    # that it runs older code, as for the sampler.
+    rp_cockpit_load_state=""; rp_cockpit_active_state=""; rp_cockpit_sub_state=""; rp_cockpit_condition_result=""
+    if has_command systemctl &&
+      rp_cockpit_unit_properties="$("${rp_call_limit[@]}" systemctl --user show -p LoadState -p ActiveState \
+        -p SubState -p ConditionResult "$rp_cockpit_unit" 2>/dev/null)"; then
+      for rp_unit_property in "${(@f)rp_cockpit_unit_properties}"; do
+        case "$rp_unit_property" in
+          LoadState=*) rp_cockpit_load_state="${rp_unit_property#LoadState=}" ;;
+          ActiveState=*) rp_cockpit_active_state="${rp_unit_property#ActiveState=}" ;;
+          SubState=*) rp_cockpit_sub_state="${rp_unit_property#SubState=}" ;;
+          ConditionResult=*) rp_cockpit_condition_result="${rp_unit_property#ConditionResult=}" ;;
+        esac
+      done
+    fi
+    rp_cockpit_opted_in="no"
+    [ -e "$rp_cockpit_config_path" ] && rp_cockpit_opted_in="yes"
+    rp_cockpit_journal_hint="journalctl --user -u $rp_cockpit_unit -e"
+    if [ -z "$rp_cockpit_load_state" ] || [ -z "$rp_cockpit_active_state" ]; then
+      rp_cockpit_line="unknown (no systemd user manager answered)"
+    elif [ "$rp_cockpit_load_state" = "not-found" ]; then
+      rp_cockpit_line="not installed (LoadState=not-found)"
+      [ "$rp_cockpit_opted_in" = "yes" ] &&
+        rp_warnings+=("$rp_cockpit_unit is not installed though $rp_cockpit_config_display_path exists — run ./install")
+    elif [ "$rp_cockpit_load_state" != "loaded" ]; then
+      rp_cockpit_line="cannot load (LoadState=$rp_cockpit_load_state)"
+      [ "$rp_cockpit_opted_in" = "yes" ] &&
+        rp_warnings+=("$rp_cockpit_unit cannot load (LoadState=$rp_cockpit_load_state) — systemctl --user status $rp_cockpit_unit")
+    else
+      case "$rp_cockpit_active_state" in
+        active) rp_describe_running_cockpit ;;
+        failed)
+          rp_cockpit_line="failed (not running)"
+          rp_warnings+=("$rp_cockpit_unit failed — $rp_cockpit_journal_hint") ;;
+        inactive)
+          if [ "$rp_cockpit_opted_in" = "yes" ]; then
+            rp_cockpit_line="inactive (not running)"
+            rp_warnings+=("$rp_cockpit_unit is not running though $rp_cockpit_config_display_path exists — systemctl --user start $rp_cockpit_unit")
+          elif [ "$rp_cockpit_condition_result" = "no" ]; then
+            rp_cockpit_line="skipped (no $rp_cockpit_config_display_path)"
+          else
+            rp_cockpit_line="inactive (not running)"
+          fi ;;
+        *)
+          if [ "$rp_cockpit_sub_state" = "auto-restart" ]; then
+            rp_cockpit_line="$rp_cockpit_active_state (auto-restart: restarting after a failure)"
+            rp_warnings+=("$rp_cockpit_unit is restarting after a failure — $rp_cockpit_journal_hint")
+          else
+            rp_cockpit_line="$rp_cockpit_active_state ($rp_cockpit_sub_state)"
+            [ "$rp_cockpit_opted_in" = "yes" ] &&
+              rp_warnings+=("$rp_cockpit_unit is $rp_cockpit_active_state ($rp_cockpit_sub_state), not serving yet — $rp_cockpit_journal_hint")
+          fi ;;
+      esac
+    fi
+    echo "  cockpit: $rp_cockpit_line"
+    if [ "$rp_cockpit_active_state" = "active" ] && [ "$rp_linked" = "yes" ]; then
+      rp_warn_when_unit_runs_older_code "$rp_cockpit_unit" "$rp_cockpit_entry_module" ""
     fi
     # Drawing side: the shell loads the extension's JS once per login, so a
     # module it runs (extension.js and what it imports, ruling R23) changed after
