@@ -2380,6 +2380,11 @@ restart_lines() {
 }
 COCKPIT_ENTRY_RESTART_LINE='  ✓ cockpit.service restarted: service/cockpit.js changed since it started|'
 SAMPLER_ENTRY_RESTART_LINE='  ✓ resource-pulse.service restarted: service/main.js changed since it started (its histories start again)|'
+reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
+both_unchanged_run="$(run_refresh_both_active)"
+check "refresh: both units active and nothing changed since their starts: one reload, both checked, neither restarted, nothing said" \
+  "${both_unchanged_run%% output=*} said=[$(restart_lines "$both_unchanged_run")]" \
+  "exit=0 calls=[$CALLS_BOTH_UNCHANGED] said=[]"
 refresh_extension_with_change service/cockpit.js
 cockpit_entry_changed_run="$(run_refresh_both_active)"
 check "refresh: service/cockpit.js newer than cockpit.service's start try-restarts cockpit.service and leaves resource-pulse.service alone, in a line naming cockpit.service" \
@@ -3426,7 +3431,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=700
+EXPECTED_ROWS=701
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
