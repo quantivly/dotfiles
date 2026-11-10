@@ -4,6 +4,7 @@
 import GLib from 'gi://GLib';
 import {runAll} from './harness.js';
 import './harness.test.js';
+import './jsonFields.test.js';
 import './parsers.test.js';
 import './math.test.js';
 import './apps.test.js';

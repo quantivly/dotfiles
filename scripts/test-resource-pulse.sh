@@ -501,8 +501,8 @@ sorted_closure() {
 # Read from the import lines of today's tree, by hand: the shell side's sixteen
 # modules and the service side's fifteen, six of them (constants, errorLog,
 # history, pressure, protocol, teardown) on both.
-EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
-EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/main.js service/sampler.js '
+EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
+EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/jsonFields.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/main.js service/sampler.js '
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
   "shell=[${EXPECTED_SHELL_CLOSURE}exit=0] service=[${EXPECTED_SERVICE_CLOSURE}exit=0]"
@@ -2476,7 +2476,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=474
+EXPECTED_ROWS=483
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
