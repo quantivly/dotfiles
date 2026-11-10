@@ -607,9 +607,10 @@ gnome_status_hints() {
   printf '%s\n' "$1" >"$STUB_STATE/$SHELL_SCHEMA/enabled-extensions"
   printf '%s\n' "$2" >"$STUB_STATE/$SHELL_SCHEMA/allow-extension-installation"
   printf '%s\n' "$3" >"$STUB_STATE/$SHELL_SCHEMA/disable-user-extensions"
+  # XDG_CONFIG_HOME pinned empty, as in gnome_status_run below.
   # shellcheck disable=SC2016  # Expanded by zsh.
-  status_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_STUB_BIN:$PATH" \
-    STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" \
+  status_output="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" XDG_CONFIG_HOME= \
+    PATH="$GNOME_STATUS_STUB_BIN:$PATH" STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" \
     GNOME_STATUS_SHELL_STATE="$4" zsh -c 'source "$1" && gnome-status' gnome-status \
     "$DOTFILES/zsh/functions/system.sh" 2>&1)"
   status_exit=$?
@@ -872,7 +873,10 @@ gnome_status_run() {
   shift 2
   : >"$GNOME_STATUS_CALLS"
   # shellcheck disable=SC2016  # Expanded by zsh.
-  GNOME_STATUS_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_STUB_BIN:$PATH" \
+  # XDG_CONFIG_HOME is pinned empty, so the cockpit's config file is looked for
+  # under the row's HOME, never the caller's config home; a row may set it.
+  GNOME_STATUS_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" HOME="$GNOME_STATUS_HOME" XDG_CONFIG_HOME= \
+    PATH="$GNOME_STATUS_STUB_BIN:$PATH" \
     STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" \
     GNOME_STATUS_CALLS="$GNOME_STATUS_CALLS" "${GNOME_STATUS_STUB_DEFAULTS[@]}" "$@" \
     zsh -c 'source "$1" && gnome-status' gnome-status "$DOTFILES/zsh/functions/system.sh" 2>&1)"
@@ -1122,6 +1126,17 @@ cockpit_skipped_summary+=" config-never-started=[$(status_cockpit_line)]/$(statu
 check "gnome-status: a cockpit unit skipped by its condition reads skipped while the config file is absent, and warns nothing; with the file, the same state is a unit not started, with the start remedy" \
   "$cockpit_skipped_summary" \
   "no-config=[skipped (no ~/.config/resource-pulse/cockpit.json)]/0/0 config-never-started=[inactive (not running)]/1/0"
+# The unit's condition (%E) and the service (GLib's user config dir) both look
+# under $XDG_CONFIG_HOME when it is set, so gnome-status does too: the file under
+# it opts in from a HOME without one, and a HOME's file does not count past it.
+cockpit_config_home_summary=""
+gnome_status_run "$ASKED_FOR_SETTING" true "XDG_CONFIG_HOME=$GNOME_STATUS_COCKPIT_HOME/.config"
+cockpit_config_home_summary+="file-under-it=[$(status_cockpit_line)]"
+gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_COCKPIT_HOME" "XDG_CONFIG_HOME=$WIRING_TMP/no-such-config-home"
+cockpit_config_home_summary+=" file-only-in-home=[$(status_cockpit_line)]"
+check "gnome-status: with XDG_CONFIG_HOME set, the cockpit's config file is the one under it, as the unit's %E and the service read it" \
+  "$cockpit_config_home_summary" \
+  "file-under-it=[inactive (not running)] file-only-in-home=[skipped (no ~/.config/resource-pulse/cockpit.json)]"
 
 # Fresh: sources 3, 3 and 2 s old, the latest publish 4 s ago. The latest
 # publish is the latest Changed (or the start), so a quiet service's is old,
@@ -1416,7 +1431,8 @@ for real_bus_stubbed_tool in gsettings gnome-extensions gnome-shell systemctl pg
 done
 GNOME_STATUS_REAL_BUS_OUTPUT="$WIRING_TMP/gnome-status-real-bus.out"
 # shellcheck disable=SC2016  # Expanded by zsh.
-GNOME_STATUS_REAL_BUS_COMMAND=(env HOME="$GNOME_STATUS_HOME" PATH="$GNOME_STATUS_REAL_BUS_STUB_BIN:$PATH"
+# XDG_CONFIG_HOME pinned empty, as in gnome_status_run.
+GNOME_STATUS_REAL_BUS_COMMAND=(env HOME="$GNOME_STATUS_HOME" XDG_CONFIG_HOME= PATH="$GNOME_STATUS_REAL_BUS_STUB_BIN:$PATH"
   STUB_STATE="$STUB_STATE" STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG"
   GNOME_STATUS_SHELL_STATE=ACTIVE GNOME_STATUS_SERVICE_ACTIVE_STATE=active
   zsh -c 'source "$1" && gnome-status' gnome-status "$DOTFILES/zsh/functions/system.sh")
@@ -2041,7 +2057,9 @@ COCKPIT_UNIT="$DOTFILES/systemd/cockpit.service"
 COCKPIT_MAIN_RELATIVE_PATH="gnome-shell/extensions/$EXTENSION_UUID/service/cockpit.js"
 # The opt-in: for anyone without the layout file, systemd skips the unit.
 COCKPIT_UNIT_CONDITION_KEY='ConditionPathExists'
-COCKPIT_UNIT_CONDITION="$COCKPIT_UNIT_CONDITION_KEY=%h/.config/$COCKPIT_CONFIG_RELATIVE_PATH"
+# %E is $XDG_CONFIG_HOME (or ~/.config), where GLib's user config dir, and so the
+# service, looks for the file too.
+COCKPIT_UNIT_CONDITION="$COCKPIT_UNIT_CONDITION_KEY=%E/$COCKPIT_CONFIG_RELATIVE_PATH"
 EXPECTED_COCKPIT_UNIT_SETTINGS=(
   '[Unit]Description=<set>'
   '[Unit]PartOf=graphical-session.target'
@@ -2071,7 +2089,7 @@ for unit_setting in "${unit_settings[@]}"; do
   [[ "$unit_setting" == *"]$COCKPIT_UNIT_CONDITION_KEY="* ]] && cockpit_condition_count=$((cockpit_condition_count + 1))
   [[ "$unit_setting" == "[Unit]$COCKPIT_UNIT_CONDITION" ]] && cockpit_exact_condition_count=$((cockpit_exact_condition_count + 1))
 done
-check "cockpit.service has exactly one $COCKPIT_UNIT_CONDITION_KEY, in [Unit], on ~/.config/$COCKPIT_CONFIG_RELATIVE_PATH" \
+check "cockpit.service has exactly one $COCKPIT_UNIT_CONDITION_KEY, in [Unit], on %E/$COCKPIT_CONFIG_RELATIVE_PATH (\$XDG_CONFIG_HOME, or ~/.config)" \
   "conditions=$cockpit_condition_count exact=$cockpit_exact_condition_count" "conditions=1 exact=1"
 check "cockpit.service's ExecStart runs, under $UNIT_INTERPRETER, the checkout's own service/cockpit.js" \
   "${unit_exec_start%% "$UNIT_DOTFILES_PREFIX"*}|$(unit_exec_resolution "$COCKPIT_MAIN_RELATIVE_PATH")" \
@@ -3408,7 +3426,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=699
+EXPECTED_ROWS=700
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

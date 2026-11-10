@@ -191,9 +191,10 @@ It runs in `background.slice` at `Nice=10`, capped at `CPUQuota=10%`, `MemoryHig
 `cockpit:`. `./install` try-restarts it when `service/cockpit.js`, a module it imports, or its unit file
 changed after it started, as it does the sampler; a cockpit that is not running is left alone, silently.
 
-**Opt-in by file: `~/.config/resource-pulse/cockpit.json`.** `./install` links the unit for everyone and
-enables it for no one: it has no `[Install]` section. Its `ConditionPathExists` makes systemd skip every
-start while that file is absent. The unit stays inactive, and that is not a failure. To opt in, copy the
+**Opt-in by file: `~/.config/resource-pulse/cockpit.json`** (under `$XDG_CONFIG_HOME` instead when that is
+set). `./install` links the unit for everyone and enables it for no one: it has no `[Install]` section. Its
+`ConditionPathExists` (on `%E`, which is `$XDG_CONFIG_HOME` or `~/.config`, where the service reads the
+file too) makes systemd skip every start while that file is absent. The unit stays inactive, and that is not a failure. To opt in, copy the
 template, then start the service once by hand, since nothing starts it yet:
 
 ```bash
@@ -442,7 +443,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (699 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (700 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it

@@ -2386,12 +2386,14 @@ gnome-status() {
     rp_object_path="/io/github/quantivly/dotfiles/ResourcePulse1"
     # Both services answer GetState on an interface named as their bus name.
     rp_get_state_method_name="GetState"
-    # The cockpit service (cockpit.service), opt-in by its config file: the
-    # unit's ConditionPathExists names %h/.config, whatever XDG_CONFIG_HOME says.
+    # The cockpit service (cockpit.service), opt-in by its config file: under
+    # $XDG_CONFIG_HOME, or ~/.config when that is unset or empty, as the unit's
+    # ConditionPathExists (%E) and the service's GLib both look for it. The
+    # lines print it as ~/.config/... whichever it is.
     rp_cockpit_unit="cockpit.service"
     rp_cockpit_bus_name="io.github.quantivly.dotfiles.Cockpit1"
     rp_cockpit_object_path="/io/github/quantivly/dotfiles/Cockpit1"
-    rp_cockpit_config_path="$HOME/.config/resource-pulse/cockpit.json"
+    rp_cockpit_config_path="${XDG_CONFIG_HOME:-$HOME/.config}/resource-pulse/cockpit.json"
     rp_cockpit_config_display_path="~/.config/resource-pulse/cockpit.json"
     # The sources GetState carries, in its order (COCKPIT_SOURCE_NAMES); each
     # is stale once its last sample is older than this many of its own
@@ -2781,7 +2783,8 @@ gnome-status() {
 
     # The cockpit service, cockpit.service: linked by ./install for everyone,
     # never enabled, and opt-in by its config file. While
-    # ~/.config/resource-pulse/cockpit.json is absent its ConditionPathExists
+    # ~/.config/resource-pulse/cockpit.json (or that file under
+    # $XDG_CONFIG_HOME, when it is set) is absent its ConditionPathExists
     # makes systemd skip every start: loaded, inactive, ConditionResult=no, and
     # no fault. LoadState is read first (a unit not found is inactive too), and
     # the file itself is tested as well: a unit never started also reads

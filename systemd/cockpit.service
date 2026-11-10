@@ -2,9 +2,10 @@
 # ========================
 # The Resource Pulse cockpit service: samples the cockpit's sources (the agent
 # sessions, the network and the mounts), each on its own cadence, and serves
-# them, with the layout read from ~/.config/resource-pulse/cockpit.json, on the
-# session bus as io.github.quantivly.dotfiles.Cockpit1, so the GNOME Shell
-# extension (gnome-shell/extensions/resource-pulse@dotfiles) only draws. It runs
+# them, with the layout read from ~/.config/resource-pulse/cockpit.json (under
+# $XDG_CONFIG_HOME instead when that is set), on the session bus as
+# io.github.quantivly.dotfiles.Cockpit1, so the GNOME Shell extension
+# (gnome-shell/extensions/resource-pulse@dotfiles) only draws. It runs
 # the extension's own service/cockpit.js, under plain gjs, never inside
 # gnome-shell, and apart from the sampler (systemd/resource-pulse.service), so
 # a fault in one never stops the other.
@@ -13,8 +14,11 @@
 #
 # OPT-IN BY FILE: INERT WITHOUT ~/.config/resource-pulse/cockpit.json. The
 # ConditionPathExists in [Unit] makes systemd skip every start while that file
-# is absent: the unit stays inactive, nothing runs, and that is not a failure
-# (`systemctl --user status cockpit.service` says the condition was unmet).
+# is absent. It names it under %E, which is $XDG_CONFIG_HOME or ~/.config, the
+# same directory GLib's user config dir gives the service, so the condition and
+# the file the service reads cannot disagree. The unit then stays inactive,
+# nothing runs, and that is not a failure (`systemctl --user status
+# cockpit.service` says the condition was unmet).
 # The file is created by hand, from examples/resource-pulse-cockpit.json.template,
 # never by ./install, so the cockpit runs only for someone who wrote one.
 #
@@ -58,7 +62,8 @@ PartOf=graphical-session.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
 # The opt-in: without the layout file every start is skipped; see the header.
-ConditionPathExists=%h/.config/resource-pulse/cockpit.json
+# %E is $XDG_CONFIG_HOME, or ~/.config when that is unset.
+ConditionPathExists=%E/resource-pulse/cockpit.json
 
 [Service]
 # Ready once it owns its bus name. service/cockpit.js exports its object before
