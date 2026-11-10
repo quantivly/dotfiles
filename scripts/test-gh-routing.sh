@@ -1063,8 +1063,12 @@ HERDR_RC="$DOTFILES/zsh/zshrc.herdr"
 GH_WORK_DIR="$TMPROOT/apply-gh-work"; GH_PERSONAL_DIR="$TMPROOT/apply-gh-personal"
 mkdir -p "$GH_WORK_DIR" "$GH_PERSONAL_DIR"
 GH_ABSENT_DIR="$TMPROOT/apply-gh-absent"
+# Every row runs from this empty dir, so a relative gh dir (`relative/gh`) exists
+# nowhere a `-d` could find it, whichever directory the suite was started from.
+APPLY_CWD="$TMPROOT/apply-cwd"; mkdir -p "$APPLY_CWD"
 apply() {   # $1 = extra prelude -> "ROUTES|PATH_ROUTES|DEFAULT"
     zsh -f -c "
+      cd '$APPLY_CWD' || exit 2
       source '$GITHUB_SH' >/dev/null 2>&1
       CLAUDE_TENANTS_FILE=/nonexistent
       source '$HERDR_RC' >/dev/null 2>&1
@@ -1130,6 +1134,11 @@ GH_REGULAR_FILE="$TMPROOT/apply-gh-regular-file"; : > "$GH_REGULAR_FILE"
 check "a gh dir path that is a regular file does not count as present" \
       "$(apply "CLAUDE_TENANT_GH_DIR=( work '$GH_REGULAR_FILE' client '$GH_ABSENT_DIR' home '$GH_ABSENT_DIR' )")" "||"
 
+# An empty value is not a dir, and it is not absolute either: a test of only
+# "not absolute" would count it, and derive a route to the one absent dir.
+check "an empty gh dir value does not count as present" \
+      "$(apply "CLAUDE_TENANT_GH_DIR=( work '$GH_ABSENT_DIR' client '' home '' )")" "||"
+
 # Pin: catches a guard that judges a relative value by `-d` too. A relative dir
 # is a fault gh-route names (exit 2, the reldir row below); the guard must pass
 # it on, not hide it as "no dirs on this machine".
@@ -1154,11 +1163,12 @@ echo "=== scripts/gh-route: the same routing, for a process with no shell (DO-82
 # empty dir — which sends gh to its default config dir — when it could not tell?
 # `env -i` so this developer's own GH_* and tenants file cannot reach a row.
 GHROUTE="$DOTFILES/scripts/gh-route"
-groute() {  # groute <home> <dir> [tenants-file] -> "<rc>|<state>|<dir>"
-  local out rc
+groute() {  # groute <home> <dir> [tenants-file] [with-token-file] -> "<rc>|<state>|<dir>[|<token_file>]"
+  local out rc answer_fields='"\(.state)|\(.dir)"'
+  [[ "${4:-}" == with-token-file ]] && answer_fields='"\(.state)|\(.dir)|\(.token_file)"'
   out="$(env -i PATH="/usr/bin:/bin" HOME="$1" CLAUDE_TENANTS_FILE="${3:-/nonexistent}" \
          "$GHROUTE" "$2" 2>/dev/null)"; rc=$?
-  printf '%s|%s' "$rc" "$(printf '%s' "$out" | jq -r '"\(.state)|\(.dir)"' 2>/dev/null)"
+  printf '%s|%s' "$rc" "$(printf '%s' "$out" | jq -r "$answer_fields" 2>/dev/null)"
 }
 groute_err() {  # groute_err <home> <dir> [tenants-file] -> stderr only
   # shellcheck disable=SC2069  # stderr to the pipe, stdout dropped: the order is the point
@@ -1241,16 +1251,12 @@ check "gh-route --tables lists the derived route after the shipped one" \
 # add no route of their own and the tenants file is the only possible source.
 GR_NOGATE_CLIENT_DIR="$GR_NOGATE/.config/gh-client"
 printf "CLAUDE_TENANT_ROUTES=( 'acme=client' )\nCLAUDE_TENANT_GH_DIR=( client '%s' )\n" "$GR_NOGATE_CLIENT_DIR" > "$TEN/onehost.zsh"
-groute_answer() {  # groute_answer <home> <dir> <tenants-file> -> "<state>|<dir>|<token_file>"
-  env -i PATH="/usr/bin:/bin" HOME="$1" CLAUDE_TENANTS_FILE="$3" "$GHROUTE" "$2" 2>/dev/null \
-    | jq -r '"\(.state)|\(.dir)|\(.token_file)"' 2>/dev/null
-}
 check "gh-route: a tenants file on a machine with none of the tenants' gh dirs: a routed owner answers none" \
-      "$(groute_answer "$GR_NOGATE" "$R_WORK" "$TEN/onehost.zsh")" "none||"
+      "$(groute "$GR_NOGATE" "$R_WORK" "$TEN/onehost.zsh" with-token-file)" "0|none||"
 # The control: the same HOME and tenants file route that owner once the dir exists.
 mkdir -p "$GR_NOGATE_CLIENT_DIR"
 check "gh-route: ...and with that tenant's dir created, the same owner answers matched" \
-      "$(groute_answer "$GR_NOGATE" "$R_WORK" "$TEN/onehost.zsh" | cut -d'|' -f1,2)" "matched|$GR_NOGATE_CLIENT_DIR"
+      "$(groute "$GR_NOGATE" "$R_WORK" "$TEN/onehost.zsh")" "0|matched|$GR_NOGATE_CLIENT_DIR"
 
 # Could not tell is exit 2 and NO answer on stdout — never an empty dir.
 GR_BAD="$(mkrepo grbad "origin=git@github.com:quantivly/platform.git")"
@@ -1291,7 +1297,7 @@ check "gh-route calls _gh_route_for and parses no remote itself" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=239
+EXPECTED_ROWS=240
 
 docs_claim() {
   local f="$DOTFILES/$1"

@@ -459,8 +459,9 @@ _claude_tenant_for() {
 # file nobody writes, and the memory sync then skipped every push (dev,
 # 2026-11-10). With at least one dir present, a missing one is a fault that must
 # stay visible, so nothing is skipped entry by entry. A value is present when it
-# is an existing directory (a symlink to one counts) or is not an absolute path:
-# a relative dir is not judged here, because gh-route names it as the fault it is.
+# is non-empty and either an existing directory (a symlink to one counts) or not
+# an absolute path: a relative dir is not judged here, because gh-route names it
+# as the fault it is. An empty value is no dir at all, so it counts for nothing.
 #
 # Defined here, deliberately NOT called here. Load order is zshrc.herdr (this
 # file) -> zshrc.company, whose zshrc.gh-routes ASSIGNS GH_ACCOUNT_ROUTES=(…) wholesale and would
@@ -469,7 +470,7 @@ _claude_tenant_for() {
 claude-tenants-apply-gh() {
   local e t d gh_dir has_present_gh_dir=0
   for gh_dir in "${(@v)CLAUDE_TENANT_GH_DIR}"; do
-    if [[ "$gh_dir" != /* || -d "$gh_dir" ]]; then has_present_gh_dir=1; break; fi
+    if [[ -n "$gh_dir" && ( "$gh_dir" != /* || -d "$gh_dir" ) ]]; then has_present_gh_dir=1; break; fi
   done
   (( has_present_gh_dir )) || return 0
   for e in "${CLAUDE_TENANT_ROUTES[@]}"; do
