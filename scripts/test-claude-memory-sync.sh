@@ -1504,6 +1504,25 @@ check "fetch: a not-found error is outcome auth-failed, exit 0, and nothing is p
     "$RC|$(status_field_of "$ALPHA_STORE" 2)|$(contains "$(status_field_of "$ALPHA_STORE" 3)" 'Repository not found')|push $(calls_of push)|$(remote_head)|$(last_ok_of "$ALPHA_STORE")" \
     "0|auth-failed|yes|push 0|$remote_before|(absent)"
 
+# The fetch prunes, so the branches the branch check reads are origin's as they are now, not as
+# they once were.
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+PATH="$GIT_WRAPPER_DIR:$PATH" run_sut --apply
+fetch_call=$(grep -F ' fetch ' "$FIXTURE_GIT_CALL_LOG")
+check "fetch: carries --prune" "$RC|$(contains "$fetch_call" ' --prune ')" "0|yes"
+
+reset_scene
+make_tracked_store "$ALPHA_STORE"
+git -C "$SEED_DIR" push -q "$REMOTES_DIR/$ALPHA_STORE.git" main:other || fatal "could not push other to the alpha remote"
+git -C "$ALPHA_DIR" fetch -q origin || fatal "could not fetch into the alpha store"
+git -C "$ALPHA_DIR" rev-parse -q --verify refs/remotes/origin/other >/dev/null \
+    || fatal "the alpha store has no origin/other for the run to prune"
+git -C "$REMOTES_DIR/$ALPHA_STORE.git" branch -q -D other || fatal "could not delete other on the alpha remote"
+run_sut --apply
+check "fetch: a remote branch deleted upstream disappears from refs/remotes after a run" \
+    "$RC|$(git -C "$ALPHA_DIR" rev-parse -q --verify refs/remotes/origin/other || printf 'gone')" "0|gone"
+
 PUSH_ATTEMPTS_LOG="$TMPROOT/push-attempts"
 reset_scene
 make_tracked_store "$ALPHA_STORE"
@@ -1834,7 +1853,7 @@ check "install.conf.yaml links the timer" \
     "$(grep -c '^    ~/.config/systemd/user/claude-memory-sync.timer: systemd/claude-memory-sync.timer$' "$DOTFILES/install.conf.yaml")" 1
 
 printf '\n'
-EXPECTED_ROWS=109
+EXPECTED_ROWS=111
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     fatal "expected $EXPECTED_ROWS rows, $((PASS + FAIL)) ran — a check vanished or was added without updating EXPECTED_ROWS"
 fi

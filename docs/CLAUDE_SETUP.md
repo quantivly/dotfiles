@@ -622,8 +622,176 @@ An armed timer on a host whose `~/.local/share/claude-memory` has gone is skippe
 `CLAUDE_MEMORY_GH_ROUTE_TIMEOUT_SECONDS` override the sync's paths, host, route and limits.
 
 State tables: `scripts/test-claude-memory-link.sh` (206 rows) and `scripts/test-claude-memory-sync.sh`
-(109 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
+(111 rows), both hermetic: a fixture `HOME`, every path named, real `git init` checkouts, and for the
 sync local bare repositories as remotes and a stub `gh-route` (CI `claude-memory-link-test` and
 `claude-memory-sync-test`). The doctor's rows are section AA of `scripts/test-claude-doctor.sh`, and
 `scripts/test-claude-config-audit.sh` pins that `claude-config-audit.sh` collects a linked `memory`
 by content.
+
+## Keeping a host level (DO-895)
+
+`scripts/host-sync` keeps an agent host level with git: the two checkouts, Claude Code, herdr and
+herdr-draft, and now the configuration the sections above declare, which is rendered settings,
+declared links, plugins, generated skills, memory stores and the absence of stale entries under
+`~/.claude`. It is step 6 of the
+[shared-configuration design](superpowers/specs/2026-11-04-shared-claude-config-design.md), D8 as
+amended (H1 to H10). It was `scripts/dev-sync` until DO-894, and `scripts/dev-sync` stays one release
+as a wrapper that supplies `--host dev`. The script's header has the full rules.
+
+**Two forms.** From the laptop, it collects the laptop's facts (its Claude Code and herdr versions,
+its herdr binary's sha256, its `~/quantivly` clones) and pipes itself to the host as
+`bash -s -- --here …`, so whatever acts on a host runs on that host. On the host, `--here` is the
+daily timer's form and needs no laptop.
+
+    scripts/host-sync --host <alias> [--check]        # report drift on <alias>; writes nothing there (the default)
+    scripts/host-sync --host <alias> --apply          # bring <alias> level, then report; arms its timer
+    scripts/host-sync --host <alias> --print-facts    # what would be sent to <alias>, and exit
+    scripts/host-sync --here [--check|--apply] [--no-mcp]   # on the host itself; --here comes first
+
+| exit | meaning |
+|---|---|
+| 0 | nothing for host-sync to fix; ⚠ rows may still be listed |
+| 1 | drift remains: in `--check`, what `--apply` would fix; in `--apply`, a fix that failed |
+| 2 | could not run: the host unreachable, another `--apply` holds the lock, `--apply` on a host that is not armed, killed |
+| 64 | usage |
+
+Rows: ✓ level · ✗ drift `--apply` fixes · ⚠ a person's step · `·` information.
+
+**The rows**, in the order they print, with what gates each:
+
+| area | runs | `--check` reads | `--apply` adds |
+|---|---|---|---|
+| `dotfiles-local` (the clone) | a profile marker and no `~/.dotfiles-local` | absent → ✗ | `git clone` of the overlay, before the public `./install` |
+| `dotfiles` | always | `~/.dotfiles` against `origin/main`: its branch, fast-forward, local edits and install stamp | fast-forward, `bash ./install </dev/null` |
+| `dotfiles-local` | a profile marker | the same rules, for the overlay | the same |
+| `profile` | always | the profile and its tenants, or why there is none | nothing |
+| `timer` | always | armed, not armed (`·`), or the arming still on `dev-sync.timer` | arm `host-sync.timer`, move the marker, retire the old timer |
+| `claude`, `auth`, `agent`, `herdr`, `herdr-draft` | always; `auth` is one `·` on a clauth host (H9) | as [HERDR_GUIDE.md](HERDR_GUIDE.md#working-on-dev) describes for dev | as there |
+| `skill` | herdr installed | `herdr --skill` against the herdr skill; `herdr-draft skill --check` on the spawn skill | regenerate from this host's binary |
+| `settings` | a profile marker | `claude-settings-render.sh --check` | its `--apply`, then `--check` again |
+| `links` | `~/.dotfiles` always; `~/.dotfiles-local` with a marker, once cloned | `check-links.sh --tsv` on each checkout | that repo's `./install`, once per run, then the checker again |
+| `marketplace`, `plugin` | always; one `plugins` ⚠ instead when `settings.json` is missing or misshapen | the live `settings.json`'s declaration against what is added and installed | add, update, install |
+| `mcp` | without `--no-mcp` | the Slack and Notion sign-ins, by status word | nothing |
+| `clone`, `clones` | skipped only when the tenants are known and leave out `quantivly` | each `~/quantivly` clone's last fetch | fetch; a laptop run also clones what the host lacks |
+| `memory` | the store table exists; the store clones and the memory timer need known tenants | the git floor, the served stores, `claude-memory-link.sh --check`, `claude-memory-sync.sh --status`, the memory timer | clone, the link script's `--apply`, enable the memory timer |
+| `retire` | always; it moves only with a marker | stale entries under `~/.claude`, counted and named | move them to `retired/<stamp>/` |
+| `slice`, `sessions` | always | `agents.slice`'s effective cap, abandoned login scopes over 200 MB | nothing |
+
+**The profile marker** (H1). `~/.config/claude-host-profile` names the host's profile, and
+`~/.dotfiles-local/hosts/<name>.json` lists its `tenants` ([Rendered settings](#rendered-settings-do-884)).
+With the marker, the overlay is cloned and kept on `origin/main`, `settings.json` is the renderer's,
+the overlay's links are checked, the served stores are cloned and the memory timer armed, and
+`--apply` moves stale entries aside. Without it, none of those runs. The `plugin` and `marketplace`
+rows are the exception (H4): they read the live `settings.json` on every host, so on a host before its
+marker the declaration is whatever that file already says, installed as written and never enabled or
+disabled. A host whose overlay is not cloned yet does not know its tenants: its `~/quantivly` clones go
+on being fetched, and its store checkouts are not judged.
+
+**Arming, and the move from dev-sync** (H2, H3). The first `--host <alias> --apply` from the laptop
+writes `~/.config/host-sync/armed` and enables `host-sync.timer`, a daily `--here --apply --no-mcp`; on
+a host that is not armed the `timer` row is `·`, never ✗, and `--here --apply` there is refused (the
+laptop form passes `--arm`). A host armed
+by `dev-sync` is moved by its first `--apply`, the state dir under the lock first, then
+`host-sync.timer` enabled and read back, and only then the marker and `dev-sync.timer`'s `.wants`
+link, so every step leaves a timer whose condition holds. Disarming takes three steps and never
+`disable`: [HERDR_GUIDE.md, "Working on dev"](HERDR_GUIDE.md#working-on-dev).
+
+**Links** (H8). `scripts/check-links.sh`, ported from the overlay, is the one checker for both repos:
+
+    scripts/check-links.sh                                   # report; exit 1 on any fault
+    scripts/check-links.sh --quiet                           # the exit code only
+    scripts/check-links.sh --tsv                             # one "<state>\t<target>\t<source>" line per declared entry
+    scripts/check-links.sh --root <checkout> --config <file> # another checkout; the manifest defaults to <root>/install.conf.yaml
+
+| state | means | who acts |
+|---|---|---|
+| `ok`, `conditional-absent` | the link is in place, or a conditional one is rightly absent | nobody |
+| `missing`, `regular-identical`, `regular-differs` | no link, or a regular file where the link belongs | that repo's `./install` |
+| `wrong-target` | a link that points elsewhere: with `backup: true` dotbot leaves an existing link in place, and its link step refuses one pointing elsewhere ("Incorrect link", exit 1) | a person: `rm` it, then `./install` |
+| `source-missing` | the manifest names a source the checkout does not carry | a person |
+
+It exits 0 when every link is in place, 1 on any other state, and 2 when it could not run (an
+unreadable manifest, nothing in it the parser recognises, a bad flag), which is never a pass. host-sync
+runs it on `~/.dotfiles` always and on `~/.dotfiles-local` under the marker; a checkout that predates
+it is ⚠ (exit 127). Dotbot's `backup: true` is the safety net: `./install` moves a regular file at a
+link's path to `<path>.dotbot-backup.<YYYYMMDD-HHMMSS>` (local time) beside it before linking, and
+the ✓ row names the newest backup when the file's content was not the repo's. A backup left under
+`~/.claude/hooks` or `~/.claude/skills` is itself stale by the retire rule, so on a host with a marker
+the same `--apply` moves it on, under `~/.local/state/host-sync/retired/<stamp>/`: the backup the
+links row names lives on there.
+
+**Plugins** (H4). The declaration is the live `settings.json`: its `enabledPlugins` entries that are
+`true`, its `extraKnownMarketplaces`, and `claude-plugins-official`, which is implicit. host-sync adds
+a declared marketplace that is missing, updates one last updated more than 7 days ago or not listing a
+plugin declared from it, and installs a declared plugin missing at user scope. The one plugin it
+updates is `linear-key`, whose version the checkout carries. It **never enables or disables a
+plugin**: the render owns enablement. A plugin whose marketplace is not declared, or is declared with
+no repo, url or path, is a person's step and is never installed, and a settings file whose
+`enabledPlugins` or `extraKnownMarketplaces` is present and not an object is one ⚠ with no plugin
+judged. Every `claude plugin` call runs with `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`, since a host's GitHub
+auth may be gh over HTTPS alone. D5's weekly update of marketplace plugins is not built here; step 10
+carries it.
+
+**Generated skills** (D6). `~/.claude/skills/herdr/SKILL.md` must be what `herdr --skill` prints, byte
+for byte, and `~/.claude/skills/spawn/SKILL.md` what herdr-draft's `skill` prints, each from this
+host's own binary (the spawn skill bakes in that binary's path). `--apply` regenerates either through a
+temp file and a rename, never from a generator that failed or printed nothing. The spawn skill is
+judged by `herdr-draft skill --check <file>`: 0 current, 1 stale, 2 it cannot answer (⚠ with its first
+stderr line). A missing spawn skill is judged by host-sync, not the tool, which exits 2 on a path that
+does not exist: it is ✗, and `--apply` creates it. A `SKILL.md` that is a directory is a person's step.
+
+**Memory** (D7, H6, H7). Where the store table exists, the rows read, in order:
+
+- **git ≥ 2.40**, since the sync passes `--attr-source`; an older git is ⚠, an upgrade for a person.
+  With no table, one `·` row and nothing else, git's version unread.
+- **The stores.** Each store whose `tenants` meets the profile's must be checked out at
+  `~/.local/share/claude-memory/<store>`; `--apply` clones it from the table's `remote`, verbatim,
+  with the host's own git credentials, and only when that remote is a repository under the GitHub
+  base. A failed clone is ✗ with git's first error line, redacted. A store checked out here that
+  serves none of the tenants is ⚠, **never removed**.
+- **The links**: `claude-memory-link.sh --check`'s summary line, ✓, or ✗ with links to fix, which
+  `--apply` makes with the link script's own `--apply`; unmapped or store-less keys are ⚠ whatever
+  the exit.
+- **The sync**: each `claude-memory-sync.sh --status` line, `ok` ✓, `warn` or `bad` ⚠ carrying the word,
+  judged against the table's `stale_after_minutes`.
+- **The memory timer**, once a served store is checked out: `--apply` enables
+  `claude-memory-sync.timer` on an armed host (enable, never `reenable`); on a host that is not armed
+  it is `·`.
+
+`CLAUDE_MEMORY_CONFIG` and `CLAUDE_MEMORY_STORES_ROOT` move the table and the stores root, as they do
+for the link and sync scripts. Every sibling script's exit maps the same way here: 2 is ⚠ with its
+first stderr line, redacted, and any other unexpected status (127 for a checkout that predates it, 124
+a timeout) is ⚠ with that status, never ✓ and never ✗.
+
+**Retire** (H5). An entry under `~/.claude/skills`, `hooks` or `agents` is **declared** when it is a
+link that resolves to an existing path inside the resolved `~/.dotfiles` or `~/.dotfiles-local`;
+**generated** when it is `skills/herdr`, `skills/spawn` or `hooks/herdr-agent-state.sh`; **Claude
+Code's own** when it is `skills/synced` or a dot-entry under `skills/`; and **stale** otherwise (a
+copy, a cache, a dangling link, a link elsewhere). `--check` counts and names the stale entries, ✗ on
+a host with a marker and ⚠ without. `--apply` moves them, on a host with a marker only, to
+`~/.local/state/host-sync/retired/<UTC stamp>/<kind>/<name>`, by `mv`, never `rm`. `retired/` grows by
+design, one stamp directory per run that moved something, and is pruned by hand. A kind directory that
+is itself a link, resolves into a checkout, or cannot be read as a directory is ⚠ and not walked:
+through a link into a checkout, a move would take tracked files out of it.
+
+**What a run never does**: enable or disable a plugin; `reenable` or `disable` a unit (either one
+deletes the dotbot link that is the unit); delete anything (a stale entry is moved, a store that serves
+no tenant is reported, a regular file at a link's path is backed up by dotbot); print or read out a
+credential (the token file is judged by its mode, shape and date, and its value reaches only
+host-sync's own `claude` calls, in their environment); or write anything in `--check`, which takes no
+lock either. It runs no sudo and no `git config`, and a laptop `--apply` runs every mutating step in a
+transient scope in `agents.slice`.
+
+**The laptop smoke test.** The laptop is never armed, so `scripts/host-sync --here --check --no-mcp`
+there exits 1 by design. Its ✗ rows are the laptop's own state: `dotfiles` and `dotfiles-local`
+`./install has not run for it` (no install stamp on a host never applied), a `marketplace` last
+updated days ago, `clones` not fetched within 36 h, and the herdr `skill` until it is regenerated by
+hand with `scripts/herdr-claude-wire.sh`. Any other ✗ there is either real drift on the laptop or a
+defect; read the row to tell which.
+
+State tables: `scripts/test-host-sync.sh` (hermetic: a fixture `HOME`, local bare repositories as
+remotes, stubs for `claude`, `herdr`, `systemctl` and the sibling scripts committed into the seed
+repo, the real link checker and redactor; CI `host-sync-test`) and `scripts/test-check-links.sh` (CI
+`check-links-test`). Before each merge a mutation sweep applies one fault at a time to a copy of the
+script or the table, names the row expected to kill it first, runs it under a timeout that kills its
+process group, and counts a mutant that kills nothing as a finding, never a pass.

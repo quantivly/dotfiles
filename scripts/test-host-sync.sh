@@ -36,6 +36,8 @@ hasnt() { if [[ "$2" != *"$3"* ]]; then ok "$1"; else bad "$1 — '$3' unexpecte
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
 for tool in bash zsh git jq curl flock; do command -v "$tool" >/dev/null || fatal "$tool is required"; done
+# The git the fixture's wrapper (write_stubs) hands every call on to, resolved before any row's PATH.
+REAL_GIT="$(command -v git)"
 [[ -x "$SUT" ]] || fatal "$SUT is not executable — every row below would assert nothing"
 if git -C "$TMPROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
     fatal "$TMPROOT is inside a git repository; the fixture repos would resolve against it"
@@ -46,6 +48,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # The profile marker's override (the settings renderer's name) and the overlay's: a row sets what
 # it means to, so a caller's own (a real ~/.config/claude-host-profile, a real remote) never reaches one.
 unset CLAUDE_SETTINGS_RENDER_MARKER HOST_SYNC_DOTFILES_LOCAL_REPO HOST_SYNC_DOTFILES_LOCAL_REMOTE PROFILE_MARKER_PATH
+# The memory scripts' overrides likewise: run sets the stores root a row means, and nothing reads another table.
+unset CLAUDE_MEMORY_STORES_ROOT CLAUDE_MEMORY_CONFIG STORES_ROOT_PATH MEMORY_CONFIG_PATH
+# A host profile may export it (dev, sol-build), and the HTTPS row must see only what host-sync sets.
+unset CLAUDE_CODE_PLUGIN_PREFER_HTTPS
 
 V_LAPTOP="2.1.296"
 HV="0.9.1"            # the laptop's herdr
@@ -53,7 +59,13 @@ ARCH="$(uname -m)"
 FAKE_KEY="lin_api_FIXTUREVALUE0123456789abcdefXYZ"
 # Built at runtime so no token-shaped literal sits in the repo for a scanner to flag.
 FAKE_TOK="sk-ant-""oat01-FIXTUREtokenNOTREAL0123456789abcdef"
-MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo '
+MUTATING='claude install|claude plugin (marketplace add|marketplace update|install|enable|disable|update)|herdr plugin install|systemctl --user enable|systemctl --user restart|systemctl --user stop|daemon-reload|^sudo |claude-settings-render.sh --apply|herdr-draft skill$|claude-memory-link.sh --apply|^git clone'
+# What the herdr-draft stub's `skill` prints with no draft-version file: the spawn skill a level host has.
+SPAWN_SKILL_TEXT="spawn skill for main"
+# Under a case's $HOME: where the memory stores are checked out (run's CLAUDE_MEMORY_STORES_ROOT
+# unless a row sets STORES_ROOT_PATH), and the store table the overlay carries.
+STORES_REL=".local/share/claude-memory"
+STORE_TABLE_REL=".dotfiles-local/claude/memory-stores.json"
 
 # ---------------------------------------------------------------------------------------------
 # Stubs. Each logs "<tool> <args>" to $HOME/stub/calls.
@@ -101,10 +113,22 @@ case "$1" in
             echo '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}'
         else echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'; fi ;;
     plugin)
+        # Whether this call ran with CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1, by name only.
+        if [[ "${CLAUDE_CODE_PLUGIN_PREFER_HTTPS:-}" == 1 ]]; then echo plugin-https=1; else echo plugin-https=0; fi >>"$S/plugin-https"
         shift
         case "$1 $2" in
+            # Named as the source's own manifest names it: a directory's marketplace.json; for a
+            # repo, its basename, except quantivly/claude-plugins, which calls itself quantivly.
             "marketplace add")
-                jqi "$KM" --arg l "$3" '.dotfiles={source:{source:"directory",path:$l},installLocation:$l,lastUpdated:(now|todate)}' ;;
+                if [[ "$3" == /* ]]; then
+                    name="$(jq -r .name "$3/.claude-plugin/marketplace.json")"; loc="$3"
+                    source_json="$(jq -nc --arg p "$3" '{source:"directory",path:$p}')"
+                else
+                    name="${3##*/}"; [[ "$3" == quantivly/claude-plugins ]] && name=quantivly; loc="$P/marketplaces/$name"
+                    source_json="$(jq -nc --arg r "$3" '{source:"github",repo:$r}')"
+                fi
+                jqi "$KM" --arg n "$name" --arg l "$loc" --argjson s "$source_json" \
+                    '.[$n]={source:$s,installLocation:$l,lastUpdated:(now|todate)}' ;;
             "marketplace update")
                 [[ -e "$S/market-update-fails" ]] && exit 1
                 jqi "$KM" --arg n "$3" '.[$n].lastUpdated=(now|todate)'
@@ -140,7 +164,9 @@ S="$HOME/stub"; echo "herdr $*" >>"$S/calls"
 V="${V:-$(cat "$S/herdr-version")}"   # a release "asset" built from this stub pins V on line 2
 case "$1 ${2:-}" in
     "--version "*) echo "herdr $V" ;;
-    "--skill "*) [[ -e "$S/skill-empty" ]] || echo "skill for $V" ;;
+    "--skill "*)   # skill-fails: a truncated skill, then a failure, as a timeout or a crash leaves it
+        if [[ -e "$S/skill-fails" ]]; then echo "skill for"; exit 1; fi
+        [[ -e "$S/skill-empty" ]] || echo "skill for $V" ;;
     "status server") printf 'status: running\nversion: %s\n' "$(cat "$S/server-version")" ;;
     "agent list") printf '{"result":{"agents":[%s]}}\n' "$(cat "$S/agents" 2>/dev/null)" ;;
     "pane list") [[ -e "$S/panes-down" ]] && exit 1; printf '{"result":{"panes":[%s]}}\n' "$(cat "$S/panes" 2>/dev/null)" ;;
@@ -152,9 +178,36 @@ case "$1 ${2:-}" in
         echo "$PATH" >"$S/herdr-install-path"
         command -v go >/dev/null || exit 1
         [[ -e "$S/draft-install-fails" ]] && exit 1
-        printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s","requested_ref":"%s"}}]}}\n' "$5" "$5" >"$S/draft.json" ;;
+        printf '{"result":{"plugins":[{"plugin_root":"%s","source":{"kind":"github","resolved_commit":"%s","requested_ref":"%s"}}]}}\n' \
+            "$S/draft-root" "$5" "$5" >"$S/draft.json" ;;
 esac
 STUB
+    # herdr-draft, at the plugin root the herdr stub's `plugin list` reports. `skill` prints the spawn
+    # skill; `skill --check <file>` exits 0 when the file holds exactly that and 1 when it differs.
+    # On a path that does not exist it exits 2 with the real tool's line (herdr-draft 0.2.0, probed
+    # 2026-11-09); 2 with a reason on its cannot-answer flag; draft-skill-check-rc's status when
+    # that file exists.
+    mkdir -p "$1/stub/draft-root/bin"
+    cat >"$1/stub/draft-root/bin/herdr-draft" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "herdr-draft $*" >>"$S/calls"
+spawn_skill() { printf 'spawn skill for %s\n' "$(cat "$S/draft-version" 2>/dev/null || echo main)"; }
+case "$1 ${2:-}" in
+    "skill ") spawn_skill ;;
+    "skill --check")
+        if [[ -e "$S/draft-skill-cannot-answer" ]]; then
+            echo "herdr-draft: cannot read the plugin manifest" >&2
+            exit 2
+        fi
+        [[ -e "$S/draft-skill-check-rc" ]] && exit "$(cat "$S/draft-skill-check-rc")"
+        if [[ ! -e "$3" ]]; then
+            echo "herdr-draft skill --check: open $3: no such file or directory" >&2
+            exit 2
+        fi
+        cmp -s <(spawn_skill) "$3" ;;
+esac
+STUB
+    chmod +x "$1/stub/draft-root/bin/herdr-draft"
     cat >"$b/mise" <<'STUB'
 #!/usr/bin/env bash
 echo "mise $*" >>"$HOME/stub/calls"
@@ -198,7 +251,132 @@ STUB
     # host-sync must never run sudo; a logging stub makes a call visible to the rows.
     # shellcheck disable=SC2016  # expanded by the stub, deliberately
     printf '#!/bin/sh\necho "sudo $*" >>"$HOME/stub/calls"\nexit 1\n' >"$b/sudo"
+    # git, first on host-sync's PATH (~/.local/bin): a clone is logged, since it writes a checkout;
+    # `--version` says 2.39.2 on its flag, below the memory sync's floor; everything else, and every
+    # clone too, is the real git.
+    {
+        printf '#!/usr/bin/env bash\nREAL_GIT=%q\n' "$REAL_GIT"
+        cat <<'STUB'
+S="$HOME/stub"
+if [[ "${1:-}" == --version && -e "$S/git-version-old" ]]; then echo "git version 2.39.2"; exit 0; fi
+[[ "${1:-}" == clone ]] && echo "git $*" >>"$S/calls"
+exec "$REAL_GIT" "$@"
+STUB
+    } >"$b/git"
     chmod +x "$b"/* "$1/stub/go/bin/go"
+}
+
+# A seed repo's ./install: it logs the attempt (so a row can count attempts, failed ones included),
+# refuses on its fail flag, then does dotbot's link step in miniature for the `~/target: source`
+# lines of its own install.conf.yaml. A regular file at a target is first moved aside under dotbot's
+# backup name (install.conf.yaml's `backup: true`; dotbot/src/dotbot/plugins/link.py, _backup:
+# <path>.dotbot-backup.<YYYYMMDD-HHMMSS>, local time). A link already at a target is left as it is,
+# as that backup rule leaves it, and one that resolves elsewhere is refused as dotbot's _link
+# refuses it: "Incorrect link" ("Invalid link" when it dangles), the other entries still linked,
+# then exit 1. Two more flags, named by its install-order word: <word>-install-links-nothing (exit
+# 0, nothing linked) and <word>-install-fails-after-linking (exit 1 once every link is made, as a
+# later step of a real ./install can).
+write_install_stub() {   # $1 = the file, $2 = its fail flag, $3 = its install-order word, $4 = its ran log
+    {
+        printf '#!/usr/bin/env bash\nFAIL_FLAG=%q ORDER_WORD=%q RAN_LOG=%q\n' "$2" "$3" "$4"
+        cat <<'STUB'
+echo "$ORDER_WORD" >>"$HOME/stub/install-order"
+echo ran >>"$HOME/stub/$RAN_LOG"
+[[ -e "$HOME/stub/$FAIL_FLAG" ]] && exit 1
+[[ -e "$HOME/stub/$ORDER_WORD-install-links-nothing" ]] && exit 0
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
+refused_links=0
+while IFS=$'\t' read -r target source; do
+    live="$HOME/${target#\~/}"
+    mkdir -p "$(dirname "$live")"
+    if [[ -L "$live" ]]; then
+        if [[ "$(readlink -f -- "$live")" != "$(readlink -f -- "$PWD/$source")" ]]; then
+            if [[ -e "$live" ]]; then terminology=Incorrect; else terminology=Invalid; fi
+            echo "$terminology link $target -> $(readlink -- "$live")"
+            refused_links=$((refused_links + 1))
+        fi
+        continue
+    fi
+    [[ -e "$live" ]] && mv "$live" "$live.dotbot-backup.$(date +%Y%m%d-%H%M%S)"
+    ln -sfn "$PWD/$source" "$live"
+done < <(awk '/^ +~\// { sub(/^ +/, ""); i = index($0, ": "); print substr($0, 1, i - 1) "\t" substr($0, i + 2) }' install.conf.yaml)
+(( refused_links == 0 )) || exit 1
+if [[ -e "$HOME/stub/$ORDER_WORD-install-fails-after-linking" ]]; then exit 1; fi
+STUB
+    } >"$1"
+    chmod +x "$1"
+}
+
+# The settings renderer: --check exits $HOME/stub/render-rc (0 when there is none) and at 2 says
+# why on stderr, as the real one does: its own line, or what $HOME/stub/render-error holds; --apply
+# renders, so the next --check is level. Two flags break --apply: render-apply-fails (it cannot
+# write: exit 2, with its reason) and render-apply-no-op (exit 0, the file left as it was).
+write_render_stub() {   # $1 = the file
+    cat >"$1" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "claude-settings-render.sh $*" >>"$S/calls"
+case "$1" in
+    --check)
+        rc="$(cat "$S/render-rc" 2>/dev/null || echo 0)"
+        if [[ "$rc" == 2 ]]; then
+            cat "$S/render-error" 2>/dev/null || echo "claude-settings-render: settings.json is a symlink"
+        fi >&2
+        exit "$rc" ;;
+    --apply)
+        if [[ -e "$S/render-apply-fails" ]]; then
+            echo "claude-settings-render: could not back up settings.json" >&2
+            exit 2
+        fi
+        [[ -e "$S/render-apply-no-op" ]] || echo 0 >"$S/render-rc" ;;
+esac
+STUB
+    chmod +x "$1"
+}
+
+# The memory link script (scripts/claude-memory-link.sh): --check prints its summary line, the
+# counts $HOME/stub/link-summary holds or three keys linked, and exits $HOME/stub/link-rc (0 when
+# there is none); at 2 it says why on stderr and prints no summary, as the real one does. --apply
+# links, so the next --check is level: link-rc 0 and the summary reset. Two flags break --apply:
+# link-apply-fails (exit 2, with its reason) and link-apply-no-op (exit 0, nothing linked).
+write_memory_link_stub() {   # $1 = the file
+    cat >"$1" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "claude-memory-link.sh $*" >>"$S/calls"
+case "$1" in
+    --check)
+        rc="$(cat "$S/link-rc" 2>/dev/null || echo 0)"
+        if [[ "$rc" == 2 ]]; then echo "claude-memory-link: tenant-route could not answer for ~/code/x" >&2; exit 2; fi
+        cat "$S/link-summary" 2>/dev/null || echo "claude-memory-link: 3 linked, 0 to fix, 0 unmapped, 0 without a store"
+        exit "$rc" ;;
+    --apply)
+        if [[ -e "$S/link-apply-fails" ]]; then echo "claude-memory-link: link.lock still held after 120 s" >&2; exit 2; fi
+        [[ -e "$S/link-apply-no-op" ]] || { echo 0 >"$S/link-rc"; rm -f "$S/link-summary"; } ;;
+esac
+STUB
+    chmod +x "$1"
+}
+
+# The memory sync (scripts/claude-memory-sync.sh): --status prints $HOME/stub/status-lines when
+# that exists, else one ok line per checked-out store under CLAUDE_MEMORY_STORES_ROOT, as the real
+# one reads them, and exits $HOME/stub/status-rc (0 when there is none); at 2 it prints nothing
+# but its reason, on stderr.
+write_memory_sync_stub() {   # $1 = the file
+    cat >"$1" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "claude-memory-sync.sh $*" >>"$S/calls"
+[[ "$1" == --status ]] || exit 0
+rc="$(cat "$S/status-rc" 2>/dev/null || echo 0)"
+if [[ "$rc" == 2 ]]; then echo "claude-memory-sync: the store table cannot be read" >&2; exit 2; fi
+if [[ -e "$S/status-lines" ]]; then
+    cat "$S/status-lines"
+else
+    for store_dir in "$CLAUDE_MEMORY_STORES_ROOT"/*/; do
+        [[ -e "$store_dir.git" ]] && printf '%s\tok\tlast synced 4 min ago\n' "$(basename "$store_dir")"
+    done
+fi
+exit "$rc"
+STUB
+    chmod +x "$1"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -214,22 +392,37 @@ bare() {   # $1 = owner/repo -> a bare repo with one commit, under $GH
 
 new_case() {
     CASE=$((CASE + 1)); C="$TMPROOT/c$CASE"; H="$C/home"; GH="$C/gh"
-    mkdir -p "$H/stub" "$GH" "$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/host-sync" "$H/quantivly"
+    # $C/tmp is the run's $TMPDIR (run), so a row can see a temp file host-sync left behind.
+    mkdir -p "$C/tmp" "$H/stub" "$GH" "$H/.claude/plugins/marketplaces" "$H/.config/systemd/user" "$H/.config/host-sync" "$H/quantivly"
     write_stubs "$H"
     echo "$V_LAPTOP" >"$H/stub/claude-version"; echo "$HV" >"$H/stub/herdr-version"; echo "$HV" >"$H/stub/server-version"
     # herdr's "release": the stub with its version pinned, served over file://
     mkdir -p "$C/releases/v$HV"; sed "2i V=$HV" "$H/.local/bin/herdr" >"$C/releases/v$HV/herdr-linux-$ARCH"
     HSHA="$(sha256sum "$C/releases/v$HV/herdr-linux-$ARCH" | cut -c1-64)"
-    mkdir -p "$H/.claude/skills/herdr"; echo old >"$H/.claude/skills/herdr/SKILL.md"
+    # Both generated skills current: what this host's herdr and herdr-draft stubs print.
+    mkdir -p "$H/.claude/skills/herdr" "$H/.claude/skills/spawn"
+    echo "skill for $HV" >"$H/.claude/skills/herdr/SKILL.md"; echo "$SPAWN_SKILL_TEXT" >"$H/.claude/skills/spawn/SKILL.md"
     : >"$H/stub/calls"
 
-    # dotfiles: origin with an install script and the linear-key plugin; dev at origin/main.
+    # dotfiles: origin with an install script, two declared links, the linear-key plugin, the
+    # settings renderer and the memory link and sync scripts (stubs) and the REAL link checker and
+    # redactor, all tracked, and a skill and a hook for ~/.claude to link to; dev at origin/main.
     local w="$C/seed-dotfiles"
     git init -q -b main "$w"
-    mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin"
+    mkdir -p "$w/claude/plugins/linear-key/.claude-plugin" "$w/claude/plugins/.claude-plugin" "$w/config" "$w/scripts" \
+        "$w/claude/skills/rabota" "$w/claude/hooks"
+    echo '# rabota' >"$w/claude/skills/rabota/SKILL.md"; echo 'exit 0' >"$w/claude/hooks/a.sh"
     # install-order is shared with dotfiles-local's stub, so a row can read which ran first.
-    # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
-    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails" ]] && exit 1\necho public >>"$HOME/stub/install-order"\necho ran >>"$HOME/stub/install-ran"\n' >"$w/install"
+    write_install_stub "$w/install" install-fails public install-ran
+    printf -- '- link:\n    ~/.x: config/x\n    ~/.config/fixture/y.conf: config/y.conf\n' >"$w/install.conf.yaml"
+    echo x >"$w/config/x"; echo y >"$w/config/y.conf"
+    cp "$DOTFILES/scripts/check-links.sh" "$w/scripts/check-links.sh"
+    # The real redactor, so every sibling's stderr a row carries is redacted as on a host, never
+    # passed through by the `cat` a checkout without one falls back to.
+    cp "$DOTFILES/scripts/redact-secrets.sh" "$w/scripts/redact-secrets.sh"
+    write_render_stub "$w/scripts/claude-settings-render.sh"
+    write_memory_link_stub "$w/scripts/claude-memory-link.sh"
+    write_memory_sync_stub "$w/scripts/claude-memory-sync.sh"
     echo '{"name":"linear-key","version":"1.0.0"}' >"$w/claude/plugins/linear-key/.claude-plugin/plugin.json"
     echo '{"name":"dotfiles","plugins":[{"name":"linear-key"}]}' >"$w/claude/plugins/.claude-plugin/marketplace.json"
     echo one >"$w/a.txt"
@@ -240,20 +433,39 @@ new_case() {
     git -C "$H/.dotfiles" rev-parse HEAD >"$H/.local/state/host-sync/installed-head"
 
     # dotfiles-local, the private overlay, with the host profile `p` marked: an install stub of the
-    # same shape, a manifest declaring two links (Task 6's rows use them) and the profile itself;
-    # cloned and installed, as a level host has it.
+    # same shape, a manifest declaring two links, the profile itself and the memory store table (a
+    # store for the profile's tenant, alpha, and one for a tenant it does not serve, beta), and a
+    # skill for ~/.claude to link to; cloned and installed, as a level host has it.
     w="$C/seed-dotfiles-local"
-    git init -q -b main "$w"; mkdir -p "$w/hosts" "$w/claude" "$w/config"
-    # shellcheck disable=SC2016  # expanded by the inner shell, deliberately
-    printf '#!/usr/bin/env bash\n[[ -e "$HOME/stub/install-fails-local" ]] && exit 1\necho local >>"$HOME/stub/install-order"\necho ran >>"$HOME/stub/local-install-ran"\n' >"$w/install"
+    git init -q -b main "$w"; mkdir -p "$w/hosts" "$w/claude/skills/zvi-voice" "$w/config"
+    echo '# zvi-voice' >"$w/claude/skills/zvi-voice/SKILL.md"
+    write_install_stub "$w/install" install-fails-local local local-install-ran
     printf -- '- link:\n    ~/.claude/CLAUDE.md: claude/CLAUDE.md\n    ~/.config/overlay/note.txt: config/note.txt\n' >"$w/install.conf.yaml"
     echo '# the overlay instructions' >"$w/claude/CLAUDE.md"; echo note >"$w/config/note.txt"
     echo '{"tenants":["quantivly"]}' >"$w/hosts/p.json"
+    jq -n --arg gh "file://$GH" '{stores: {
+        alpha: {remote: ($gh + "/example-org/mem-alpha.git"), tenants: ["quantivly"]},
+        beta: {remote: ($gh + "/example-org/mem-beta.git"), tenants: ["personal"]}}}' >"$w/claude/memory-stores.json"
     git -C "$w" add -A; git -C "$w" commit -q -m init
     mkdir -p "$GH/ZviBaratz"; git clone -q --bare "$w" "$GH/ZviBaratz/dotfiles-local.git"; rm -rf "$w"
     git clone -q "$GH/ZviBaratz/dotfiles-local.git" "$H/.dotfiles-local"
     git -C "$H/.dotfiles-local" rev-parse HEAD >"$H/.local/state/host-sync/installed-head-dotfiles-local"
     echo p >"$H/.config/claude-host-profile"
+    # A level host has run both ./installs, so every declared link is in place. Their logs are
+    # cleared, so a row reads only what the run under test did.
+    { (cd "$H/.dotfiles" && HOME="$H" bash ./install) && (cd "$H/.dotfiles-local" && HOME="$H" bash ./install); } ||
+        fatal "the fixture's ./install stubs could not link the declared links"
+    rm -f "$H/stub/install-order" "$H/stub/install-ran" "$H/stub/local-install-ran"
+
+    # ~/.claude as declared (shared-configuration design, H5), with nothing stale in it: a skill
+    # linked from each checkout and a hook from the public one, the generated hook beside the two
+    # generated skills above, and Claude Code's own skills/synced and dot-entries under skills/. No
+    # agents directory: a host may have none.
+    mkdir -p "$H/.claude/hooks" "$H/.claude/skills/synced" "$H/.claude/skills/.trash" "$H/.claude/skills/.cache"
+    ln -s "$H/.dotfiles/claude/skills/rabota" "$H/.claude/skills/rabota"
+    ln -s "$H/.dotfiles-local/claude/skills/zvi-voice" "$H/.claude/skills/zvi-voice"
+    ln -s "$H/.dotfiles/claude/hooks/a.sh" "$H/.claude/hooks/a.sh"
+    echo 'the herdr agent-state hook' >"$H/.claude/hooks/herdr-agent-state.sh"
 
     # timer armed. ./install links both units on every host (plain files stand in for the links);
     # only host-sync.timer is enabled, which puts its link in the .wants directory.
@@ -262,11 +474,18 @@ new_case() {
     : >"$H/.config/systemd/user/host-sync.timer"; : >"$H/.config/systemd/user/dev-sync.timer"
     stub_timer_live host-sync.timer
 
+    # Memory: both stores' remotes on the fake GitHub, the served store (alpha) cloned from the
+    # table's remote, and the memory timer live, since a served store is checked out.
+    bare example-org/mem-alpha; bare example-org/mem-beta
+    git clone -q "file://$GH/example-org/mem-alpha.git" "$H/$STORES_REL/alpha"
+    : >"$H/.config/systemd/user/claude-memory-sync.timer"
+    stub_timer_live claude-memory-sync.timer
+
     # herdr-draft at the target commit
     bare ZviBaratz/herdr-draft
     DRAFT="$(git --git-dir="$GH/ZviBaratz/herdr-draft.git" rev-parse HEAD)"
-    printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s","requested_ref":"%s"}}]}}\n' \
-        "$DRAFT" "$DRAFT" >"$H/stub/draft.json"
+    printf '{"result":{"plugins":[{"plugin_root":"%s","source":{"kind":"github","resolved_commit":"%s","requested_ref":"%s"}}]}}\n' \
+        "$H/stub/draft-root" "$DRAFT" "$DRAFT" >"$H/stub/draft.json"
 
     # marketplaces, fresh, listing what is wanted; plugins installed and enabled
     local m
@@ -286,10 +505,15 @@ new_case() {
         "notion@claude-plugins-official": [{scope: "user", version: "1"}],
         "linear-key@dotfiles": [{scope: "user", version: "1.0.0"}],
         "linear@claude-plugins-official": [{scope: "user", version: "1"}]}}' >"$H/.claude/plugins/installed_plugins.json"
-    jq -n '{theme: "dark", enabledPlugins: {
+    # The declaration (H4): enabledPlugins' true entries and extraKnownMarketplaces, the official
+    # marketplace implicit. linear is false and installed, so a level host has one plugin to leave alone.
+    jq -n --arg h "$H" '{theme: "dark", enabledPlugins: {
         "quantivly-conventions@quantivly": true, "slack@claude-plugins-official": true,
         "notion@claude-plugins-official": true, "linear-key@dotfiles": true,
-        "linear@claude-plugins-official": false}}' >"$H/.claude/settings.json"
+        "linear@claude-plugins-official": false},
+        extraKnownMarketplaces: {
+            "quantivly": {source: {source: "github", repo: "quantivly/claude-plugins"}},
+            "dotfiles": {source: {source: "directory", path: ($h + "/.dotfiles/claude/plugins")}}}}' >"$H/.claude/settings.json"
     printf 'plugin:slack:slack: https://x (HTTP) - ✔ Connected\nplugin:Notion:notion: https://y (HTTP) - ✔ Connected\n' >"$H/stub/mcp-list"
     printf 'export LINEAR_API_KEY=%s\n' "$FAKE_KEY" >"$H/.zshrc.local"
 
@@ -330,6 +554,21 @@ armed_where() {
     else echo none; fi
 }
 present() { if [[ -e "$1" || -L "$1" ]]; then echo present; else echo gone; fi; }
+# The four entries under ~/.claude that the retire row moves aside (shared-configuration design, H5):
+# a copied skill (a directory), a hooks cache, a hook link left dangling, and an agent file nothing
+# declares. STALE_ENTRIES_SHOWN is how the rows name them: sorted, comma-joined.
+STALE_ENTRIES=(skills/review-pr hooks/__pycache__ hooks/gone.sh agents/x.md)
+STALE_ENTRIES_SHOWN="agents/x.md, hooks/__pycache__, hooks/gone.sh, skills/review-pr"
+STALE_SKILL_TEXT="a copy of a skill"
+STALE_AGENT_TEXT="an agent from 2025 that nothing declares"
+STALE_CACHE_FILE="a.cpython-312.pyc"
+add_stale_entries() {
+    mkdir -p "$H/.claude/skills/review-pr" "$H/.claude/hooks/__pycache__" "$H/.claude/agents"
+    echo "$STALE_SKILL_TEXT" >"$H/.claude/skills/review-pr/SKILL.md"
+    echo bytecode >"$H/.claude/hooks/__pycache__/$STALE_CACHE_FILE"
+    ln -s "$H/.dotfiles/claude/hooks/missing.sh" "$H/.claude/hooks/gone.sh"
+    echo "$STALE_AGENT_TEXT" >"$H/.claude/agents/x.md"
+}
 # From the stub log, by line: the enable of host-sync.timer, the first is-enabled read-back after
 # it, and the stop of dev-sync.timer must come in that order.
 arming_order() {
@@ -392,15 +631,22 @@ facts() { printf '%s\n' --claude-version "$V_LAPTOP" --herdr-version "$HV" --her
 
 # OUT / RC as globals, never inside $( ): an exit code assigned in a subshell dies with it.
 # PROFILE_MARKER_PATH, when a row sets it, is where CLAUDE_SETTINGS_RENDER_MARKER points instead of
-# the default path, so a row can tell an honoured override from a hard-coded default.
+# the default path, so a row can tell an honoured override from a hard-coded default; STORES_ROOT_PATH
+# likewise for CLAUDE_MEMORY_STORES_ROOT. MEMORY_CONFIG_PATH, when set, is passed as
+# CLAUDE_MEMORY_CONFIG; unset, the variable is not passed at all, as on a host that never sets it.
 run() {   # $@ = host-sync args after --here; XTRACE=1 traces it to $C/xtrace
     # The trace goes to its own fd, as a person debugging with BASH_XTRACEFD would see it: a
     # command's own 2>/dev/null then hides nothing from it.
     local xt=(); [[ -n "${XTRACE:-}" ]] && xt=(BASH_XTRACEFD=3)
+    local memory_config_override=()
+    [[ -n "${MEMORY_CONFIG_PATH:-}" ]] && memory_config_override=(CLAUDE_MEMORY_CONFIG="$MEMORY_CONFIG_PATH")
     # No SSH_AUTH_SOCK, as over `ssh dev` with ForwardAgent no: the caller's own must not leak in.
-    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" HOME="$H" HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
-        HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" \
+    # GIT_SSH_COMMAND=false: every remote is file://, so a git call that reaches for ssh (a mutant's
+    # remote URL, say) fails at once, never resolving a host or touching the network.
+    OUT="$(env -u LINEAR_API_KEY -u SSH_AUTH_SOCK "${xt[@]}" "${memory_config_override[@]}" HOME="$H" GIT_SSH_COMMAND=false HOST_SYNC_GITHUB_BASE="file://$GH" HOST_SYNC_NPM_URL="file://$C/npm.json" \
+        HOST_SYNC_HERDR_RELEASES="file://$C/releases" HOST_SYNC_PROC="$C/proc" XDG_RUNTIME_DIR="$C/run" TMPDIR="$C/tmp" \
         CLAUDE_SETTINGS_RENDER_MARKER="${PROFILE_MARKER_PATH:-$H/.config/claude-host-profile}" \
+        CLAUDE_MEMORY_STORES_ROOT="${STORES_ROOT_PATH:-$H/$STORES_REL}" \
         PATH="/usr/local/bin:/usr/bin:/bin" bash ${XTRACE:+-x} "$SUT" --here "$@" 2>&1 3>"$C/xtrace")"
     RC=$?
 }
@@ -481,12 +727,17 @@ echo "== --check writes nothing"
 new_case
 push_origin b.txt two
 echo 2.1.272 >"$H/stub/claude-version"; echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
-printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s"}}]}}\n' "$(printf 'a%.0s' {1..40})" >"$H/stub/draft.json"
+printf '{"result":{"plugins":[{"plugin_root":"%s","source":{"kind":"github","resolved_commit":"%s"}}]}}\n' \
+    "$H/stub/draft-root" "$(printf 'a%.0s' {1..40})" >"$H/stub/draft.json"
+echo stale >"$H/.claude/skills/spawn/SKILL.md"   # the herdr skill is stale already: the binary is 0.9.0
 jq '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z" | del(.dotfiles)' "$H/.claude/plugins/known_marketplaces.json" >"$C/k" &&
     mv "$C/k" "$H/.claude/plugins/known_marketplaces.json"
 jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true | .enabledPlugins["linear@claude-plugins-official"] = true' \
     "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
 rm -rf "$H/.local/state/host-sync" "$H/.config/host-sync/armed"; touch -d '3 days ago' "$H/quantivly/alpha/.git/FETCH_HEAD"
+echo 1 >"$H/stub/render-rc"; rm "$H/.x"   # settings and a link, each one gate from its apply path
+rm -rf "${H:?}/$STORES_REL/alpha"; echo 1 >"$H/stub/link-rc"   # memory: a store to clone and links to fix
+add_stale_entries   # retire: four entries to move aside
 # Every path under $HOME with its size, mode and mtime, less the stub log and any path given.
 snapshot() {   # $@ = further paths to leave out
     local leave_out=(-path "$H/stub") path
@@ -497,6 +748,8 @@ before="$(snapshot)"
 run_level --check --clone beta=quantivly/beta
 check "a fully drifted --check exits 1" "$RC" 1
 check "--check changes no file, directory or mode under \$HOME" "$(diff <(echo "$before") <(snapshot) | head -n 5)" ""
+check "a fully drifted --check calls nothing mutating and runs no ./install" \
+    "$(mutations)/$(present "$H/stub/install-ran")/$(present "$H/stub/local-install-ran")" 0/gone/gone
 
 echo "== dotfiles"
 new_case
@@ -728,11 +981,14 @@ hasnt "linked herdr-draft: never replaced" "$(calls)" "herdr plugin install"
 new_case
 touch "$H/stub/draft-down"
 run_level --check
-has   "herdr server down: ⚠, not ✓" "$OUT" "did not answer"
+has   "herdr server down: ⚠, not ✓" "$OUT" \
+    "$(printf '⚠ %-14s ' herdr-draft)the herdr server did not answer \`plugin list\`; is herdr-server.service running?"
 
 echo "== herdr itself"
 new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
+# The skill a 0.9.0 host has: it is regenerated only if the skill row runs after the swap.
+echo "skill for 0.9.0" >"$H/.claude/skills/herdr/SKILL.md"
 run_level --check
 has   "older herdr: ✗ with both versions and what is busy" "$OUT" "0.9.0, laptop has $HV (server 0.9.0, 0 pane(s), 0 busy; --apply upgrades only when none is)"
 hasnt "older herdr: --check restarts nothing" "$(calls)" "systemctl --user restart"
@@ -780,10 +1036,6 @@ run_level --apply
 has   "herdr is a symlink: ⚠, never replaced" "$OUT" "is a symlink; host-sync does not replace a link"
 check "herdr is a symlink: still a symlink" "$([[ -L "$H/.local/bin/herdr" ]] && echo link || echo file)" link
 new_case
-echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"; touch "$H/stub/skill-empty"
-run_level --apply
-check "an empty --skill output never replaces the agent skill" "$(cat "$H/.claude/skills/herdr/SKILL.md")" old
-new_case
 echo 0.9.0 >"$H/stub/herdr-version"; echo 0.9.0 >"$H/stub/server-version"
 : >"$H/.local/state/host-sync/lock"; chmod 555 "$H/.local/state/host-sync"   # the backup copy cannot be written
 run_level --apply
@@ -825,6 +1077,363 @@ run --apply "${F[@]}"
 has   "no laptop facts (the timer): herdr is only reported" "$OUT" "version parity is laptop-driven"
 hasnt "no laptop facts: no restart" "$(calls)" "systemctl --user restart"
 
+echo "== settings and links"
+# The rows' glyph and area, as row() prints them, so a needle also pins the glyph.
+SETTINGS_OK="$(printf '✓ %-14s ' settings)"; SETTINGS_DRIFT="$(printf '✗ %-14s ' settings)"
+SETTINGS_OPER="$(printf '⚠ %-14s ' settings)"; SETTINGS_INFO="$(printf '· %-14s ' settings)"
+LINKS_OK="$(printf '✓ %-14s ' links)"; LINKS_DRIFT="$(printf '✗ %-14s ' links)"; LINKS_OPER="$(printf '⚠ %-14s ' links)"
+LINKS_AREA="$(printf '%-14s ' links)"
+renderer_calls() { grep '^claude-settings-render.sh' "$H/stub/calls" | paste -sd'|'; }
+ran_count() { if [[ -e "$H/stub/$1" ]]; then wc -l <"$H/stub/$1"; else echo 0; fi; }   # $1 = a stub's ran log
+# What a second --apply may change besides the stub log: the state dir, and the fetch bookkeeping
+# every --apply leaves in both checkouts (FETCH_HEAD, the objects dir's mtime).
+leave_out_for_second_apply() {
+    printf '%s\n' "$H/.local/state/host-sync" "$H/.dotfiles/.git/FETCH_HEAD" "$H/.dotfiles/.git/objects" \
+        "$H/.dotfiles-local/.git/FETCH_HEAD" "$H/.dotfiles-local/.git/objects"
+}
+
+new_case
+run_level --check
+has   "settings: level → ✓" "$OUT" "${SETTINGS_OK}settings.json renders to itself (profile p)"
+check "settings: level → ✓: the renderer is called once, with --check" "$(renderer_calls)" "claude-settings-render.sh --check"
+has   "links: level → one ✓ per repo: dotfiles" "$OUT" "${LINKS_OK}dotfiles: 2 declared links in place"
+has   "links: level → one ✓ per repo: dotfiles-local" "$OUT" "${LINKS_OK}dotfiles-local: 2 declared links in place"
+
+new_case
+rm "$H/.config/claude-host-profile"
+run_level --apply
+has   "settings: no marker → · and the renderer is not called: the · row" "$OUT" \
+    "${SETTINGS_INFO}no host profile; settings.json is not rendered here"
+check "settings: no marker → · and the renderer is not called: not even by --apply" "$(renderer_calls)" ""
+
+new_case
+echo 1 >"$H/stub/render-rc"
+run_level --check
+has   "settings: drift → ✗ in --check, --apply renders then re-checks: the ✗ row" "$OUT" \
+    "${SETTINGS_DRIFT}settings.json differs from its render"
+check "settings: drift → ✗ in --check, --apply renders then re-checks: --check renders nothing, exit 1" \
+    "$(renderer_calls)/$RC" "claude-settings-render.sh --check/1"
+reset_calls; run_level --apply
+check "settings: drift → ✗ in --check, --apply renders then re-checks: --check, --apply, --check" "$(renderer_calls)" \
+    "claude-settings-render.sh --check|claude-settings-render.sh --apply|claude-settings-render.sh --check"
+has   "settings: drift → ✗ in --check, --apply renders then re-checks: the ✓ row" "$OUT" "${SETTINGS_OK}rendered (profile p)"
+check "settings: drift → ✗ in --check, --apply renders then re-checks: exit 0" "$RC" 0
+
+new_case
+echo 1 >"$H/stub/render-rc"; touch "$H/stub/render-apply-no-op"
+run_level --apply
+has   "settings: an --apply that leaves drift is ✗" "$OUT" \
+    "${SETTINGS_DRIFT}settings.json still differs from its render after claude-settings-render --apply"
+echo 1 >"$H/stub/render-rc"; touch "$H/stub/render-apply-fails"
+reset_calls; run_level --apply
+has   "settings: an --apply that cannot run → ⚠ with its first line, not re-checked" "$OUT" \
+    "${SETTINGS_OPER}claude-settings-render could not run: claude-settings-render: could not back up settings.json"
+check "settings: an --apply that cannot run → ⚠ with its first line, not re-checked: the calls" "$(renderer_calls)" \
+    "claude-settings-render.sh --check|claude-settings-render.sh --apply"
+
+new_case
+echo 2 >"$H/stub/render-rc"
+run_level --apply
+has   "settings: a renderer that cannot run → ⚠ with its first line, no --apply" "$OUT" \
+    "${SETTINGS_OPER}claude-settings-render could not run: claude-settings-render: settings.json is a symlink"
+check "settings: a renderer that cannot run → ⚠ with its first line, no --apply: only --check, exit 0" \
+    "$(renderer_calls)/$RC" "claude-settings-render.sh --check/0"
+
+# A sibling's stderr reaches a row only through the redactor. The token is FAKE_TOK, built from two
+# halves at runtime, and a shape the redactor knows; the seed carries the real redactor.
+new_case
+echo 2 >"$H/stub/render-rc"
+echo "claude-settings-render: the overlay's token file holds $FAKE_TOK" >"$H/stub/render-error"
+run_level --check
+check "settings: a sibling's stderr is redacted before a row carries it: the redactor's marker, never the token" \
+    "$(grep -c -F "${SETTINGS_OPER}claude-settings-render could not run: claude-settings-render: the overlay's token file holds <REDACTED:anthropic-key>" <<<"$OUT")/$(grep -c -F "$FAKE_TOK" <<<"$OUT")" "1/0"
+
+new_case
+rm "$H/.dotfiles/scripts/claude-settings-render.sh"
+run_level --check
+has   "settings: a renderer that is not there → ⚠ could not run (exit 127)" "$OUT" \
+    "${SETTINGS_OPER}claude-settings-render could not run (exit 127)"
+
+new_case
+rm -rf "$H/.dotfiles-local"
+run_level --check
+check "links: dotfiles-local absent → no dotfiles-local links row: the public one's only" "$(area_rows links)" 1
+hasnt "links: dotfiles-local absent → no dotfiles-local links row" "$OUT" "${LINKS_AREA}dotfiles-local:"
+
+new_case
+rm "$H/.x"
+run_level --check
+has   "links: a missing link is drift; --apply runs that repo's ./install and re-checks: the ✗ row" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: 1 link(s) to fix: ~/.x"
+check "links: a missing link is drift; --apply runs that repo's ./install and re-checks: --check runs no ./install, exit 1" \
+    "$(ran_count install-ran)/$(present "$H/.x")/$RC" 0/gone/1
+run_level --apply
+check "links: a missing link is drift; --apply runs that repo's ./install and re-checks: that repo's ./install, once" \
+    "$(ran_count install-ran)/$(ran_count local-install-ran)" 1/0
+check "links: a missing link is drift; --apply runs that repo's ./install and re-checks: the link" \
+    "$(readlink "$H/.x")" "$H/.dotfiles/config/x"
+has   "links: a missing link is drift; --apply runs that repo's ./install and re-checks: the ✓ row" "$OUT" \
+    "${LINKS_OK}dotfiles: 1 link(s) relinked"
+check "links: a missing link is drift; --apply runs that repo's ./install and re-checks: exit 0" "$RC" 0
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"
+run_level --apply
+check "links: a second --apply after a relink runs no ./install, nothing mutating" \
+    "$(ran_count install-ran)/$(mutations)" 1/0
+check "links: a second --apply after a relink changes no file" \
+    "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)" ""
+
+new_case
+rm "$H/.x"; cp "$H/.dotfiles/config/x" "$H/.x"
+run_level --check
+has   "links: a regular file with identical content is drift ./install fixes: the ✗ row" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: 1 link(s) to fix: ~/.x"
+run_level --apply
+check "links: a regular file with identical content is drift ./install fixes: relinked" "$(readlink "$H/.x")" "$H/.dotfiles/config/x"
+
+# An older backup is already beside it, from some earlier relink: the row names this run's.
+new_case
+rm "$H/.x"; echo edited >"$H/.x"; echo older >"$H/.x.dotbot-backup.20200101-000000"
+run_level --check
+has   "links: a regular file with other content is relinked and its backup named: the ✗ row" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: ~/.x is a regular file whose content differs from the repo; ./install backs it up beside it and relinks"
+run_level --apply
+backups=("$H"/.x.dotbot-backup.*); newest_backup="${backups[-1]}"
+check "links: a regular file with other content is relinked and its backup named: the link" "$(readlink "$H/.x")" "$H/.dotfiles/config/x"
+check "links: a regular file with other content is relinked and its backup named: a new backup, with the old content" \
+    "${#backups[@]}/$(cat "$newest_backup")" 2/edited
+has   "links: a regular file with other content is relinked and its backup named: the ✓ row names the newest" "$OUT" \
+    "${LINKS_OK}dotfiles: 1 link(s) relinked; the old ~/.x is kept as ~${newest_backup#"$H"}"
+
+new_case
+rm "$H/.dotfiles/config/y.conf"
+run_level --apply
+has   "links: a source missing from the checkout is a person's step: ⚠ naming the source" "$OUT" \
+    "${LINKS_OPER}dotfiles: config/y.conf is declared but not in the checkout"
+check "links: a source missing from the checkout is a person's step: ./install not run for it alone, exit 0" \
+    "$(ran_count install-ran)/$RC" 0/0
+
+new_case
+rm "$H/.dotfiles/install.conf.yaml"
+run_level --apply
+has   "links: a checker that cannot run → ⚠ (exit 2)" "$OUT" "${LINKS_OPER}dotfiles: check-links could not run (exit 2)"
+has   "links: a checker that cannot run → ⚠ (exit 2): its reason on the line below" "$OUT" \
+    "$(printf '\n        ')COULD NOT RUN: $H/.dotfiles/install.conf.yaml is missing or unreadable"
+check "links: a checker that cannot run → ⚠ (exit 2): no ./install, exit 0" "$(ran_count install-ran)/$RC" 0/0
+rm "$H/.dotfiles/scripts/check-links.sh"
+run_level --check
+has   "links: a checker that is not there → ⚠ (exit 127)" "$OUT" "${LINKS_OPER}dotfiles: check-links could not run (exit 127)"
+
+# A state added to the checker after host-sync: exit 1 with nothing this script can classify.
+new_case
+printf '#!/bin/sh\nprintf "a-new-state\\t~/.x\\tconfig/x\\n"\nexit 1\n' >"$H/.dotfiles/scripts/check-links.sh"
+run_level --check
+has   "links: a fault in a state host-sync does not know is ⚠, never ✓" "$OUT" \
+    "${LINKS_OPER}dotfiles: check-links reports a fault in a state host-sync does not know (exit 1)"
+
+new_case
+rm "$H/.x" "$H/.config/fixture/y.conf"; cp "$H/.dotfiles/config/y.conf" "$H/.config/fixture/y.conf"; rm "$H/.claude/CLAUDE.md"
+run_level --check
+has   "links: several faults in one repo are one ✗ row" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: 2 link(s) to fix: ~/.x, ~/.config/fixture/y.conf"
+run_level --apply
+check "links: ./install runs once per repo per run even with several faults" \
+    "$(ran_count install-ran)/$(ran_count local-install-ran)" 1/1
+has   "links: ./install runs once per repo per run even with several faults: both relinked" "$OUT" \
+    "${LINKS_OK}dotfiles: 2 link(s) relinked"
+
+# A link that points elsewhere: with `backup: true` dotbot leaves any existing link in place and its
+# link step refuses one pointing elsewhere ("Incorrect link", exit 1), so ./install cannot fix it.
+LINK_POINTING_ELSEWHERE_REMEDY="dotbot's backup rule will not replace a link, so point it right by hand (rm it, then ./install)"
+new_case
+ln -sfn "$C/elsewhere" "$H/.config/fixture/y.conf"
+run_level --check
+has   "links: a link pointing elsewhere is a person's step: ⚠ naming where it points" "$OUT" \
+    "${LINKS_OPER}dotfiles: ~/.config/fixture/y.conf links to $C/elsewhere, not into the checkout; $LINK_POINTING_ELSEWHERE_REMEDY"
+check "links: a link pointing elsewhere is a person's step: --check is ⚠, neither ✗ nor ✓ in place: exit 0" \
+    "$RC/$(line_of "${LINKS_OK}dotfiles:")" 0/0
+run_level --apply
+check "links: a link pointing elsewhere is a person's step: --apply runs no ./install for it alone, exit 0" \
+    "$(ran_count install-ran)/$RC" 0/0
+check "links: a link pointing elsewhere is a person's step: the link unchanged after --apply" \
+    "$(readlink "$H/.config/fixture/y.conf")" "$C/elsewhere"
+# Beside a missing link, ./install runs for the missing one; the stub refuses the other, as dotbot does.
+new_case
+rm "$H/.x"; ln -sfn "$C/elsewhere" "$H/.config/fixture/y.conf"
+run_level --apply
+check "links: a link pointing elsewhere beside a missing one: the missing one linked, the other left" \
+    "$(readlink "$H/.x")|$(readlink "$H/.config/fixture/y.conf")" "$H/.dotfiles/config/x|$C/elsewhere"
+has   "links: a link pointing elsewhere beside a missing one: ✓ for the one relinked, never ✗ still to fix" "$OUT" \
+    "${LINKS_OK}dotfiles: 1 link(s) relinked"
+
+new_case
+rm "$H/.x"; touch "$H/stub/install-fails"
+run_level --apply
+has   "links: an ./install that leaves a link out of place is ✗, naming its log" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: still 1 to fix after ./install (~/.x); log: ~/.local/state/host-sync/install-links-dotfiles.log"
+check "links: an ./install that leaves a link out of place is ✗, naming its log: exit 1" "$RC" 1
+
+# The link step succeeds and a later step of the same ./install fails: the stamp is already level,
+# so this run is the only one that can name the log.
+new_case
+rm "$H/.x"; touch "$H/stub/public-install-fails-after-linking"
+run_level --apply
+has   "links: an ./install that relinks and then fails is ⚠, naming its log: the relink verdict" "$OUT" \
+    "${LINKS_OK}dotfiles: 1 link(s) relinked"
+has   "links: an ./install that relinks and then fails is ⚠, naming its log: the ⚠ row" "$OUT" \
+    "${LINKS_OPER}dotfiles: ./install exited 1 after relinking; log: ~/.local/state/host-sync/install-links-dotfiles.log"
+check "links: an ./install that relinks and then fails is ⚠, naming its log: the link, exit 0" \
+    "$(readlink "$H/.x")/$RC" "$H/.dotfiles/config/x/0"
+
+# ./install runs at most once per repo per run: sync_checkout's ./install, run for a stale stamp,
+# fails (its stub logs the attempt first, so a second attempt would be a second line).
+new_case
+rm "$H/.local/state/host-sync/installed-head" "$H/.x"; touch "$H/stub/install-fails"
+run_level --apply
+check "links: an ./install that already failed this run is not run again: one attempt" "$(ran_count install-ran)" 1
+has   "links: an ./install that already failed this run is not run again: the ⚠ row" "$OUT" \
+    "${LINKS_OPER}dotfiles: 1 link(s) to fix, but ./install already failed this run (log: ~/.local/state/host-sync/install.log)"
+
+# sync_checkout's ./install ran and succeeded, and a link is still out of place.
+new_case
+rm "$H/.local/state/host-sync/installed-head" "$H/.x"; touch "$H/stub/public-install-links-nothing"
+run_level --apply
+check "links: an ./install that already ran this run is not run again: one attempt" "$(ran_count install-ran)" 1
+has   "links: an ./install that already ran this run is not run again: ✗ naming that ./install's log" "$OUT" \
+    "${LINKS_DRIFT}dotfiles: still 1 to fix after ./install (~/.x); log: ~/.local/state/host-sync/install.log"
+
+new_case
+git -C "$H/.dotfiles" checkout -q -b feature; rm "$H/.x"
+run_level --check
+has   "links: a checkout left alone this run is not installed: --check says so, ⚠ not ✗" "$OUT" \
+    "${LINKS_OPER}dotfiles: 1 link(s) to fix, but the checkout was left alone this run; fix the checkout first"
+run_level --apply
+check "links: a checkout left alone this run is not installed: no ./install, the link still missing" \
+    "$(ran_count install-ran)/$(present "$H/.x")" 0/gone
+has   "links: a checkout left alone this run is not installed: --apply's ⚠ row" "$OUT" \
+    "${LINKS_OPER}dotfiles: 1 link(s) to fix, but the checkout was left alone this run; fix the checkout first"
+
+# H1: the overlay is managed only with a marker, its links included.
+new_case
+rm "$H/.config/claude-host-profile" "$H/.claude/CLAUDE.md"
+run_level --apply
+hasnt "links: with no marker the overlay's links are not judged: no dotfiles-local links row" "$OUT" "${LINKS_AREA}dotfiles-local:"
+check "links: with no marker the overlay's links are not judged: no ./install of the overlay" "$(ran_count local-install-ran)" 0
+has   "links: with no marker the overlay's links are not judged: the public links row still prints" "$OUT" \
+    "${LINKS_OK}dotfiles: 2 declared links in place"
+
+echo "== generated skills (herdr, spawn)"
+# Each is what this host's own binary prints (shared-configuration design, D6), so --apply
+# regenerates it in place, and a binary that cannot say what it should be is a person's step.
+SKILL_OK="$(printf '✓ %-14s ' skill)"; SKILL_DRIFT="$(printf '✗ %-14s ' skill)"
+SKILL_OPER="$(printf '⚠ %-14s ' skill)"; SKILL_INFO="$(printf '· %-14s ' skill)"
+HERDR_SKILL_REL=".claude/skills/herdr/SKILL.md"; SPAWN_SKILL_REL=".claude/skills/spawn/SKILL.md"
+# herdr-draft's regenerating calls: a bare `skill`, never its `skill --check`.
+regenerations() { grep -cx 'herdr-draft skill' "$H/stub/calls"; }
+new_case
+run_level --check
+has   "skill: herdr skill current → ✓" "$OUT" "${SKILL_OK}herdr skill current (herdr $HV)"
+has   "skill: spawn current → ✓" "$OUT" "${SKILL_OK}spawn skill current"
+check "skill: judging the herdr skill leaves no temp file in TMPDIR" "$(ls -A "$C/tmp")" ""
+new_case
+echo stale >"$H/$HERDR_SKILL_REL"
+run_level --check
+has   "skill: a herdr skill that differs is drift; --apply regenerates it: --check's ✗" "$OUT" \
+    "${SKILL_DRIFT}herdr skill differs from \`herdr --skill\` (herdr $HV)"
+check "skill: a herdr skill that differs is drift; --apply regenerates it: --check leaves the file" \
+    "$(cat "$H/$HERDR_SKILL_REL")" stale
+run_level --apply
+check "skill: a herdr skill that differs is drift; --apply regenerates it" "$(cat "$H/$HERDR_SKILL_REL")" "skill for $HV"
+has   "skill: a herdr skill that differs is drift; --apply regenerates it: the ✓ row" "$OUT" \
+    "${SKILL_OK}herdr skill regenerated (herdr $HV)"
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"
+run_level --apply
+check "skill: a second --apply after a herdr skill regeneration changes no file and calls nothing mutating" \
+    "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)|$(mutations)" "|0"
+new_case
+rm -rf "$H/.claude/skills/herdr"
+run_level --apply
+check "skill: a herdr skill is created where none exists" "$(cat "$H/$HERDR_SKILL_REL" 2>&1)" "skill for $HV"
+new_case
+echo old >"$H/$HERDR_SKILL_REL"; touch "$H/stub/skill-empty"
+run_level --apply
+check "skill: an empty herdr --skill never replaces the file" "$(cat "$H/$HERDR_SKILL_REL")" old
+has   "skill: an empty herdr --skill is a person's step" "$OUT" "${SKILL_OPER}\`herdr --skill\` printed nothing (herdr $HV)"
+# A non-zero exit after partial output (a timeout's 124 is the same path): what it printed is a
+# truncated skill, so nothing is installed and nothing is left behind.
+new_case
+echo old >"$H/$HERDR_SKILL_REL"; touch "$H/stub/skill-fails"
+run_level --apply
+has   "skill: a herdr --skill that fails is a person's step" "$OUT" \
+    "${SKILL_OPER}\`herdr --skill\` could not run (exit 1, herdr $HV); ~/$HERDR_SKILL_REL left as it is"
+check "skill: a herdr --skill that fails installs nothing: the old file, no temp file beside it or in TMPDIR" \
+    "$(cat "$H/$HERDR_SKILL_REL")|$(ls -A "$H/.claude/skills/herdr")|$(ls -A "$C/tmp")" "old|SKILL.md|"
+new_case
+rm "$H/$HERDR_SKILL_REL"; mkdir "$H/$HERDR_SKILL_REL"
+run_level --apply
+has   "skill: a SKILL.md that is a directory is a person's step" "$OUT" \
+    "${SKILL_OPER}~/$HERDR_SKILL_REL is a directory; move it aside, and the next run regenerates it"
+check "skill: a SKILL.md that is a directory: --apply writes nothing into it" "$(ls -A "$H/$HERDR_SKILL_REL")" ""
+new_case
+echo v2 >"$H/stub/draft-version"   # herdr-draft moved on; the file is the previous build's
+run_level --check
+has   "skill: a stale spawn skill is drift; --apply regenerates it with herdr-draft skill: --check's ✗" "$OUT" \
+    "${SKILL_DRIFT}spawn skill differs from \`herdr-draft skill\`"
+check "skill: a stale spawn skill: --check leaves the file and never runs herdr-draft skill" \
+    "$(cat "$H/$SPAWN_SKILL_REL")|$(regenerations)" "$SPAWN_SKILL_TEXT|0"
+run_level --apply
+check "skill: a stale spawn skill is drift; --apply regenerates it with herdr-draft skill" \
+    "$(regenerations)|$(cat "$H/$SPAWN_SKILL_REL")" "1|spawn skill for v2"
+has   "skill: a stale spawn skill: ✓ once herdr-draft re-checks it" "$OUT" "${SKILL_OK}spawn skill regenerated with herdr-draft skill"
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"
+run_level --apply
+check "skill: a second --apply after a spawn skill regeneration changes no file and calls nothing mutating" \
+    "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)|$(mutations)" "|0"
+new_case
+rm -rf "$H/.claude/skills/spawn"
+run_level --check
+has   "skill: a missing spawn skill is drift" "$OUT" "${SKILL_DRIFT}no spawn skill at ~/$SPAWN_SKILL_REL"
+# herdr-draft's `skill --check` exits 2 on a path that does not exist (the stub says the same), so
+# a missing skill handed to it would read ⚠, and --apply would never create it.
+hasnt "skill: a missing spawn skill is drift, never ⚠" "$OUT" "$SKILL_OPER"
+run_level --apply
+check "skill: spawn is created where none exists" "$(cat "$H/$SPAWN_SKILL_REL" 2>&1)" "$SPAWN_SKILL_TEXT"
+has   "skill: spawn is created where none exists: ✓, never ⚠" "$OUT" "${SKILL_OK}spawn skill regenerated with herdr-draft skill"
+new_case
+touch "$H/stub/draft-skill-cannot-answer"; echo stale >"$H/$SPAWN_SKILL_REL"
+run_level --apply
+has   "skill: herdr-draft that cannot answer → ⚠" "$OUT" \
+    "${SKILL_OPER}herdr-draft skill --check could not answer: herdr-draft: cannot read the plugin manifest"
+check "skill: herdr-draft that cannot answer: a person's step, nothing regenerated" \
+    "$RC|$(regenerations)|$(cat "$H/$SPAWN_SKILL_REL")" "0|0|stale"
+new_case
+echo 3 >"$H/stub/draft-skill-check-rc"
+run_level --check
+has   "skill: herdr-draft skill --check exiting otherwise → ⚠ could not run" "$OUT" \
+    "${SKILL_OPER}herdr-draft skill --check could not run (exit 3)"
+new_case
+echo '{"result":{"plugins":[]}}' >"$H/stub/draft.json"
+run_level --check
+has   "skill: no herdr-draft plugin → ·" "$OUT" "${SKILL_INFO}no herdr-draft plugin on this host's herdr; no spawn skill to generate"
+check "skill: no herdr-draft plugin → · and no spawn row" "$(area_rows skill)" 2
+new_case
+chmod -x "$H/stub/draft-root/bin/herdr-draft"
+run_level --check
+has   "skill: a herdr-draft plugin with no executable binary → ·" "$OUT" \
+    "${SKILL_INFO}no executable herdr-draft at ~/stub/draft-root/bin/herdr-draft; no spawn skill to generate"
+new_case
+printf '{"result":{"plugins":[{"source":{"kind":"github","resolved_commit":"%s"}}]}}\n' "$DRAFT" >"$H/stub/draft.json"
+run_level --check
+has   "skill: a plugin list that names no plugin_root → ·, never judged" "$OUT" \
+    "${SKILL_INFO}herdr reports no absolute plugin_root for herdr-draft; spawn skill not judged"
+new_case
+touch "$H/stub/draft-down"
+run_level --check
+has   "skill: herdr not answering plugin list → ·, never ✓" "$OUT" \
+    "${SKILL_INFO}spawn skill not judged: herdr gave no \`plugin list\` answer"
+
 echo "== plugins"
 new_case
 jq '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z"' "$H/.claude/plugins/known_marketplaces.json" >"$C/k" &&
@@ -846,19 +1455,7 @@ jq 'del(.dotfiles)' "$H/.claude/plugins/known_marketplaces.json" >"$C/k" && mv "
 run_level --apply
 has   "missing dotfiles marketplace: added from the checkout path" "$(calls)" "claude plugin marketplace add $H/.dotfiles/claude/plugins --scope user"
 new_case
-jq '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
-run_level --check
-has   "superseded plugin enabled: ✗" "$OUT" "quantivly-pr-conventions@quantivly is enabled but superseded"
-run_level --apply
-has   "superseded plugin: ✓ disabled, read back as false (jq // treats false as missing)" "$OUT" "✓ plugin         quantivly-pr-conventions@quantivly disabled (superseded)"
-check "superseded plugin: --apply exits 0" "$RC" 0
-check "superseded plugin: set false in settings.json" "$(jq -r '.enabledPlugins["quantivly-pr-conventions@quantivly"]' "$H/.claude/settings.json")" false
-check "superseded plugin: the rest of settings.json survives" "$(jq -r .theme "$H/.claude/settings.json")" dark
-check "superseded plugin: a backup is kept" "$([[ -e "$H/.local/state/host-sync/settings.json.before-host-sync" ]] && echo yes || echo no)" yes
-hasnt "superseded plugin: no CLI call names it" "$(calls)" "quantivly-pr-conventions"
-new_case
 jq 'del(.plugins["slack@claude-plugins-official"])' "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
-jq 'del(.enabledPlugins["slack@claude-plugins-official"])' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
 run_level --check
 has   "missing plugin: ✗ not installed" "$OUT" "slack@claude-plugins-official not installed"
 run_level --apply
@@ -873,25 +1470,128 @@ jq '.plugins["linear-key@dotfiles"] = [{scope: "project", projectPath: "/x", ver
     "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
 run_level --check
 hasnt "a project entry listed first: the USER entry's version is read" "$OUT" "0.1.0 installed"
+
+# The declaration is the live settings.json (H4): its true enabledPlugins entries and its
+# extraKnownMarketplaces. host-sync installs and refreshes; it never enables or disables.
+PLUGIN_OK="$(printf '✓ %-14s ' plugin)"; PLUGIN_DRIFT="$(printf '✗ %-14s ' plugin)"; PLUGIN_OPER="$(printf '⚠ %-14s ' plugin)"
+PLUGINS_OPER="$(printf '⚠ %-14s ' plugins)"
+MARKET_OK="$(printf '✓ %-14s ' marketplace)"; MARKET_DRIFT="$(printf '✗ %-14s ' marketplace)"
+MARKET_OPER="$(printf '⚠ %-14s ' marketplace)"
+SETTINGS_JSON_REL=".claude/settings.json"; INSTALLED_JSON_REL=".claude/plugins/installed_plugins.json"
+KNOWN_JSON_REL=".claude/plugins/known_marketplaces.json"
+QUANTIVLY_MANIFEST_REL=".claude/plugins/marketplaces/quantivly/.claude-plugin/marketplace.json"
+edit_json() {   # rewrite the case's $HOME/$1 through the jq filter $2; a failed edit stops the table
+    if ! { jq "$2" "$H/$1" >"$H/$1.edit" && mv "$H/$1.edit" "$H/$1"; }; then fatal "could not edit ~/$1 with: $2"; fi
+}
 new_case
-jq '.enabledPlugins["notion@claude-plugins-official"] = false' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["extra@quantivly"] = true'
+edit_json "$QUANTIVLY_MANIFEST_REL" '.plugins += [{name: "extra"}]'
+run_level --check
+has   "plugins: the declaration is settings.json: a true entry not installed is ✗" "$OUT" "${PLUGIN_DRIFT}extra@quantivly not installed"
 run_level --apply
-has   "disabled plugin: enabled, not reinstalled" "$(calls)" "claude plugin enable notion@claude-plugins-official --scope user"
+has   "plugins: the declaration is settings.json: --apply installs it at user scope" "$(calls)" "claude plugin install extra@quantivly --scope user"
+has   "plugins: the declaration is settings.json: ✓ once installed" "$OUT" "${PLUGIN_OK}extra@quantivly (installed)"
 new_case
-jq '.enabledPlugins["linear@claude-plugins-official"] = true | del(.enabledPlugins["linear-key@dotfiles"])' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
-jq 'del(.plugins["linear-key@dotfiles"])' "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["extra@quantivly"] = true'
+edit_json "$QUANTIVLY_MANIFEST_REL" '.plugins += [{name: "extra"}]'
+touch "$H/stub/install-fails-extra@quantivly"
 run_level --apply
-check "official linear: disabled once linear-key is on" "$(jq -r '.enabledPlugins["linear@claude-plugins-official"]' "$H/.claude/settings.json")" false
-check "official linear: disabled AFTER linear-key was installed" \
-    "$(grep -nE 'install linear-key|disable linear@' "$H/stub/calls" | cut -d: -f2- | tr '\n' '|')" \
-    "claude plugin install linear-key@dotfiles --scope user|claude plugin disable linear@claude-plugins-official --scope user|"
+has   "a plugin install that fails: ✗ with the log, never ✓" "$OUT" \
+    "${PLUGIN_DRIFT}extra@quantivly: install failed (log: ~/.local/state/host-sync/plugins.log)"
+# notion was on the fixed list the script used to carry, which turned an installed, false entry back on.
 new_case
-jq '.enabledPlugins["linear@claude-plugins-official"] = true | del(.enabledPlugins["linear-key@dotfiles"])' "$H/.claude/settings.json" >"$C/s" && mv "$C/s" "$H/.claude/settings.json"
-jq 'del(.plugins["linear-key@dotfiles"])' "$H/.claude/plugins/installed_plugins.json" >"$C/i" && mv "$C/i" "$H/.claude/plugins/installed_plugins.json"
-touch "$H/stub/install-fails-linear-key@dotfiles"
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["old@quantivly"] = false | .enabledPlugins["notion@claude-plugins-official"] = false'
+edit_json "$INSTALLED_JSON_REL" '.plugins["old@quantivly"] = [{scope: "user", version: "1"}]'
+plugin_files_before="$(cat "$H/$INSTALLED_JSON_REL" "$H/$SETTINGS_JSON_REL")"
 run_level --apply
-check "linear-key install failing: official linear is LEFT ON" "$(jq -r '.enabledPlugins["linear@claude-plugins-official"]' "$H/.claude/settings.json")" true
-has   "linear-key install failing: ✗ says why" "$OUT" "must not end up with neither"
+declared_false_named=no
+[[ "$OUT" == *"old@quantivly"* || "$OUT" == *"notion@claude-plugins-official"* ]] && declared_false_named=yes
+check "a declared-false plugin is left alone: no row names it" "$declared_false_named" no
+check "a declared-false plugin is left alone: installed_plugins.json and settings.json unchanged" \
+    "$(cat "$H/$INSTALLED_JSON_REL" "$H/$SETTINGS_JSON_REL")" "$plugin_files_before"
+# Drifted on every path the fixed lists took: a superseded entry on, official linear on beside
+# linear-key, notion off, slack not installed, one marketplace stale and one not added.
+new_case
+edit_json "$KNOWN_JSON_REL" '.["quantivly"].lastUpdated = "2026-01-01T00:00:00Z" | del(.dotfiles)'
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["quantivly-pr-conventions@quantivly"] = true
+    | .enabledPlugins["linear@claude-plugins-official"] = true | .enabledPlugins["notion@claude-plugins-official"] = false'
+edit_json "$INSTALLED_JSON_REL" 'del(.plugins["slack@claude-plugins-official"])'
+run_level --apply
+check "host-sync never calls plugin enable or disable" "$(grep -cE '^claude plugin (enable|disable) ' "$H/stub/calls")" 0
+plugin_calls="$(grep -c '^claude plugin ' "$H/stub/calls")"
+(( plugin_calls > 0 )) || plugin_calls=none   # with no call to judge, the row must not pass
+check "every claude plugin call carries CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1" \
+    "$(grep -c '^plugin-https=1$' "$H/stub/plugin-https" 2>/dev/null) of $plugin_calls" "$plugin_calls of $plugin_calls"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["x@unknown"] = true'
+run_level --check
+has   "a plugin whose marketplace no fragment declares is a person's step" "$OUT" \
+    "${PLUGIN_OPER}x@unknown: marketplace unknown is declared by no settings fragment; not installed"
+run_level --apply
+hasnt "a plugin whose marketplace no fragment declares: --apply does not install it" "$(calls)" "install x@unknown"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins["x@unknown"] = true'
+edit_json "$INSTALLED_JSON_REL" '.plugins["x@unknown"] = [{scope: "user", version: "1"}]'
+run_level --check
+has   "a plugin whose marketplace no fragment declares, installed: the ⚠ says installed" "$OUT" \
+    "${PLUGIN_OPER}x@unknown: marketplace unknown is declared by no settings fragment; installed, but its marketplace is not refreshed"
+new_case
+edit_json "$KNOWN_JSON_REL" 'del(.quantivly)'
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.team = {source: {source: "github", repo: "example/team"}}'
+run_level --check
+has   "marketplaces come from extraKnownMarketplaces: a declared one not added is ✗" "$OUT" "${MARKET_DRIFT}quantivly: not added"
+has   "marketplaces come from extraKnownMarketplaces: one only settings declares has its row" "$OUT" "${MARKET_DRIFT}team: not added"
+run_level --apply
+has   "marketplaces come from extraKnownMarketplaces: --apply adds it from the declared source" "$(calls)" \
+    "claude plugin marketplace add quantivly/claude-plugins --scope user"
+# The renderer substitutes $HOME; a hand-edited settings.json may still hold it literally, and an
+# unexpanded path reads as a cloned source, whose 2020 lastUpdated in the fixture is a ✗.
+new_case
+# shellcheck disable=SC2016  # the literal $HOME, deliberately
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.dotfiles.source.path = "$HOME/.dotfiles/claude/plugins"'
+run_level --check
+has   "a hand-written directory marketplace path with \$HOME is expanded before it is compared: ✓ against the known location" \
+    "$OUT" "${MARKET_OK}dotfiles"$'\n'
+new_case
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.team = {source: {source: "github"}}'
+run_level --check
+has   "a marketplace entry that names no repo, url or path: ⚠, never added" "$OUT" \
+    "${MARKET_OPER}team: its extraKnownMarketplaces entry names no repo, url or path; not added"
+run_level --apply
+hasnt "a marketplace entry that names no repo, url or path: --apply adds nothing" "$(calls)" "claude plugin marketplace add"
+# A plugin declared from that marketplace has nowhere to come from: ⚠ like its marketplace, never an
+# install attempt that fails, a ✗ on every run.
+new_case
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces.team = {source: {source: "github"}} | .enabledPlugins["x@team"] = true'
+run_level --apply
+check "a plugin whose marketplace entry names no repo, url or path is a person's step: the ⚠, no install call" \
+    "$(grep -c -F "${PLUGIN_OPER}x@team: marketplace team's extraKnownMarketplaces entry names no repo, url or path; not installed" <<<"$OUT")/$(grep -c '^claude plugin install x@team' "$H/stub/calls")" "1/0"
+# A settings.json of the wrong shape is one ⚠ and nothing else: no marketplace or plugin row is
+# judged from it, and --apply adds nothing. Each object key is broken in its own case, so each half
+# of the shape check has a row of its own; only the array-shaped marketplaces have a source to add.
+SHAPE_OPER="${PLUGINS_OPER}the live ~/.claude/settings.json is not an object with object enabledPlugins and extraKnownMarketplaces; plugins are not judged"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins = ["slack@claude-plugins-official"]'
+run_level --apply
+has   "a settings.json whose enabledPlugins is not an object: ⚠, no plugin judged" "$OUT" "$SHAPE_OPER"
+check "a settings.json whose enabledPlugins is not an object: --apply judges no marketplace and no plugin" \
+    "$(area_rows marketplace) marketplace, $(area_rows plugin) plugin rows" "0 marketplace, 0 plugin rows"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces = [{source: {source: "github", repo: "example/team"}}]'
+run_level --apply
+has   "a settings.json whose extraKnownMarketplaces is not an object: ⚠" "$OUT" "$SHAPE_OPER"
+hasnt "a settings.json whose extraKnownMarketplaces is not an object: --apply adds nothing" "$(calls)" "claude plugin marketplace add"
+# A literal false or null is present and not an object: jq's // would read either as an empty one.
+new_case
+edit_json "$SETTINGS_JSON_REL" '.enabledPlugins = false'
+run_level --apply
+check "a settings.json whose enabledPlugins is false: ⚠, no marketplace or plugin row, no plugin call" \
+    "$(grep -c -F "$SHAPE_OPER" <<<"$OUT")/$(area_rows marketplace)/$(area_rows plugin)/$(grep -c '^claude plugin ' "$H/stub/calls")" "1/0/0/0"
+new_case
+edit_json "$SETTINGS_JSON_REL" '.extraKnownMarketplaces = null'
+run_level --apply
+check "a settings.json whose extraKnownMarketplaces is null: ⚠, no marketplace or plugin row, no plugin call" \
+    "$(grep -c -F "$SHAPE_OPER" <<<"$OUT")/$(area_rows marketplace)/$(area_rows plugin)/$(grep -c '^claude plugin ' "$H/stub/calls")" "1/0/0/0"
 new_case
 echo '{"name":"linear-key","version":"1.1.0"}' >"$H/.dotfiles/claude/plugins/linear-key/.claude-plugin/plugin.json"
 run_level --check
@@ -954,6 +1654,471 @@ check "an unsafe --clone dir is refused (64)" "$RC" 64
 new_case
 HOST_SYNC_DOTFILES_LOCAL_REPO='x;rm -rf /' run --check
 check "an unsafe HOST_SYNC_DOTFILES_LOCAL_REPO is refused (64)" "$RC" 64
+
+echo "== memory: the git floor, store checkouts, links, sync status, the memory timer"
+# The rows' glyph and area, as row() prints them, so a needle also pins the glyph.
+MEMORY_OK="$(printf '✓ %-14s ' memory)"; MEMORY_DRIFT="$(printf '✗ %-14s ' memory)"
+MEMORY_OPER="$(printf '⚠ %-14s ' memory)"; MEMORY_INFO="$(printf '· %-14s ' memory)"
+LEVEL_LINK_SUMMARY="claude-memory-link: 3 linked, 0 to fix, 0 unmapped, 0 without a store"
+memory_sibling_calls() { grep -E '^claude-memory-(link|sync)\.sh' "$H/stub/calls" | paste -sd'|'; }
+clone_calls() { grep -c '^git clone' "$H/stub/calls"; }
+# The memory timer's mutating calls, in order.
+memory_timer_arming_calls() { grep -E '^systemctl --user (daemon-reload|enable|reenable|disable)' "$H/stub/calls" | paste -sd'|'; }
+# Every row that names the memory timer, whatever its glyph.
+memory_timer_rows() { grep -c 'claude-memory-sync.timer' <<<"$OUT"; }
+
+new_case
+run_level --check
+has   "memory: level → the served store ✓" "$OUT" "${MEMORY_OK}store alpha checked out"
+has   "memory: linked → ✓ with the link script's summary" "$OUT" "${MEMORY_OK}${LEVEL_LINK_SUMMARY}"
+has   "memory: status ok → ✓" "$OUT" "${MEMORY_OK}store alpha: last synced 4 min ago"
+has   "memory: level → the memory timer ✓" "$OUT" "${MEMORY_OK}claude-memory-sync.timer armed"
+hasnt "memory: git at or above 2.40 prints no git row" "$OUT" "the memory sync needs"
+check "memory: level → four memory rows, and the siblings asked --check and --status only" \
+    "$(area_rows memory)/$(memory_sibling_calls)" "4/claude-memory-link.sh --check|claude-memory-sync.sh --status"
+check "memory: printed after the clones row and before the slice row" \
+    "$(( $(line_of "clones under ~/quantivly") < $(line_of "${MEMORY_OK}store alpha") && \
+        $(line_of "${MEMORY_OK}claude-memory-sync.timer") < $(line_of "agents.slice MemoryHigh") ))" 1
+
+new_case
+touch "$H/stub/git-version-old"
+run_level --check
+has   "memory: git older than 2.40 is a person's step" "$OUT" \
+    "${MEMORY_OPER}git 2.39.2 is older than 2.40; the memory sync needs --attr-source: upgrade git"
+
+new_case
+rm "$H/$STORE_TABLE_REL"
+run_level --apply
+has   "memory: no store table → · and nothing else: the · row" "$OUT" \
+    "${MEMORY_INFO}no memory store table at ~/.dotfiles-local/claude/memory-stores.json; memory is not linked or synced here"
+check "memory: no store table → · and nothing else: one memory row, no sibling called" \
+    "$(area_rows memory)/$(memory_sibling_calls)" "1/"
+
+# The table is read before the git floor: a host with no table runs no memory sync, so an old git there
+# is nothing to warn about.
+new_case
+rm "$H/$STORE_TABLE_REL"; touch "$H/stub/git-version-old"
+run_level --check
+check "memory: no store table and an old git → the one · row, and no git ⚠" \
+    "$(area_rows memory)/$(grep -c -F "${MEMORY_INFO}no memory store table at" <<<"$OUT")/$(grep -c -F 'is older than 2.40' <<<"$OUT")" "1/1/0"
+
+new_case
+edit_json .dotfiles-local/claude/memory-stores.json '.stores.alpha.tenants = "quantivly"'
+run_level --apply
+has   "memory: a store table of the wrong shape is ⚠, and nothing else runs" "$OUT" \
+    "${MEMORY_OPER}the store table ~/.dotfiles-local/claude/memory-stores.json cannot be read, or a store in it has no remote or no tenants list"
+check "memory: a store table of the wrong shape is ⚠, and nothing else runs: one row, no sibling called" \
+    "$(area_rows memory)/$(memory_sibling_calls)" "1/"
+
+new_case
+rm "$H/.dotfiles-local/hosts/p.json"; rm -rf "${H:?}/$STORES_REL/alpha"
+run_level --apply
+has   "memory: tenants unknown → · store checkouts not judged, nothing cloned: the · row" "$OUT" \
+    "${MEMORY_INFO}store checkouts not judged: this host's tenants are unknown (see the profile row)"
+check "memory: tenants unknown → · store checkouts not judged, nothing cloned: no clone, no timer row" \
+    "$(present "$H/$STORES_REL/alpha")/$(clone_calls)/$(memory_timer_rows)" "gone/0/0"
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"
+run_level --check
+has   "memory: a served store that is not checked out is drift; --apply clones it: the ✗ row" "$OUT" \
+    "${MEMORY_DRIFT}store alpha not checked out (example-org/mem-alpha)"
+check "memory: a served store that is not checked out is drift; --apply clones it: --check clones nothing, exit 1" \
+    "$(present "$H/$STORES_REL/alpha")/$(clone_calls)/$RC" "gone/0/1"
+reset_calls; run_level --apply
+check "memory: a served store that is not checked out is drift; --apply clones it: the table's remote, verbatim" \
+    "$(grep '^git clone' "$H/stub/calls")" "git clone --quiet file://$GH/example-org/mem-alpha.git $H/$STORES_REL/alpha"
+check "memory: a served store that is not checked out is drift; --apply clones it: origin is the table's remote, byte for byte" \
+    "$(git -C "$H/$STORES_REL/alpha" config --get remote.origin.url)" "$(jq -r .stores.alpha.remote "$H/$STORE_TABLE_REL")"
+check "memory: a served store that is not checked out is drift; --apply clones it: on the remote's default branch" \
+    "$(git -C "$H/$STORES_REL/alpha" symbolic-ref --short HEAD)/$(head_of "$H/$STORES_REL/alpha")" \
+    "main/$(git --git-dir="$GH/example-org/mem-alpha.git" rev-parse main)"
+has   "memory: a served store that is not checked out is drift; --apply clones it: the ✓ row" "$OUT" \
+    "${MEMORY_OK}store alpha cloned"
+check "memory: a served store that is not checked out is drift; --apply clones it: exit 0" "$RC" 0
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"
+run_level --apply
+check "memory: a second --apply after the clone calls nothing mutating" "$(mutations)" 0
+check "memory: a second --apply after the clone changes no file" \
+    "$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)" ""
+
+# alpha's remote ends in .git, which is also what a URL rebuilt from owner/repo ends in; gamma's is
+# spelled without it, and its repository lives only at that suffix-less path. So a clone of the
+# table's string resolves, and one of a rebuilt "$GITHUB_BASE/$repo.git" (here_clones' shape) names
+# no repository. Between them, the two stores pin the string as the table spells it either way.
+new_case
+git clone -q --bare "$GH/example-org/mem-alpha.git" "$GH/example-org/mem-gamma"
+edit_json .dotfiles-local/claude/memory-stores.json \
+    ".stores.gamma = {remote: \"file://$GH/example-org/mem-gamma\", tenants: [\"quantivly\"]}"
+run_level --apply
+check "memory: a remote spelled without .git is cloned as spelled: the clone's arguments" \
+    "$(grep '^git clone' "$H/stub/calls")" "git clone --quiet file://$GH/example-org/mem-gamma $H/$STORES_REL/gamma"
+check "memory: a remote spelled without .git is cloned as spelled: origin is the table's remote, byte for byte" \
+    "$(git -C "$H/$STORES_REL/gamma" config --get remote.origin.url 2>/dev/null)" \
+    "$(jq -r .stores.gamma.remote "$H/$STORE_TABLE_REL")"
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"; rm -rf "${GH:?}/example-org/mem-alpha.git"
+run_level --apply
+has   "memory: a clone that fails is ✗, and leaves no directory: the ✗ row" "$OUT" \
+    "${MEMORY_DRIFT}store alpha: git clone example-org/mem-alpha failed"
+check "memory: a clone that fails is ✗, and leaves no directory: no directory, exit 1" \
+    "$(present "$H/$STORES_REL/alpha")/$RC" "gone/1"
+check "memory: a clone that fails is ✗ with git's first error line: the store, and why" \
+    "$(grep -F "${MEMORY_DRIFT}store alpha: git clone example-org/mem-alpha failed: " <<<"$OUT" | grep -c 'does not appear to be a git repository')" 1
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"
+edit_json .dotfiles-local/claude/memory-stores.json '.stores.alpha.remote = "ssh://x/y.git"'
+run_level --apply
+has   "memory: a remote that is not under the GitHub base is not cloned: ⚠ naming the store" "$OUT" \
+    "${MEMORY_OPER}store alpha: its remote is not a repository URL under file://$GH; not cloned"
+check "memory: a remote that is not under the GitHub base is not cloned: no clone" \
+    "$(present "$H/$STORES_REL/alpha")/$(clone_calls)" "gone/0"
+hasnt "memory: a remote that is not under the GitHub base is not cloned: the remote is never printed" "$OUT" "ssh://x/y.git"
+
+# A remote under the base whose owner is .. passes the character rule alone; it names a path outside
+# the base, and is never cloned.
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"
+edit_json .dotfiles-local/claude/memory-stores.json ".stores.alpha.remote = \"file://$GH/../x\""
+run_level --apply
+check "memory: a remote whose owner is .. is not cloned: ⚠ naming the store, no clone" \
+    "$(grep -c -F "${MEMORY_OPER}store alpha: its remote is not a repository URL under file://$GH; not cloned" <<<"$OUT")/$(clone_calls)/$(present "$H/$STORES_REL/alpha")" "1/0/gone"
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"; mkdir -p "$H/$STORES_REL/alpha"; echo kept >"$H/$STORES_REL/alpha/note.md"
+run_level --apply
+has   "memory: a store directory that is not a checkout is a person's step: the ⚠ row" "$OUT" \
+    "${MEMORY_OPER}store alpha: ~/$STORES_REL/alpha exists but is not a checkout; not touched"
+check "memory: a store directory that is not a checkout is a person's step: no clone, its file kept" \
+    "$(clone_calls)/$(cat "$H/$STORES_REL/alpha/note.md")" "0/kept"
+
+new_case
+edit_json .dotfiles-local/claude/memory-stores.json \
+    ".stores[\"../escape\"] = {remote: \"file://$GH/example-org/mem-alpha.git\", tenants: [\"quantivly\"]}"
+run_level --apply
+has   "memory: a store name that is not a plain directory name is ⚠ and never cloned: the ⚠ row" "$OUT" \
+    "${MEMORY_OPER}a store in the table has a name that is not a plain directory name; it is not judged"
+check "memory: a store name that is not a plain directory name is ⚠ and never cloned: no clone, nothing beside the root" \
+    "$(clone_calls)/$(present "$H/.local/share/escape")" "0/gone"
+
+new_case
+git clone -q "file://$GH/example-org/mem-beta.git" "$H/$STORES_REL/beta"
+run_level --check
+has   "memory: a store for an unserved tenant is reported, not touched: the ⚠ row" "$OUT" \
+    "${MEMORY_OPER}store beta is checked out here but serves no tenant of profile p (its tenants: personal); remove it by hand"
+run_level --apply
+check "memory: a store for an unserved tenant is reported, not touched: still checked out after --apply, nothing synced" \
+    "$(present "$H/$STORES_REL/beta/.git")/$(git -C "$H/$STORES_REL/beta" config --get remote.origin.url)/$(grep -c 'claude-memory-sync.sh --apply' "$H/stub/calls")" \
+    "present/file://$GH/example-org/mem-beta.git/0"
+
+# A tenant is one name, whatever it holds: personal,quantivly is not personal and quantivly.
+new_case
+git clone -q "file://$GH/example-org/mem-beta.git" "$H/$STORES_REL/delta"
+edit_json .dotfiles-local/claude/memory-stores.json \
+    ".stores.delta = {remote: \"file://$GH/example-org/mem-beta.git\", tenants: [\"personal,quantivly\"]}"
+run_level --check
+has   "memory: a tenant name holding a comma is one name: the store serves no tenant of the profile" "$OUT" \
+    "${MEMORY_OPER}store delta is checked out here but serves no tenant of profile p (its tenants: personal,quantivly); remove it by hand"
+
+STORES_ROOT_PATH="$TMPROOT/stores-elsewhere"
+new_case
+mkdir -p "$STORES_ROOT_PATH"; rm -rf "${STORES_ROOT_PATH:?}/alpha"; mv "$H/$STORES_REL/alpha" "$STORES_ROOT_PATH/alpha"
+run_level --check
+has   "memory: CLAUDE_MEMORY_STORES_ROOT is honoured: the store is found there" "$OUT" "${MEMORY_OK}store alpha checked out"
+check "memory: CLAUDE_MEMORY_STORES_ROOT is honoured: exit 0" "$RC" 0
+rm -rf "${STORES_ROOT_PATH:?}"; unset STORES_ROOT_PATH
+
+# The link and sync scripts read CLAUDE_MEMORY_CONFIG's table; host-sync judges the same one.
+MEMORY_CONFIG_PATH="$TMPROOT/other-memory-stores.json"
+new_case
+jq -n --arg gh "file://$GH" '{stores: {omega: {remote: ($gh + "/example-org/mem-omega.git"), tenants: ["quantivly"]}}}' \
+    >"$MEMORY_CONFIG_PATH"
+run_level --check
+has   "memory: CLAUDE_MEMORY_CONFIG is honoured: a store named only in that table is judged" "$OUT" \
+    "${MEMORY_DRIFT}store omega not checked out (example-org/mem-omega)"
+rm -f "$MEMORY_CONFIG_PATH"; unset MEMORY_CONFIG_PATH
+
+new_case
+echo 'claude-memory-link: 3 linked, 0 to fix, 1 unmapped, 0 without a store' >"$H/stub/link-summary"
+run_level --check
+has   "memory: unmapped or store-less keys in the summary → ⚠ even at exit 0: unmapped" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link: 3 linked, 0 to fix, 1 unmapped, 0 without a store: memory that no store link reaches; claude-memory-link --list names the keys"
+check "memory: unmapped or store-less keys in the summary → ⚠ even at exit 0: no ✓ link row, exit 0" \
+    "$(grep -c "${MEMORY_OK}claude-memory-link:" <<<"$OUT")/$RC" "0/0"
+echo 'claude-memory-link: 3 linked, 0 to fix, 0 unmapped, 2 without a store' >"$H/stub/link-summary"
+run_level --check
+has   "memory: unmapped or store-less keys in the summary → ⚠ even at exit 0: without a store" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link: 3 linked, 0 to fix, 0 unmapped, 2 without a store: memory that no store link reaches"
+
+new_case
+echo 'claude-memory-link: no summary here' >"$H/stub/link-summary"
+run_level --check
+has   "memory: a link check with no summary line is ⚠, never ✓" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link --check printed no summary line (exit 0)"
+
+new_case
+echo 1 >"$H/stub/link-rc"; echo 'claude-memory-link: 1 linked, 2 to fix, 0 unmapped, 0 without a store' >"$H/stub/link-summary"
+run_level --check
+has   "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: the ✗ row" "$OUT" \
+    "${MEMORY_DRIFT}2 memory link(s) to fix (claude-memory-link: 1 linked, 2 to fix, 0 unmapped, 0 without a store)"
+check "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: --check links nothing, exit 1" \
+    "$(grep -c '^claude-memory-link.sh --apply' "$H/stub/calls")/$RC" "0/1"
+reset_calls; run_level --apply
+check "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: --check, --apply, --check" \
+    "$(grep '^claude-memory-link.sh' "$H/stub/calls" | paste -sd'|')" \
+    "claude-memory-link.sh --check|claude-memory-link.sh --apply|claude-memory-link.sh --check"
+has   "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: the ✓ row" "$OUT" \
+    "${MEMORY_OK}linked by claude-memory-link --apply (${LEVEL_LINK_SUMMARY})"
+check "memory: links to fix → ✗; --apply runs claude-memory-link.sh --apply and re-checks: exit 0" "$RC" 0
+
+new_case
+echo 1 >"$H/stub/link-rc"; echo 'claude-memory-link: 1 linked, 2 to fix, 0 unmapped, 0 without a store' >"$H/stub/link-summary"
+touch "$H/stub/link-apply-no-op"
+run_level --apply
+has   "memory: an --apply that leaves links to fix is ✗" "$OUT" \
+    "${MEMORY_DRIFT}still 2 memory link(s) to fix after claude-memory-link --apply (claude-memory-link: 1 linked, 2 to fix, 0 unmapped, 0 without a store)"
+rm "$H/stub/link-apply-no-op"; touch "$H/stub/link-apply-fails"
+reset_calls; run_level --apply
+has   "memory: an --apply that cannot run → ⚠ with its first line, not re-checked" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link --apply could not run: claude-memory-link: link.lock still held after 120 s"
+check "memory: an --apply that cannot run → ⚠ with its first line, not re-checked: the calls" \
+    "$(grep '^claude-memory-link.sh' "$H/stub/calls" | paste -sd'|')" "claude-memory-link.sh --check|claude-memory-link.sh --apply"
+
+new_case
+echo 2 >"$H/stub/link-rc"
+run_level --apply
+has   "memory: a link script that cannot run → ⚠ with its first line, no --apply" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link --check could not run: claude-memory-link: tenant-route could not answer for ~/code/x"
+check "memory: a link script that cannot run → ⚠ with its first line, no --apply: only --check, exit 0" \
+    "$(grep '^claude-memory-link.sh' "$H/stub/calls" | paste -sd'|')/$RC" "claude-memory-link.sh --check/0"
+rm "$H/.dotfiles/scripts/claude-memory-link.sh"
+run_level --check
+has   "memory: a link script that is not there → ⚠ could not run (exit 127)" "$OUT" \
+    "${MEMORY_OPER}claude-memory-link --check could not run (exit 127)"
+
+new_case
+printf 'alpha\twarn\t2 conflict copies in the tree\n' >"$H/stub/status-lines"
+run_level --check
+has   "memory: status warn → ⚠ carrying the word warn" "$OUT" "${MEMORY_OPER}store alpha: warn: 2 conflict copies in the tree"
+check "memory: status warn → ⚠ carrying the word warn: no ✓ status row, exit 0" \
+    "$(grep -c "${MEMORY_OK}store alpha:" <<<"$OUT")/$RC" "0/0"
+printf 'alpha\tbad\tnever synced; last outcome unreachable: no answer within 60 s\n' >"$H/stub/status-lines"
+run_level --check
+has   "memory: status bad → ⚠ carrying the word bad" "$OUT" \
+    "${MEMORY_OPER}store alpha: bad: never synced; last outcome unreachable: no answer within 60 s"
+echo 2 >"$H/stub/status-rc"
+run_level --check
+has   "memory: status that cannot run → ⚠ with its first line" "$OUT" \
+    "${MEMORY_OPER}claude-memory-sync --status could not run: claude-memory-sync: the store table cannot be read"
+rm "$H/.dotfiles/scripts/claude-memory-sync.sh"
+run_level --check
+has   "memory: status that is not there → ⚠ could not run (exit 127)" "$OUT" \
+    "${MEMORY_OPER}claude-memory-sync --status could not run (exit 127)"
+
+new_case
+timer_off claude-memory-sync.timer
+run_level --check
+has   "memory: the memory timer is armed by --apply once a served store is checked out: the ✗ row" "$OUT" \
+    "${MEMORY_DRIFT}claude-memory-sync.timer not armed (is-enabled=disabled, is-active=inactive)"
+check "memory: the memory timer is armed by --apply once a served store is checked out: --check arms nothing, exit 1" \
+    "$(memory_timer_arming_calls)/$RC" "/1"
+reset_calls; run_level --apply
+check "memory: the memory timer is armed by --apply once a served store is checked out: daemon-reload, then enable --now, never reenable" \
+    "$(memory_timer_arming_calls)" "systemctl --user daemon-reload|systemctl --user enable --now claude-memory-sync.timer"
+has   "memory: the memory timer is armed by --apply once a served store is checked out: the ✓ row" "$OUT" \
+    "${MEMORY_OK}claude-memory-sync.timer armed by this run"
+check "memory: the memory timer is armed by --apply once a served store is checked out: exit 0" "$RC" 0
+
+new_case
+timer_off claude-memory-sync.timer; touch "$H/stub/enable-fails"
+run_level --apply
+has   "memory: a memory timer that cannot be armed is ✗ with what systemd reads back" "$OUT" \
+    "${MEMORY_DRIFT}arming claude-memory-sync.timer failed: is-enabled=disabled, is-active=inactive"
+
+new_case
+rm "$H/.config/host-sync/armed"; timer_off claude-memory-sync.timer
+run_level --check
+has   "memory: on a host that is not armed, a memory timer not armed is information" "$OUT" \
+    "${MEMORY_INFO}claude-memory-sync.timer not armed, nor is this host (see the timer row); host-sync arms it with the host"
+check "memory: on a host that is not armed, a memory timer not armed is information: exit 0" "$RC" 0
+
+new_case
+: >"$H/.config/host-sync/disarmed"; timer_off claude-memory-sync.timer
+reset_calls; run_level --apply
+check "memory: on a host disarmed by hand, --apply leaves the memory timer alone" \
+    "$(memory_timer_arming_calls)/$(grep -c -F "${MEMORY_INFO}claude-memory-sync.timer not armed, nor is this host" <<<"$OUT")" "/1"
+
+new_case
+rm -rf "${H:?}/$STORES_REL/alpha"; git clone -q "file://$GH/example-org/mem-beta.git" "$H/$STORES_REL/beta"
+timer_off claude-memory-sync.timer
+run_level --check
+check "memory: no served store checked out → no memory timer row (an unserved one does not count)" "$(memory_timer_rows)" 0
+
+# Each memory fix one gate from its apply path: a served store to clone (gamma), links to fix, and
+# the memory timer not armed while alpha is checked out.
+new_case
+edit_json .dotfiles-local/claude/memory-stores.json \
+    ".stores.gamma = {remote: \"file://$GH/example-org/mem-gamma.git\", tenants: [\"quantivly\"]}"
+echo 1 >"$H/stub/link-rc"; echo 'claude-memory-link: 2 linked, 1 to fix, 0 unmapped, 0 without a store' >"$H/stub/link-summary"
+timer_off claude-memory-sync.timer
+before="$(snapshot)"
+run_level --check
+check "memory: --check clones nothing and arms nothing: the three ✗ rows" \
+    "$(grep -c -F -e "${MEMORY_DRIFT}store gamma not checked out" -e "${MEMORY_DRIFT}1 memory link(s) to fix" \
+        -e "${MEMORY_DRIFT}claude-memory-sync.timer not armed" <<<"$OUT")" 3
+check "memory: --check clones nothing and arms nothing: nothing mutating, no clone" "$(mutations)/$(clone_calls)" "0/0"
+check "memory: --check clones nothing and arms nothing: no file changes" "$(diff <(echo "$before") <(snapshot) | head -n 5)" ""
+
+echo "== retire: stale skills, hooks and agents under ~/.claude"
+# Stale is structural (shared-configuration design, H5): an entry that is not a link into one of the
+# two checkouts, not generated and not Claude Code's own. --apply moves it aside, only on a host with
+# a profile marker, and never deletes it. The fixture's declared, generated and own entries are
+# new_case's; add_stale_entries adds the four stale ones.
+RETIRE_OK="$(printf '✓ %-14s ' retire)"; RETIRE_DRIFT="$(printf '✗ %-14s ' retire)"; RETIRE_OPER="$(printf '⚠ %-14s ' retire)"
+NOTHING_STALE_ROW="${RETIRE_OK}no stale skill, hook or agent under ~/.claude"
+RETIRED_REL=".local/state/host-sync/retired"
+UTC_STAMP_RE='^[0-9]{8}T[0-9]{6}Z$'
+# Whether each stale entry is still under ~/.claude, in STALE_ENTRIES' order.
+stale_entries_left() {
+    local entry states=()
+    for entry in "${STALE_ENTRIES[@]}"; do states+=("$(present "$H/.claude/$entry")"); done
+    echo "${states[*]}"
+}
+retired_stamps() { ls -A "$H/$RETIRED_REL" 2>/dev/null; }   # the stamp directories, one per line
+# Every <kind>/<name> under the first stamp directory, sorted and space-joined; empty when there is none.
+retired_entries() {
+    local first_stamp
+    first_stamp="$(retired_stamps | head -n 1)"
+    [[ -n "$first_stamp" ]] || return 0
+    (cd "$H/$RETIRED_REL/$first_stamp" && find . -mindepth 2 -maxdepth 2 | sed 's#^\./##' | LC_ALL=C sort | paste -sd' ')
+}
+# Every path under retired/ with its size, mode and mtime: snapshot() leaves the whole state dir out.
+retired_tree() { find "$H/$RETIRED_REL" -printf '%p %s %m %T@\n' 2>/dev/null | sort; }
+# snapshot() less the stale entries and the lines of the kind directories that held them (a move
+# changes their mtime): what --apply must leave exactly as it was. $@ = further paths to leave out.
+snapshot_without_stale() {
+    local entry leave_out=()
+    for entry in "${STALE_ENTRIES[@]}"; do leave_out+=("$H/.claude/$entry"); done
+    snapshot "${leave_out[@]}" "$@" | grep -v -F -e "$H/.claude/skills " -e "$H/.claude/hooks " -e "$H/.claude/agents "
+}
+
+new_case
+run_level --check
+has   "retire: nothing stale → ✓" "$OUT" "$NOTHING_STALE_ROW"
+check "retire: printed after the memory rows and before the slice row" \
+    "$(( $(line_of "${MEMORY_OK}claude-memory-sync.timer") < $(line_of "$RETIRE_OK") && \
+        $(line_of "$RETIRE_OK") < $(line_of "agents.slice MemoryHigh") ))" 1
+run_level --apply
+check "retire: nothing stale → ✓: --apply moves nothing and makes no retired directory" \
+    "$(grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")/$(present "$H/$RETIRED_REL")" "1/gone"
+
+new_case
+add_stale_entries
+run_level --check
+has   "retire: stale entries are counted and named in --check" "$OUT" \
+    "${RETIRE_DRIFT}4 stale entries under ~/.claude: $STALE_ENTRIES_SHOWN; --apply moves them to ~/$RETIRED_REL/<stamp>/"
+check "retire: stale entries are counted and named in --check: nothing moved, exit 1" \
+    "$(stale_entries_left)/$(present "$H/$RETIRED_REL")/$RC" "present present present present/gone/1"
+mapfile -t LEAVE_OUT < <(leave_out_for_second_apply)
+# A first --apply also writes each checkout's FETCH_HEAD, which changes its .git directory's mtime.
+before="$(snapshot_without_stale "${LEAVE_OUT[@]}" "$H/.dotfiles/.git" "$H/.dotfiles-local/.git")"
+run_level --apply
+STAMP="$(retired_stamps)"
+check "retire: --apply moves exactly the stale ones, keeping their paths: one stamp directory, in UTC" \
+    "$(grep -cE "$UTC_STAMP_RE" <<<"$STAMP")/$(grep -c . <<<"$STAMP")" "1/1"
+check "retire: --apply moves exactly the stale ones, keeping their paths: <kind>/<name> under the stamp" \
+    "$(retired_entries)" "agents/x.md hooks/__pycache__ hooks/gone.sh skills/review-pr"
+check "retire: --apply moves exactly the stale ones, keeping their paths: none left under ~/.claude, exit 0" \
+    "$(stale_entries_left)/$RC" "gone gone gone gone/0"
+check "retire: --apply moves exactly the stale ones: the declared, generated and own entries are untouched" \
+    "$(diff <(echo "$before") <(snapshot_without_stale "${LEAVE_OUT[@]}" "$H/.dotfiles/.git" "$H/.dotfiles-local/.git") | head -n 5)" ""
+has   "retire: --apply moves exactly the stale ones: ✓ names the count, the directory and the entries" "$OUT" \
+    "${RETIRE_OK}4 entries moved to ~/$RETIRED_REL/$STAMP/ ($STALE_ENTRIES_SHOWN)"
+check "retire: nothing is deleted: the agent file, the dangling link, the skill copy and the cache, as they were" \
+    "$(cat "$H/$RETIRED_REL/$STAMP/agents/x.md" 2>/dev/null)|$(readlink "$H/$RETIRED_REL/$STAMP/hooks/gone.sh")|$(
+        cat "$H/$RETIRED_REL/$STAMP/skills/review-pr/SKILL.md" 2>/dev/null)|$(ls -A "$H/$RETIRED_REL/$STAMP/hooks/__pycache__" 2>/dev/null)" \
+    "$STALE_AGENT_TEXT|$H/.dotfiles/claude/hooks/missing.sh|$STALE_SKILL_TEXT|$STALE_CACHE_FILE"
+reset_calls; before="$(snapshot "${LEAVE_OUT[@]}")"; retired_before="$(retired_tree)"
+run_level --apply
+retired_after="$(retired_tree)"
+check "retire: a second --apply is clean: nothing mutating, no file changes, retired/ as it was, ✓" \
+    "$(mutations)|$(diff <(echo "$before") <(snapshot "${LEAVE_OUT[@]}") | head -n 5)|$(
+        [[ -n "$retired_before" && "$retired_after" == "$retired_before" ]] && echo unchanged)|$(
+        grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")" "0||unchanged|1"
+
+# ~/.dotfiles a link to the clone: the rabota link resolves through it, so only a checkout that is
+# itself resolved before the prefix test still counts the link as declared.
+new_case
+mv "$H/.dotfiles" "$C/dotfiles-clone"; ln -s "$C/dotfiles-clone" "$H/.dotfiles"
+run_level --apply
+check "retire: a checkout reached through a symlink still counts as declared: the rabota link stays, ✓" \
+    "$(readlink "$H/.claude/skills/rabota")|$(grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")" \
+    "$H/.dotfiles/claude/skills/rabota|1"
+
+new_case
+add_stale_entries; rm "$H/.config/claude-host-profile"
+run_level --apply
+has   "retire: without a profile marker, --apply moves nothing and ⚠ says why" "$OUT" \
+    "${RETIRE_OPER}4 stale entries under ~/.claude ($STALE_ENTRIES_SHOWN); no host profile here, so --apply leaves them"
+check "retire: without a profile marker, --apply moves nothing: every stale entry in place, no retired directory" \
+    "$(stale_entries_left)/$(present "$H/$RETIRED_REL")" "present present present present/gone"
+
+# A link to a path that exists in neither checkout. ~/.dotfiles-old has ~/.dotfiles as a string
+# prefix, so only a prefix test that ends in / tells the two apart.
+new_case
+mkdir -p "$H/.dotfiles-old/claude/skills/old-skill"
+ln -s "$H/.dotfiles-old/claude/skills/old-skill" "$H/.claude/skills/old-skill"
+run_level --check
+has   "retire: a link to an existing path outside both checkouts is stale" "$OUT" \
+    "${RETIRE_DRIFT}1 stale entry under ~/.claude: skills/old-skill; --apply moves it to ~/$RETIRED_REL/<stamp>/"
+
+# Only skills/ has dot-entries of Claude Code's own; one under hooks/ is walked, and stale.
+new_case
+mkdir -p "$H/.claude/hooks/.old-cache"
+run_level --check
+has   "retire: a dot-entry under hooks is walked, and stale" "$OUT" \
+    "${RETIRE_DRIFT}1 stale entry under ~/.claude: hooks/.old-cache; --apply moves it to ~/$RETIRED_REL/<stamp>/"
+
+# retired/ is a regular file, so no stamp directory can be made under it, whoever runs the table.
+new_case
+mkdir -p "$H/.claude/agents"; echo "$STALE_AGENT_TEXT" >"$H/.claude/agents/x.md"; : >"$H/$RETIRED_REL"
+run_level --apply
+has   "retire: a move that fails is ✗ naming the entry" "$OUT" "${RETIRE_DRIFT}could not move ~/.claude/agents/x.md to ~/$RETIRED_REL/"
+check "retire: a move that fails leaves the entry in place, prints no ✓, and --apply exits 1" \
+    "$(cat "$H/.claude/agents/x.md")|$(grep -c -F "$RETIRE_OK" <<<"$OUT")|$RC" "$STALE_AGENT_TEXT|0|1"
+
+# A whole kind directory linked elsewhere (here, outside both checkouts): what is in it is not
+# ~/.claude's to move, and a link into a checkout would have --apply move tracked files out of it.
+new_case
+mkdir -p "$C/shared-agents"; echo "$STALE_AGENT_TEXT" >"$C/shared-agents/y.md"; ln -s "$C/shared-agents" "$H/.claude/agents"
+run_level --apply
+has   "retire: a kind directory that is itself a link is a person's step" "$OUT" \
+    "${RETIRE_OPER}~/.claude/agents is a link, not a directory; its entries are not judged"
+check "retire: a kind directory that is itself a link is never walked: its entry stays, nothing retired, no ✓" \
+    "$(cat "$C/shared-agents/y.md")|$(present "$H/$RETIRED_REL")|$(grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")" "$STALE_AGENT_TEXT|gone|0"
+
+# ~/.claude itself a link into a checkout: no kind directory is a link, yet each resolves inside the
+# checkout, where a move would take files out of it.
+new_case
+add_stale_entries
+mv "$H/.claude" "$H/.dotfiles/claude-home"; ln -s "$H/.dotfiles/claude-home" "$H/.claude"
+run_level --apply
+check "retire: kind directories that resolve into a checkout are not walked: a ⚠ for each kind, nothing moved" \
+    "$(grep -c -F -e "${RETIRE_OPER}~/.claude/skills resolves to" -e "${RETIRE_OPER}~/.claude/hooks resolves to" \
+        -e "${RETIRE_OPER}~/.claude/agents resolves to" <<<"$OUT")/$(stale_entries_left)/$(present "$H/$RETIRED_REL")" \
+    "3/present present present present/gone"
+
+# A kind directory that is a regular file: nothing in it can be judged, so no ✓ says nothing is stale.
+new_case
+rm -rf "${H:?}/.claude/hooks"; echo 'not a directory' >"$H/.claude/hooks"
+run_level --apply
+check "retire: a kind directory that is a regular file is ⚠, not ✓: the ⚠, no ✓, the file as it was, nothing retired" \
+    "$(grep -c -F "${RETIRE_OPER}~/.claude/hooks could not be read as a directory; its entries are not judged" <<<"$OUT")/$(
+        grep -c -F "$NOTHING_STALE_ROW" <<<"$OUT")/$(cat "$H/.claude/hooks")/$(present "$H/$RETIRED_REL")" \
+    "1/0/not a directory/gone"
 
 echo "== timer"
 # The timer row's glyph and area, as row() prints them, so a needle also pins ✓ against ✗ and ·.
@@ -1846,7 +3011,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=441
+EXPECTED_ROWS=649
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

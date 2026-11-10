@@ -472,6 +472,20 @@ jobs:
       - name: Run the claude-memory-sync state table
         run: ./scripts/test-claude-memory-sync.sh
 
+  check-links-test:
+    name: Check Links State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Bash only: every row builds its own checkout and HOME under mktemp -d,
+      # reads no network, and asserts its own row total. No apt step is needed.
+      - name: Run the check-links state table
+        run: ./scripts/test-check-links.sh
+
   timer-health-test:
     name: Repo-Owned Timer Health State Table
     runs-on: ubuntu-latest

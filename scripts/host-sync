@@ -4,7 +4,9 @@
 # ================
 #
 # Keep dev's tooling level with the laptop's: dotfiles, Claude Code, herdr and
-# herdr-draft, the work tenant's Claude plugins, and the ~/quantivly clones.
+# herdr-draft and the skills generated from them, the Claude plugins its settings
+# declare, the ~/quantivly clones, and the Claude Code memory stores, their links
+# and their sync.
 #
 # WHY. dev (the team EC2) sat unused from 2026-09-28, partly because nothing kept
 # it current: on 2026-10-12 it was 73 dotfiles commits and 24 Claude Code
@@ -64,6 +66,18 @@
 #   - write agents.slice. Its cap is set on dev with `systemctl --user
 #     set-property` (drop-ins under ~/.config/systemd/user.control/), and the
 #     effective values are shown as information.
+#   - add a source a checkout's install.conf.yaml declares but does not carry.
+#     Every other link out of place is drift that repo's ./install fixes.
+#   - enable or disable a Claude plugin, or install one whose marketplace no settings
+#     fragment declares with a source. settings.json declares the plugins (H4) and the render owns
+#     enablement; host-sync installs what it sets true, and nothing else.
+#   - remove a memory store checked out here that serves none of the profile's tenants,
+#     clone a store whose remote is not a repository under the GitHub base, or upgrade
+#     a git older than the memory sync needs (2.40). It names each.
+#   - delete anything under ~/.claude. A stale skill, hook or agent is moved to
+#     ~/.local/state/host-sync/retired/<UTC stamp>/, and only on a host with a profile
+#     marker; a skills, hooks or agents directory that is itself a link, resolves into a
+#     checkout or cannot be read is not walked.
 #
 # THE HOST PROFILE (shared-configuration design, H1). ~/.config/claude-host-profile, the
 # settings renderer's marker, names this host's profile, and the private overlay's
@@ -72,7 +86,14 @@
 # overlay, and is then kept on origin/main exactly as ~/.dotfiles is. Without it, no overlay row
 # runs. The ~/quantivly clones are skipped only when the tenants are known and leave out the work
 # tenant: a host whose overlay is not cloned yet goes on fetching them. Where clauth manages the
-# Claude accounts (~/.clauth), the long-lived-token rows do not apply (H9).
+# Claude accounts (~/.clauth), the long-lived-token rows do not apply (H9). With a profile,
+# settings.json is the renderer's (scripts/claude-settings-render.sh); on every host, the links both
+# checkouts declare are checked by scripts/check-links.sh (H8). Where the overlay carries the memory
+# store table, the stores that serve the profile's tenants are cloned and the memory sync's timer is
+# armed with the host (H6), and the memory links and sync are read through their own scripts. On
+# every host, an entry under ~/.claude's skills, hooks or agents that is neither a link into one of
+# the two checkouts, nor generated, nor Claude Code's own is reported as stale; with a profile,
+# --apply moves it aside (H5).
 #
 # Usage (the controlling host, usually the laptop):
 #   host-sync --host <ssh alias> [--check]     report drift on <host>; changes nothing (default)
@@ -92,7 +113,8 @@
 # HOST_SYNC_HERDR_RELEASES, HOST_SYNC_DOTFILES_REMOTE, HOST_SYNC_DOTFILES_LOCAL_REMOTE (the
 # laptop's ls-remote of the overlay), HOST_SYNC_DOTFILES_LOCAL_REPO (its owner/repo, cloned from
 # HOST_SYNC_GITHUB_BASE), CLAUDE_SETTINGS_RENDER_MARKER (the renderer's own name for the profile
-# marker), HOST_SYNC_NO_SCOPE=1 (skip the systemd-run wrapper), HOST_SYNC_SSH (the ssh command),
+# marker), CLAUDE_MEMORY_STORES_ROOT and CLAUDE_MEMORY_CONFIG (the memory scripts' own names for where
+# the stores are checked out and for their table), HOST_SYNC_NO_SCOPE=1 (skip the systemd-run wrapper), HOST_SYNC_SSH (the ssh command),
 # HOST_SYNC_PROC (/proc), HOST_SYNC_TOKEN_WARN_D.
 
 set -uo pipefail
@@ -105,36 +127,17 @@ DRAFT_REPO="ZviBaratz/herdr-draft"
 # The private overlay: owner/repo, cloned from GITHUB_BASE with the host's own git credentials.
 DOTFILES_LOCAL_REPO="${HOST_SYNC_DOTFILES_LOCAL_REPO:-ZviBaratz/dotfiles-local}"
 DRAFT_ID="zvibaratz.draft"
+# herdr-draft's binary, relative to the plugin root this host's `herdr plugin list` reports.
+DRAFT_BINARY_RELATIVE="bin/herdr-draft"
 
-# `claude plugin marketplace add` sources, by marketplace name. The dotfiles one is the
-# checkout's own directory marketplace (docs/CLAUDE_SETUP.md, "Linear: one API key").
-MARKETPLACES=(
-    "claude-plugins-official=anthropics/claude-plugins-official"
-    "quantivly=quantivly/claude-plugins"
-    "dotfiles=@DOTFILES@/claude/plugins"
-)
-# Enabled on the laptop for work, and wanted on dev.
-PLUGINS_ON=(
-    quantivly-conventions@quantivly
-    slack@claude-plugins-official
-    notion@claude-plugins-official
-    linear-key@dotfiles
-)
-# Gone from their marketplaces, which replaced them with plugins in PLUGINS_ON:
-# quantivly-conventions superseded the first two, and the official marketplace
-# renamed Notion to notion. A stale enabled entry keeps loading the cached copy,
-# which means outdated conventions skills in every session. They are set to false
-# in settings.json directly, because the CLI cannot address a plugin that its
-# marketplace no longer lists.
-PLUGINS_SUPERSEDED=(
-    quantivly-linear@quantivly
-    quantivly-pr-conventions@quantivly
-    Notion@claude-plugins-official
-)
-# Must be OFF once linear-key is on: two plugins at one URL are deduplicated, and the
-# first one in enabledPlugins wins, so the official plugin would shadow linear-key
-# (docs/CLAUDE_SETUP.md). Disabled only after linear-key is enabled, never before.
-LINEAR_OFFICIAL="linear@claude-plugins-official"
+# The plugin declaration is the live settings.json (shared-configuration design, H4), rendered
+# from the fragments on a host with a profile: its enabledPlugins entries that are true, and its
+# extraKnownMarketplaces, with the official marketplace implicit (name=`marketplace add` source).
+# The render owns enablement, so host-sync adds and refreshes marketplaces and installs plugins,
+# and never enables or disables one.
+OFFICIAL_MARKETPLACE="claude-plugins-official=anthropics/claude-plugins-official"
+# The one plugin host-sync updates: the checkout's own directory marketplace carries its version
+# (docs/CLAUDE_SETUP.md, "Linear: one API key").
 LINEAR_KEY="linear-key@dotfiles"
 
 GITHUB_BASE="${HOST_SYNC_GITHUB_BASE:-https://github.com}"
@@ -174,8 +177,68 @@ PROFILE_MARKER="${CLAUDE_SETTINGS_RENDER_MARKER:-$HOME/.config/claude-host-profi
 PROFILE_NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 # Where clauth manages the Claude accounts (claude-oauth-store and zshrc.company read the same dir).
 CLAUTH_DIR="$HOME/.clauth"
+# The skills generated from this host's own binaries, never tracked (shared-configuration design,
+# D6): herdr's is what `herdr --skill` prints, spawn's what herdr-draft's `skill` prints, and the
+# spawn skill bakes in that binary's absolute path, so neither can be copied from another host.
+HERDR_SKILL_FILE="$HOME/.claude/skills/herdr/SKILL.md"
+SPAWN_SKILL_FILE="$HOME/.claude/skills/spawn/SKILL.md"
+# How long a skill generator (`herdr --skill`, `herdr-draft skill`) may run before its row says so.
+SKILL_GENERATOR_TIMEOUT_SECONDS=60
+# What belongs under ~/.claude's skills, hooks and agents (shared-configuration design, H5), named
+# <kind>/<name>: the entries generated on this host from its own binaries, and Claude Code's own, as
+# glob patterns (skills/synced, and any dot-entry under skills/). Anything else that is not a link
+# into one of the two checkouts is stale, and --apply moves it under the state dir's retired/, into
+# a directory named for the UTC second of the run.
+CLAUDE_USER_DIR="$HOME/.claude"
+CLAUDE_ENTRY_KINDS=(skills hooks agents)
+GENERATED_CLAUDE_ENTRIES=(skills/herdr skills/spawn hooks/herdr-agent-state.sh)
+CLAUDE_OWN_ENTRIES=(skills/synced 'skills/.*')
+RETIRED_DIR_NAME="retired"
+RETIRED_STAMP_FORMAT='+%Y%m%dT%H%M%SZ'
 GIT_NET_TIMEOUT_SECONDS=300
 CLONE_TIMEOUT_SECONDS=300
+# How long a sibling script (the settings renderer, the link checker, the memory scripts' --check and
+# --status) may run before its row says it could not run (exit 124).
+SIBLING_TIMEOUT_SECONDS=120
+# The memory layer (shared-configuration design, D7, H6, H7): the store table the overlay carries and
+# where the stores are checked out (each through the memory scripts' own override, so one variable
+# moves all three scripts, and host-sync never judges a table the siblings do not read), the git the
+# memory sync needs (--attr-source), the sync's timer, and how long the link script's --apply may run,
+# merging real memory directories into the stores, before its row says so.
+STORE_TABLE_RELATIVE="claude/memory-stores.json"
+MEMORY_STORE_TABLE="${CLAUDE_MEMORY_CONFIG:-$DOTFILES_LOCAL/$STORE_TABLE_RELATIVE}"
+MEMORY_STORES_ROOT="${CLAUDE_MEMORY_STORES_ROOT:-$HOME/.local/share/claude-memory}"
+MIN_GIT_VERSION_FOR_MEMORY_SYNC="2.40"
+MEMORY_TIMER_UNIT="claude-memory-sync.timer"
+LINK_APPLY_TIMEOUT_SECONDS=300
+# The store table host-sync can act on: every store named, with a remote and a list of tenant names.
+# A store's tenants travel as one field joined by the unit separator, never by a comma: a name is
+# free text in the table, so a comma inside one would split it into two tenants.
+STORE_TABLE_SHAPE_FILTER='.stores | type == "object" and all(to_entries[]; (.key | length > 0)
+    and (.value.remote | type == "string" and length > 0)
+    and (.value.tenants | type == "array" and all(type == "string")))'
+# claude-memory-link.sh --check's last line, its four counts captured.
+TENANT_SEPARATOR=$'\x1f'
+MEMORY_LINK_SUMMARY_RE='^claude-memory-link: ([0-9]+) linked, ([0-9]+) to fix, ([0-9]+) unmapped, ([0-9]+) without a store$'
+# scripts/check-links.sh's states, by who acts on them: the ones in place, the drift the repo's
+# ./install fixes, and the two only a person can fix: a source the manifest names that is not in
+# the checkout, and a link that points elsewhere. dotbot's `backup: true` (install.conf.yaml's link
+# default) answers "nothing to back up" for any existing link, which skips the relink, and its link
+# step then refuses one pointing elsewhere ("Incorrect link", exit 1;
+# dotbot/src/dotbot/plugins/link.py, _backup and _link), so ./install never fixes it. Any other
+# first field on its output is not an entry.
+LINK_STATES_IN_PLACE=(ok conditional-absent)
+LINK_STATES_TO_FIX=(missing regular-identical regular-differs)
+LINK_STATES_FOR_A_PERSON=(source-missing wrong-target)
+LINK_STATE_WRONG_TARGET="wrong-target"
+LINK_POINTING_ELSEWHERE_REMEDY="dotbot's backup rule will not replace a link, so point it right by hand (rm it, then ./install)"
+LINK_DESTINATION_UNREADABLE="<unreadable>"
+# The one whose content is not the repo's: ./install backs it up, and the row names that backup.
+LINK_STATE_REGULAR_DIFFERS="regular-differs"
+# dotbot's name for the backup of a regular file it replaces with a link (install.conf.yaml's
+# `backup: true`): <path>.dotbot-backup.<YYYYMMDD-HHMMSS>, local time
+# (dotbot/src/dotbot/plugins/link.py, _backup). The names sort in the order they were made.
+DOTBOT_BACKUP_INFIX=".dotbot-backup."
 SAFE_DIR_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 HOST_ALIAS_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'   # an ssh alias, never an option or a path
 SAFE_REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
@@ -202,6 +265,11 @@ repo_of_url() {
 
 N_DRIFT=0
 N_OPER=0
+# What sync_checkout did with each checkout THIS run, keyed by its row area (dotfiles |
+# dotfiles-local), so the links row neither runs ./install a second time nor runs it on a checkout
+# that was left alone: left-alone (a ⚠ row: not a checkout, off main, ahead, diverged, overlapping
+# local edits), installed or install-failed (its ./install ran; CHECKOUT_INSTALL_LOG holds the log).
+declare -A CHECKOUT_THIS_RUN=() CHECKOUT_INSTALL_LOG=()
 row() {   # $1 = ok|drift|oper|info, $2 = area, $3 = message
     local g
     case "$1" in
@@ -286,9 +354,11 @@ clone_overlay() {
 
 here_dotfiles() { sync_checkout dotfiles "$DOTFILES" installed-head; }
 
-# The overlay is managed only on a host with a profile marker (H1), usable or not, once it exists.
+# The overlay is managed only on a host with a profile marker (H1), usable or not, once it exists:
+# its checkout row and its links row alike.
+overlay_is_managed() { [[ -n "$PROFILE" || -n "$PROFILE_FAULT" ]] && [[ -d "$DOTFILES_LOCAL" ]]; }
 here_dotfiles_local() {
-    [[ -n "$PROFILE" || -n "$PROFILE_FAULT" ]] && [[ -d "$DOTFILES_LOCAL" ]] || return 0
+    overlay_is_managed || return 0
     sync_checkout dotfiles-local "$DOTFILES_LOCAL" installed-head-dotfiles-local
 }
 
@@ -315,12 +385,12 @@ sync_checkout() {
     local laptop_sha="" laptop_behind="" fix="move it aside, and --apply clones it again"
     [[ "$label" == dotfiles ]] && fix="bootstrap it (scripts/server-bootstrap.sh)"
     if ! git -C "$d" rev-parse --git-dir >/dev/null 2>&1; then
-        row oper "$label" "$d is not a git checkout; $fix"
+        leave_checkout_alone "$label" "$d is not a git checkout; $fix"
         return
     fi
     branch="$(git -C "$d" symbolic-ref --quiet --short HEAD 2>/dev/null)" || branch="(detached)"
     if [[ "$branch" != main ]]; then
-        row oper "$label" "on '$branch', not main; host-sync only moves main, so it has not touched it"
+        leave_checkout_alone "$label" "on '$branch', not main; host-sync only moves main, so it has not touched it"
         return
     fi
     case "$label" in
@@ -350,11 +420,11 @@ sync_checkout() {
             return
         fi
         if git -C "$d" merge-base --is-ancestor "$target" "$head"; then
-            row oper "$label" "$(short "$head") is AHEAD of $src: unpushed commits on this host, not touched"
+            leave_checkout_alone "$label" "$(short "$head") is AHEAD of $src: unpushed commits on this host, not touched"
             return
         fi
         if ! git -C "$d" merge-base --is-ancestor "$head" "$target"; then
-            row oper "$label" "diverged from $src; not fast-forwardable, resolve by hand"
+            leave_checkout_alone "$label" "diverged from $src; not fast-forwardable, resolve by hand"
             return
         fi
         n="$(git -C "$d" rev-list --count "$head..$target")"
@@ -369,7 +439,7 @@ sync_checkout() {
             <({ git -C "$d" diff --name-only HEAD; git -C "$d" ls-files --others --exclude-standard; } | sort -u) \
             <(git -C "$d" diff --name-only "$head" "$target" | sort -u) | tr '\n' ' ')"
         if [[ -n "$overlap" ]]; then
-            row oper "$label" "local edits to ${overlap% } that origin/main also changes; not merged"
+            leave_checkout_alone "$label" "local edits to ${overlap% } that origin/main also changes; not merged"
             return
         fi
         if ! git -C "$d" merge --ff-only --quiet "$target" </dev/null >/dev/null 2>&1; then
@@ -379,6 +449,10 @@ sync_checkout() {
         head="$target"
     fi
     install_checkout "$label" "$d" "$STATE/$stamp_name" "$old" "$head" "$n"
+}
+leave_checkout_alone() {   # $1 = the area, $2 = why; the ⚠ row, and the record the links row reads
+    CHECKOUT_THIS_RUN[$1]="left-alone"
+    row oper "$1" "$2"
 }
 
 # The install half of sync_checkout. ./install is part of deploying (CLAUDE.md, "The checkout IS
@@ -400,10 +474,13 @@ install_checkout() {
         row drift "$label" "main at $(short "$head"), but ./install has not run for it"
         return
     fi
+    CHECKOUT_INSTALL_LOG[$label]="$STATE/$log_name"
     if (cd "$d" && bash ./install) >"$STATE/$log_name" 2>&1 </dev/null; then
+        CHECKOUT_THIS_RUN[$label]="installed"
         printf '%s\n' "$head" >"$stamp"
         row ok "$label" "$level_text"
     else
+        CHECKOUT_THIS_RUN[$label]="install-failed"
         row drift "$label" "./install failed at $(short "$head"); log: ~/.local/state/host-sync/$log_name"
         tail -n 5 "$STATE/$log_name" | sed 's/^/        /'
     fi
@@ -530,6 +607,35 @@ disarmed_marker_shown() {
 # A path under $HOME as ~/…, as the rows print it; any other path as it is.
 tilde_path() {
     if [[ "$1" == "$HOME"/* ]]; then printf '~%s' "${1#"$HOME"}"; else printf '%s' "$1"; fi
+}
+# A manifest's target as a path: a leading ~/, $HOME/ or ${HOME}/ expanded, as dotbot expands it.
+expand_home_path() {
+    local path="$1" prefix
+    # shellcheck disable=SC2016,SC2088  # the manifest's literal ~ and $HOME, matched as text, deliberately
+    local home_prefixes=('~/' '$HOME/' '${HOME}/')
+    for prefix in "${home_prefixes[@]}"; do
+        if [[ "$path" == "$prefix"* ]]; then
+            printf '%s/%s' "$HOME" "${path#"$prefix"}"
+            return
+        fi
+    done
+    printf '%s' "$path"
+}
+# stdin to stdout through the checkout's redactor, or unchanged on a checkout that predates it.
+redact_stream() {
+    local redactor="$DOTFILES/scripts/redact-secrets.sh"
+    if [[ -x "$redactor" ]]; then "$redactor"; else cat; fi
+}
+list_has() {   # $1 = a word, $2… = a list; 0 when the list holds the word
+    local word="$1" item
+    shift
+    for item in "$@"; do [[ "$item" == "$word" ]] && return 0; done
+    return 1
+}
+join_comma() {   # $@ = items, printed as "a, b, c"
+    local joined
+    joined="$(printf '%s, ' "$@")"
+    printf '%s' "${joined%, }"
 }
 
 # host-sync.timer's is-enabled and is-active, into TIMER_ENABLED and TIMER_ACTIVE.
@@ -726,6 +832,7 @@ here_auth() {
 }
 
 server_version() { "$HERDR" status server 2>/dev/null </dev/null | awk '$1=="version:"{print $2; exit}'; }
+herdr_binary_version() { "$HERDR" --version 2>/dev/null </dev/null | awk 'NR==1{print $2}'; }
 
 # herdr itself, at the laptop's exact version. herdr-draft's `--machine` needs the remote side
 # on 0.9.1 or later: a 0.9.0 dev answers "remote Herdr does not support machine API
@@ -808,7 +915,7 @@ here_agent() {
 here_herdr() {
     local bin srv target="$ARG_HERDR" got arch agents="" panes="" busy="" i old
     [[ -x "$HERDR" ]] || return 0   # here_draft reports a missing herdr
-    bin="$("$HERDR" --version 2>/dev/null | awk 'NR==1{print $2}')"
+    bin="$(herdr_binary_version)"
     if [[ -z "$target" ]]; then
         row info herdr "$bin; version parity is laptop-driven (no laptop facts in this run)"
         return
@@ -869,12 +976,7 @@ here_herdr() {
             rm -f "$HERDR_TMP"; row drift herdr "could not keep a copy of the $bin binary; not installed"; return
         fi
         mv -f "$HERDR_TMP" "$HERDR"
-        # The agent skill is the CLI reference a lead Claude drives panes with; a stale copy
-        # teaches the wrong flags (HERDR_GUIDE.md, "Updating"). Never install an empty one.
-        if [[ -d "$HOME/.claude/skills/herdr" ]] && "$HERDR" --skill >"$STATE/SKILL.md.new" 2>/dev/null &&
-            [[ -s "$STATE/SKILL.md.new" ]]; then
-            mv -f "$STATE/SKILL.md.new" "$HOME/.claude/skills/herdr/SKILL.md"
-        fi
+        # The agent skill this binary prints is regenerated by here_skills, later in this run.
         row ok herdr "binary $bin → $target (previous kept in ~/.local/state/host-sync/herdr-$bin)"
         old="$bin"; bin="$target"
     fi
@@ -893,12 +995,15 @@ here_herdr() {
     fi
 }
 
-draft_state() {   # sets D_KIND D_COMMIT D_REF from the running herdr server; 1 if it cannot answer
+# Sets D_KIND D_COMMIT D_REF and D_ROOT (the plugin's checkout, `plugin_root`) from the running
+# herdr server; 1 if it cannot answer.
+draft_state() {
     local j
     j="$("$HERDR" plugin list --plugin "$DRAFT_ID" --json 2>/dev/null </dev/null)" || return 1
     D_KIND="$(jq -r '.result.plugins[0].source.kind // "absent"' <<<"$j" 2>/dev/null)" || return 1
     D_COMMIT="$(jq -r '.result.plugins[0].source.resolved_commit // empty' <<<"$j")"
     D_REF="$(jq -r '.result.plugins[0].source.requested_ref // empty' <<<"$j")"
+    D_ROOT="$(jq -r '.result.plugins[0].plugin_root // empty' <<<"$j")"
 }
 
 here_draft() {
@@ -953,6 +1058,381 @@ here_draft() {
     fi
 }
 
+# The generated skills (D6), each kept equal to what this host's binary prints: a stale herdr skill
+# teaches a lead Claude the wrong CLI flags (HERDR_GUIDE.md, "Updating"), and a spawn skill copied
+# from another host names a binary that is not here. Run after here_herdr and here_draft, so the
+# binaries are the ones this run left in place. A file is replaced by a rename, and never by the
+# output of a generator that failed or printed nothing; a SKILL.md that is a directory is a
+# person's step.
+here_skills() {
+    [[ -x "$HERDR" ]] || return 0   # here_draft reports a missing herdr
+    herdr_skill_row
+    spawn_skill_row
+}
+skill_is_directory_row() {   # $1 = the skill file; 0, with the ⚠ row, when it is a directory
+    [[ -d "$1" ]] || return 1
+    row oper skill "$(tilde_path "$1") is a directory; move it aside, and the next run regenerates it"
+}
+# `herdr --skill`'s raw output goes to a temp file under $TMPDIR, never beside the skill: a temp
+# file made and removed there would change the skill directory's mtime on every level run, and
+# --check would have to create the directory. The output is installed only after the command
+# exits 0 with something in it, by write_generated_file's rename.
+herdr_skill_row() {
+    local generated status
+    skill_is_directory_row "$HERDR_SKILL_FILE" && return
+    if ! generated="$(mktemp 2>/dev/null)"; then
+        row oper skill "could not make a temp file to judge $(tilde_path "$HERDR_SKILL_FILE") with"
+        return
+    fi
+    timeout "$SKILL_GENERATOR_TIMEOUT_SECONDS" "$HERDR" --skill >"$generated" 2>/dev/null </dev/null
+    status=$?
+    herdr_skill_verdict "$generated" "$status" "$(herdr_binary_version)"
+    rm -f "$generated"
+}
+# The herdr skill's row. $1 = the file `herdr --skill` printed into, $2 = its exit status (124 a
+# timeout), $3 = herdr's version.
+herdr_skill_verdict() {
+    local generated="$1" status="$2" version="$3" file="$HERDR_SKILL_FILE" shown
+    shown="$(tilde_path "$file")"
+    if (( status != 0 )); then
+        # Whatever it printed before failing may be a truncated skill: never installed.
+        row oper skill "\`herdr --skill\` could not run (exit $status, herdr $version); $shown left as it is"
+    elif [[ ! -s "$generated" ]]; then
+        # A broken herdr install exits 0 and prints nothing.
+        row oper skill "\`herdr --skill\` printed nothing (herdr $version); $shown left as it is"
+    elif cmp -s "$generated" "$file"; then
+        row ok skill "herdr skill current (herdr $version)"
+    elif [[ "$MODE" != apply ]]; then
+        if [[ -e "$file" ]]; then
+            row drift skill "herdr skill differs from \`herdr --skill\` (herdr $version)"
+        else
+            row drift skill "no herdr skill at $shown (herdr $version)"
+        fi
+    elif write_generated_file "$file" cat "$generated"; then
+        row ok skill "herdr skill regenerated (herdr $version)"
+    else
+        row drift skill "could not write $shown (herdr $version)"
+    fi
+}
+# The spawn skill. A missing file is judged here, never by herdr-draft: its `skill --check` exits 2
+# on a path that does not exist ("open …: no such file or directory", 0.2.0 on 2026-11-09), which
+# would make an absent skill a ⚠ that --apply never fixes. An existing file is judged by
+# `skill --check`: 0 current, 1 stale, 2 it cannot answer; any other status is a could-not-run.
+spawn_skill_row() {
+    local file="$SPAWN_SKILL_FILE" rc
+    find_draft_binary || return
+    skill_is_directory_row "$file" && return
+    if [[ ! -e "$file" ]]; then
+        if [[ "$MODE" == apply ]]; then
+            regenerate_spawn_skill "$file"
+        else
+            row drift skill "no spawn skill at $(tilde_path "$file")"
+        fi
+        return
+    fi
+    run_spawn_skill_check "$DRAFT_BINARY" "$file"; rc=$?
+    case "$rc" in
+        0) row ok skill "spawn skill current (from $(tilde_path "$DRAFT_BINARY"))" ;;
+        1) if [[ "$MODE" == apply ]]; then
+               regenerate_spawn_skill "$file"
+           else
+               row drift skill "spawn skill differs from \`herdr-draft skill\`"
+           fi ;;
+        *) spawn_check_failed_row "$rc" ;;
+    esac
+}
+# herdr-draft's binary, from the plugin root this host's herdr reports, into DRAFT_BINARY; 1, with
+# the · row that says why, when there is none to generate the spawn skill with.
+find_draft_binary() {
+    if ! draft_state; then
+        row info skill "spawn skill not judged: herdr gave no \`plugin list\` answer"
+        return 1
+    fi
+    if [[ "$D_KIND" == absent ]]; then
+        row info skill "no herdr-draft plugin on this host's herdr; no spawn skill to generate"
+        return 1
+    fi
+    if [[ "$D_ROOT" != /* ]]; then
+        row info skill "herdr reports no absolute plugin_root for herdr-draft; spawn skill not judged"
+        return 1
+    fi
+    DRAFT_BINARY="$D_ROOT/$DRAFT_BINARY_RELATIVE"
+    [[ -x "$DRAFT_BINARY" ]] && return 0
+    row info skill "no executable herdr-draft at $(tilde_path "$DRAFT_BINARY"); no spawn skill to generate"
+    return 1
+}
+# $1 = herdr-draft, $2 = the skill file. Returns `skill --check`'s status (124 a timeout), and sets
+# SPAWN_CHECK_ERROR_LINE to the first line of its stderr, redacted: the unredacted text never
+# reaches a variable.
+run_spawn_skill_check() {
+    SPAWN_CHECK_ERROR_LINE="$(timeout "$SKILL_GENERATOR_TIMEOUT_SECONDS" "$1" skill --check "$2" \
+        2>&1 >/dev/null </dev/null | redact_stream | sed -n 1p; exit "${PIPESTATUS[0]}")"
+}
+spawn_check_failed_row() {   # $1 = `skill --check`'s status
+    if [[ "$1" == 2 && -n "$SPAWN_CHECK_ERROR_LINE" ]]; then
+        row oper skill "herdr-draft skill --check could not answer: $SPAWN_CHECK_ERROR_LINE"
+    else
+        row oper skill "herdr-draft skill --check could not run (exit $1)"
+    fi
+}
+# --apply's half: what `herdr-draft skill` prints, renamed into place, then re-checked by it.
+regenerate_spawn_skill() {   # $1 = the skill file
+    local file="$1" rc
+    if ! write_generated_file "$file" timeout "$SKILL_GENERATOR_TIMEOUT_SECONDS" "$DRAFT_BINARY" skill; then
+        row drift skill "could not write $(tilde_path "$file") from \`herdr-draft skill\`"
+        return
+    fi
+    run_spawn_skill_check "$DRAFT_BINARY" "$file"; rc=$?
+    case "$rc" in
+        0) row ok skill "spawn skill regenerated with herdr-draft skill" ;;
+        1) row drift skill "spawn skill still differs from \`herdr-draft skill\` after regenerating it" ;;
+        *) spawn_check_failed_row "$rc" ;;
+    esac
+}
+# Run "${@:2}" with its stdout into a temp file beside $1, then rename that over $1, so a reader
+# never sees half a file. A command that fails or prints nothing leaves $1 as it was. 1 on any failure.
+write_generated_file() {   # $1 = the file, $2… = the command that prints its content
+    local file="$1" tmp
+    shift
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+    tmp="$(mktemp "$file.XXXXXX" 2>/dev/null)" || return 1
+    if "$@" >"$tmp" 2>/dev/null </dev/null && [[ -s "$tmp" ]] && mv -f "$tmp" "$file" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+# settings.json is the settings renderer's output (shared-configuration design, D2), on a host with
+# a profile marker only (H1). The renderer decides: --check exits 0 level, 1 drift, 2 could not run;
+# any other status (127 on a host whose checkout predates it, 124 a timeout) is a could-not-run too,
+# never ✓ or ✗. Its stdout, a diff of the declared keys, is never printed.
+here_settings() {
+    local rc
+    if [[ -z "$PROFILE" ]]; then
+        row info settings "no host profile; settings.json is not rendered here"
+        return 0
+    fi
+    run_renderer --check; rc=$?
+    case "$rc" in
+        0) row ok settings "settings.json renders to itself (profile $PROFILE)"; return 0 ;;
+        1) ;;
+        *) renderer_could_not_run_row "$rc"; return 0 ;;
+    esac
+    if [[ "$MODE" != apply ]]; then
+        row drift settings "settings.json differs from its render"
+        return 0
+    fi
+    run_renderer --apply; rc=$?
+    (( rc == 0 )) || { renderer_could_not_run_row "$rc"; return 0; }
+    run_renderer --check; rc=$?
+    case "$rc" in
+        0) row ok settings "rendered (profile $PROFILE)" ;;
+        1) row drift settings "settings.json still differs from its render after claude-settings-render --apply" ;;
+        *) renderer_could_not_run_row "$rc" ;;
+    esac
+}
+# $1 = --check | --apply. Returns the renderer's status, and sets RENDER_ERROR_LINE to the first
+# line of its stderr, redacted: the unredacted text never reaches a variable.
+run_renderer() {
+    RENDER_ERROR_LINE="$(timeout "$SIBLING_TIMEOUT_SECONDS" "$DOTFILES/scripts/claude-settings-render.sh" "$1" \
+        2>&1 >/dev/null </dev/null | redact_stream | sed -n 1p; exit "${PIPESTATUS[0]}")"
+}
+renderer_could_not_run_row() {   # $1 = the renderer's status
+    if [[ "$1" == 2 && -n "$RENDER_ERROR_LINE" ]]; then
+        row oper settings "claude-settings-render could not run: $RENDER_ERROR_LINE"
+    else
+        row oper settings "claude-settings-render could not run (exit $1)"
+    fi
+}
+
+# Every link each checkout's install.conf.yaml declares is in place (H8): ~/.dotfiles always, and
+# ~/.dotfiles-local under the overlay's own gate (overlay_is_managed): with no marker, host-sync
+# neither checks nor installs it. One checker for both, the public checkout's own: a host whose
+# checkout predates it gets ⚠ (exit 127). A link that is missing or a regular file is drift that
+# repo's ./install fixes, run once per repo per run; dotbot backs a regular file up beside it before
+# relinking (`backup: true`), and the row names that backup when its content was not the repo's. A
+# source the manifest names that is not in the checkout, and a link that points elsewhere (dotbot
+# refuses to replace it; see LINK_STATES_FOR_A_PERSON), are a person's step: ./install never runs
+# for them alone.
+here_links() {
+    links_of_checkout dotfiles "$DOTFILES"
+    overlay_is_managed && links_of_checkout dotfiles-local "$DOTFILES_LOCAL"
+    return 0
+}
+links_of_checkout() {   # $1 = the repo's name in the rows, $2 = its checkout
+    local label="$1" dir="$2" rc steps_for_a_person
+    run_link_checker "$dir"; rc=$?
+    if (( rc != 0 && rc != 1 )); then
+        links_could_not_run_row "$label" "$rc"
+        return
+    fi
+    classify_link_states
+    if unknown_link_fault "$rc"; then
+        unknown_link_fault_row "$label"
+        return
+    fi
+    report_link_steps_for_a_person "$label"
+    if (( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} == 0 )); then
+        steps_for_a_person=$(( ${#LINK_SOURCES_FOR_A_PERSON[@]} + ${#LINK_TARGETS_POINTING_ELSEWHERE[@]} ))
+        (( steps_for_a_person )) || row ok links "$label: $LINKS_DECLARED declared links in place"
+        return
+    fi
+    explain_links_left_this_run "$label" && return
+    if [[ "$MODE" == apply ]]; then
+        relink_checkout "$label" "$dir"
+    else
+        report_links_to_fix "$label"
+    fi
+}
+# $1 = a checkout. Returns check-links' status (127 when it is absent, 124 a timeout) and sets
+# LINK_CHECK_OUTPUT to what it printed: its --tsv lines, or on a could-not-run its reason.
+run_link_checker() {
+    local dir="$1"
+    LINK_CHECK_OUTPUT="$(timeout "$SIBLING_TIMEOUT_SECONDS" "$DOTFILES/scripts/check-links.sh" --tsv \
+        --root "$dir" --config "$dir/install.conf.yaml" </dev/null 2>&1)"
+}
+# The row for a checker that could not run, and its reason, redacted, on the line below it.
+links_could_not_run_row() {   # $1 = the repo's name, $2 = check-links' status
+    local reason
+    row oper links "$1: check-links could not run (exit $2)"
+    reason="$(printf '%s\n' "$LINK_CHECK_OUTPUT" | sed -n 1p | redact_stream)"
+    # check-links marks that line ✗; under a ⚠ row the glyph would read as a second, drifted row.
+    reason="${reason#✗ }"
+    [[ -n "$reason" ]] && printf '        %s\n' "$reason"
+    return 0
+}
+# Sort LINK_CHECK_OUTPUT's lines by who acts on them, into LINKS_DECLARED (every entry, the
+# conditional-absent included), LINK_TARGETS_TO_FIX and LINK_TARGETS_DIFFERING (targets, as ~/…),
+# LINK_SOURCES_FOR_A_PERSON (sources, as the manifest names them), and LINK_TARGETS_POINTING_ELSEWHERE
+# (targets, as ~/…) beside LINK_TARGETS_POINTED_TO (where each of those points, at the same index).
+classify_link_states() {
+    local state target source live shown
+    LINKS_DECLARED=0; LINK_TARGETS_TO_FIX=(); LINK_TARGETS_DIFFERING=(); LINK_SOURCES_FOR_A_PERSON=()
+    LINK_TARGETS_POINTING_ELSEWHERE=(); LINK_TARGETS_POINTED_TO=()
+    while IFS=$'\t' read -r state target source; do
+        live="$(expand_home_path "$target")"
+        shown="$(tilde_path "$live")"
+        if list_has "$state" "${LINK_STATES_TO_FIX[@]}"; then
+            if [[ "$state" == "$LINK_STATE_REGULAR_DIFFERS" ]]; then
+                LINK_TARGETS_DIFFERING+=("$shown")
+            else
+                LINK_TARGETS_TO_FIX+=("$shown")
+            fi
+        elif list_has "$state" "${LINK_STATES_FOR_A_PERSON[@]}"; then
+            if [[ "$state" == "$LINK_STATE_WRONG_TARGET" ]]; then
+                LINK_TARGETS_POINTING_ELSEWHERE+=("$shown")
+                LINK_TARGETS_POINTED_TO+=("$(link_destination_shown "$live")")
+            else
+                LINK_SOURCES_FOR_A_PERSON+=("$source")
+            fi
+        elif ! list_has "$state" "${LINK_STATES_IN_PLACE[@]}"; then
+            continue
+        fi
+        LINKS_DECLARED=$((LINKS_DECLARED + 1))
+    done <<<"$LINK_CHECK_OUTPUT"
+}
+# Where the link at $1 points, as the rows print it: the link's own text (what `ls -l` shows), as
+# ~/… under $HOME. A link gone or replaced since the checker read it prints a placeholder instead.
+link_destination_shown() {
+    local destination
+    if ! destination="$(readlink -- "$1" 2>/dev/null)"; then
+        printf '%s' "$LINK_DESTINATION_UNREADABLE"
+        return 0
+    fi
+    tilde_path "$destination"
+}
+# ⚠ rows for the link faults only a person can fix; ./install is never run for them. $1 = the repo's name.
+report_link_steps_for_a_person() {
+    local label="$1" source i
+    for source in ${LINK_SOURCES_FOR_A_PERSON[@]+"${LINK_SOURCES_FOR_A_PERSON[@]}"}; do
+        row oper links "$label: $source is declared but not in the checkout"
+    done
+    for (( i = 0; i < ${#LINK_TARGETS_POINTING_ELSEWHERE[@]}; i++ )); do
+        row oper links "$label: ${LINK_TARGETS_POINTING_ELSEWHERE[i]} links to ${LINK_TARGETS_POINTED_TO[i]}, not into the checkout; $LINK_POINTING_ELSEWHERE_REMEDY"
+    done
+}
+# check-links exited 1, yet no line names a fault this script knows (a state added to the checker
+# after it): never read as level. $1 = check-links' status.
+unknown_link_fault() {
+    local faults_to_fix=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
+    local steps_for_a_person=$(( ${#LINK_SOURCES_FOR_A_PERSON[@]} + ${#LINK_TARGETS_POINTING_ELSEWHERE[@]} ))
+    (( $1 == 1 && faults_to_fix + steps_for_a_person == 0 ))
+}
+unknown_link_fault_row() {   # $1 = the repo's name
+    row oper links "$1: check-links reports a fault in a state host-sync does not know (exit 1)"
+}
+report_links_to_fix() {   # $1 = the repo's name; --check's ✗ rows
+    local target
+    if (( ${#LINK_TARGETS_TO_FIX[@]} )); then
+        row drift links "$1: ${#LINK_TARGETS_TO_FIX[@]} link(s) to fix: $(join_comma "${LINK_TARGETS_TO_FIX[@]}")"
+    fi
+    for target in ${LINK_TARGETS_DIFFERING[@]+"${LINK_TARGETS_DIFFERING[@]}"}; do
+        row drift links "$1: $target is a regular file whose content differs from the repo; ./install backs it up beside it and relinks"
+    done
+}
+# --apply: the repo's ./install, once, then the checker again. $1 = the repo's name, $2 = its checkout.
+relink_checkout() {
+    local label="$1" dir="$2" log="$STATE/install-links-$1.log" rc install_rc fixed
+    local differing=(${LINK_TARGETS_DIFFERING[@]+"${LINK_TARGETS_DIFFERING[@]}"})
+    fixed=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
+    (cd "$dir" && bash ./install </dev/null) >"$log" 2>&1; install_rc=$?
+    run_link_checker "$dir"; rc=$?
+    if (( rc != 0 && rc != 1 )); then
+        links_could_not_run_row "$label" "$rc"
+        return
+    fi
+    classify_link_states
+    if unknown_link_fault "$rc"; then
+        unknown_link_fault_row "$label"
+        return
+    fi
+    if (( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} )); then
+        still_to_fix_row "$label" "$log"
+        return
+    fi
+    row ok links "$label: $fixed link(s) relinked$(backups_kept ${differing[@]+"${differing[@]}"})"
+    # The link step can succeed and a later step of the same ./install fail. Its stamp is the
+    # checkout's, already level, so no later run would ever name this log.
+    (( install_rc == 0 )) || row oper links "$label: ./install exited $install_rc after relinking; log: $(tilde_path "$log")"
+}
+# ✗ for the links an ./install left out of place. $1 = the repo's name, $2 = that ./install's log.
+still_to_fix_row() {
+    local left still
+    left=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
+    still="$(join_comma ${LINK_TARGETS_TO_FIX[@]+"${LINK_TARGETS_TO_FIX[@]}"} ${LINK_TARGETS_DIFFERING[@]+"${LINK_TARGETS_DIFFERING[@]}"})"
+    row drift links "$1: still $left to fix after ./install ($still); log: $(tilde_path "$2")"
+}
+# ./install runs at most once per repo per run, and never on a checkout sync_checkout left alone.
+# When this run's sync_checkout already decided, print the row that says what that means for the
+# links and return 0; return 1 when the links row may run ./install itself. $1 = the repo's name.
+explain_links_left_this_run() {
+    local label="$1" faults log
+    faults=$(( ${#LINK_TARGETS_TO_FIX[@]} + ${#LINK_TARGETS_DIFFERING[@]} ))
+    log="$(tilde_path "${CHECKOUT_INSTALL_LOG[$label]:-}")"
+    case "${CHECKOUT_THIS_RUN[$label]:-}" in
+        left-alone)
+            row oper links "$label: $faults link(s) to fix, but the checkout was left alone this run; fix the checkout first" ;;
+        install-failed)
+            row oper links "$label: $faults link(s) to fix, but ./install already failed this run (log: $log)" ;;
+        installed) still_to_fix_row "$label" "${CHECKOUT_INSTALL_LOG[$label]}" ;;
+        *) return 1 ;;
+    esac
+}
+# "; the old ~/.x is kept as ~/.x.dotbot-backup.<stamp>" for each target ($@, as ~/…) whose
+# backup dotbot left beside it: the newest by name, since the names sort by their stamp.
+backups_kept() {
+    local target candidate newest
+    for target in "$@"; do
+        newest=""
+        for candidate in "$(expand_home_path "$target")$DOTBOT_BACKUP_INFIX"*; do
+            [[ -e "$candidate" ]] && newest="$candidate"
+        done
+        [[ -n "$newest" ]] && printf '; the old %s is kept as %s' "$target" "$(tilde_path "$newest")"
+    done
+    return 0
+}
+
 # Not `.enabledPlugins[$p] // "absent"`: jq's // treats false as missing, so a plugin just set to
 # false read back as "absent" and every disable reported failure (dev, 2026-10-14).
 plugin_enabled() {
@@ -962,7 +1442,54 @@ plugin_enabled() {
 # installed in, and those neither load everywhere nor share the user entry's version.
 plugin_installed() { jq -e --arg p "$1" 'any((.plugins[$p] // [])[]; .scope == "user")' "$INSTALLED" >/dev/null 2>&1; }
 plugin_version() { jq -r --arg p "$1" 'first((.plugins[$p] // [])[] | select(.scope == "user")) | .version // empty' "$INSTALLED" 2>/dev/null; }
-claude_plugin() { (cd "$HOME" && "$CLAUDE" plugin "$@" >>"$STATE/plugins.log" 2>&1 </dev/null); }
+# Every `claude plugin` call runs with CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 (H4): an owner/repo
+# source tries SSH first, and a host's GitHub auth may be gh over HTTPS alone (dev, sol-build).
+claude_plugin() {
+    (cd "$HOME" && CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 "$CLAUDE" plugin "$@" >>"$STATE/plugins.log" 2>&1 </dev/null)
+}
+
+# The declaration's shape, read before it is indexed: settings.json is an object, and its
+# enabledPlugins and extraKnownMarketplaces are objects wherever they are present. Not `// {}`: jq's
+# // reads a literal false or null as missing, so such a container would pass as an empty one.
+settings_shape_ok() {
+    jq -e 'type == "object"
+        and ((has("enabledPlugins") | not) or (.enabledPlugins | type == "object"))
+        and ((has("extraKnownMarketplaces") | not) or (.extraKnownMarketplaces | type == "object"))' \
+        "$SETTINGS" >/dev/null 2>&1
+}
+# The declared plugins, one name@marketplace per line: the enabledPlugins entries that are
+# exactly true, so a false entry is never read as declared (nor, through jq's //, as missing).
+declared_plugins() {
+    jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "$SETTINGS" 2>/dev/null
+}
+# The declared marketplaces, one name=source per line, as `marketplace add` takes the source:
+# the official one, then each extraKnownMarketplaces entry's directory path, or its repo or url.
+# An entry that names none of them is printed with an empty source, for its row to report.
+declared_marketplaces() {
+    local entry
+    printf '%s\n' "$OFFICIAL_MARKETPLACE"
+    jq -r '.extraKnownMarketplaces // {} | to_entries[]
+        | "\(.key)=\((try (.value.source | if .source == "directory" then .path else (.repo // .url) end)) // "")"' \
+        "$SETTINGS" 2>/dev/null |
+        while IFS= read -r entry; do
+            # The renderer substitutes $HOME in these paths already; this guards a hand-edited
+            # settings.json, whose literal $HOME, ${HOME} or ~ would read as a cloned source (and
+            # go stale) and reach `marketplace add` as text.
+            printf '%s=%s\n' "${entry%%=*}" "$(expand_home_path "${entry#*=}")"
+        done
+}
+# Why no plugin can be installed from marketplace $1, printed, and 0; 1 when one can: it is declared
+# with a source. One declared with none is no declaration a plugin can come from (its own row is ⚠).
+marketplace_unusable_reason() {   # $1 = a marketplace name
+    local entry
+    while IFS= read -r entry; do
+        [[ "${entry%%=*}" == "$1" ]] || continue
+        [[ -n "${entry#*=}" ]] && return 1
+        printf "marketplace %s's extraKnownMarketplaces entry names no repo, url or path" "$1"
+        return 0
+    done < <(declared_marketplaces)
+    printf 'marketplace %s is declared by no settings fragment' "$1"
+}
 
 # Why marketplace $1 (source $2) needs a refresh, or nothing if it does not. Asked again after
 # the add or update, so a failed one is a ✗ rather than a ✓ on every run.
@@ -972,11 +1499,12 @@ market_why() {
         echo "not added"; return
     fi
     loc="$(jq -r --arg m "$name" '.[$m].installLocation // empty' "$KNOWN")"
-    for p in "${PLUGINS_ON[@]}"; do
-        [[ "${p#*@}" == "$name" ]] || continue
+    # Every plugin the settings declare from this marketplace must be one it lists.
+    while IFS= read -r p; do
+        [[ "${p##*@}" == "$name" ]] || continue
         jq -e --arg n "${p%@*}" 'any(.plugins[]; .name == $n)' "$loc/.claude-plugin/marketplace.json" \
             >/dev/null 2>&1 || { echo "does not list ${p%@*}"; return; }
-    done
+    done < <(declared_plugins)
     # A directory marketplace is the checkout itself; only a cloned one goes stale. An update
     # moves lastUpdated even when upstream has not changed (measured 2026-10-14).
     [[ "$src" == /* ]] && return
@@ -987,8 +1515,12 @@ market_why() {
 
 here_marketplaces() {
     local entry name src why after
-    for entry in "${MARKETPLACES[@]}"; do
-        name="${entry%%=*}"; src="${entry#*=}"; src="${src//@DOTFILES@/$DOTFILES}"
+    while IFS= read -r entry; do
+        name="${entry%%=*}"; src="${entry#*=}"
+        if [[ -z "$src" ]]; then
+            row oper marketplace "$name: its extraKnownMarketplaces entry names no repo, url or path; not added"
+            continue
+        fi
         why="$(market_why "$name" "$src")"
         if [[ -z "$why" ]]; then
             row ok marketplace "$name"
@@ -1009,93 +1541,73 @@ here_marketplaces() {
         else
             row drift marketplace "$name: still $after after --apply (log: ~/.local/state/host-sync/plugins.log)"
         fi
-    done
+    done < <(declared_marketplaces)
 }
 
+# A directory-marketplace install is a COPY; an edit reaches it only through a version bump plus
+# `plugin update` (docs/CLAUDE_SETUP.md, "Changing the plugin"). True when linear-key's installed
+# copy has the checkout's version, or --apply has brought it there; otherwise its ✗ row is printed.
+linear_key_current() {
+    local have want
+    have="$(plugin_version "$LINEAR_KEY")"
+    want="$(json_get "$DOTFILES/claude/plugins/${LINEAR_KEY%@*}/.claude-plugin/plugin.json" '.version // empty')"
+    [[ -z "$want" || "$have" == "$want" ]] && return 0
+    if [[ "$MODE" != apply ]]; then
+        row drift plugin "$LINEAR_KEY $have installed, checkout has $want"
+        return 1
+    fi
+    claude_plugin marketplace update "${LINEAR_KEY##*@}"
+    claude_plugin update "$LINEAR_KEY" --scope user
+    have="$(plugin_version "$LINEAR_KEY")"
+    [[ "$have" == "$want" ]] && return 0
+    row drift plugin "$LINEAR_KEY update to $want failed"
+    return 1
+}
+
+# One declared plugin's row: a person's step when no settings fragment declares its marketplace with
+# a source; ✓ when it is installed at user scope (and, for linear-key, current); else drift --apply
+# installs.
+here_plugin() {   # $1 = name@marketplace
+    local plugin="$1" marketplace="${1##*@}" unusable_reason
+    if unusable_reason="$(marketplace_unusable_reason "$marketplace")"; then
+        if plugin_installed "$plugin"; then
+            row oper plugin "$plugin: $unusable_reason; installed, but its marketplace is not refreshed"
+        else
+            row oper plugin "$plugin: $unusable_reason; not installed"
+        fi
+        return
+    fi
+    if plugin_installed "$plugin"; then
+        if [[ "$plugin" != "$LINEAR_KEY" ]] || linear_key_current; then row ok plugin "$plugin"; fi
+        return
+    fi
+    if [[ "$MODE" != apply ]]; then
+        row drift plugin "$plugin not installed"
+        return
+    fi
+    claude_plugin install "$plugin" --scope user
+    if plugin_installed "$plugin"; then
+        row ok plugin "$plugin (installed)"
+    else
+        row drift plugin "$plugin: install failed (log: ~/.local/state/host-sync/plugins.log)"
+    fi
+}
+
+# Marketplaces first, so a plugin's install finds its marketplace added and current.
 here_plugins() {
-    local p st have want tmp
+    local plugin
     if [[ ! -r "$SETTINGS" ]]; then
         row oper plugins "no ~/.claude/settings.json; log in to Claude Code on this machine first"
         return
     fi
-    here_marketplaces
-
-    for p in "${PLUGINS_SUPERSEDED[@]}"; do
-        [[ "$(plugin_enabled "$p")" == true ]] || continue
-        if [[ "$MODE" != apply ]]; then
-            row drift plugin "$p is enabled but superseded"
-            continue
-        fi
-        if [[ -L "$SETTINGS" ]]; then
-            row oper plugin "$p is enabled but superseded; settings.json is a symlink, so it is not rewritten"
-            continue
-        fi
-        cp -p "$SETTINGS" "$STATE/settings.json.before-host-sync"
-        tmp="$(mktemp "$SETTINGS.host-sync.XXXXXX")" &&
-            jq --arg p "$p" '.enabledPlugins[$p] = false' "$SETTINGS" >"$tmp" &&
-            chmod --reference="$SETTINGS" "$tmp" && mv "$tmp" "$SETTINGS"
-        rm -f "$tmp"
-        if [[ "$(plugin_enabled "$p")" == false ]]; then
-            row ok plugin "$p disabled (superseded)"
-        else
-            row drift plugin "$p: could not disable"
-        fi
-    done
-
-    for p in "${PLUGINS_ON[@]}"; do
-        st="$(plugin_enabled "$p")"
-        if plugin_installed "$p" && [[ "$st" == true ]]; then
-            # A directory-marketplace install is a COPY; an edit reaches it only through a
-            # version bump plus `plugin update` (docs/CLAUDE_SETUP.md, "Changing the plugin").
-            if [[ "$p" == "$LINEAR_KEY" ]]; then
-                have="$(plugin_version "$p")"
-                want="$(json_get "$DOTFILES/claude/plugins/linear-key/.claude-plugin/plugin.json" '.version // empty')"
-                if [[ -n "$want" && "$have" != "$want" ]]; then
-                    if [[ "$MODE" != apply ]]; then
-                        row drift plugin "$p $have installed, checkout has $want"
-                        continue
-                    fi
-                    claude_plugin marketplace update dotfiles
-                    claude_plugin update "$p" --scope user
-                    have="$(plugin_version "$p")"
-                    [[ "$have" == "$want" ]] || { row drift plugin "$p update to $want failed"; continue; }
-                fi
-            fi
-            row ok plugin "$p"
-            continue
-        fi
-        if [[ "$MODE" != apply ]]; then
-            if plugin_installed "$p"; then row drift plugin "$p installed, not enabled"
-            else row drift plugin "$p not installed"; fi
-            continue
-        fi
-        if plugin_installed "$p"; then
-            claude_plugin enable "$p" --scope user
-        else
-            claude_plugin install "$p" --scope user
-        fi
-        if plugin_installed "$p" && [[ "$(plugin_enabled "$p")" == true ]]; then
-            row ok plugin "$p (enabled)"
-        else
-            row drift plugin "$p: install/enable failed (log: ~/.local/state/host-sync/plugins.log)"
-        fi
-    done
-
-    st="$(plugin_enabled "$LINEAR_OFFICIAL")"
-    if [[ "$st" == true ]]; then
-        if [[ "$MODE" != apply ]]; then
-            row drift plugin "$LINEAR_OFFICIAL enabled; it would shadow $LINEAR_KEY"
-        elif [[ "$(plugin_enabled "$LINEAR_KEY")" != true ]]; then
-            row drift plugin "$LINEAR_OFFICIAL left on: $LINEAR_KEY is not enabled, and Linear must not end up with neither"
-        else
-            claude_plugin disable "$LINEAR_OFFICIAL" --scope user
-            if [[ "$(plugin_enabled "$LINEAR_OFFICIAL")" != true ]]; then
-                row ok plugin "$LINEAR_OFFICIAL disabled (superseded by $LINEAR_KEY)"
-            else
-                row drift plugin "$LINEAR_OFFICIAL: could not disable"
-            fi
-        fi
+    if ! settings_shape_ok; then
+        row oper plugins "the live ~/.claude/settings.json is not an object with object enabledPlugins and extraKnownMarketplaces; plugins are not judged"
+        return
     fi
+    here_marketplaces
+    while IFS= read -r plugin; do
+        here_plugin "$plugin"
+    done < <(declared_plugins)
 }
 
 here_mcp() {
@@ -1246,6 +1758,447 @@ here_clones() {
     fi
 }
 
+# Memory (shared-configuration design, D7, H6, H7), on a host whose overlay carries the store table:
+# git new enough for the sync; a checkout of every store that serves one of the profile's tenants,
+# which --apply clones from the table's remote, verbatim, and only from a repository under
+# GITHUB_BASE; the links into the stores (claude-memory-link.sh); how each store last synced
+# (claude-memory-sync.sh --status); and the sync's timer, once a served store is checked out. A
+# store that serves none of the profile's tenants is reported, never removed. Without known tenants
+# (no marker, an overlay not cloned yet, a profile that cannot be read) no store is judged, cloned or
+# timed (H1); the links and the sync status are still read. Every sibling call maps its status as the
+# settings row does: 2 is a ⚠ with its first stderr line, any other unexpected status (127 a checkout
+# that predates the script, 124 a timeout) a ⚠ with that status, never ✓ and never ✗.
+here_memory() {
+    memory_store_table_usable || return 0
+    memory_git_floor_row
+    memory_store_rows
+    memory_link_row
+    memory_status_rows
+    memory_timer_row
+}
+# 0 when the store table is there and has the shape the rows read; otherwise 1, with the row that
+# says why: · for no table (memory is not managed here), ⚠ for one that cannot be used.
+memory_store_table_usable() {
+    local shown
+    shown="$(tilde_path "$MEMORY_STORE_TABLE")"
+    if [[ ! -e "$MEMORY_STORE_TABLE" && ! -L "$MEMORY_STORE_TABLE" ]]; then
+        row info memory "no memory store table at $shown; memory is not linked or synced here"
+        return 1
+    fi
+    jq -e "$STORE_TABLE_SHAPE_FILTER" "$MEMORY_STORE_TABLE" >/dev/null 2>&1 && return 0
+    row oper memory "the store table $shown cannot be read, or a store in it has no remote or no tenants list"
+    return 1
+}
+# The memory sync reads no attribute a store holds by passing --attr-source, which git 2.40 added
+# (H7). Silent when this host's git has it.
+memory_git_floor_row() {
+    local version
+    version="$(git --version 2>/dev/null | awk '{print $3}')"
+    if [[ ! "$version" =~ $VER_RE ]]; then
+        row oper memory "could not read git's version; the memory sync needs git $MIN_GIT_VERSION_FOR_MEMORY_SYNC or later"
+    elif ! ver_ge "$version" "$MIN_GIT_VERSION_FOR_MEMORY_SYNC"; then
+        row oper memory "git $version is older than $MIN_GIT_VERSION_FOR_MEMORY_SYNC; the memory sync needs --attr-source: upgrade git"
+    fi
+}
+
+# A row for each store this host serves, and for each one checked out here that it does not.
+# Sets MEMORY_SERVED_CHECKED_OUT to 1 when a served store is checked out once this run is done.
+memory_store_rows() {
+    local store remote tenant_list
+    MEMORY_SERVED_CHECKED_OUT=0
+    if (( ! TENANTS_KNOWN )); then
+        row info memory "store checkouts not judged: this host's tenants are unknown (see the profile row)"
+        return
+    fi
+    # @tsv keeps each store on one line; the shape filter leaves only the last field possibly empty,
+    # so no empty field folds under a tab IFS.
+    while IFS=$'\t' read -r store remote tenant_list; do
+        if [[ ! "$store" =~ $SAFE_DIR_RE ]]; then
+            # The name becomes a directory under the stores root, and is never printed unchecked.
+            row oper memory "a store in the table has a name that is not a plain directory name; it is not judged"
+        elif store_serves_profile "$tenant_list"; then
+            served_store_row "$store" "$remote"
+        else
+            unserved_store_row "$store" "$tenant_list"
+        fi
+    done < <(jq -r --arg separator "$TENANT_SEPARATOR" \
+        '.stores | to_entries[] | [.key, .value.remote, (.value.tenants | join($separator))] | @tsv' \
+        "$MEMORY_STORE_TABLE" 2>/dev/null)
+}
+store_serves_profile() {   # $1 = a store's tenants, TENANT_SEPARATOR-joined; 0 when the profile lists one of them
+    local tenant store_tenants=()
+    IFS="$TENANT_SEPARATOR" read -r -a store_tenants <<<"$1"
+    for tenant in ${store_tenants[@]+"${store_tenants[@]}"}; do
+        has_tenant "$tenant" && return 0
+    done
+    return 1
+}
+# A store this host serves: ✓ when checked out (its .git, as the sync reads it), else drift that
+# --apply clones, from the table's remote string as it is (H6), and only when that is a repository
+# under GITHUB_BASE: the clone runs with this host's own git credentials. A path in the way that is
+# not a checkout is a person's step. $1 = the store, $2 = its remote, as the table spells it.
+served_store_row() {
+    local store="$1" remote="$2" dir="$MEMORY_STORES_ROOT/$1" repo
+    if [[ -e "$dir/.git" ]]; then
+        MEMORY_SERVED_CHECKED_OUT=1
+        row ok memory "store $store checked out"
+        return
+    fi
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        row oper memory "store $store: $(tilde_path "$dir") exists but is not a checkout; not touched"
+        return
+    fi
+    # The remote is never printed: a URL can carry a credential.
+    if ! repo="$(github_repo_of_remote "$remote")"; then
+        row oper memory "store $store: its remote is not a repository URL under $GITHUB_BASE; not cloned"
+        return
+    fi
+    if [[ "$MODE" != apply ]]; then
+        row drift memory "store $store not checked out ($repo)"
+    elif clone_store "$remote" "$dir"; then
+        MEMORY_SERVED_CHECKED_OUT=1
+        row ok memory "store $store cloned"
+    else
+        row drift memory "store $store: git clone $repo failed: $CLONE_FAILURE_REASON"
+    fi
+}
+# git clone $1 into $2. Returns git's status (124 a timeout), and on a failure sets
+# CLONE_FAILURE_REASON to the first line of its stderr, redacted (the unredacted text never reaches a
+# variable), or to its exit status when it printed none.
+clone_store() {   # $1 = the remote, as the table spells it, $2 = the directory
+    local status
+    CLONE_FAILURE_REASON="$(git_net_within "$CLONE_TIMEOUT_SECONDS" clone --quiet "$1" "$2" 2>&1 >/dev/null \
+        | redact_stream | sed -n 1p; exit "${PIPESTATUS[0]}")"
+    status=$?
+    (( status == 0 )) && return 0
+    [[ -n "$CLONE_FAILURE_REASON" ]] || CLONE_FAILURE_REASON="exit $status"
+    return "$status"
+}
+# owner/repo when $1 is GITHUB_BASE/<owner>/<repo>, with or without .git, each half a plain name (and
+# neither . nor ..); 1 otherwise.
+github_repo_of_remote() {
+    local path="${1#"$GITHUB_BASE/"}" owner name
+    [[ "$path" != "$1" ]] || return 1
+    path="${path%.git}"
+    [[ "$path" =~ $SAFE_REPO_RE ]] || return 1
+    owner="${path%%/*}"; name="${path#*/}"
+    [[ "$owner" != . && "$owner" != .. && "$name" != . && "$name" != .. ]] || return 1
+    printf '%s' "$path"
+}
+# A store this host does not serve, checked out here anyway: reported, never removed, since what it
+# holds may not be anywhere else. $1 = the store, $2 = its tenants, TENANT_SEPARATOR-joined.
+unserved_store_row() {
+    local store="$1" tenants_shown="${2//"$TENANT_SEPARATOR"/, }"
+    [[ -e "$MEMORY_STORES_ROOT/$store/.git" ]] || return 0
+    row oper memory "store $store is checked out here but serves no tenant of profile $PROFILE (its tenants: ${tenants_shown:-none}); remove it by hand"
+}
+
+# The links into the stores, as claude-memory-link.sh --check reads them: exit 0 is ✓ with its
+# summary line, 1 is links to fix, which --apply makes (claude-memory-link.sh --apply) and checks
+# again. Keys whose memory no store link reaches (the summary's unmapped and without-a-store counts)
+# are a person's step, whatever the exit.
+memory_link_row() {
+    local rc
+    run_memory_sibling "$SIBLING_TIMEOUT_SECONDS" claude-memory-link.sh --check; rc=$?
+    memory_link_check_answered "$rc" || return 0
+    if (( rc == 0 )); then
+        memory_links_level_row "$MEMORY_LINK_SUMMARY"
+    elif [[ "$MODE" == apply ]]; then
+        relink_memory
+    else
+        row drift memory "$MEMORY_LINKS_TO_FIX memory link(s) to fix ($MEMORY_LINK_SUMMARY)"
+        memory_unreached_keys_row
+    fi
+    return 0
+}
+# --apply's half: the link script's --apply, then its --check again.
+relink_memory() {
+    local rc
+    run_memory_sibling "$LINK_APPLY_TIMEOUT_SECONDS" claude-memory-link.sh --apply; rc=$?
+    if (( rc != 0 )); then
+        memory_sibling_could_not_run_row "claude-memory-link --apply" "$rc"
+        return
+    fi
+    run_memory_sibling "$SIBLING_TIMEOUT_SECONDS" claude-memory-link.sh --check; rc=$?
+    memory_link_check_answered "$rc" || return
+    if (( rc == 0 )); then
+        memory_links_level_row "linked by claude-memory-link --apply ($MEMORY_LINK_SUMMARY)"
+    else
+        row drift memory "still $MEMORY_LINKS_TO_FIX memory link(s) to fix after claude-memory-link --apply ($MEMORY_LINK_SUMMARY)"
+        memory_unreached_keys_row
+    fi
+}
+# 0 when --check exited 0 or 1 and printed its summary line; otherwise 1, with the ⚠ row that says why.
+memory_link_check_answered() {   # $1 = claude-memory-link --check's status
+    if (( $1 != 0 && $1 != 1 )); then
+        memory_sibling_could_not_run_row "claude-memory-link --check" "$1"
+        return 1
+    fi
+    read_memory_link_summary && return 0
+    row oper memory "claude-memory-link --check printed no summary line (exit $1)"
+    return 1
+}
+# The last summary line in SIBLING_STDOUT into MEMORY_LINK_SUMMARY, with its counts of links to fix,
+# unmapped keys and keys without a store; 1 when it printed none.
+read_memory_link_summary() {
+    local line
+    MEMORY_LINK_SUMMARY=""
+    while IFS= read -r line; do
+        [[ "$line" =~ $MEMORY_LINK_SUMMARY_RE ]] || continue
+        MEMORY_LINK_SUMMARY="$line"
+        MEMORY_LINKS_TO_FIX="${BASH_REMATCH[2]}"
+        MEMORY_LINKS_UNMAPPED="${BASH_REMATCH[3]}"
+        MEMORY_LINKS_WITHOUT_STORE="${BASH_REMATCH[4]}"
+    done <<<"$SIBLING_STDOUT"
+    [[ -n "$MEMORY_LINK_SUMMARY" ]]
+}
+# ✓ with $1, unless the summary counts keys whose memory no store link reaches: then only the ⚠.
+memory_links_level_row() {
+    memory_unreached_keys_row || row ok memory "$1"
+}
+# 0, with the ⚠ row, when the summary counts unmapped keys or keys without a store: memory that only
+# a person can place (a checkout glob, a store to check out); 1 when it counts none.
+memory_unreached_keys_row() {
+    (( MEMORY_LINKS_UNMAPPED + MEMORY_LINKS_WITHOUT_STORE > 0 )) || return 1
+    row oper memory "$MEMORY_LINK_SUMMARY: memory that no store link reaches; claude-memory-link --list names the keys"
+}
+
+# How each checked-out store last synced, as claude-memory-sync.sh --status says: ok is ✓, and any
+# other level (warn, bad) a ⚠ carrying that word. --status exits 0 whatever it reports.
+memory_status_rows() {
+    local rc store level message
+    run_memory_sibling "$SIBLING_TIMEOUT_SECONDS" claude-memory-sync.sh --status; rc=$?
+    if (( rc != 0 )); then
+        memory_sibling_could_not_run_row "claude-memory-sync --status" "$rc"
+        return
+    fi
+    # The sync redacts what it reports; this is a second pass, as for every sibling's text here.
+    while IFS=$'\t' read -r store level message; do
+        [[ -n "$store" ]] || continue
+        if [[ "$level" == ok ]]; then
+            row ok memory "store $store: $message"
+        else
+            row oper memory "store $store: $level: $message"
+        fi
+    done < <(printf '%s\n' "$SIBLING_STDOUT" | redact_stream)
+}
+
+# The memory sync's timer, once a served store is checked out (H6). The host-sync arming is that
+# decision: on an armed host, not live is drift that --apply enables (enable, never reenable: the
+# unit is a dotbot link into the checkout, as host-sync.timer is) and reads back; on a host that is
+# not armed, or was disarmed by hand, it is information.
+memory_timer_row() {
+    (( MEMORY_SERVED_CHECKED_OUT )) || return 0
+    if memory_timer_is_live; then
+        row ok memory "$MEMORY_TIMER_UNIT armed"
+    elif ! is_armed || is_disarmed; then
+        row info memory "$MEMORY_TIMER_UNIT not armed, nor is this host (see the timer row); host-sync arms it with the host"
+    elif [[ "$MODE" != apply ]]; then
+        row drift memory "$MEMORY_TIMER_UNIT not armed (is-enabled=${MEMORY_TIMER_ENABLED:-?}, is-active=${MEMORY_TIMER_ACTIVE:-?})"
+    else
+        systemctl --user daemon-reload >/dev/null 2>&1
+        systemctl --user enable --now "$MEMORY_TIMER_UNIT" >/dev/null 2>&1
+        if memory_timer_is_live; then
+            row ok memory "$MEMORY_TIMER_UNIT armed by this run"
+        else
+            row drift memory "arming $MEMORY_TIMER_UNIT failed: is-enabled=${MEMORY_TIMER_ENABLED:-?}, is-active=${MEMORY_TIMER_ACTIVE:-?}"
+        fi
+    fi
+}
+# Reads the memory timer's is-enabled and is-active into MEMORY_TIMER_ENABLED and MEMORY_TIMER_ACTIVE;
+# 0 when it is enabled and active.
+memory_timer_is_live() {
+    MEMORY_TIMER_ENABLED="$(systemctl --user is-enabled "$MEMORY_TIMER_UNIT" 2>/dev/null)"
+    MEMORY_TIMER_ACTIVE="$(systemctl --user is-active "$MEMORY_TIMER_UNIT" 2>/dev/null)"
+    [[ "$MEMORY_TIMER_ENABLED" == enabled && "$MEMORY_TIMER_ACTIVE" == active ]]
+}
+
+# Run a memory script with stdin closed, cut off after $1 seconds. $2 = its name under the checkout's
+# scripts/, $3 = its verb. Sets SIBLING_STDOUT to what it printed and SIBLING_ERROR_LINE to the first
+# line of its stderr, redacted on the way in (the unredacted stderr never reaches a variable), and
+# returns its status (124 a timeout, 127 a checkout without the script). Its stdout goes straight to
+# fd 3, the capture's own output, while its stderr runs through the redactor; once both are done the
+# status and that line follow, tab-separated, as the capture's last line, so one subshell yields all three.
+run_memory_sibling() {
+    local seconds="$1" script="$DOTFILES/scripts/$2" verb="$3" captured status_and_error
+    captured="$(
+        { SIBLING_ERROR_LINE="$(timeout "$seconds" "$script" "$verb" 2>&1 >&3 3>&- </dev/null \
+            | redact_stream | sed -n 1p; exit "${PIPESTATUS[0]}")"; } 3>&1
+        printf '\n%s\t%s' "$?" "$SIBLING_ERROR_LINE"
+    )"
+    status_and_error="${captured##*$'\n'}"
+    SIBLING_STDOUT="${captured%$'\n'*}"
+    SIBLING_ERROR_LINE="${status_and_error#*$'\t'}"
+    return "${status_and_error%%$'\t'*}"
+}
+memory_sibling_could_not_run_row() {   # $1 = the script and its verb, as the row names them, $2 = its status
+    if [[ "$2" == 2 && -n "$SIBLING_ERROR_LINE" ]]; then
+        row oper memory "$1 could not run: $SIBLING_ERROR_LINE"
+    else
+        row oper memory "$1 could not run (exit $2)"
+    fi
+}
+
+# ----------------------------------------------------------------------------------------------
+# Stale skills, hooks and agents under ~/.claude
+# ----------------------------------------------------------------------------------------------
+
+# Stale is structural (shared-configuration design, H5): an entry under ~/.claude's skills, hooks or
+# agents that is not a link into one of the two checkouts, not generated and not Claude Code's own (a
+# copy left from before the links, a cache, a link left dangling or pointing elsewhere). --check
+# names each; --apply moves them into one stamp directory under the state dir, only on a host with a
+# profile (H1), and deletes nothing. A kind directory that is itself a link, that resolves into a
+# checkout (~/.claude a link into one, say), or that cannot be read as a directory is a person's step
+# and is not walked: what is in it is not ~/.claude's to move, a move through a checkout would take
+# tracked files out of it, and an unread directory is no evidence that nothing in it is stale.
+here_retire() {
+    local kind
+    STALE_CLAUDE_ENTRIES=(); KIND_DIR_NOT_WALKED=0
+    read_checkout_roots
+    for kind in "${CLAUDE_ENTRY_KINDS[@]}"; do
+        collect_stale_entries "$kind"
+    done
+    if (( ${#STALE_CLAUDE_ENTRIES[@]} == 0 )); then
+        (( KIND_DIR_NOT_WALKED )) || row ok retire "no stale skill, hook or agent under $(tilde_path "$CLAUDE_USER_DIR")"
+    elif [[ -z "$PROFILE" ]]; then
+        stale_entries_left_row
+    elif [[ "$MODE" != apply ]]; then
+        stale_entries_to_move_row
+    else
+        retire_stale_entries
+    fi
+    return 0
+}
+# Each checkout that exists, resolved, with a trailing slash, into CHECKOUT_ROOTS: a ~/.dotfiles that
+# is itself a link still holds what a link through it resolves to, and the slash keeps a sibling
+# such as ~/.dotfiles-old from passing as the checkout.
+read_checkout_roots() {
+    local checkout resolved
+    CHECKOUT_ROOTS=()
+    for checkout in "$DOTFILES" "$DOTFILES_LOCAL"; do
+        [[ -d "$checkout" ]] || continue
+        resolved="$(readlink -f -- "$checkout" 2>/dev/null)"
+        # Never an empty prefix, nor the root: every path would pass.
+        [[ "$resolved" == /?* ]] && CHECKOUT_ROOTS+=("$resolved/")
+    done
+}
+# Append each stale entry under ~/.claude/<kind>/ to STALE_CLAUDE_ENTRIES as <kind>/<name>,
+# dot-entries included. An absent kind directory holds nothing; one that kind_dir_walkable refuses is
+# not walked.
+collect_stale_entries() {   # $1 = the kind: skills, hooks or agents
+    local kind="$1" dir="$CLAUDE_USER_DIR/$1" path name
+    [[ -e "$dir" || -L "$dir" ]] || return 0
+    kind_dir_walkable "$dir" || return 0
+    for path in "$dir"/* "$dir"/.*; do
+        name="${path##*/}"
+        [[ "$name" == . || "$name" == .. ]] && continue
+        [[ -e "$path" || -L "$path" ]] || continue   # a pattern that matched nothing is left as written
+        [[ "$(classify_claude_entry "$kind" "$name")" == stale ]] && STALE_CLAUDE_ENTRIES+=("$kind/$name")
+    done
+}
+# 0 when the kind directory $1 may be walked: not itself a link, a directory this run can list, and
+# resolving outside every checkout. Otherwise 1, with the ⚠ row that says why, and KIND_DIR_NOT_WALKED
+# set. The last test catches what the first cannot: a link higher up the path (~/.claude itself).
+kind_dir_walkable() {   # $1 = the kind directory
+    local dir="$1" shown resolved root
+    shown="$(tilde_path "$dir")"
+    if [[ -L "$dir" ]]; then
+        row oper retire "$shown is a link, not a directory; its entries are not judged"
+    elif [[ ! -d "$dir" || ! -r "$dir" || ! -x "$dir" ]] || ! resolved="$(readlink -f -- "$dir" 2>/dev/null)" \
+        || [[ -z "$resolved" ]]; then
+        row oper retire "$shown could not be read as a directory; its entries are not judged"
+    else
+        for root in ${CHECKOUT_ROOTS[@]+"${CHECKOUT_ROOTS[@]}"}; do
+            [[ "$resolved/" == "$root"* ]] || continue
+            row oper retire "$shown resolves to $(tilde_path "$resolved"), inside a checkout; its entries are not judged"
+            KIND_DIR_NOT_WALKED=1
+            return 1
+        done
+        return 0
+    fi
+    KIND_DIR_NOT_WALKED=1
+    return 1
+}
+# What ~/.claude/<kind>/<name> is, printed: generated, own (Claude Code's), declared or stale.
+classify_claude_entry() {   # $1 = the kind, $2 = the entry's name
+    local entry_key="$1/$2"
+    if list_has "$entry_key" "${GENERATED_CLAUDE_ENTRIES[@]}"; then
+        echo generated
+    elif matches_any_pattern "$entry_key" "${CLAUDE_OWN_ENTRIES[@]}"; then
+        echo own
+    elif is_declared_link "$CLAUDE_USER_DIR/$entry_key"; then
+        echo declared
+    else
+        echo stale
+    fi
+}
+matches_any_pattern() {   # $1 = a string, $2… = glob patterns; 0 when one of them matches it
+    local string="$1" pattern
+    shift
+    for pattern in "$@"; do
+        # shellcheck disable=SC2053  # the right side is a glob pattern, unquoted deliberately
+        [[ "$string" == $pattern ]] && return 0
+    done
+    return 1
+}
+# 0 when $1 is a link that resolves to a path that exists, inside one of CHECKOUT_ROOTS. readlink -f
+# prints a dangling link's target and exits 0, so the target's existence is tested on its own.
+is_declared_link() {   # $1 = the entry's path
+    local target root
+    [[ -L "$1" ]] || return 1
+    target="$(readlink -f -- "$1" 2>/dev/null)" || return 1
+    [[ -n "$target" && -e "$target" ]] || return 1
+    for root in ${CHECKOUT_ROOTS[@]+"${CHECKOUT_ROOTS[@]}"}; do
+        [[ "$target" == "$root"* ]] && return 0
+    done
+    return 1
+}
+# $@ = <kind>/<name> entries, printed sorted bytewise and comma-joined, as the rows name them. The
+# sort is for the row only: what is moved is the list as it was walked, each name exactly as it is.
+sorted_entries_shown() {
+    local sorted=()
+    mapfile -t sorted < <(printf '%s\n' "$@" | LC_ALL=C sort)
+    join_comma "${sorted[@]}"
+}
+entries_noun() { if (( $1 == 1 )); then printf entry; else printf entries; fi; }   # $1 = a count
+# The ⚠ for a host with no usable profile: the stale entries are named, and --apply leaves them.
+stale_entries_left_row() {
+    local count="${#STALE_CLAUDE_ENTRIES[@]}" noun shown
+    noun="$(entries_noun "$count")"
+    shown="$(sorted_entries_shown "${STALE_CLAUDE_ENTRIES[@]}")"
+    row oper retire "$count stale $noun under $(tilde_path "$CLAUDE_USER_DIR") ($shown); no host profile here, so --apply leaves them"
+}
+# --check's ✗, naming where --apply puts them: under the new state dir, which a legacy host's
+# --apply moves its state into before any row runs.
+stale_entries_to_move_row() {
+    local count="${#STALE_CLAUDE_ENTRIES[@]}" noun shown pronoun=them retired_root_shown
+    noun="$(entries_noun "$count")"
+    (( count == 1 )) && pronoun=it
+    shown="$(sorted_entries_shown "${STALE_CLAUDE_ENTRIES[@]}")"
+    retired_root_shown="$(tilde_path "$STATE_DIR/$RETIRED_DIR_NAME")"
+    row drift retire "$count stale $noun under $(tilde_path "$CLAUDE_USER_DIR"): $shown; --apply moves $pronoun to $retired_root_shown/<stamp>/"
+}
+# --apply's half: each stale entry to $STATE/retired/<one UTC stamp>/<kind>/<name>, by mv, never rm.
+# ✓ names what moved; an entry that could not be moved is a ✗ of its own and stays where it was.
+retire_stale_entries() {
+    local stamp retired_dir entry kind moved=() count noun shown
+    stamp="$(date -u "$RETIRED_STAMP_FORMAT")"
+    retired_dir="$STATE/$RETIRED_DIR_NAME/$stamp"
+    for entry in "${STALE_CLAUDE_ENTRIES[@]}"; do
+        kind="${entry%%/*}"
+        if mkdir -p -- "$retired_dir/$kind" 2>/dev/null && mv -- "$CLAUDE_USER_DIR/$entry" "$retired_dir/$entry" 2>/dev/null; then
+            moved+=("$entry")
+        else
+            row drift retire "could not move $(tilde_path "$CLAUDE_USER_DIR/$entry") to $(tilde_path "$retired_dir/$kind")/; left in place"
+        fi
+    done
+    count="${#moved[@]}"
+    (( count )) || return 0
+    noun="$(entries_noun "$count")"
+    shown="$(sorted_entries_shown "${moved[@]}")"
+    row ok retire "$count $noun moved to $(tilde_path "$retired_dir")/ ($shown)"
+}
+
 # The state dir moved with the rename. --check reads whichever exists, the new one first, so a
 # legacy host's install stamp is found where it is, and moves nothing.
 pick_state_dir() {
@@ -1330,8 +2283,15 @@ here_rows() {
     # Order matters. The overlay is cloned first: dotfiles' ./install renders settings from it, and
     # the renderer refuses (exit 2) a host with a profile marker and no overlay; the profile is
     # read again after that clone. dotfiles' ./install links the timer's units and the dotfiles
-    # marketplace's plugin, so the checkouts go before both; linear-key is enabled before linear
-    # is disabled.
+    # marketplace's plugin, so the checkouts go before both. settings and links come after both
+    # checkouts have fast-forwarded and installed, so the render reads the overlay's current
+    # fragments and the links its current manifest; plugins come after settings, since what the
+    # plugin rows install is what the render declares (H4). The generated skills come after herdr
+    # and herdr-draft, so each is what the binary this run left in place prints. Memory comes after
+    # both checkouts too: the store table is the overlay's, and the link and sync scripts and the
+    # memory timer's unit are what dotfiles' ./install left in place. Retire comes after the links
+    # and the generated skills, so an entry an ./install or a generator made this run is declared or
+    # generated by then, never moved aside.
     read_profile
     clone_overlay
     here_dotfiles
@@ -1343,9 +2303,14 @@ here_rows() {
     here_agent
     here_herdr
     here_draft
+    here_skills
+    here_settings
+    here_links
     here_plugins
     here_mcp
     here_clones
+    here_memory
+    here_retire
     here_slice
     here_sessions
 

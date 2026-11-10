@@ -1264,9 +1264,12 @@ outage.
 - **Keep dev level with `scripts/host-sync --host dev`, run from the laptop.** `--host <alias>`
   is required (`--here` is the host's own form). `--check` (the default)
   reports drift and writes nothing on dev: dotfiles vs `origin/main`, Claude Code and herdr vs
-  the laptop's versions, herdr-draft vs its `main`, the work tenant's plugins, missing and stale
+  the laptop's versions, herdr-draft vs its `main`, the plugins its live settings declare, missing and stale
   `~/quantivly` clones, the long-lived Claude token, the effective `agents.slice` cap, and this user's abandoned
-  login-session scopes over 200 MB. `--apply` fixes the ✗ rows inside a capped transient scope
+  login-session scopes over 200 MB, plus the declared configuration (settings, links, generated skills,
+  memory stores, stale entries under `~/.claude`) that
+  [CLAUDE_SETUP.md, "Keeping a host level"](CLAUDE_SETUP.md#keeping-a-host-level-do-895) lists row by
+  row. `--apply` fixes the ✗ rows inside a capped transient scope
   in `agents.slice`, and arms `host-sync.timer` on dev, a daily run of the same thing that needs
   no laptop and no `aws login`. On a host it has not armed, the `timer` row is a `·` "not armed
   on this host": information, not drift. `scripts/dev-sync` stays one release as a wrapper for
