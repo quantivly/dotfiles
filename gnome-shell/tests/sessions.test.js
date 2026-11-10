@@ -31,13 +31,14 @@ function readFixture(relativePath) {
  *     vanished) and one codex agent. Memory falls 2, 1, 0.75, 0.25 GiB in that order (sum 4 GiB), null for the last.
  */
 function fixtureInputs() {
-    const {agents, workspaces} = JSON.parse(readFixture('herdr-snapshot.json')).result.snapshot;
+    const snapshot = JSON.parse(readFixture('herdr-snapshot.json')).result.snapshot;
     const registryEntries = REGISTRY_FILE_NAMES.map(name => JSON.parse(readFixture(`hspawn-registry/${name}`)));
     const secondsAgo = seconds => NOW_USEC - seconds * SECONDS_TO_USEC;
     return {
-        agents,
+        agents: snapshot.agents,
         registryEntriesByPaneId: Object.fromEntries(registryEntries.map(entry => [entry.pane_id, entry])),
-        workspaceLabelsById: Object.fromEntries(workspaces.map(workspace => [workspace.id, workspace.label])),
+        // The real reader, so the fixture is held to herdr's live shape (workspaces keyed by `workspace_id`).
+        workspaceLabelsById: sessions.workspaceLabelsByIdFromSnapshot(snapshot),
         transcriptMtimeUsecBySessionId: {
             'sess-aaa': secondsAgo(5), 'sess-bbb': secondsAgo(600), 'sess-ccc': secondsAgo(7200),
             'sess-ddd': secondsAgo(90_000),

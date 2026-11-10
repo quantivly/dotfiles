@@ -5,7 +5,7 @@
 // Names, ids and the mangling of a transcript path mirror `hreap` in zsh/zshrc.herdr; the sidebar tokens `acct` and
 // `ctx_ok` / `ctx_warn` / `ctx_crit` are the ones claude/hooks/session-statusline.sh publishes.
 import {guardDisplayName} from './nameGuard.js';
-import {COCKPIT_REDACTED_NAME} from './constants.js';
+import {COCKPIT_REDACTED_NAME, MICROSECONDS_PER_SECOND} from './constants.js';
 import {SESSION_STATES} from './cockpitProtocol.js';
 import {isPlainObject, nonNegativeNumberOrNull, stringOrNull} from './jsonFields.js';
 
@@ -29,7 +29,6 @@ const VM_RSS_PATTERN = /^VmRSS:\s+(\d+)\s*kB\s*$/m;
 const VM_SWAP_PATTERN = /^VmSwap:\s+(\d+)\s*kB\s*$/m;
 /** /proc/<pid>/status counts memory in kibibytes. */
 const BYTES_PER_KIB = 1024;
-const MICROSECONDS_PER_SECOND = 1e6;
 
 /**
  * @param {*} agentStatus - The `agent_status` of a herdr snapshot agent; absent for an agent herdr has not classified.
@@ -112,6 +111,25 @@ export function memoryBytesFromProcStatus(text) {
     if (residentKib === null)
         return null;
     return (residentKib + (kibFromStatusLine(text, VM_SWAP_PATTERN) ?? 0)) * BYTES_PER_KIB;
+}
+
+/**
+ * Reads the workspace labels out of herdr's snapshot, keyed as herdr keys them: by `workspace_id`.
+ *
+ * @param {*} snapshot - herdr's snapshot (the `snapshot` of session.snapshot's result).
+ * @returns {Object<string, string>} Each workspace's label by its `workspace_id`; a workspace without both is left
+ *     out, and a snapshot without a `workspaces` list gives none.
+ */
+export function workspaceLabelsByIdFromSnapshot(snapshot) {
+    const workspaces = isPlainObject(snapshot) && Array.isArray(snapshot.workspaces) ? snapshot.workspaces : [];
+    const workspaceLabelsById = {};
+    workspaces.filter(isPlainObject).forEach(workspace => {
+        const workspaceId = stringOrNull(workspace.workspace_id);
+        const label = stringOrNull(workspace.label);
+        if (workspaceId !== null && label !== null)
+            workspaceLabelsById[workspaceId] = label;
+    });
+    return workspaceLabelsById;
 }
 
 /**

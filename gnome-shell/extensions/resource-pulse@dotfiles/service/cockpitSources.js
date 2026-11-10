@@ -16,8 +16,8 @@
 import GLib from 'gi://GLib';
 
 import {
-    BATTERY_CADENCE_MULTIPLIER, COCKPIT_LOG_PREFIX, MOUNTS_INTERVAL_SECONDS, NETWORK_INTERVAL_SECONDS,
-    SESSIONS_UNWATCHED_INTERVAL_SECONDS, SESSIONS_WATCHED_INTERVAL_SECONDS, SOURCE_SIGNAL_COOLDOWN_SECONDS,
+    BATTERY_CADENCE_MULTIPLIER, COCKPIT_LOG_PREFIX, MICROSECONDS_PER_SECOND, MOUNTS_INTERVAL_SECONDS,
+    NETWORK_INTERVAL_SECONDS, SESSIONS_UNWATCHED_INTERVAL_SECONDS, SESSIONS_WATCHED_INTERVAL_SECONDS, SOURCE_SIGNAL_COOLDOWN_SECONDS,
 } from '../lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from '../lib/errorLog.js';
 import {isPlainObject} from '../lib/jsonFields.js';
@@ -39,7 +39,6 @@ const UPOWER_BUS_NAME = 'org.freedesktop.UPower';
 const UPOWER_OBJECT_PATH = '/org/freedesktop/UPower';
 const UPOWER_INTERFACE_NAME = 'org.freedesktop.UPower';
 const ON_BATTERY_PROPERTY = 'OnBattery';
-const MICROSECONDS_PER_SECOND = 1e6;
 const SIGNAL_COOLDOWN_USEC = SOURCE_SIGNAL_COOLDOWN_SECONDS * MICROSECONDS_PER_SECOND;
 /** The shortest wait GLib's whole-second timeouts can give: a cooldown's remainder is rounded up to it. */
 const MIN_TIMEOUT_SECONDS = 1;

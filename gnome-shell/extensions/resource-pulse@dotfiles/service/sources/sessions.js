@@ -14,10 +14,12 @@
 // process named `claude`. Its cwd, when herdr gives one, names the transcript's project directory, as in hreap.
 import GLib from 'gi://GLib';
 
-import {COCKPIT_LOG_PREFIX, HERDR_REQUEST_TIMEOUT_MS} from '../../lib/constants.js';
+import {COCKPIT_LOG_PREFIX, HERDR_REQUEST_TIMEOUT_MS, MICROSECONDS_PER_SECOND} from '../../lib/constants.js';
 import {RateLimitedLogger, describeError} from '../../lib/errorLog.js';
 import {isPlainObject, stringOrNull} from '../../lib/jsonFields.js';
-import {buildSessionsSource, memoryBytesFromProcStatus, transcriptPathCandidates} from '../../lib/sessions.js';
+import {
+    buildSessionsSource, memoryBytesFromProcStatus, transcriptPathCandidates, workspaceLabelsByIdFromSnapshot,
+} from '../../lib/sessions.js';
 import {SESSION_STATES} from '../../lib/cockpitProtocol.js';
 import {HERDR_ERROR_CODES, HerdrSocketClient, herdrSocketPath} from '../herdrSocket.js';
 import {isNotFoundError, listEntryNames, modificationTimeUsecOrNull, readFileRefusingSecrets} from './sourceIo.js';
@@ -57,7 +59,6 @@ const START_TIME_INDEX_AFTER_COMMAND = 19;
 const PROC_PID_STAT_FIELD_SEPARATOR = /\s+/;
 /** The clock ticks per second of /proc/<pid>/stat's starttime: USER_HZ, 100 on every Linux this runs on. */
 const CLOCK_TICKS_PER_SECOND = 100;
-const MICROSECONDS_PER_SECOND = 1e6;
 /** buildSessionsSource's interval input: the scheduler stamps the effective interval over it (ruling R2). */
 const PLACEHOLDER_INTERVAL_SECONDS = 0;
 /** Template keys of this source's log lines, so each logs once per ERROR_LOG_REPEAT_INTERVAL_USEC whatever its text. */
@@ -198,7 +199,7 @@ export class SessionsSource {
         return buildSessionsSource({
             agents,
             registryEntriesByPaneId: this._readRegistryEntriesByPaneId(),
-            workspaceLabelsById: workspaceLabelsByIdFrom(snapshot),
+            workspaceLabelsById: workspaceLabelsByIdFromSnapshot(snapshot),
             ...sampleFacts,
             nowUsec,
             sampledAtUsec: nowUsec,
@@ -445,21 +446,4 @@ function* transcriptProjectDirectories(claudeProjectsRoot, clauthProfilesRoot, l
                 yield `${projectsDirectory}/${projectName}`;
         }
     }
-}
-
-/**
- * @param {*} snapshot - herdr's snapshot.
- * @returns {Object<string, string>} Each workspace's label by its `workspace_id`; a workspace without both is left
- *     out.
- */
-function workspaceLabelsByIdFrom(snapshot) {
-    const workspaces = isPlainObject(snapshot) && Array.isArray(snapshot.workspaces) ? snapshot.workspaces : [];
-    const workspaceLabelsById = {};
-    workspaces.filter(isPlainObject).forEach(workspace => {
-        const workspaceId = stringOrNull(workspace.workspace_id);
-        const label = stringOrNull(workspace.label);
-        if (workspaceId !== null && label !== null)
-            workspaceLabelsById[workspaceId] = label;
-    });
-    return workspaceLabelsById;
 }

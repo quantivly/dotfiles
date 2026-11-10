@@ -117,6 +117,8 @@ export const CPU_IDLE_THRESHOLD_PERCENT = 1;
 export const UNIT_DISPLAY_ALIASES = {'herdr-server': 'herdr agents', 'org.gnome.Shell': 'GNOME Shell'};
 /** Bytes in one gibibyte (the memory unit shown everywhere). */
 export const BYTES_PER_GIBIBYTE = 1024 ** 3;
+/** Microseconds in one second: GLib's clocks and every `*Usec` value count in microseconds. */
+export const MICROSECONDS_PER_SECOND = 1_000_000;
 /** Number of cells in the pressure meter (one more than the number of band thresholds). */
 export const PRESSURE_METER_CELLS = 3;
 /** Width of one drawn pressure-meter cell, in logical pixels: whole pixels keep its edges crisp. */
