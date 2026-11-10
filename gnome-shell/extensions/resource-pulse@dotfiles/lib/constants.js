@@ -161,3 +161,11 @@ export const COCKPIT_GRID_COLUMNS = 4;
 export const COCKPIT_CONFIG_RELATIVE_PATH = 'resource-pulse/cockpit.json';
 /** A session row idle at least this many seconds is drawn dimmed (the drawing side reads it). */
 export const SESSION_IDLE_DIM_SECONDS = 1800;
+/** Interface-name prefixes of VPN tunnels in /proc/net/route (OpenVPN tun and tap, WireGuard wg). */
+export const TUNNEL_INTERFACE_PREFIXES = ['tun', 'tap', 'wg'];
+/** Filesystem types of network shares, as /proc/self/mountinfo names them. */
+export const NETWORK_FILESYSTEM_TYPES = ['cifs', 'smb3', 'nfs', 'nfs4', 'fuse.sshfs', 'fuse.rclone', 'davfs', 'afp'];
+/** Mount-point prefixes under which removable disks are mounted. */
+export const REMOVABLE_MOUNT_PREFIXES = ['/media/', '/run/media/', '/mnt/'];
+/** The RTF_GATEWAY bit of a /proc/net/route `Flags` column: the route goes via a gateway. */
+export const ROUTE_FLAG_GATEWAY = 0x0002;

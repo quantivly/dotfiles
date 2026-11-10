@@ -17,6 +17,8 @@ import './cockpitProtocol.test.js';
 import './cockpitConfig.test.js';
 import './nameGuard.test.js';
 import './sessions.test.js';
+import './network.test.js';
+import './mounts.test.js';
 import './service-sampler.test.js';
 import './client.test.js';
 import './graph.test.js';
