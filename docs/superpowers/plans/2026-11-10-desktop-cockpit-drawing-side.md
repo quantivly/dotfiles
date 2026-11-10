@@ -139,16 +139,19 @@ plain-gjs rows: `gjs -m gnome-shell/tests/run.js`; the full table: `scripts/test
 
 **Interfaces:**
 - Produces, `lib/cockpitGrid.js`:
-  - `COCKPIT_GRID_REFERENCE = Object.freeze({widthPx: 1920, heightPx: 1080, marginPx: 52, innerGutterPx: 24,
-    groupGapPx: 48, captionHeightPx: 28, rowGutterPx: 24, columns: 4, rows: 3})` (the spec's numbers at 1920×1080
-    logical; in `lib/constants.js`).
+  - `COCKPIT_GRID_REFERENCE = Object.freeze({widthPx: 1920, heightPx: 1080, cellWidthPx: 420, cellHeightPx: 300,
+    innerGutterPx: 24, groupGapPx: 48, rowGutterPx: 24, captionHeightPx: 28, columns: 4, rows: 3})` (the spec's
+    numbers at 1920×1080 logical; in `lib/constants.js`). The spec's "margins about 52" are what remains: at the
+    reference the grid is 4 × 420 + 24 + 48 + 48 = 1800 wide, so 60 px a side, and 28 + 3 × 300 + 2 × 24 = 976 tall,
+    so 52 px top and bottom.
   - `cockpitGridGeometry({workArea: {x, y, width, height}, groups: Array<{id, caption, columns, cards: string[]}>})
     → {captions: Array<{groupId, text, x, y, width, height}>, cells: Array<{cardId, groupId, column, row, x, y,
-    width, height}>}`: margins, gutters and the caption height scale by `min(width / 1920, height / 1080)` (never
-    below `COCKPIT_GRID_MIN_SCALE = 0.5`); the four columns share the remaining width evenly; the three rows share the
-    remaining height evenly; groups sit left to right, each `columns` cells wide, separated by the group gap; a
-    group's cards fill its columns left to right, then the next row; every card id in the layout gets a cell, known
-    or not; the caption spans its group's width above its first row; all numbers are floored integers.
+    width, height}>}`: every reference length (cells, gutters, caption) scales by `min(width / 1920, height /
+    1080)` (never below `COCKPIT_GRID_MIN_SCALE = 0.5`, never above `COCKPIT_GRID_MAX_SCALE = 2`); the grid is
+    centred in the work area (the margins take the remainder); groups sit left to right, each `columns` cells wide,
+    one inner gutter between cells of a group, one group gap between groups; a group's cards fill its columns left
+    to right, then the next row; every card id in the layout gets a cell, known or not; the caption spans its
+    group's width above its first row; all numbers are floored integers.
   - `isKnownCockpitCard(cardId)`: true for the ids this plan draws, `COCKPIT_DRAWN_CARD_IDS = ['system', 'apps',
     'connections', 'sessions']` (in `lib/constants.js`).
 - Produces, `lib/cockpitMonitor.js`:
@@ -170,12 +173,13 @@ plain-gjs rows: `gjs -m gnome-shell/tests/run.js`; the full table: `scripts/test
 test('cockpitGrid: the spec grid at 1920x1080 has 420-wide cells, 300-tall rows and a 28 px caption row', () => {
     const geometry = cockpitGrid.cockpitGridGeometry({workArea: {x: 0, y: 0, width: 1920, height: 1080}, groups: TEMPLATE_GROUPS});
     const system = geometry.cells.find(c => c.cardId === 'system');
-    assertEqual([system.x, system.y, system.width, system.height], [52, 80, 420, 300]);
+    assertEqual([system.x, system.y, system.width, system.height], [60, 80, 420, 300]);
     assertEqual(geometry.cells.find(c => c.cardId === 'connections').row, 1);
-    assertEqual(geometry.cells.find(c => c.cardId === 'sessions').x, 52 + 2 * 420 + 24 + 48);
+    assertEqual(geometry.cells.find(c => c.cardId === 'connections').y, 80 + 300 + 24);
+    assertEqual(geometry.cells.find(c => c.cardId === 'sessions').x, 60 + 2 * 420 + 24 + 48);
     assertEqual(geometry.captions.map(c => c.text), ['MACHINE', 'AGENTS', 'WORK']);
 });
-test('cockpitGrid: a work area offset and a smaller monitor scale the gutters, never the cell count', () => { /* 1280x720 at x=1920: every cell inside the work area; 8 cells; scale 2/3 → margin 34 */ });
+test('cockpitGrid: a work area offset and a smaller monitor scale every length, never the cell count', () => { /* 1280x720 at x=1920: scale 2/3 → cells 280x200, gutters 16/32; every cell inside the work area; 8 cells; the grid centred */ });
 test('cockpitGrid: an unknown card id still gets a cell', () => {
     const groups = [{id: 'g', caption: 'G', columns: 1, cards: ['weather']}];
     assertEqual(cockpitGrid.cockpitGridGeometry({workArea: FULL_HD, groups}).cells.length, 1);
