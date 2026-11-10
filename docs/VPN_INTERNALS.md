@@ -955,11 +955,18 @@ Two things the upgrade showed about 6.x:
   redactor and the transcript scrubber both anchored on `AUTH_FAILED,CRV1:`, so that shape passed
   through untouched until both were re-anchored on `CRV1:` alone.
 
-**Not verified: whether the tunnel survives the GUI dying.** 6.x's quit dialog offers only
-"Cancel" and "Disconnect and quit", so the intended check (quit, keep the tunnel) does not exist.
-The real test is `pkill -KILL -x 'AWS VPN Client'` with the tunnel up, and it has not been run.
-The architecture predicts survival: a root daemon owns the tunnel, and the GUI is a gRPC client
-of it.
+**Measured 2026-11-09: the tunnel survives the GUI dying.** A GNOME logout ended the GUI. Its
+processes were gone, and new ones started 9 s after the next login. The root daemon
+(`aws-client-vpn-daemon.service`) kept running throughout.
+- **Its log:** no state transition after `Connected` at 18:29:47Z through 18:49Z, a window that spans
+  the logout (about 18:33Z) and the GUI's restart (18:34:10Z).
+- **The client:** `aws-vpn-client get-connection-status` still read `Connected` after the login, with
+  its latest connection attempt dated before the logout.
+
+This is what the architecture predicts: a root daemon owns the tunnel, and the GUI is only a gRPC
+client of it. Quitting *from* the GUI still disconnects, because 6.x's quit dialog offers only
+"Cancel" and "Disconnect and quit". Ending its process does not. `pkill -KILL -x 'AWS VPN Client'`
+was not run; a logout is the case that happens day to day.
 
 ### The fix on this side: two static rules per destination
 
