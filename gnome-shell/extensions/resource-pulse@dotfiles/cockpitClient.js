@@ -15,17 +15,19 @@
 // - start() asks systemd's user manager to start the unit (StartUnit, "replace"), on every start(), with
 //   pulseClient.js's chain: a failure is retried after START_RETRY_DELAYS_SECONDS (5, 30, 300 s, then every 300 s);
 //   the service appearing on the bus ends the chain.
-// - The cockpit is optional, so a unit that is not there to run is "not configured", never a fault to retry. The client
-//   is SKIPPED (the chain ends, with one info line and no warning; the cached layout is kept; the next start(), the
-//   next enable, asks again, which is how a layout file created mid-session is picked up) in three cases:
-//   - StartUnit is rejected with org.freedesktop.systemd1.NoSuchUnit: no unit file is linked (./install never ran);
+// - The cockpit is optional, so a unit that is not there to run is "not configured", never a fault to retry (ruling
+//   D4). The client is SKIPPED (the chain ends, with one info line and no warning; the cached layout is kept; the next
+//   start(), the next enable, asks again, which is how a layout file created mid-session is picked up) in three
+//   cases, each a first-class reading of "not configured":
+//   - (a) StartUnit is rejected with org.freedesktop.systemd1.NoSuchUnit: no unit file is linked (./install never
+//     ran);
 //   - after an accepted StartUnit with no service on the bus within START_CONFIRMATION_TIMEOUT_SECONDS, the unit read
 //     over systemd's D-Bus gives ConditionResult false, checked (ConditionTimestampMonotonic above 0, so by the job
 //     just asked for: a unit never started also reads false, ruling R17): the layout file is absent;
-//   - in that same read, GetUnit answers NoSuchUnit: systemd unloaded the unit after its skipped job. This is the
-//     fallback, and how often it fires is unmeasured: whether a skipped cockpit.service is still loaded 15 s later is
-//     up to systemd's garbage collection, and its PartOf=graphical-session.target points from the unit to the target,
-//     so it may not keep the unit loaded.
+//   - (b) in that same read, GetUnit answers NoSuchUnit after the accepted job: systemd has unloaded the skipped unit.
+//   The client never depends on the unit staying loaded after a skipped job: loaded, its condition says skipped;
+//   unloaded, (b) says the same. How often (b) happens is unmeasured until the deploy: it is up to systemd's garbage
+//   collection, and the unit's PartOf=graphical-session.target points from the unit to the target, not the reverse.
 //   Any other answer (a true or unchecked condition, a read that failed otherwise: a timeout, no systemd, another
 //   error) counts as a failed attempt and is retried.
 // - It follows the bus name's owner. An owner appearing is asked GetState, whose answer makes the client LIVE and
@@ -38,7 +40,10 @@
 //   whose object changed. A Changed before any state from this owner asks for the state instead (it holds the change).
 // - Staleness is decided by pulling, not by a timer (ruling R14): pullIfSuspicious(name) asks GetState once per
 //   interval while lib/cockpitStaleness.js suspects a source, stamping when it asked and when the answer came; a pull
-//   that answers the same old stamp makes the source stale. With no owner a pull asks nobody and completes at once.
+//   that answers the same old stamp makes the source stale. A GetState that fails completes the pull too (ruling D6),
+//   so a service that keeps its name but hangs reads stale. With no owner a pull asks nobody and completes at once.
+//   A source whose stamp moves forward, by any answer or Changed, has both pull stamps cleared (ruling D5): a refreshed
+//   source starts a new suspicion cycle, and reads stale only after a pull of that cycle answers its new stamp.
 // - The watch: WatchCockpit and UnwatchCockpit go out only when the wanted flag changes, and only to an owner.
 //   destroy() sends UnwatchCockpit, uncancellable and best-effort, while a watch is held: the shell's bus connection
 //   outlives the extension, and the service drops a caller's watches only when its connection closes.
@@ -362,6 +367,31 @@ function isSameAsJson(firstValue, secondValue) {
     return JSON.stringify(firstValue) === JSON.stringify(secondValue);
 }
 
+/**
+ * Says whether a source's new object carries a later sample than the one the client holds (ruling D5): a refresh,
+ * which ends the source's suspicion cycle. A first stamp counts; no stamp, the same one or an earlier one does not.
+ *
+ * @param {object|null} previousSource - The source object the client holds, or null.
+ * @param {object|null} nextSource - The source object an answer or a Changed carries, or null.
+ * @returns {boolean} True when nextSource's sampledAtUsec is later than previousSource's, or previousSource has none.
+ */
+function isSampledLater(previousSource, nextSource) {
+    const nextSampledAtUsec = nextSource?.sampledAtUsec ?? null;
+    if (nextSampledAtUsec === null)
+        return false;
+    const previousSampledAtUsec = previousSource?.sampledAtUsec ?? null;
+    return previousSampledAtUsec === null || nextSampledAtUsec > previousSampledAtUsec;
+}
+
+/**
+ * The pull stamps of a source with no pull asked for in its current suspicion cycle.
+ *
+ * @returns {{requestedAtUsec: null, completedAtUsec: null}} A new one each time.
+ */
+function emptyPullStamps() {
+    return {requestedAtUsec: null, completedAtUsec: null};
+}
+
 /** Follows the cockpit service on the bus, and keeps what the cockpit's cards draw. */
 export class CockpitClient {
     /**
@@ -444,9 +474,10 @@ export class CockpitClient {
         this._layout = cachedLayout;
         this._configError = null;
         this._sourcesByName = new Map(COCKPIT_SOURCE_NAMES.map(sourceName => [sourceName, null]));
-        // When the client last asked for each source's state on suspicion, and when that answer came: wall clock.
+        // When the client last asked for each source's state on suspicion, and when that answer came: wall clock. Both
+        // are cleared when the source's stamp moves forward (_storeSources).
         this._pullStampsBySourceName = new Map(COCKPIT_SOURCE_NAMES.map(sourceName =>
-            [sourceName, {requestedAtUsec: null, completedAtUsec: null}]));
+            [sourceName, emptyPullStamps()]));
         this._listeners = new Map();
         this._nextListenerId = 1;
     }
@@ -586,8 +617,11 @@ export class CockpitClient {
      * (past COCKPIT_SOURCE_STALE_INTERVALS of its interval, and no pull asked for within one interval), it stamps the
      * request and calls GetState, joining one already in flight. The answer stamps the completion, replaces the
      * state, and tells a sources event naming this source (its freshness may have changed) and any other that changed.
-     * With no owner it asks nobody: the pull completes at once, so a suspect source reads stale. A GetState that fails
-     * is logged and stamps no completion, so the source stays suspect and the next interval asks again.
+     * An answer that refreshes the source's stamp clears both pull stamps instead (ruling D5), so it reads stale only
+     * after a later pull answers that same stamp. With no owner it asks nobody: the pull completes at once, so a
+     * suspect source reads stale. A GetState that fails, or answers no readable state, completes the pull too (ruling
+     * D6): it is logged once per key, the completion is stamped and the source told, so a service that keeps its name
+     * but hangs reads stale; the next interval asks again.
      *
      * @param {string} sourceName - One of COCKPIT_SOURCE_NAMES.
      * @returns {Promise<{pulled: boolean}>} Settles once the pull did (never rejects): pulled is true when one was
@@ -992,7 +1026,7 @@ export class CockpitClient {
 
     /**
      * Applies GetState's answer, if it answers the latest call, and settles the pulls that waited for it. A failure or
-     * an unreadable state is logged and changes nothing.
+     * an unreadable state is logged, completes those pulls (ruling D6) and changes nothing else.
      *
      * @param {number} stateRequestNumber - The call's number.
      * @param {Error|null} error - Why the call failed, or null.
@@ -1004,12 +1038,48 @@ export class CockpitClient {
             return;
         this._isStateRequestInFlight = false;
         const pendingPulls = this._takePendingPulls();
+        const pulledSourceNames = pendingPulls.map(pendingPull => pendingPull.sourceName);
         const state = this._readStateReply(error, reply);
-        if (state !== null) {
-            const pulledSourceNames = pendingPulls.map(pendingPull => pendingPull.sourceName);
+        if (state === null)
+            this._completeUnansweredPulls(pulledSourceNames);
+        else
             this._applyState(state, pulledSourceNames);
-        }
         this._settlePulls(pendingPulls);
+    }
+
+    /**
+     * Completes the pulls a GetState was for that failed or answered no readable state (ruling D6): their completion
+     * is stamped now and they are told as a sources event, so a suspect source whose service keeps its name but hangs
+     * reads stale, and its card redraws. _readStateReply logged the failure, once per key; the next interval's
+     * suspicion pulls again.
+     *
+     * @param {string[]} pulledSourceNames - The sources whose pulls the GetState was for; none tells nothing.
+     * @returns {void}
+     */
+    _completeUnansweredPulls(pulledSourceNames) {
+        if (pulledSourceNames.length === 0)
+            return;
+        this._stampPullCompletions(pulledSourceNames);
+        const toldSourceNames = COCKPIT_SOURCE_NAMES.filter(sourceName => pulledSourceNames.includes(sourceName));
+        this._notifyListeners({type: CockpitClientEventType.SOURCES, names: toldSourceNames});
+    }
+
+    /**
+     * Stamps now as the completion of each pull named. A pull whose source was refreshed while it was in flight (a
+     * Changed carried a later stamp, which cleared its request stamp) belongs to a cycle that has ended, and is not
+     * stamped: its answer is no evidence about the new stamp.
+     *
+     * @param {string[]} pulledSourceNames - The sources whose pulls completed.
+     * @returns {void}
+     */
+    _stampPullCompletions(pulledSourceNames) {
+        const completedAtUsec = this._nowRealUsec();
+        for (const pulledSourceName of pulledSourceNames) {
+            const pullStamps = this._pullStampsBySourceName.get(pulledSourceName);
+            const isPullOfCurrentCycle = pullStamps.requestedAtUsec !== null;
+            if (isPullOfCurrentCycle)
+                pullStamps.completedAtUsec = completedAtUsec;
+        }
     }
 
     /**
@@ -1034,9 +1104,10 @@ export class CockpitClient {
     }
 
     /**
-     * Takes a state whole: the layout, the config error and every source replace the client's, the pulled sources'
-     * completion is stamped, and the client is LIVE. Then tells, in order, the state, the layout (if it changed) and
-     * the sources that changed or were pulled.
+     * Takes a state whole: the pulled sources' completion is stamped, the layout, the config error and every source
+     * replace the client's (a source the answer refreshed has both pull stamps cleared, its completion with them), and
+     * the client is LIVE. Then tells, in order, the state, the layout (if it changed) and the sources that changed or
+     * were pulled.
      *
      * @param {object} state - lib/cockpitProtocol.js parseCockpitStatePayload's result.
      * @param {string[]} pulledSourceNames - The sources whose pulls this answer completes.
@@ -1045,10 +1116,11 @@ export class CockpitClient {
     _applyState(state, pulledSourceNames) {
         this._hasStateFromOwner = true;
         const isLayoutChanged = this._storeLayout(state.layout, state.configError);
+        // Stamped before the sources are stored, so that storing a refreshed source clears this completion with the
+        // rest of the cycle it ends (ruling D5); stamped after, it would make that source read stale at its next
+        // suspicion, before any pull of the new cycle answered.
+        this._stampPullCompletions(pulledSourceNames);
         const changedSourceNames = this._storeSources(state.sources);
-        const completedAtUsec = this._nowRealUsec();
-        for (const pulledSourceName of pulledSourceNames)
-            this._pullStampsBySourceName.get(pulledSourceName).completedAtUsec = completedAtUsec;
         const toldSourceNames = COCKPIT_SOURCE_NAMES.filter(sourceName =>
             changedSourceNames.includes(sourceName) || pulledSourceNames.includes(sourceName));
         this._setState(CockpitClientState.LIVE);
@@ -1123,7 +1195,9 @@ export class CockpitClient {
     }
 
     /**
-     * Keeps each source an answer carries.
+     * Keeps each source an answer or a Changed carries. A source whose stamp moves forward has both pull stamps cleared
+     * (ruling D5): it was refreshed, so it starts a new suspicion cycle, and reads stale only once a pull of that cycle
+     * answers its new stamp.
      *
      * @param {object} sources - Source objects by name; a name the client does not know is ignored.
      * @returns {string[]} The names whose object changed, in COCKPIT_SOURCE_NAMES's order.
@@ -1133,9 +1207,12 @@ export class CockpitClient {
         for (const sourceName of COCKPIT_SOURCE_NAMES) {
             if (!Object.hasOwn(sources, sourceName))
                 continue;
+            const previousSource = this._sourcesByName.get(sourceName);
             const source = sources[sourceName];
-            if (!isSameAsJson(this._sourcesByName.get(sourceName), source))
+            if (!isSameAsJson(previousSource, source))
                 changedSourceNames.push(sourceName);
+            if (isSampledLater(previousSource, source))
+                this._pullStampsBySourceName.set(sourceName, emptyPullStamps());
             this._sourcesByName.set(sourceName, source);
         }
         return changedSourceNames;

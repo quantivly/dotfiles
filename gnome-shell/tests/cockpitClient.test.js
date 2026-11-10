@@ -100,6 +100,12 @@ const MOUNTS_SOURCE = {
 /** The mounts source resampled: a new stamp and the USB disk gone. */
 const RESAMPLED_MOUNTS_SOURCE = {...MOUNTS_SOURCE, sampledAtUsec: RESAMPLED_AT_USEC, rows: []};
 const SOURCES = {sessions: SESSIONS_SOURCE, network: NETWORK_SOURCE, mounts: MOUNTS_SOURCE};
+/** COCKPIT_SOURCE_STALE_INTERVALS (3), written out: how many of its intervals a source ages before it is suspect. */
+const STALE_INTERVALS = 3;
+/** The interval of mounts, the source the pull rows suspect. */
+const MOUNTS_INTERVAL_SECONDS = MOUNTS_SOURCE.intervalSeconds;
+/** How old a mounts stamp may be before it is suspect: past this, the first pull is due. */
+const MOUNTS_SUSPECT_AFTER_SECONDS = STALE_INTERVALS * MOUNTS_INTERVAL_SECONDS;
 
 /** Fake GLib timeouts: a row fires one by its interval, and sees which are still pending. */
 class FakeTimeouts {
@@ -466,6 +472,28 @@ function answerState(proxy, {layout = LAYOUT, configError = null, sources = SOUR
 }
 
 /**
+ * Answers the oldest GetState with SOURCES, except that mounts carries another stamp.
+ *
+ * @param {FakeProxy} proxy - The fixture's proxy.
+ * @param {number} sampledAtUsec - The wall-clock stamp mounts carries.
+ * @returns {void}
+ */
+function answerStateWithMountsSampledAt(proxy, sampledAtUsec) {
+    answerState(proxy, {sources: {...SOURCES, mounts: {...MOUNTS_SOURCE, sampledAtUsec}}});
+}
+
+/**
+ * A wall-clock time some seconds after another.
+ *
+ * @param {number} stampUsec - Wall-clock microseconds.
+ * @param {number} seconds - How many seconds later.
+ * @returns {number} The later time, in microseconds.
+ */
+function usecAfter(stampUsec, seconds) {
+    return stampUsec + seconds * USEC_PER_SECOND;
+}
+
+/**
  * Emits one Changed signal.
  *
  * @param {FakeProxy} proxy - The fixture's proxy.
@@ -780,37 +808,137 @@ test('cockpitClient: a source past three intervals is suspect but not stale; a p
     });
 });
 
-test('cockpitClient: a pull whose GetState fails is logged, leaves the source suspect but not stale, and is not ' +
-    'repeated within the interval', async () => {
-    const {client, clock, proxy, logged} = makeLiveClientFixture();
-    clock.nowRealUsec = SAMPLED_AT_USEC + 100 * USEC_PER_SECOND;
-    const pullPromise = client.pullIfSuspicious('mounts');
-    proxy.fail(GET_STATE, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached'));
-    const pullResult = await valueOnceSettled(pullPromise);
-    clock.nowRealUsec += USEC_PER_SECOND;
+test('cockpitClient: a pull whose GetState fails completes the pull (D6): a service that keeps its name but hangs ' +
+    'reads stale after one failed pull, told as a sources event and logged once; the next interval pulls again, and ' +
+    'a later pull answering a fresh stamp makes the source fresh again', async () => {
+    const {client, clock, proxy, events, logged} = makeLiveClientFixture();
+    const stateCallsBeforePulls = proxy.callsOf(GET_STATE).length;
+    const hungServiceError = new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached');
+    const freshnessAfterEachPull = [];
+    const pullResults = [];
+    for (const secondsAfterSample of [100, 131]) {
+        clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, secondsAfterSample);
+        const failedPull = client.pullIfSuspicious('mounts');
+        proxy.fail(GET_STATE, hungServiceError);
+        pullResults.push(await valueOnceSettled(failedPull));
+        freshnessAfterEachPull.push(client.sourceFreshness('mounts'));
+    }
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, 162);
+    const answeredPull = client.pullIfSuspicious('mounts');
+    answerStateWithMountsSampledAt(proxy, usecAfter(SAMPLED_AT_USEC, 161));
+    pullResults.push(await valueOnceSettled(answeredPull));
+    freshnessAfterEachPull.push(client.sourceFreshness('mounts'));
+    const mountsEvent = {type: 'sources', names: ['mounts']};
     assertEqual({
-        pullResult, freshness: client.sourceFreshness('mounts'),
+        pullResults, freshnessAfterEachPull, state: client.state,
+        pullStateCallCount: proxy.callsOf(GET_STATE).length - stateCallsBeforePulls, events,
         stateLogLines: logged.filter(line => line.includes(GET_STATE)).length,
     }, {
-        pullResult: {pulled: true}, freshness: {isStale: false, shouldPull: false, ageSeconds: 101},
-        stateLogLines: 1,
+        pullResults: [{pulled: true}, {pulled: true}, {pulled: true}],
+        freshnessAfterEachPull: [
+            {isStale: true, shouldPull: false, ageSeconds: 100}, {isStale: true, shouldPull: false, ageSeconds: 131},
+            {isStale: false, shouldPull: false, ageSeconds: 1},
+        ],
+        state: LIVE, pullStateCallCount: 3, events: [mountsEvent, mountsEvent, mountsEvent], stateLogLines: 1,
     });
 });
 
-test('cockpitClient: the name losing its owner makes it VANISHED with its sources kept, calls no StartUnit and sends ' +
-    'no UnwatchCockpit, then or at destroy() (the watch left with the owner)', () => {
+test('cockpitClient: a pull answering a fresher stamp clears the source\'s pull stamps (D5): three intervals after ' +
+    'that stamp it is suspect but not stale, and only a pull answering that same stamp makes it stale', async () => {
+    const {client, clock, proxy} = makeLiveClientFixture();
+    const firstSuspicionUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    // The service resampled mounts a second before the pull, and sent no Changed: the data did not change.
+    const refreshedSampledAtUsec = usecAfter(firstSuspicionUsec, -1);
+    clock.nowRealUsec = firstSuspicionUsec;
+    const refreshingPull = client.pullIfSuspicious('mounts');
+    clock.nowRealUsec = usecAfter(firstSuspicionUsec, 1);
+    answerStateWithMountsSampledAt(proxy, refreshedSampledAtUsec);
+    const refreshingPullResult = await valueOnceSettled(refreshingPull);
+    const afterRefresh = client.sourceFreshness('mounts');
+    clock.nowRealUsec = usecAfter(refreshedSampledAtUsec, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    const atNextSuspicion = client.sourceFreshness('mounts');
+    const sameStampPull = client.pullIfSuspicious('mounts');
+    clock.nowRealUsec = usecAfter(clock.nowRealUsec, 1);
+    answerStateWithMountsSampledAt(proxy, refreshedSampledAtUsec);
+    const sameStampPullResult = await valueOnceSettled(sameStampPull);
+    assertEqual({
+        refreshingPullResult, afterRefresh, atNextSuspicion, sameStampPullResult,
+        afterSameStamp: client.sourceFreshness('mounts'),
+    }, {
+        refreshingPullResult: {pulled: true}, afterRefresh: {isStale: false, shouldPull: false, ageSeconds: 2},
+        atNextSuspicion: {isStale: false, shouldPull: true, ageSeconds: 91}, sameStampPullResult: {pulled: true},
+        afterSameStamp: {isStale: true, shouldPull: false, ageSeconds: 92},
+    });
+});
+
+test('cockpitClient: the review\'s counter-example (D5): mounts (a 30 s interval) sampled at S, pulled at S+100 s ' +
+    'with the answer a fresh stamp S+99 s, the pull requested and completed at S+100 s: at S+190 s it is not stale, ' +
+    'and a pull is due', async () => {
+    const {client, clock, proxy} = makeLiveClientFixture();
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, 100);
+    const pullPromise = client.pullIfSuspicious('mounts');
+    answerStateWithMountsSampledAt(proxy, usecAfter(SAMPLED_AT_USEC, 99));
+    const pullResult = await valueOnceSettled(pullPromise);
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, 190);
+    assertEqual({intervalSeconds: MOUNTS_INTERVAL_SECONDS, pullResult, freshness: client.sourceFreshness('mounts')}, {
+        intervalSeconds: 30, pullResult: {pulled: true},
+        freshness: {isStale: false, shouldPull: true, ageSeconds: 91},
+    });
+});
+
+test('cockpitClient: a Changed refreshing a source while its pull\'s GetState is in flight ends that pull\'s cycle ' +
+    '(D5): the answer, carrying the same fresh stamp, stamps no completion, so three intervals after that stamp the ' +
+    'source is suspect but not stale', async () => {
+    const {client, clock, proxy} = makeLiveClientFixture();
+    const suspicionUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    clock.nowRealUsec = suspicionUsec;
+    const pullPromise = client.pullIfSuspicious('mounts');
+    emitChanged(proxy, {sources: {mounts: {...MOUNTS_SOURCE, sampledAtUsec: suspicionUsec}}});
+    clock.nowRealUsec = usecAfter(suspicionUsec, 1);
+    answerStateWithMountsSampledAt(proxy, suspicionUsec);
+    const pullResult = await valueOnceSettled(pullPromise);
+    clock.nowRealUsec = usecAfter(suspicionUsec, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    assertEqual({pullResult, freshness: client.sourceFreshness('mounts')},
+        {pullResult: {pulled: true}, freshness: {isStale: false, shouldPull: true, ageSeconds: 91}});
+});
+
+test('cockpitClient: pulls for two sources made while one GetState is in flight join it: exactly one GetState, ' +
+    'both settle only when it answers, and one sources event names both', async () => {
+    const {client, clock, proxy, events} = makeLiveClientFixture();
+    const stateCallsBeforePulls = proxy.callsOf(GET_STATE).length;
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    const mountsPull = client.pullIfSuspicious('mounts');
+    const networkPull = client.pullIfSuspicious('network');
+    const pullStateCallCount = proxy.callsOf(GET_STATE).length - stateCallsBeforePulls;
+    const beforeAnswer = [await valueOnceSettled(mountsPull), await valueOnceSettled(networkPull)];
+    answerState(proxy);
+    const afterAnswer = [await valueOnceSettled(mountsPull), await valueOnceSettled(networkPull)];
+    assertEqual({
+        pullStateCallCount, beforeAnswer, afterAnswer, events,
+        isStaleByName: {mounts: client.sourceFreshness('mounts').isStale,
+            network: client.sourceFreshness('network').isStale},
+    }, {
+        pullStateCallCount: 1, beforeAnswer: [UNSETTLED, UNSETTLED], afterAnswer: [{pulled: true}, {pulled: true}],
+        events: [{type: 'sources', names: ['network', 'mounts']}], isStaleByName: {mounts: true, network: true},
+    });
+});
+
+test('cockpitClient: the name losing its owner makes it VANISHED with its sources kept, calls no StartUnit and arms ' +
+    'no retry for one (both read before destroy(), which would remove a timer), and sends no UnwatchCockpit, then or ' +
+    'at destroy() (the watch left with the owner)', () => {
     const {client, timeouts, serviceStarter, proxy, events} = makeLiveClientFixture();
     client.setWatchWanted(true);
     proxy.setNameOwner(null);
     client.setWatchWanted(false);
+    const pendingAfterVanish = timeouts.pendingIntervalsSeconds();
+    const attemptCountAfterVanish = serviceStarter.attempts.length;
     client.destroy();
     assertEqual({
-        events, sourcesByName: client.sourcesByName, layout: client.layout,
-        attemptCount: serviceStarter.attempts.length, calledMethodNames: proxy.calledMethodNames,
-        pending: timeouts.pendingIntervalsSeconds(),
+        events, sourcesByName: client.sourcesByName, layout: client.layout, pendingAfterVanish,
+        attemptCountAfterVanish, calledMethodNames: proxy.calledMethodNames,
     }, {
-        events: [{type: 'state', state: VANISHED}], sourcesByName: SOURCES, layout: LAYOUT, attemptCount: 1,
-        calledMethodNames: [GET_STATE, WATCH_COCKPIT], pending: [],
+        events: [{type: 'state', state: VANISHED}], sourcesByName: SOURCES, layout: LAYOUT, pendingAfterVanish: [],
+        attemptCountAfterVanish: 1, calledMethodNames: [GET_STATE, WATCH_COCKPIT],
     });
 });
 
