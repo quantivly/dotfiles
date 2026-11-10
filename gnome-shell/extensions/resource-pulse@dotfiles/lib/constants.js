@@ -143,6 +143,8 @@ export const APP_RANKING_LENGTH = 10;
  * "no data since HH:MM" rather than its numbers as live.
  */
 export const COCKPIT_SOURCE_STALE_INTERVALS = 3;
+/** The interval a cockpit source is judged against when it publishes none (null or 0): one sample a minute. */
+export const COCKPIT_FALLBACK_INTERVAL_SECONDS = 60;
 /**
  * Longest name, in characters, a cockpit source publishes (a session slug or branch, a workspace label, an account, a
  * mount label); a longer one is published as COCKPIT_REDACTED_NAME.
