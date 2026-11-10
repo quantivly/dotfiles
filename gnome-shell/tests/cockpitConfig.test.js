@@ -107,9 +107,10 @@ test('cockpitConfig: malformed JSON and a wrong version are errors, never a thro
     assertEqual(cockpitConfig.parseCockpitConfig('{').layout, null);
     assertEqual(cockpitConfig.parseCockpitConfig('{"version": 2, "groups": []}').error, 'version: expected 1, got 2');
 });
-test('cockpitConfig: text that is not an object, or not text, is an error', () => {
-    assertEqual(errorOf('{'), 'config: expected a JSON object');
+test('cockpitConfig: text that is not JSON, JSON that is not an object, or not text, is its own error', () => {
+    assertEqual(errorOf('{'), 'config: malformed JSON');
     assertEqual(errorOf('[1]'), 'config: expected a JSON object');
+    assertEqual(errorOf('[]'), 'config: expected a JSON object');
     assertEqual(cockpitConfig.parseCockpitConfig(null), {layout: null, error: 'config: expected JSON text'});
     assertEqual(cockpitConfig.parseCockpitConfig(undefined), {layout: null, error: 'config: expected JSON text'});
 });

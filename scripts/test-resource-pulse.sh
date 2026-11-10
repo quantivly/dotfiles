@@ -1830,7 +1830,7 @@ check "a second service/cockpit.js finds the name taken and exits 1, while the f
 check "the config rewritten with the same text publishes no layout change, and with a new text publishes one (Changed signals carrying configError, watched on the bus)" \
   "${cockpit_driver_said[layout-changes]-}" "same-text=0 new-text=1"
 check "the config overwritten with '{' reads within 3 s as no layout and the parse error, and the sources keep serving" \
-  "${cockpit_driver_said[malformed]-}" 'layout=null configError="config: expected a JSON object" mounts=object'
+  "${cockpit_driver_said[malformed]-}" 'layout=null configError="config: malformed JSON" mounts=object'
 check "the config deleted reads within 3 s as no layout and the error missing, and the sources keep serving" \
   "${cockpit_driver_said[deleted]-}" 'layout=null configError="missing" mounts=object'
 check "the config renamed back into place (an atomic editor's save) reads within 3 s as the layout again" \
@@ -3408,7 +3408,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=698
+EXPECTED_ROWS=699
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

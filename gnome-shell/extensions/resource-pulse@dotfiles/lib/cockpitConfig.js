@@ -6,7 +6,7 @@
 // what the config said. Keys the parser does not know are ignored, `_`-prefixed ones (the template's `_comment`)
 // included, so the format can grow additively like the protocol.
 import {COCKPIT_CARD_IDS, COCKPIT_CONFIG_RELATIVE_PATH, COCKPIT_GRID_COLUMNS} from './constants.js';
-import {isPlainObject, parseJsonObject, stringOrNull} from './jsonFields.js';
+import {isPlainObject, stringOrNull} from './jsonFields.js';
 import {guardDisplayName} from './nameGuard.js';
 
 /** The only `version` this parser reads. */
@@ -15,7 +15,9 @@ const SUPPORTED_CONFIG_VERSION = 1;
 const GROUP_COLUMN_CHOICES = [1, 2];
 /** The error for a config that is not text at all. */
 const NOT_TEXT_ERROR = 'config: expected JSON text';
-/** The error for text that is not a JSON object. */
+/** The error for text that is not JSON at all (a truncated or hand-broken file). */
+const MALFORMED_JSON_ERROR = 'config: malformed JSON';
+/** The error for valid JSON that is not an object (a list, a string, a number, null). */
 const NOT_OBJECT_ERROR = 'config: expected a JSON object';
 
 /**
@@ -54,13 +56,36 @@ function describeConfigVersion(version) {
 export function parseCockpitConfig(text) {
     if (typeof text !== 'string')
         return {layout: null, error: NOT_TEXT_ERROR};
-    const config = parseJsonObject(text);
+    const {config, error: jsonError} = parseConfigObject(text);
     if (config === null)
-        return {layout: null, error: NOT_OBJECT_ERROR};
+        return {layout: null, error: jsonError};
     const error = firstConfigError(config);
     if (error !== null)
         return {layout: null, error};
     return {layout: buildLayout(config), error: null};
+}
+
+/**
+ * Reads the config's JSON, telling text that is not JSON from JSON that is not an object.
+ *
+ * @param {string} text - The config file's text.
+ * @returns {{config: object|null, error: string|null}} The object and no error; or null and MALFORMED_JSON_ERROR
+ *     for text that is not JSON, NOT_OBJECT_ERROR for JSON that is not an object.
+ * @throws {Error} Only what JSON.parse throws other than a SyntaxError, as lib/jsonFields.js's parseJsonObject lets
+ *     through.
+ */
+function parseConfigObject(text) {
+    let parsedValue;
+    try {
+        parsedValue = JSON.parse(text);
+    } catch (error) {
+        if (error instanceof SyntaxError)
+            return {config: null, error: MALFORMED_JSON_ERROR};
+        throw error;
+    }
+    if (!isPlainObject(parsedValue))
+        return {config: null, error: NOT_OBJECT_ERROR};
+    return {config: parsedValue, error: null};
 }
 
 /**

@@ -142,8 +142,9 @@ export class CockpitDBusService {
     }
 
     /**
-     * Sends one Changed for one cockpit listener call, and records its real time for GetState. Runs as a cockpit
-     * listener, which logs a throw (a closed connection) and carries on.
+     * Sends one Changed for one cockpit listener call, and records its real time for GetState once it went out: an
+     * emit that throws leaves GetState's latest publish where it was. Runs as a cockpit listener, which logs a throw
+     * (a closed connection) and carries on.
      *
      * @param {string[]} changedSourceNames - The sources that changed; COCKPIT_LAYOUT_CHANGE_NAME among them when the
      *     layout config did.
@@ -152,7 +153,6 @@ export class CockpitDBusService {
      */
     _emitChanged(changedSourceNames, sourcesByName) {
         const publishedAtUsec = this._nowRealUsec();
-        this._latestPublishedAtUsec = publishedAtUsec;
         // COCKPIT_LAYOUT_CHANGE_NAME lands among the sources here too: buildChangedPayload writes only the names
         // COCKPIT_SOURCE_NAMES lists, so it never reaches the JSON as a source.
         const changedSourceEntries = changedSourceNames
@@ -164,6 +164,7 @@ export class CockpitDBusService {
         }
         const changedParameters = new GLib.Variant(COCKPIT_CHANGED_SIGNAL_SIGNATURE, [buildChangedPayload(change)]);
         this._exportedObject.emit_signal(COCKPIT_CHANGED_SIGNAL_NAME, changedParameters);
+        this._latestPublishedAtUsec = publishedAtUsec;
     }
 
     /**

@@ -41,6 +41,8 @@ const INTERNAL_FOCUS_ERROR = 'internal';
 /** A rejection that is not herdr's: the real cockpit answers herdr's rejections itself, so only a fault rejects. */
 const FOCUS_FAULT_MESSAGE = 'sessionRows.find is not a function';
 const CONFIG_MISSING_ERROR = 'missing';
+/** What the stubbed emit throws, as GLib does on a closed connection. */
+const EMIT_FAILURE_MESSAGE = 'The connection is closed';
 
 /** The sessions source as the scheduler stores it, its fields in the reader's order so a round trip compares equal. */
 const SESSIONS_SOURCE = {
@@ -368,6 +370,24 @@ test('cockpit-dbus: a listener call becomes one Changed naming only the changed 
             changes: [{publishedAtUsec: PUBLISHED_AT_USEC, sources: {network: NETWORK_SOURCE}}],
             latestPublishedAtUsec: PUBLISHED_AT_USEC,
         });
+    }));
+
+test('cockpit-dbus: a Changed whose emit throws leaves GetState\'s latest publish time where it was', () =>
+    withExportedCockpit(async ({cockpit, service, serviceName, openClient}) => {
+        // The exported object's emit, replaced on this one instance: the only way to make a live emit throw while
+        // GetState can still be asked over the same connection.
+        service._exportedObject.emit_signal = () => {
+            throw new Error(EMIT_FAILURE_MESSAGE);
+        };
+        let publishError = null;
+        try {
+            cockpit.publish(['network']);
+        } catch (error) {
+            publishError = error.message;
+        }
+        const state = await fetchState(openClient(), serviceName);
+        assertEqual({publishError, latestPublishedAtUsec: state?.latestPublishedAtUsec},
+            {publishError: EMIT_FAILURE_MESSAGE, latestPublishedAtUsec: SERVICE_STARTED_AT_USEC});
     }));
 
 test('cockpit-dbus: a layout change becomes one Changed carrying the layout and the config error beside no source',

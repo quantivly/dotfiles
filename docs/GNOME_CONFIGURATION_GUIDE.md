@@ -210,8 +210,8 @@ most 4. `version` must be 1. Keys it does not know, such as the template's `_com
 
 The service watches the file. An edit, a save that renames into place, a move or a delete is read again
 200 ms after its first event, with no restart. A malformed file publishes no layout, and a `configError`
-that names its first fault; a deleted one publishes the `configError` `missing`. The sources are served
-either way.
+that names its first fault (`config: malformed JSON` for text that is not JSON at all); a deleted one
+publishes the `configError` `missing`. The sources are served either way.
 
 **Cadence.** Each source samples once at start, then on its own interval:
 
@@ -442,7 +442,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (698 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (699 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
