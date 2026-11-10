@@ -3306,6 +3306,25 @@ else
     ok "$CLAUTH_INSTALLED_ROW_NAME"
 fi
 
+# A table SHAPE fault is still a ✗ without clauth: scripts/tenant-route runs the
+# same check (_claude_tenant_table_ok) with no clauth gate and exits 2, so every
+# memory-link verb refuses the host. Catches the early return moved back above the
+# pool-shape checks, which left only the note on such a host (final review, I1).
+new_home nc6; write_cred
+mk_tenants "$NO_CLAUTH_POOLS
+CLAUDE_TENANT_ROUTES=( \"acme=work\" )"
+WITH_CLAUTH=0 run_doctor
+want_out "no clauth, a route to a tenant with no pool is still a ✗" \
+         "tenant 'work' is named by a route, the default, an overflow or a spill entry, but its pool has no members"
+
+# PIN: a host that sources zshrc.herdr has a clauth shell FUNCTION and may still
+# have no clauth binary. Catches `whence -p clauth` → `command -v clauth`, which
+# finds the function and drops the note on exactly such a host.
+new_home nc7; write_cred; mk_tenants "$NO_CLAUTH_POOLS"
+WITH_CLAUTH=0 PRELUDE='clauth() { :; }' run_doctor
+want_out "no clauth binary, a clauth shell function defined: the note is still printed" \
+         "$NO_CLAUTH_NOTE"
+
 #-----------------------------------------------------------------------------
 section "X. Plugin MCP sign-ins, per pool member (DO-794)"
 #-----------------------------------------------------------------------------
@@ -4166,7 +4185,7 @@ no_out "timer: stores with no origin are no ⚠: nothing has anywhere to sync to
 # record worthless. The trap is live rather than hypothetical: the needle would
 # be "(331 checks" and those sentences are already in exactly the shape it
 # greps for. scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=609
+EXPECTED_ROWS=611
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
