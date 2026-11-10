@@ -159,3 +159,5 @@ export const COCKPIT_CARD_IDS = ['system', 'apps', 'connections', 'sessions', 'h
 export const COCKPIT_GRID_COLUMNS = 4;
 /** The cockpit layout config's path under the user's config home (XDG_CONFIG_HOME). */
 export const COCKPIT_CONFIG_RELATIVE_PATH = 'resource-pulse/cockpit.json';
+/** A session row idle at least this many seconds is drawn dimmed (the drawing side reads it). */
+export const SESSION_IDLE_DIM_SECONDS = 1800;
