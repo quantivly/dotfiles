@@ -303,7 +303,7 @@ shorter history. Before the service existed the sampling ran inside gnome-shell,
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (524 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (530 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures) and of `PulseClient` (its JSON handling and
 version-skew rows). On a private bus of its own (`dbus-run-session`, never the live session bus) it
 runs the service's D-Bus face, the client against it, and the real `service/main.js`. It parses the

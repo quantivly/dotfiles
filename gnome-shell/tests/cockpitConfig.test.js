@@ -69,6 +69,28 @@ test('cockpitConfig: a group id repeated is an error', () => {
     const text = configTextOf([['machine', 1, ['system']], ['machine', 1, ['apps']]]);
     assertEqual(errorOf(text), "groups[1].id: repeated group id 'machine'");
 });
+test('cockpitConfig: a card repeated within one group is an error', () => {
+    assertEqual(errorOf(configTextOf([['machine', 2, ['system', 'system']]])), "groups[0].cards[1]: repeated card id 'system'");
+});
+test('cockpitConfig: a card id too long to print is redacted in the error', () => {
+    const text = configTextOf([['machine', 1, ['x'.repeat(65)]]]);
+    assertEqual(errorOf(text), "groups[0].cards[0]: unknown card id '—'");
+});
+test('cockpitConfig: a card id of exactly the name limit prints as is', () => {
+    const cardId = 'x'.repeat(64);
+    assertEqual(errorOf(configTextOf([['machine', 1, [cardId]]])), `groups[0].cards[0]: unknown card id '${cardId}'`);
+});
+test('cockpitConfig: a card id with a control character is redacted in the error', () => {
+    const text = configTextOf([['machine', 1, ['bad\u001bid']]]);
+    assertEqual(errorOf(text), "groups[0].cards[0]: unknown card id '—'");
+});
+test('cockpitConfig: a repeated group id that is unsafe to print is redacted in the error', () => {
+    const text = configTextOf([['bad\u007fid', 1, ['system']], ['bad\u007fid', 1, ['apps']]]);
+    assertEqual(errorOf(text), "groups[1].id: repeated group id '—'");
+});
+test('cockpitConfig: a version that is not a number names its type, never its text', () => {
+    assertEqual(errorOf('{"version": "1", "groups": []}'), 'version: expected 1, got string');
+});
 test('cockpitConfig: columns above the grid width is an error', () => {
     const text = configTextOf([['a', 2, ['system']], ['b', 2, ['apps']], ['c', 1, ['sol']]]);
     assertEqual(errorOf(text), 'groups[2].columns: columns total 5 exceeds 4');
@@ -120,7 +142,7 @@ test('cockpitConfig: a bad group field is an error naming that field', () => {
     assertEqual(errorWith({columns: '1'}), 'groups[1].columns: expected 1 or 2');
     assertEqual(errorWith({cards: []}), 'groups[1].cards: expected a non-empty array');
     assertEqual(errorWith({cards: 'apps'}), 'groups[1].cards: expected a non-empty array');
-    assertEqual(errorWith({cards: [4]}), "groups[1].cards[0]: unknown card id '4'");
+    assertEqual(errorWith({cards: [4]}), "groups[1].cards[0]: unknown card id '—'");
 });
 test('cockpitConfig: keys starting with an underscore and unknown keys are ignored', () => {
     const text = JSON.stringify({

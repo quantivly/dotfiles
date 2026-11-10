@@ -5,7 +5,9 @@
 // The layout it returns is exactly the shape cockpitProtocol.parseLayout rebuilds, so what the service publishes is
 // what the config said. Keys the parser does not know are ignored, `_`-prefixed ones (the template's `_comment`)
 // included, so the format can grow additively like the protocol.
-import {COCKPIT_CARD_IDS, COCKPIT_CONFIG_RELATIVE_PATH, COCKPIT_GRID_COLUMNS} from './constants.js';
+import {
+    COCKPIT_CARD_IDS, COCKPIT_CONFIG_RELATIVE_PATH, COCKPIT_GRID_COLUMNS, COCKPIT_NAME_MAX_CHARS, COCKPIT_REDACTED_NAME,
+} from './constants.js';
 import {isPlainObject, parseJsonObject, stringOrNull} from './jsonFields.js';
 
 /** The only `version` this parser reads. */
@@ -16,6 +18,30 @@ const GROUP_COLUMN_CHOICES = [1, 2];
 const NOT_TEXT_ERROR = 'config: expected JSON text';
 /** The error for text that is not a JSON object. */
 const NOT_OBJECT_ERROR = 'config: expected a JSON object';
+/** Matches a control character (below 0x20, or 0x7f), which never reaches an error message. */
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
+
+/**
+ * Renders a value from the config file for an error message that is published and drawn on screen. Bounded: a
+ * string of 1 to COCKPIT_NAME_MAX_CHARS characters with no control character prints as is, anything else prints as
+ * COCKPIT_REDACTED_NAME. A later task may swap this for the repo's name guard.
+ *
+ * @param {*} value - A value read from the config file.
+ * @returns {string} The value itself when it is a safe short string, otherwise COCKPIT_REDACTED_NAME.
+ */
+function describeConfigValue(value) {
+    const isSafeName = typeof value === 'string' && value.length >= 1 && [...value].length <= COCKPIT_NAME_MAX_CHARS &&
+        !CONTROL_CHARACTER_PATTERN.test(value);
+    return isSafeName ? value : COCKPIT_REDACTED_NAME;
+}
+
+/**
+ * @param {*} version - The config's `version`.
+ * @returns {string} The number itself when finite, otherwise its typeof, so no file text reaches the message.
+ */
+function describeConfigVersion(version) {
+    return typeof version === 'number' && Number.isFinite(version) ? String(version) : typeof version;
+}
 
 /**
  * @typedef {object} CockpitLayout
@@ -58,7 +84,7 @@ export function cockpitConfigPath(configHome) {
  */
 function firstConfigError(config) {
     if (config.version !== SUPPORTED_CONFIG_VERSION)
-        return `version: expected ${SUPPORTED_CONFIG_VERSION}, got ${String(config.version)}`;
+        return `version: expected ${SUPPORTED_CONFIG_VERSION}, got ${describeConfigVersion(config.version)}`;
     const monitorError = firstMonitorError(config.monitor);
     if (monitorError !== null)
         return monitorError;
@@ -124,13 +150,13 @@ function firstCardsError(cards, where) {
         return `${where}.cards: expected a non-empty array`;
     const unknownIndex = cards.findIndex(cardId => !COCKPIT_CARD_IDS.includes(cardId));
     if (unknownIndex !== -1)
-        return `${where}.cards[${unknownIndex}]: unknown card id '${String(cards[unknownIndex])}'`;
+        return `${where}.cards[${unknownIndex}]: unknown card id '${describeConfigValue(cards[unknownIndex])}'`;
     return null;
 }
 
 /**
  * @param {object[]} groups - The groups, each already valid on its own.
- * @returns {string|null} The first group id, then card id, seen a second time; null when none repeats. Group ids are
+ * @returns {string|null} The first group id, then card id (within a group or across groups), seen a second time; null when none repeats. Group ids are
  *     checked first across all groups, as the order the rule is documented in.
  */
 function firstRepeatError(groups) {
@@ -139,12 +165,14 @@ function firstRepeatError(groups) {
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
         const group = groups[groupIndex];
         if (seenGroupIds.has(group.id))
-            return `groups[${groupIndex}].id: repeated group id '${group.id}'`;
+            return `groups[${groupIndex}].id: repeated group id '${describeConfigValue(group.id)}'`;
         seenGroupIds.add(group.id);
-        const repeatedIndex = group.cards.findIndex(cardId => seenCardIds.has(cardId));
-        if (repeatedIndex !== -1)
-            return `groups[${groupIndex}].cards[${repeatedIndex}]: repeated card id '${group.cards[repeatedIndex]}'`;
-        group.cards.forEach(cardId => seenCardIds.add(cardId));
+        for (let cardIndex = 0; cardIndex < group.cards.length; cardIndex++) {
+            const cardId = group.cards[cardIndex];
+            if (seenCardIds.has(cardId))
+                return `groups[${groupIndex}].cards[${cardIndex}]: repeated card id '${describeConfigValue(cardId)}'`;
+            seenCardIds.add(cardId);
+        }
     }
     return null;
 }
