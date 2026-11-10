@@ -77,6 +77,8 @@ export const HOVER_LABEL_DELAY_MS = 300;
 /** Milliseconds the hover label takes to fade in, and to fade out: the dash's own label timings (dash.js). */
 export const HOVER_LABEL_FADE_IN_MS = 150;
 export const HOVER_LABEL_FADE_OUT_MS = 100;
+/** Pixels between a cockpit row's edge and the cockpit tooltip's nearest edge. */
+export const COCKPIT_TOOLTIP_GAP_PX = 6;
 /** Width of one top-bar graph's slot for a sample, in logical pixels: whole pixels keep the slots crisp. */
 export const TOPBAR_GRAPH_SLOT_WIDTH_PX = 1;
 /** Width of each top-bar graph, in logical pixels: one slot per sample of its history. */

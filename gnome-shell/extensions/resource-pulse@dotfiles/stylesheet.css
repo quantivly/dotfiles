@@ -113,3 +113,94 @@
   color: rgba(255, 255, 255, 0.45);
   -rp-graph-opacity: 0.4;
 }
+
+/* Added in the cockpit drawing release. Every class above stays as it was: GNOME re-reads this file on every enable
+   but the code only at login, so the previous release's code may meet this stylesheet until the next login. The
+   cockpit layer sets each cell's size, so none of these fixes a width or height except the row bar's. */
+
+/* The layer holding every cockpit card: transparent, so only the cards show on the desktop. */
+.rp-cockpit-layer {
+  background-color: transparent;
+}
+
+/* A group caption above its cards. */
+.rp-cockpit-caption {
+  color: rgba(255, 255, 255, 0.6);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 0.8em;
+  font-weight: bold;
+}
+
+/* One card's cell: the desktop card's surface, filling the cell the grid gave it. */
+.rp-cockpit-cell {
+  background-color: rgba(30, 30, 30, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 14px 18px;
+  spacing: 12px;
+  color: white;
+  font-family: "Ubuntu Sans", sans-serif;
+  font-feature-settings: "tnum";
+}
+
+/* A row of a cell, and the faint bar behind its text (the row sets the bar's width). */
+.rp-cockpit-row {
+  spacing: 8px;
+}
+
+.rp-cockpit-row:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.rp-cockpit-row-bar {
+  background-color: rgba(255, 255, 255, 0.08);
+  height: 2px;
+}
+
+/* A session's state: the colour of its icon and text (an icon follows the text colour). */
+.rp-cockpit-state-working {
+  color: #2190a4;
+}
+
+.rp-cockpit-state-blocked {
+  color: #e5a50a;
+}
+
+.rp-cockpit-state-idle {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.rp-cockpit-state-done {
+  color: #26a269;
+}
+
+.rp-cockpit-state-unknown {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* The name of a session waiting on someone: the amber tint of the blocked state. */
+.rp-cockpit-name-waiting {
+  color: #e5a50a;
+}
+
+/* A session idle for a long time recedes (.55 of opaque, on the 0-255 scale Clutter uses). */
+.rp-cockpit-row-long-idle {
+  opacity: 140;
+}
+
+/* The tooltip every cockpit card shares: the top bar's hover label, left-aligned for several lines. */
+.rp-cockpit-tooltip {
+  background-color: rgba(0, 0, 0, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  border-radius: 12px;
+  padding: 6px 12px;
+  text-align: left;
+  font-feature-settings: "tnum";
+}
+
+/* A card with nothing to show: a muted line. */
+.rp-cockpit-no-data {
+  color: rgba(255, 255, 255, 0.6);
+}

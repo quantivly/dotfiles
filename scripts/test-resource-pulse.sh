@@ -96,7 +96,7 @@ printf '\nShell glue and packaging (%s)\n' "$EXT_DIR"
 SHELL_IMPORT_NEEDLE='resource:///org/gnome/shell'
 SYNTAX_ERROR_NEEDLE='SyntaxError'
 GLUE_PARSE_TIMEOUT_SECONDS=20
-for glue_file in extension.js indicator.js card.js; do
+for glue_file in extension.js indicator.js card.js cockpitTooltip.js; do
   glue_path="$EXT_DIR/$glue_file"
   row_name="$glue_file parses and gets as far as its Shell imports"
   if [[ ! -r "$glue_path" ]]; then
@@ -3770,7 +3770,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=797
+EXPECTED_ROWS=812
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

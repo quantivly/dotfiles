@@ -5,7 +5,7 @@ import {
 } from '../extensions/resource-pulse@dotfiles/lib/format.js';
 // The heaviest row's parts, read through the namespace, so a missing export fails its rows rather than the whole run.
 import * as formatModule from '../extensions/resource-pulse@dotfiles/lib/format.js';
-import {cardPosition, hoverLabelPosition} from '../extensions/resource-pulse@dotfiles/lib/layout.js';
+import {cardPosition, hoverLabelPosition, tooltipPosition} from '../extensions/resource-pulse@dotfiles/lib/layout.js';
 
 const GIB = 1024 ** 3;
 const CARD_WIDTH_PX = 340;
@@ -249,3 +249,28 @@ test('hoverLabelPosition: a label wider than its monitor starts at the monitor\'
 test('hoverLabelPosition: a fractional width or gap lands on whole pixels, still inside the monitor', () =>
     // Flush right the label would start at 1300.5; whole pixels round that left, to 1300, never past the edge.
     assertEqual(hoverLabelPosition(indicatorAt(1500), 235.5, 8.5, LEFT_MONITOR), {x: 1300, y: 40}));
+
+// The cockpit tooltip's rows: a 1536 px wide monitor 864 px tall, an anchor row, and a two-line label.
+const TOOLTIP_LABEL_WIDTH_PX = 200;
+const TOOLTIP_LABEL_HEIGHT_PX = 48;
+const TOOLTIP_GAP_PX = 6;
+const TALL_MONITOR = {x: 0, y: 0, width: MONITOR_WIDTH_PX, height: 864};
+const tooltipPlacement = (anchorRect, monitorRect = TALL_MONITOR) => tooltipPosition({
+    anchorRect, labelWidthPx: TOOLTIP_LABEL_WIDTH_PX, labelHeightPx: TOOLTIP_LABEL_HEIGHT_PX,
+    gapPx: TOOLTIP_GAP_PX, monitorRect,
+});
+
+test('tooltipPosition: centred under the anchor, the gap below it, when there is room', () =>
+    assertEqual(tooltipPlacement({x: 500, y: 100, width: 100, height: 20}), {x: 450, y: 126}));
+test('tooltipPosition: above the anchor, the gap over it, when the label would cross the monitor\'s bottom', () =>
+    assertEqual(tooltipPlacement({x: 500, y: 830, width: 100, height: 20}), {x: 450, y: 776}));
+test('tooltipPosition: clamped at the right edge so the label stays inside the monitor', () =>
+    assertEqual(tooltipPlacement({x: 1500, y: 100, width: 30, height: 20}), {x: 1336, y: 126}));
+test('tooltipPosition: clamped at the monitor\'s left edge, on a monitor that starts right of another', () =>
+    assertEqual(tooltipPlacement({x: 1930, y: 100, width: 20, height: 20},
+        {x: 1920, y: 0, width: MONITOR_WIDTH_PX, height: 864}), {x: 1920, y: 126}));
+test('tooltipPosition: a fractional anchor lands on whole pixels', () =>
+    assertEqual(tooltipPlacement({x: 500.5, y: 100.4, width: 99, height: 20}), {x: 450, y: 126}));
+test('tooltipPosition: a label that fits neither below nor above stays below, never above the monitor\'s top', () =>
+    assertEqual(tooltipPlacement({x: 500, y: 20, width: 100, height: 20},
+        {x: 0, y: 0, width: MONITOR_WIDTH_PX, height: 60}), {x: 450, y: 46}));
