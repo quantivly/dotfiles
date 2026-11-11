@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/host-sync` is truthful on a host that serves no work tenant, and reports when the
+  host's GitHub token expires (DO-900).** For step 8 of the shared-configuration design
+  (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, D8 amendments H12 and H13,
+  and the D11 and "Verification" amendments). The `LINEAR_API_KEY` row is a person's step only where
+  the profile serves the work tenant or its tenants are unknown; elsewhere it is one `·` row,
+  `no LINEAR_API_KEY is expected on this host`, and `~/.zshrc.local` is not read. A new `gh` row,
+  after the auth rows, reads the token's expiry from the `github-authentication-token-expiration`
+  header of one `gh api --include user` call (30-second timeout), never the token: ✓ with the date
+  or "carries no expiry"; ⚠ inside 14 days, after it, for a value that cannot be read, or when gh
+  gets no 200 answer; `·` with no gh; and no row where clauth manages the accounts. The call clears
+  `CLICOLOR_FORCE` and `GH_FORCE_TTY`, either of which makes gh colour the header's name so that
+  the row would miss it, and the no-answer ⚠ also names an unreachable GitHub and the remedy for an
+  expired token, which GitHub answers with 401.
+  `docs/CLAUDE_SETUP.md`'s "A host's first run" gains "A host with no checkout yet", the path for a
+  host without sudo (`scripts/server-bootstrap.sh` needs it): zsh and linger first, a silent
+  `~/.zshenv` tested before any login-shell change, `~/.gitconfig.local` and `~/.zshrc.local` before
+  `./install`, the clone, the prerequisites and mise (a host-owned mise config where the host's own
+  Node or Python must stay), then `./install`, the preflight, the marker, `--apply` and
+  `scripts/herdr-claude-wire.sh`. `scripts/test-host-sync.sh` goes from 649 to 677 rows.
+
 - **Resource Pulse's desktop cockpit, data side: a second service, `cockpit.service`, serves the
   Claude Code sessions, the network and the mounts on the session bus; nothing is drawn yet.** Built
   from `docs/superpowers/plans/2026-11-09-desktop-cockpit-data-side.md` (design:
