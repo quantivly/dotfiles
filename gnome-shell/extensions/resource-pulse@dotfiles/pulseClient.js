@@ -1,14 +1,16 @@
 // The extension's one source of numbers: a client of the Resource Pulse sampler service (service/, run by systemd as
 // resource-pulse.service) on the session bus. It keeps the interface the card and the indicator draw from (cpuHistory,
 // memoryHistory, latestSnapshot, lastGoodClockLabel, addListener and removeListener) and does no sampling, no file IO
-// and no subprocess. Gio and GLib only (no Shell, St, Clutter or Meta), so it runs under plain gjs, and its proxy,
-// StartUnit, connection, clock and timeouts are all injectable.
+// and no subprocess. Gio and GLib only (no Shell, St, Clutter or Meta), so it runs under plain gjs, and its link to the
+// service, StartUnit, connection, clock and timeouts are all injectable.
 //
 // It runs inside gnome-shell, the compositor, so:
 // - every D-Bus call is asynchronous, with DBUS_CALL_TIMEOUT_MS, and none is ever synchronous;
+// - it follows the service through serviceLink.js (a name watch, a Sample subscription and plain calls), never
+//   through a D-Bus proxy object, which would make GJS force a full garbage collection after every Sample;
 // - every callback checks for destroy() before it touches anything, and destroy() cancels every pending call, removes
-//   every timeout and disconnects every handler: GNOME 50 disables the extension, destroying this client, on every
-//   lock and every blank, so a teardown must leave nothing behind;
+//   every timeout and ends the name watch and the subscription: GNOME 50 disables the extension, destroying this
+//   client, on every lock and every blank, so a teardown must leave nothing behind;
 // - nothing a timeout runs can throw out of its callback, which would end the GLib source.
 //
 // How it follows the service (docs/superpowers/specs/2026-11-08-resource-pulse-service-design.md, "Lifecycle"):
@@ -38,12 +40,12 @@ import {
 import {RateLimitedLogger, describeError} from './lib/errorLog.js';
 import {RingBuffer} from './lib/history.js';
 import {
-    GET_STATE_METHOD_NAME, RESOURCE_PULSE_BUS_NAME, RESOURCE_PULSE_INTERFACE_NAME, RESOURCE_PULSE_OBJECT_PATH,
-    SAMPLE_SIGNAL_NAME, SAMPLE_SIGNAL_SIGNATURE, UNWATCH_DETAIL_METHOD_NAME, WATCH_DETAIL_METHOD_NAME,
-    parseSamplePayload, parseStatePayload,
+    GET_STATE_METHOD_NAME, SAMPLE_SIGNAL_NAME, SAMPLE_SIGNAL_SIGNATURE, UNWATCH_DETAIL_METHOD_NAME,
+    WATCH_DETAIL_METHOD_NAME, parseSamplePayload, parseStatePayload,
 } from './lib/protocol.js';
 import {runEveryStep} from './lib/teardown.js';
 import {isSampleStale, nextStartRetryDelaySeconds} from './lib/wiring.js';
+import {createResourcePulseLink} from './serviceLink.js';
 
 // systemd's user manager on the session bus, and what the client asks of it.
 const SYSTEMD_BUS_NAME = 'org.freedesktop.systemd1';
@@ -60,17 +62,8 @@ const START_UNIT_PARAMETERS_SIGNATURE = '(ss)';
 const START_UNIT_REPLY_SIGNATURE = '(o)';
 /** GetState → (s state). */
 const STATE_REPLY_SIGNATURE = '(s)';
-/**
- * The proxy loads no properties (the interface has none) and never asks the bus to activate the service: systemd
- * starts it, through StartUnit.
- */
-const PROXY_FLAGS = Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES | Gio.DBusProxyFlags.DO_NOT_AUTO_START;
-/** No call asks the bus to activate a name: a name nobody owns fails the call at once. */
-const CALL_FLAGS = Gio.DBusCallFlags.NO_AUTO_START;
-/** The GObject signal a GDBusProxy emits when the bus name's owner changes. */
-const NAME_OWNER_NOTIFY_SIGNAL = 'notify::g-name-owner';
-/** The GObject signal a GDBusProxy emits for each D-Bus signal from the owner. */
-const PROXY_DBUS_SIGNAL_SIGNAL = 'g-signal';
+/** StartUnit does not ask the bus to activate systemd's name: with nobody owning it, the call fails at once. */
+const START_UNIT_CALL_FLAGS = Gio.DBusCallFlags.NO_AUTO_START;
 
 // Template keys of the rate-limited journal lines whose text varies (lib/errorLog.js).
 const START_UNIT_FAILURE_LOG_KEY = 'StartUnit failed';
@@ -135,7 +128,7 @@ function startResourcePulseUnit(connection, cancellable, onAnswered) {
         [RESOURCE_PULSE_UNIT_NAME, START_UNIT_MODE]);
     const startUnitReplyType = new GLib.VariantType(START_UNIT_REPLY_SIGNATURE);
     connection.call(SYSTEMD_BUS_NAME, SYSTEMD_OBJECT_PATH, SYSTEMD_MANAGER_INTERFACE_NAME, START_UNIT_METHOD_NAME,
-        startUnitParameters, startUnitReplyType, CALL_FLAGS, DBUS_CALL_TIMEOUT_MS, cancellable,
+        startUnitParameters, startUnitReplyType, START_UNIT_CALL_FLAGS, DBUS_CALL_TIMEOUT_MS, cancellable,
         (callingConnection, result) => {
             try {
                 callingConnection.call_finish(result);
@@ -144,30 +137,6 @@ function startResourcePulseUnit(connection, cancellable, onAnswered) {
                 return;
             }
             onAnswered(null);
-        });
-}
-
-/**
- * Creates the proxy for the service's object, asynchronously. The proxy follows the bus name's owner
- * (notify::g-name-owner) and delivers the owner's signals (g-signal).
- *
- * @param {Gio.DBusConnection} connection - The session bus.
- * @param {Gio.Cancellable} cancellable - Cancels the creation.
- * @param {(error: Error|null, proxy: Gio.DBusProxy|null) => void} onCreated - Called once, with the proxy or the
- *     failure.
- * @returns {void}
- */
-function createResourcePulseProxy(connection, cancellable, onCreated) {
-    Gio.DBusProxy.new(connection, PROXY_FLAGS, null, RESOURCE_PULSE_BUS_NAME, RESOURCE_PULSE_OBJECT_PATH,
-        RESOURCE_PULSE_INTERFACE_NAME, cancellable, (_source, result) => {
-            let proxy;
-            try {
-                proxy = Gio.DBusProxy.new_finish(result);
-            } catch (error) {
-                onCreated(error, null);
-                return;
-            }
-            onCreated(null, proxy);
         });
 }
 
@@ -272,9 +241,10 @@ export class PulseClient {
      * @param {Gio.DBusConnection|null} [options.connection] - A connection to use instead of fetching busType's.
      * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable,
      *     onAnswered: (error: Error|null) => void) => void} [options.startUnit] - Asks systemd to start the service.
-     * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable,
-     *     onCreated: (error: Error|null, proxy: Gio.DBusProxy|null) => void) => void} [options.createProxy] - Creates
-     *     the service's proxy.
+     * @param {(connection: Gio.DBusConnection, callbacks: {onOwnerChanged: (nameOwner: string|null) => void,
+     *     onSample: (parameters: GLib.Variant) => void}) => object} [options.createLink] - Starts following the
+     *     service: serviceLink.js's createResourcePulseLink, whose link reports the owner, delivers each Sample and
+     *     makes the calls.
      * @param {() => number} [options.nowUsec] - Monotonic microseconds, for staleness.
      * @param {{addSeconds: (intervalSeconds: number, callback: () => boolean) => number,
      *     remove: (sourceId: number) => void}} [options.timeouts] - Adds and removes timeouts.
@@ -289,7 +259,7 @@ export class PulseClient {
         busType = Gio.BusType.SESSION,
         connection = null,
         startUnit = startResourcePulseUnit,
-        createProxy = createResourcePulseProxy,
+        createLink = createResourcePulseLink,
         nowUsec = () => GLib.get_monotonic_time(),
         timeouts = GLIB_TIMEOUTS,
         errorLog = new RateLimitedLogger({nowUsec, write: line => console.warn(line)}),
@@ -298,17 +268,18 @@ export class PulseClient {
         this._busType = busType;
         this._connection = connection;
         this._startUnit = startUnit;
-        this._createProxy = createProxy;
+        this._createLink = createLink;
         this._nowUsec = nowUsec;
         this._timeouts = timeouts;
         this._errorLog = errorLog;
 
-        // Cancels every call and creation in flight, at destroy(); the best-effort UnwatchDetail uses none.
+        // Cancels every call in flight, and the bus connection's fetch, at destroy(); the best-effort UnwatchDetail
+        // uses none.
         this._cancellable = new Gio.Cancellable();
         this._isStarted = false;
         this._isDestroyed = false;
-        this._proxy = null;
-        this._proxyHandlerIds = [];
+        // The service on the bus (serviceLink.js), from the connection's arrival until destroy().
+        this._link = null;
         // The unique name owning the service's bus name, as last seen; null while nobody does.
         this._nameOwner = null;
         this._staleCheckSourceId = null;
@@ -359,7 +330,7 @@ export class PulseClient {
     }
 
     /**
-     * Asks systemd to start the service, and the first time also starts following it: the bus connection, the proxy
+     * Asks systemd to start the service, and the first time also starts following it: the bus connection, the link
      * and the staleness check. Every call asks systemd again (each enable makes one), restarting the retries; nothing
      * is connected twice. Does nothing once destroyed.
      *
@@ -379,8 +350,8 @@ export class PulseClient {
 
     /**
      * Stops everything for good: releases a held detail watch (an UnwatchDetail no cancel can stop), cancels every
-     * call in flight, removes every timeout, disconnects from the proxy and forgets every listener. Each step runs
-     * whatever the others throw. Safe twice.
+     * call in flight, removes every timeout, destroys the link (its name watch and its subscription) and forgets every
+     * listener. Each step runs whatever the others throw. Safe twice.
      *
      * @returns {void}
      */
@@ -392,7 +363,7 @@ export class PulseClient {
             {name: 'release the detail watch', run: () => this._sendUnwatchDetail(null)},
             {name: 'cancel the calls in flight', run: () => this._cancellable.cancel()},
             {name: 'remove the timeouts', run: () => this._removeTimeouts()},
-            {name: 'disconnect from the proxy', run: () => this._disconnectFromProxy()},
+            {name: 'destroy the link', run: () => this._destroyLink()},
             {name: 'forget the listeners', run: () => this._listeners.clear()},
         ], (stepName, error) => {
             const errorText = describeError(error);
@@ -585,7 +556,8 @@ export class PulseClient {
     }
 
     /**
-     * Sends a StartUnit that waited for the connection, and creates the service's proxy.
+     * Sends a StartUnit that waited for the connection, and starts following the service: the link reports its
+     * owner (soon after, even when nobody owns the name) and delivers its Samples.
      *
      * @param {Gio.DBusConnection} connection - The bus connection.
      * @returns {void}
@@ -595,34 +567,14 @@ export class PulseClient {
             return;
         this._connection = connection;
         this._attemptServiceStartIfConnected();
-        this._createProxy(connection, this._cancellable, (error, proxy) => this._onProxyCreated(error, proxy));
+        this._link = this._createLink(connection, {
+            onOwnerChanged: nameOwner => this._followNameOwner(nameOwner),
+            onSample: parameters => this._onSampleSignal(parameters),
+        });
     }
 
     /**
-     * Connects to the new proxy's owner changes and signals, and takes its owner as it is now.
-     *
-     * @param {Error|null} error - Why it could not be created, or null.
-     * @param {Gio.DBusProxy|null} proxy - The proxy.
-     * @returns {void}
-     */
-    _onProxyCreated(error, proxy) {
-        if (this._isDestroyed)
-            return;
-        if (error !== null) {
-            this._logFollowFailure(error);
-            return;
-        }
-        this._proxy = proxy;
-        this._proxyHandlerIds = [
-            proxy.connect(NAME_OWNER_NOTIFY_SIGNAL, () => this._followNameOwner()),
-            proxy.connect(PROXY_DBUS_SIGNAL_SIGNAL,
-                (_proxy, _senderName, signalName, parameters) => this._onServiceSignal(signalName, parameters)),
-        ];
-        this._followNameOwner();
-    }
-
-    /**
-     * Logs that the client cannot follow the service at all (no bus connection, or no proxy), unless destroyed.
+     * Logs that the client cannot follow the service at all (no bus connection), unless destroyed.
      *
      * @param {*} error - The failure.
      * @returns {void}
@@ -635,16 +587,14 @@ export class PulseClient {
     }
 
     /**
-     * Acts on the proxy's owner as it is now: an owner that left vanished, a new one appeared (both, for a direct
-     * change from one to another).
+     * Acts on the owner the link reports: an owner that left vanished, a new one appeared (both, for a direct change
+     * from one to another). The same owner again, nobody after nobody included, changes nothing.
      *
+     * @param {string|null} nameOwner - The unique name owning the service's bus name now, or null for none.
      * @returns {void}
      */
-    _followNameOwner() {
-        if (this._isDestroyed)
-            return;
-        const nameOwner = this._proxy.get_name_owner();
-        if (nameOwner === this._nameOwner)
+    _followNameOwner(nameOwner) {
+        if (this._isDestroyed || nameOwner === this._nameOwner)
             return;
         if (this._nameOwner !== null)
             this._onServiceVanished();
@@ -748,15 +698,14 @@ export class PulseClient {
     }
 
     /**
-     * Reads a D-Bus signal from the service: a Sample of signature '(s)' holding a JSON object is drawn; another signal
-     * is ignored, and a malformed Sample is logged and dropped.
+     * Reads a Sample signal the link delivered: one of signature '(s)' holding a JSON object is drawn, and a malformed
+     * one is logged and dropped.
      *
-     * @param {string} signalName - The D-Bus signal's name.
-     * @param {GLib.Variant} parameters - Its parameters.
+     * @param {GLib.Variant} parameters - The signal's parameters.
      * @returns {void}
      */
-    _onServiceSignal(signalName, parameters) {
-        if (this._isDestroyed || signalName !== SAMPLE_SIGNAL_NAME)
+    _onSampleSignal(parameters) {
+        if (this._isDestroyed)
             return;
         const sampleText = stringOfVariant(parameters, SAMPLE_SIGNAL_SIGNATURE);
         if (sampleText === null) {
@@ -967,7 +916,8 @@ export class PulseClient {
     }
 
     /**
-     * Calls a method of the service, asynchronously, with DBUS_CALL_TIMEOUT_MS.
+     * Calls a method of the service through the link: asynchronously, with DBUS_CALL_TIMEOUT_MS. Only with an owner,
+     * so the link is there.
      *
      * @param {string} methodName - GetState, WatchDetail or UnwatchDetail.
      * @param {Gio.Cancellable|null} cancellable - The call's cancellable.
@@ -976,16 +926,7 @@ export class PulseClient {
      * @returns {void}
      */
     _callService(methodName, cancellable, onAnswered) {
-        this._proxy.call(methodName, null, CALL_FLAGS, DBUS_CALL_TIMEOUT_MS, cancellable, (proxy, result) => {
-            let reply;
-            try {
-                reply = proxy.call_finish(result);
-            } catch (error) {
-                onAnswered(error, null);
-                return;
-            }
-            onAnswered(null, reply);
-        });
+        this._link.call(methodName, cancellable, onAnswered);
     }
 
     /**
@@ -1003,16 +944,13 @@ export class PulseClient {
     }
 
     /**
-     * Disconnects every handler from the proxy and lets it go.
+     * Destroys the link, if there is one, and lets it go: its name watch and its subscription end.
      *
      * @returns {void}
      */
-    _disconnectFromProxy() {
-        const proxy = this._proxy;
-        const proxyHandlerIds = this._proxyHandlerIds;
-        this._proxy = null;
-        this._proxyHandlerIds = [];
-        for (const handlerId of proxyHandlerIds)
-            proxy.disconnect(handlerId);
+    _destroyLink() {
+        const link = this._link;
+        this._link = null;
+        link?.destroy();
     }
 }

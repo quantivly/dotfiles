@@ -111,12 +111,13 @@ for glue_file in extension.js indicator.js card.js; do
   fi
 done
 
-# lib/, pulseClient.js and graph.js run under plain gjs in the JS rows above,
-# which only works while they import nothing from the Shell. A listed file that
-# is missing fails the row: an absent file contains nothing, which is not a pass.
-PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/graph.js")
+# lib/, pulseClient.js, serviceLink.js and graph.js run under plain gjs in the JS
+# rows above, which only works while they import nothing from the Shell. A
+# listed file that is missing fails the row: an absent file contains nothing,
+# which is not a pass.
+PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/serviceLink.js" "$EXT_DIR/graph.js")
 mapfile -d '' LIB_MODULE_PATHS < <(find "$EXT_DIR/lib" -type f -name '*.js' -print0 2>/dev/null)
-row_name="lib/, pulseClient.js and graph.js import nothing from resource:///"
+row_name="lib/, pulseClient.js, serviceLink.js and graph.js import nothing from resource:///"
 if (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
   bad "$row_name — found no lib/*.js under $EXT_DIR"
 else
@@ -271,6 +272,51 @@ printf '%s\n' "import {ServiceSampler} from './sampler.js';" "import {RingBuffer
   "import {ResourcePulseDBusService} from '../service/dbusService.js';" >"$SERVICE_IMPORT_FIXTURE_DIR/service/main.js"
 check "the service/ import scan finds a static and a dynamic import of service/, and neither a comment nor service/'s own" \
   "$(service_imports_in "$SERVICE_IMPORT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" "extension.js lib/loader.js "
+
+# A D-Bus proxy object owned only by JavaScript, with handlers connected, is
+# referenced by GDBus on every incoming signal, and that makes GJS schedule a
+# forced full garbage collection on the compositor thread 10 s later: once per
+# Sample. So no shell-side file (every .js outside the top-level service/) may
+# name one, not even in a comment: the client follows the service through
+# serviceLink.js's name watch and subscription. The service, a process of its
+# own, may.
+DBUS_PROXY_LITERAL='Gio.DBusProxy'
+# dbus_proxy_mentions_in <extension dir>: one line per .js file outside the
+# top-level service/ that contains DBUS_PROXY_LITERAL. A tree with no
+# JavaScript is a line too.
+dbus_proxy_mentions_in() {
+  local extension_dir="$1" extension_file_path
+  local -a extension_file_paths
+  mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -name '*.js' -print0 2>/dev/null)
+  if (( ${#extension_file_paths[@]} == 0 )); then
+    printf 'found no JavaScript under %s\n' "$extension_dir"
+    return 0
+  fi
+  for extension_file_path in "${extension_file_paths[@]}"; do
+    [[ "$extension_file_path" == "$extension_dir/service/"* ]] && continue
+    if [[ "$(<"$extension_file_path")" == *"$DBUS_PROXY_LITERAL"* ]]; then
+      printf '%s\n' "${extension_file_path#"$extension_dir"/}"
+    fi
+  done
+  return 0
+}
+row_name="no shell-side file names Gio.DBusProxy"
+dbus_proxy_mentions="$(dbus_proxy_mentions_in "$EXT_DIR")"
+dbus_proxy_scan_status=$?
+if (( dbus_proxy_scan_status == 0 )) && [[ -z "$dbus_proxy_mentions" ]]; then
+  ok "$row_name"
+else
+  bad "$row_name — scan exit $dbus_proxy_scan_status: $(tr '\n' ' ' <<<"$dbus_proxy_mentions")"
+fi
+# The planted twin, on a copy of the extension: a call at the top level and a
+# comment in lib/ are found; service/, whose sources use proxies, is not.
+DBUS_PROXY_FIXTURE_DIR="$WIRING_TMP/dbus-proxy-fixture"
+cp -R "$EXT_DIR" "$DBUS_PROXY_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $DBUS_PROXY_FIXTURE_DIR"
+printf '%s\n' 'Gio.DBusProxy.new(connection, flags, null, busName, objectPath, interfaceName, cancellable, callback);' \
+  >>"$DBUS_PROXY_FIXTURE_DIR/pulseClient.js"
+printf '%s\n' '// Built with Gio.DBusProxy.new(connection, ...), once.' >>"$DBUS_PROXY_FIXTURE_DIR/lib/wiring.js"
+check "a planted Gio.DBusProxy.new( in a shell-side copy is found" \
+  "$(dbus_proxy_mentions_in "$DBUS_PROXY_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" "lib/wiring.js pulseClient.js "
 
 # extension.js imports the Shell, so its teardown cannot run here. lib/teardown.js
 # (runEveryStep, whose rows are in lifecycle.test.js) guards each step; these
@@ -499,9 +545,9 @@ sorted_closure() {
   printf '%sexit=%s' "$(LC_ALL=C sort <<<"$closure_output" | tr '\n' ' ')" "$closure_exit"
 }
 # Read from the import lines of today's tree, by hand: the shell side's
-# seventeen modules and the service side's seventeen, seven of them (constants,
+# eighteen modules and the service side's seventeen, seven of them (constants,
 # errorLog, history, jsonFields, pressure, protocol, teardown) on both.
-EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
+EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js serviceLink.js '
 EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/jsonFields.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/fileIo.js service/main.js service/sampler.js '
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
@@ -3431,7 +3477,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=705
+EXPECTED_ROWS=708
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

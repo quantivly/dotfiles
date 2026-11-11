@@ -1,18 +1,26 @@
-// pulseClient.js with its REAL defaults (a Gio.DBusProxy, GLib timeouts, the StartUnit call) on a PRIVATE message bus.
-// Run only by run-private-bus.js under `dbus-run-session`, never by run.js. Every connection is opened by address
-// through service-dbus.test.js's openPrivateBusConnection, which refuses anything but the private bus. The service side
-// is the real service/dbusService.js over a fake sampler, owning the real bus name; systemd's side is either absent
-// (nothing owns org.freedesktop.systemd1 here) or a fake Manager that records StartUnit.
+// pulseClient.js with its REAL defaults (serviceLink.js's name watch, Sample subscription and calls, GLib timeouts, the
+// StartUnit call) on a PRIVATE message bus, and serviceLink.js on its own. Run only by run-private-bus.js under
+// `dbus-run-session`, never by run.js. Every connection is opened by address through service-dbus.test.js's
+// openPrivateBusConnection, which refuses anything but the private bus. The service side is the real
+// service/dbusService.js over a fake sampler, owning the real bus name; systemd's side is either absent (nothing owns
+// org.freedesktop.systemd1 here) or a fake Manager that records StartUnit.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
 import {FakeSampler, openPrivateBusConnection, waitUntil} from './service-dbus.test.js';
 import {PulseClient} from '../extensions/resource-pulse@dotfiles/pulseClient.js';
+import {createResourcePulseLink} from '../extensions/resource-pulse@dotfiles/serviceLink.js';
 import {ResourcePulseDBusService} from '../extensions/resource-pulse@dotfiles/service/dbusService.js';
-import {RESOURCE_PULSE_BUS_NAME} from '../extensions/resource-pulse@dotfiles/lib/protocol.js';
+import {
+    GET_STATE_METHOD_NAME, RESOURCE_PULSE_BUS_NAME, RESOURCE_PULSE_INTERFACE_NAME, RESOURCE_PULSE_OBJECT_PATH,
+    parseSamplePayload, parseStatePayload,
+} from '../extensions/resource-pulse@dotfiles/lib/protocol.js';
+import {DBUS_CALL_TIMEOUT_MS} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
 
 const BUS_ROUND_TRIP_TIMEOUT_MS = 2000;
+/** The signature of GetState's reply and of a Sample's parameters: one string. */
+const ONE_STRING_SIGNATURE = '(s)';
 const SYSTEMD_BUS_NAME = 'org.freedesktop.systemd1';
 const SYSTEMD_OBJECT_PATH = '/org/freedesktop/systemd1';
 const SYSTEMD_MANAGER_INTERFACE_NAME = 'org.freedesktop.systemd1.Manager';
@@ -93,6 +101,53 @@ function pingPeer(connection, busName) {
 }
 
 /**
+ * Records where each call made through a connection's call() goes, with its flags and timeout, and passes the call on
+ * unchanged.
+ *
+ * @param {Gio.DBusConnection} connection - The caller.
+ * @returns {Array<{busName: string, objectPath: string, interfaceName: string, methodName: string,
+ *     flags: Gio.DBusCallFlags, timeoutMs: number}>} The calls so far, in order.
+ */
+function recordCalls(connection) {
+    const recordedCalls = [];
+    const callThroughConnection = connection.call.bind(connection);
+    connection.call = (busName, objectPath, interfaceName, methodName, ...callArguments) => {
+        const [, , flags, timeoutMs] = callArguments;
+        recordedCalls.push({busName, objectPath, interfaceName, methodName, flags, timeoutMs});
+        callThroughConnection(busName, objectPath, interfaceName, methodName, ...callArguments);
+    };
+    return recordedCalls;
+}
+
+/**
+ * Calls a method through a link and waits for its answer.
+ *
+ * @param {object} link - serviceLink.js's ResourcePulseLink.
+ * @param {string} methodName - The method.
+ * @returns {Promise<{error: Error|null, reply: GLib.Variant|null}>} What the link answered.
+ */
+function callThroughLink(link, methodName) {
+    return new Promise(resolve => link.call(methodName, null, (error, reply) => resolve({error, reply})));
+}
+
+/**
+ * Makes a link on a connection that records what it delivers.
+ *
+ * @param {Gio.DBusConnection} connection - The connection.
+ * @returns {{link: object, owners: Array<string|null>, samples: GLib.Variant[]}} The link, and every owner and every
+ *     Sample's parameters it delivered, in order.
+ */
+function makeRecordingLink(connection) {
+    const owners = [];
+    const samples = [];
+    const link = createResourcePulseLink(connection, {
+        onOwnerChanged: nameOwner => owners.push(nameOwner),
+        onSample: parameters => samples.push(parameters),
+    });
+    return {link, owners, samples};
+}
+
+/**
  * Closes the connections a row opened that are still open.
  *
  * @param {Gio.DBusConnection[]} connections - The connections.
@@ -109,8 +164,9 @@ function closeConnections(connections) {
  * Serves the Resource Pulse interface for a fake sampler under the real bus name on the private bus, runs a row
  * against it, and takes it all down whatever happens.
  *
- * @param {(fixture: object) => Promise<void>} body - The row; gets {sampler, service, isNameOwned, clientConnection,
- *     logged, makeClient}.
+ * @param {(fixture: object) => Promise<void>} body - The row; gets {sampler, service, isNameOwned, serviceName,
+ *     releaseName, clientConnection, logged, makeClient}: serviceName is the owner's unique name, and releaseName()
+ *     gives the bus name up before the row ends.
  * @returns {Promise<void>}
  */
 async function withServedResourcePulse(body) {
@@ -121,12 +177,19 @@ async function withServedResourcePulse(body) {
     const clients = [];
     let service = null;
     let ownerId = null;
+    const releaseName = () => {
+        if (ownerId === null)
+            return;
+        Gio.bus_unown_name(ownerId);
+        ownerId = null;
+    };
     try {
         service = new ResourcePulseDBusService(sampler, serviceConnection);
         const ownership = await ownName(serviceConnection, RESOURCE_PULSE_BUS_NAME);
         ownerId = ownership.ownerId;
         await body({
-            sampler, service, clientConnection, logged, isNameOwned: ownership.isOwned,
+            sampler, service, clientConnection, logged, isNameOwned: ownership.isOwned, releaseName,
+            serviceName: serviceConnection.get_unique_name(),
             makeClient: () => {
                 const client = new PulseClient({
                     connection: clientConnection,
@@ -140,12 +203,64 @@ async function withServedResourcePulse(body) {
     } finally {
         for (const client of clients)
             client.destroy();
-        if (ownerId !== null)
-            Gio.bus_unown_name(ownerId);
+        releaseName();
         service?.destroy();
         closeConnections([clientConnection, serviceConnection]);
     }
 }
+
+test('link: the owner appears, GetState answers, a Sample arrives, and after destroy() no callback is called', () =>
+    withServedResourcePulse(async ({sampler, isNameOwned, serviceName, releaseName, clientConnection}) => {
+        const recordedCalls = recordCalls(clientConnection);
+        const recording = makeRecordingLink(clientConnection);
+        const isSubscribedFromCreation = recording.link.isSampleSubscribed;
+        // A second link on the same connection stays live: that it sees the Sample and the owner leaving after the
+        // first is destroyed proves both reached this connection, and that one link's destroy() spares the other.
+        const control = makeRecordingLink(clientConnection);
+        try {
+            const isOwnerSeen = await waitUntil(() => recording.owners.length >= 1 && control.owners.length >= 1,
+                BUS_ROUND_TRIP_TIMEOUT_MS);
+            const stateAnswer = await callThroughLink(recording.link, GET_STATE_METHOD_NAME);
+            sampler.publish(TICK_SNAPSHOT, TICK_APPENDED_HISTORY);
+            const isSampleSeen = await waitUntil(() => recording.samples.length >= 1, BUS_ROUND_TRIP_TIMEOUT_MS);
+            recording.link.destroy();
+            recording.link.destroy();
+            sampler.publish(TICK_SNAPSHOT, TICK_APPENDED_HISTORY);
+            releaseName();
+            const hasControlSeenBoth = await waitUntil(
+                () => control.samples.length >= 2 && control.owners.at(-1) === null, BUS_ROUND_TRIP_TIMEOUT_MS);
+            const [stateText] = stateAnswer.reply?.deepUnpack() ?? [null];
+            const [sampleText] = recording.samples[0]?.deepUnpack() ?? [null];
+            const sample = parseSamplePayload(sampleText);
+            // The call's shape carries what the client's rows cannot see: every call has DBUS_CALL_TIMEOUT_MS.
+            assertEqual({
+                isNameOwned, isOwnerSeen, isSampleSeen, hasControlSeenBoth, isSubscribedFromCreation,
+                isSubscribedAfterDestroy: recording.link.isSampleSubscribed,
+                owners: recording.owners, sampleCount: recording.samples.length,
+                calls: recordedCalls, stateError: stateAnswer.error,
+                stateSignature: stateAnswer.reply?.get_type_string() ?? null,
+                stateSequence: parseStatePayload(stateText)?.sequence ?? null,
+                sampleSignature: recording.samples[0]?.get_type_string() ?? null,
+                sample: {snapshot: sample?.snapshot ?? null, sequence: sample?.sequence ?? null},
+                control: {owners: control.owners, sampleCount: control.samples.length},
+            }, {
+                isNameOwned: true, isOwnerSeen: true, isSampleSeen: true, hasControlSeenBoth: true,
+                isSubscribedFromCreation: true, isSubscribedAfterDestroy: false,
+                owners: [serviceName], sampleCount: 1,
+                calls: [{
+                    busName: RESOURCE_PULSE_BUS_NAME, objectPath: RESOURCE_PULSE_OBJECT_PATH,
+                    interfaceName: RESOURCE_PULSE_INTERFACE_NAME, methodName: GET_STATE_METHOD_NAME,
+                    flags: Gio.DBusCallFlags.NO_AUTO_START, timeoutMs: DBUS_CALL_TIMEOUT_MS,
+                }],
+                stateError: null, stateSignature: ONE_STRING_SIGNATURE, stateSequence: 0,
+                sampleSignature: ONE_STRING_SIGNATURE, sample: {snapshot: TICK_SNAPSHOT, sequence: 1},
+                control: {owners: [serviceName, null], sampleCount: 2},
+            });
+        } finally {
+            recording.link.destroy();
+            control.link.destroy();
+        }
+    }));
 
 test('client on a private bus with no systemd: StartUnit fails, yet it follows the service\'s name, fills its ' +
     'histories from GetState, draws each Sample and holds a watch while wanted', () =>

@@ -37,7 +37,8 @@ export const SAMPLE_SIGNAL_NAME = 'Sample';
 /** The Sample signal's parameters as a GLib.Variant type: one string, the sample JSON. */
 export const SAMPLE_SIGNAL_SIGNATURE = '(s)';
 /**
- * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side and a proxy on the client side:
+ * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side; the client (serviceLink.js) calls and
+ * subscribes by the names above:
  * - GetState() → s: the state JSON (buildStatePayload), for a client that has just connected, and for gnome-status;
  * - WatchDetail() and UnwatchDetail(): a caller holds a detail watch while its card is visible or its dropdown open;
  *   the service counts them per caller and drops a caller's watches when its connection closes;

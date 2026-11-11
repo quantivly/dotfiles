@@ -1,7 +1,7 @@
-// pulseClient.js with a fake D-Bus proxy, fake timeouts and a fake StartUnit, so every row runs under plain gjs, on no
-// bus at all, in a fixed order: each fake answers only when a row tells it to. The payloads are built with
-// lib/protocol.js's builders, as the real service builds them. The real proxy and the real StartUnit are exercised on a
-// private bus by client-dbus.test.js.
+// pulseClient.js with a fake link to the service (in place of serviceLink.js), fake timeouts and a fake StartUnit, so
+// every row runs under plain gjs, on no bus at all, in a fixed order: each fake answers only when a row tells it to.
+// The payloads are built with lib/protocol.js's builders, as the real service builds them. The real link and the real
+// StartUnit are exercised on a private bus by client-dbus.test.js.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
@@ -10,7 +10,6 @@ import * as pulseClientModule from '../extensions/resource-pulse@dotfiles/pulseC
 import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
 import {cardText} from '../extensions/resource-pulse@dotfiles/lib/format.js';
 import {buildSamplePayload, buildStatePayload} from '../extensions/resource-pulse@dotfiles/lib/protocol.js';
-import * as constantsModule from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const USEC_PER_SECOND = 1_000_000;
 const SAMPLE_INTERVAL_SECONDS = 2;
@@ -25,7 +24,7 @@ const START_USEC = 1_000_000_000;
 const LONG_WAIT_USEC = 60 * USEC_PER_SECOND;
 const OWNER = ':1.42';
 const NEXT_OWNER = ':1.77';
-/** Stands in for the session bus connection: the client only hands it to createProxy and startUnit. */
+/** Stands in for the session bus connection: the client only hands it to createLink and startUnit. */
 const FAKE_CONNECTION = {isFakeConnection: true};
 const SERVICE_STARTED_AT_USEC = 1_794_000_000_000_000;
 const SAMPLED_AT_USEC = 1_794_000_002_000_000;
@@ -35,8 +34,6 @@ const GET_STATE = 'GetState';
 const WATCH_DETAIL = 'WatchDetail';
 const UNWATCH_DETAIL = 'UnwatchDetail';
 const SAMPLE_SIGNAL = 'Sample';
-const NAME_OWNER_NOTIFY_SIGNAL = 'notify::g-name-owner';
-const PROXY_SIGNAL = 'g-signal';
 const NO_DATA_TEXT = 'no data';
 /** The last good time a previous client saw, before a lock or a blank: earlier than any snapshot here. */
 const SEEDED_CLOCK_LABEL = '13:58';
@@ -153,73 +150,67 @@ class FakeTimeouts {
     }
 }
 
-/** A fake Gio.DBusProxy: the name owner, the two signals the client connects, and calls a row answers. */
-class FakeProxy {
+/**
+ * A fake link to the service (serviceLink.js's ResourcePulseLink): a row reports the owner and delivers Samples, and
+ * answers each call.
+ */
+class FakeLink {
     /**
-     * @param {string|null} nameOwner - The unique name owning the service's name, or null for none.
+     * @param {object} connection - The connection the client passed.
+     * @param {{onOwnerChanged: (nameOwner: string|null) => void, onSample: (parameters: GLib.Variant) => void}}
+     *     callbacks - The client's.
      */
-    constructor(nameOwner) {
-        this._nameOwner = nameOwner;
-        this._handlersById = new Map();
-        this._nextHandlerId = 1;
-        /** @type {Array<{methodName: string, timeoutMs: number, cancellable: Gio.Cancellable|null,
-         *     callback: Function, isAnswered: boolean}>} Every call, in order. */
+    constructor(connection, {onOwnerChanged, onSample}) {
+        this.connection = connection;
+        this._onOwnerChanged = onOwnerChanged;
+        this._onSample = onSample;
+        this._isSampleSubscribed = true;
+        this._isDestroyed = false;
+        /** @type {Array<{methodName: string, cancellable: Gio.Cancellable|null, onAnswered: Function,
+         *     isAnswered: boolean}>} Every call, in order. */
         this.calls = [];
     }
 
-    /** @returns {string|null} The name owner. */
-    get_name_owner() {
-        return this._nameOwner;
+    /** @returns {boolean} True while Samples are delivered: from creation until unsubscribed or destroyed. */
+    get isSampleSubscribed() {
+        return this._isSampleSubscribed;
+    }
+
+    /** @returns {boolean} True once the client has destroyed the link. */
+    get isDestroyed() {
+        return this._isDestroyed;
     }
 
     /**
-     * @param {string} signalName - 'notify::g-name-owner' or 'g-signal'.
-     * @param {Function} handler - The handler.
-     * @returns {number} A handler id.
-     */
-    connect(signalName, handler) {
-        const handlerId = this._nextHandlerId++;
-        this._handlersById.set(handlerId, {signalName, handler});
-        return handlerId;
-    }
-
-    /**
-     * @param {number} handlerId - An id connect returned.
+     * @param {boolean} isSubscribed - Whether Samples are delivered; nothing changes once destroyed.
      * @returns {void}
      */
-    disconnect(handlerId) {
-        this._handlersById.delete(handlerId);
-    }
-
-    /** @returns {number} Handlers still connected. */
-    get connectedHandlerCount() {
-        return this._handlersById.size;
+    setSampleSubscribed(isSubscribed) {
+        if (!this._isDestroyed)
+            this._isSampleSubscribed = isSubscribed;
     }
 
     /**
      * Records a call; a row answers it with answer() or fail().
      *
      * @param {string} methodName - The method.
-     * @param {GLib.Variant|null} _parameters - Its parameters (none of the service's methods takes any).
-     * @param {Gio.DBusCallFlags} _flags - Call flags.
-     * @param {number} timeoutMs - The call's timeout.
      * @param {Gio.Cancellable|null} cancellable - Its cancellable.
-     * @param {(proxy: FakeProxy, result: object) => void} callback - Called with the answer.
+     * @param {(error: Error|null, reply: GLib.Variant|null) => void} onAnswered - Called with the answer.
      * @returns {void}
      */
-    call(methodName, _parameters, _flags, timeoutMs, cancellable, callback) {
-        this.calls.push({methodName, timeoutMs, cancellable, callback, isAnswered: false});
+    call(methodName, cancellable, onAnswered) {
+        this.calls.push({methodName, cancellable, onAnswered, isAnswered: false});
     }
 
     /**
-     * @param {{reply: GLib.Variant|null, error: Error|null}} result - What answer() or fail() passed.
-     * @returns {GLib.Variant|null} The reply.
-     * @throws {Error} The failure.
+     * Records the destroy and stops the Samples, as the real link's unsubscribe does. Owner reports go on (see
+     * setNameOwner).
+     *
+     * @returns {void}
      */
-    call_finish(result) {
-        if (result.error !== null)
-            throw result.error;
-        return result.reply;
+    destroy() {
+        this._isDestroyed = true;
+        this._isSampleSubscribed = false;
     }
 
     /**
@@ -258,69 +249,52 @@ class FakeProxy {
     }
 
     /**
-     * Changes the name owner and notifies, as GDBusProxy does on NameOwnerChanged.
+     * Reports the bus name's owner, as the name watch does: once when it starts (null when nobody owns the name), then
+     * on each change. Reported after destroy() too, so a row sees the client ignore a late report.
      *
-     * @param {string|null} nameOwner - The new owner, or null for none.
+     * @param {string|null} nameOwner - The unique name owning the service's name, or null for none.
      * @returns {void}
      */
     setNameOwner(nameOwner) {
-        this._nameOwner = nameOwner;
-        this._emit(NAME_OWNER_NOTIFY_SIGNAL, [this, null]);
+        this._onOwnerChanged(nameOwner);
     }
 
     /**
-     * Delivers a D-Bus signal from the owner, as GDBusProxy's g-signal does.
+     * Delivers a Sample's parameters, as the subscription does: only while subscribed.
      *
-     * @param {string} signalName - The signal's name.
-     * @param {GLib.Variant} parameters - Its parameters.
+     * @param {GLib.Variant} parameters - The signal's parameters.
      * @returns {void}
      */
-    emitSignal(signalName, parameters) {
-        this._emit(PROXY_SIGNAL, [this, this._nameOwner, signalName, parameters]);
+    emitSample(parameters) {
+        if (this._isSampleSubscribed)
+            this._onSample(parameters);
     }
 
     /**
      * @param {string} methodName - The method.
-     * @param {object} result - {reply, error}.
+     * @param {{reply: GLib.Variant|null, error: Error|null}} result - The answer.
      * @returns {void}
      * @throws {Error} When no call of that method is waiting.
      */
-    _settleOldestCall(methodName, result) {
+    _settleOldestCall(methodName, {reply, error}) {
         const call = this.calls.find(pendingCall => pendingCall.methodName === methodName && !pendingCall.isAnswered);
         if (call === undefined)
             throw new Error(`no unanswered ${methodName} call`);
         call.isAnswered = true;
-        call.callback(this, result);
-    }
-
-    /**
-     * @param {string} signalName - The GObject signal.
-     * @param {Array<*>} signalArguments - Its arguments.
-     * @returns {void}
-     */
-    _emit(signalName, signalArguments) {
-        for (const {signalName: handledSignalName, handler} of [...this._handlersById.values()]) {
-            if (handledSignalName === signalName)
-                handler(...signalArguments);
-        }
+        call.onAnswered(error, reply);
     }
 }
 
-/** A fake createProxy: a row delivers the proxy when it chooses. */
-class FakeProxyFactory {
+/** A fake createLink: records each link the client makes. */
+class FakeLinkFactory {
     constructor() {
-        /** @type {Array<{connection: object, cancellable: Gio.Cancellable, onCreated: Function}>} */
-        this.requests = [];
-        this.createProxy = (connection, cancellable, onCreated) =>
-            this.requests.push({connection, cancellable, onCreated});
-    }
-
-    /**
-     * @param {FakeProxy} proxy - The proxy to hand the latest request.
-     * @returns {void}
-     */
-    deliver(proxy) {
-        this.requests.at(-1).onCreated(null, proxy);
+        /** @type {FakeLink[]} Every link made, in order. */
+        this.links = [];
+        this.createLink = (connection, callbacks) => {
+            const link = new FakeLink(connection, callbacks);
+            this.links.push(link);
+            return link;
+        };
     }
 }
 
@@ -355,21 +329,21 @@ class FakeServiceStarter {
  * Builds a client on fakes and starts it.
  *
  * @param {object} [options] - The fixture's shape.
- * @param {string|null} [options.nameOwner] - The service's owner when the proxy arrives; null for none.
- * @param {boolean} [options.isProxyDelivered] - False to leave the proxy still being created.
+ * @param {string|null} [options.nameOwner] - The service's owner when the name watch first reports; null for none.
+ * @param {boolean} [options.isOwnerReported] - False to leave the name watch's first report still to come.
  * @param {string|null} [options.lastGoodClockLabel] - The label the extension seeds the client with; none by default.
- * @returns {object} {client, clock, timeouts, serviceStarter, proxyFactory, proxy, notifications, logged}.
+ * @returns {object} {client, clock, timeouts, serviceStarter, linkFactory, link, notifications, logged}.
  */
-function makeClientFixture({nameOwner = OWNER, isProxyDelivered = true, lastGoodClockLabel = undefined} = {}) {
+function makeClientFixture({nameOwner = OWNER, isOwnerReported = true, lastGoodClockLabel = undefined} = {}) {
     const clock = {nowUsec: START_USEC};
     const timeouts = new FakeTimeouts();
     const serviceStarter = new FakeServiceStarter();
-    const proxyFactory = new FakeProxyFactory();
+    const linkFactory = new FakeLinkFactory();
     const logged = [];
     const client = new pulseClientModule.PulseClient({
         connection: FAKE_CONNECTION,
         startUnit: serviceStarter.startUnit,
-        createProxy: proxyFactory.createProxy,
+        createLink: linkFactory.createLink,
         nowUsec: () => clock.nowUsec,
         timeouts,
         errorLog: new RateLimitedLogger({nowUsec: () => clock.nowUsec, write: line => logged.push(line)}),
@@ -378,36 +352,36 @@ function makeClientFixture({nameOwner = OWNER, isProxyDelivered = true, lastGood
     const notifications = [];
     client.addListener(snapshot => notifications.push(snapshot));
     client.start();
-    const proxy = new FakeProxy(nameOwner);
-    if (isProxyDelivered)
-        proxyFactory.deliver(proxy);
-    return {client, clock, timeouts, serviceStarter, proxyFactory, proxy, notifications, logged};
+    const [link] = linkFactory.links;
+    if (isOwnerReported)
+        link.setNameOwner(nameOwner);
+    return {client, clock, timeouts, serviceStarter, linkFactory, link, notifications, logged};
 }
 
 /**
  * Answers the oldest GetState with a state payload.
  *
- * @param {FakeProxy} proxy - The fixture's proxy.
+ * @param {FakeLink} link - The fixture's link.
  * @param {object} state - {snapshot, histories, sequence}.
  * @returns {void}
  */
-function answerState(proxy, {snapshot, histories, sequence}) {
+function answerState(link, {snapshot, histories, sequence}) {
     const statePayload = buildStatePayload({
         snapshot, histories, serviceStartedAtUsec: SERVICE_STARTED_AT_USEC, sequence,
     });
-    proxy.answer(GET_STATE, new GLib.Variant(STATE_REPLY_SIGNATURE, [statePayload]));
+    link.answer(GET_STATE, new GLib.Variant(STATE_REPLY_SIGNATURE, [statePayload]));
 }
 
 /**
- * Emits one Sample signal.
+ * Delivers one Sample signal.
  *
- * @param {FakeProxy} proxy - The fixture's proxy.
+ * @param {FakeLink} link - The fixture's link.
  * @param {object} sample - {snapshot, appendedHistory, sequence}.
  * @returns {void}
  */
-function emitSample(proxy, {snapshot, appendedHistory, sequence}) {
+function emitSample(link, {snapshot, appendedHistory, sequence}) {
     const samplePayload = buildSamplePayload({snapshot, appendedHistory, sequence, sampledAtUsec: SAMPLED_AT_USEC});
-    proxy.emitSignal(SAMPLE_SIGNAL, new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, [samplePayload]));
+    link.emitSample(new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, [samplePayload]));
 }
 
 /**
@@ -419,7 +393,7 @@ function emitSample(proxy, {snapshot, appendedHistory, sequence}) {
 function makeLiveClientFixture() {
     const fixture = makeClientFixture();
     fixture.serviceStarter.succeed();
-    answerState(fixture.proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    answerState(fixture.link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     return fixture;
 }
 
@@ -443,17 +417,17 @@ function historiesOf({client}) {
 
 test('client: before the first state it draws nothing, not even a Sample: no snapshot, no history, no listener call',
     () => {
-        const {client, clock, timeouts, proxy, notifications} = makeClientFixture();
-        emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
+        const {client, clock, timeouts, link, notifications} = makeClientFixture();
+        emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
             sequence: STATE_SEQUENCE + 1});
         clock.nowUsec += LONG_WAIT_USEC;
         timeouts.fire(SAMPLE_INTERVAL_SECONDS);
         // A staleness check while no state is held must not let later Samples through either.
-        emitSample(proxy, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 2});
+        emitSample(link, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 2});
         assertEqual({
             latestSnapshot: client.latestSnapshot, histories: historiesOf({client}),
             lastGoodClockLabel: client.lastGoodClockLabel, notificationCount: notifications.length,
-            stateCallCount: proxy.callsOf(GET_STATE).length,
+            stateCallCount: link.callsOf(GET_STATE).length,
         }, {
             latestSnapshot: null, histories: {cpu: [], memory: []}, lastGoodClockLabel: null, notificationCount: 0,
             stateCallCount: 1,
@@ -474,7 +448,7 @@ test('client: GetState fills both histories, the latest snapshot and the last go
 
 test('client: a Sample appends its values to both histories and tells listeners its snapshot', () => {
     const fixture = makeLiveClientFixture();
-    emitSample(fixture.proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
+    emitSample(fixture.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
         sequence: STATE_SEQUENCE + 1});
     assertEqual({
         histories: historiesOf(fixture), latestSnapshot: fixture.client.latestSnapshot,
@@ -488,7 +462,7 @@ test('client: a Sample appends its values to both histories and tells listeners 
 test('client: a Sample that appends nothing (a watch start\'s reveal: appendedHistory null) is drawn, and adds no ' +
     'history point', () => {
     const fixture = makeLiveClientFixture();
-    emitSample(fixture.proxy, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 1});
+    emitSample(fixture.link, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 1});
     assertEqual({histories: historiesOf(fixture), notifications: fixture.notifications},
         {histories: STATE_HISTORIES, notifications: [STATE_SNAPSHOT, REVEAL_SNAPSHOT]});
 });
@@ -506,11 +480,11 @@ test('client: no Sample for more than 6 s publishes one no-data snapshot (and a 
     timeouts.fire(SAMPLE_INTERVAL_SECONDS);
     const lastGoodClockLabelWhileStale = fixture.client.lastGoodClockLabel;
     const historiesWhileStale = historiesOf(fixture);
-    emitSample(fixture.proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
+    emitSample(fixture.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
         sequence: STATE_SEQUENCE + 1});
     assertEqual({
         notificationsAtExactlyStall, notifications, lastGoodClockLabelWhileStale, historiesWhileStale,
-        stateCallCount: fixture.proxy.callsOf(GET_STATE).length,
+        stateCallCount: fixture.link.callsOf(GET_STATE).length,
     }, {
         notificationsAtExactlyStall: 1,
         notifications: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT, TICK_SNAPSHOT],
@@ -522,17 +496,17 @@ test('client: no Sample for more than 6 s publishes one no-data snapshot (and a 
 
 test('client: a sequence that restarts publishes no data once, and draws nothing until a fresh GetState', () => {
     const fixture = makeLiveClientFixture();
-    const {proxy, notifications} = fixture;
-    emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
-    emitSample(proxy, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4}, sequence: 1});
-    emitSample(proxy, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.1, memory: 0.4}, sequence: 2});
+    const {link, notifications} = fixture;
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    emitSample(link, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4}, sequence: 1});
+    emitSample(link, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.1, memory: 0.4}, sequence: 2});
     const notificationsBeforeState = [...notifications];
-    answerState(proxy, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 2});
+    answerState(link, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 2});
     const historiesFromState = historiesOf(fixture);
-    emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: 3});
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: 3});
     assertEqual({
         notificationsBeforeState, historiesFromState, notificationsAfter: notifications.slice(3),
-        histories: historiesOf(fixture), stateCallCount: proxy.callsOf(GET_STATE).length,
+        histories: historiesOf(fixture), stateCallCount: link.callsOf(GET_STATE).length,
     }, {
         notificationsBeforeState: [STATE_SNAPSHOT, TICK_SNAPSHOT, NO_DATA_SNAPSHOT],
         historiesFromState: RESTARTED_HISTORIES,
@@ -565,13 +539,13 @@ test('client: a failed StartUnit is retried after 5, 30, 300, then 300 s and log
     });
 
 test('client: the service appearing ends the StartUnit retries, since it runs: no retry is left pending', () => {
-    const {timeouts, serviceStarter, proxy} = makeClientFixture({nameOwner: null});
+    const {timeouts, serviceStarter, link} = makeClientFixture({nameOwner: null});
     serviceStarter.fail();
     const pendingAfterFailure = timeouts.pendingIntervalsSeconds();
-    proxy.setNameOwner(OWNER);
+    link.setNameOwner(OWNER);
     assertEqual({
         pendingAfterFailure, pendingAfterOwner: timeouts.pendingIntervalsSeconds(),
-        attemptCount: serviceStarter.attempts.length, calledMethodNames: proxy.calledMethodNames,
+        attemptCount: serviceStarter.attempts.length, calledMethodNames: link.calledMethodNames,
     }, {
         pendingAfterFailure: [SAMPLE_INTERVAL_SECONDS, 5], pendingAfterOwner: [SAMPLE_INTERVAL_SECONDS],
         attemptCount: 1, calledMethodNames: [GET_STATE],
@@ -581,16 +555,16 @@ test('client: the service appearing ends the StartUnit retries, since it runs: n
 test('client: the name losing its owner publishes no data once and never calls StartUnit (a stop stays stopped); ' +
     'a new owner is read with GetState and drawn', () => {
     const fixture = makeLiveClientFixture();
-    const {clock, timeouts, serviceStarter, proxy, notifications} = fixture;
-    emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
-    proxy.setNameOwner(null);
+    const {clock, timeouts, serviceStarter, link, notifications} = fixture;
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    link.setNameOwner(null);
     clock.nowUsec += LONG_WAIT_USEC;
     timeouts.fire(SAMPLE_INTERVAL_SECONDS);
     const notificationsWhileGone = [...notifications];
     const pendingWhileGone = timeouts.pendingIntervalsSeconds();
-    proxy.setNameOwner(NEXT_OWNER);
+    link.setNameOwner(NEXT_OWNER);
     const returnedSnapshot = {...RESTARTED_SNAPSHOT, takenAtUsec: clock.nowUsec};
-    answerState(proxy, {snapshot: returnedSnapshot, histories: RESTARTED_HISTORIES, sequence: 1});
+    answerState(link, {snapshot: returnedSnapshot, histories: RESTARTED_HISTORIES, sequence: 1});
     assertEqual({
         notificationsWhileGone, pendingWhileGone, attemptCount: serviceStarter.attempts.length,
         notificationsAfterReturn: notifications.slice(notificationsWhileGone.length), histories: historiesOf(fixture),
@@ -604,10 +578,10 @@ test('client: the name losing its owner publishes no data once and never calls S
 test('client: Samples are drawn although StartUnit failed (no systemd, as in the nested harness), and a StartUnit ' +
     'answered while the service runs, failed or accepted, schedules nothing', () => {
     const fixture = makeClientFixture();
-    const {client, timeouts, serviceStarter, proxy, notifications} = fixture;
+    const {client, timeouts, serviceStarter, link, notifications} = fixture;
     serviceStarter.fail();
-    answerState(proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
-    emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    answerState(link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     client.start();
     serviceStarter.fail();
     const pendingAfterFailureWhileRunning = timeouts.pendingIntervalsSeconds();
@@ -648,13 +622,13 @@ test('client: an accepted StartUnit with no owner within 15 s is no success: the
 
 test('client: an owner within 15 s of an accepted StartUnit confirms it and ends the chain, and its later leaving ' +
     'starts nothing', () => {
-    const {clock, timeouts, serviceStarter, proxy} = makeClientFixture({nameOwner: null});
+    const {clock, timeouts, serviceStarter, link} = makeClientFixture({nameOwner: null});
     serviceStarter.succeed();
     const pendingWhileWaiting = timeouts.pendingIntervalsSeconds();
     clock.nowUsec += (START_CONFIRMATION_SECONDS - 1) * USEC_PER_SECOND;
-    proxy.setNameOwner(OWNER);
+    link.setNameOwner(OWNER);
     const pendingAfterOwner = timeouts.pendingIntervalsSeconds();
-    proxy.setNameOwner(null);
+    link.setNameOwner(null);
     assertEqual({
         pendingWhileWaiting, pendingAfterOwner, pendingAfterLeaving: timeouts.pendingIntervalsSeconds(),
         attemptCount: serviceStarter.attempts.length,
@@ -675,9 +649,9 @@ test('client: destroy() while an accepted StartUnit waits for the service leaves
 
 test('client: a StartUnit still on its way when the service appears is superseded: its failure, after the owner ' +
     'left again, schedules no retry', () => {
-    const {timeouts, serviceStarter, proxy, logged} = makeClientFixture({nameOwner: null});
-    proxy.setNameOwner(OWNER);
-    proxy.setNameOwner(null);
+    const {timeouts, serviceStarter, link, logged} = makeClientFixture({nameOwner: null});
+    link.setNameOwner(OWNER);
+    link.setNameOwner(null);
     serviceStarter.fail();
     assertEqual({pending: timeouts.pendingIntervalsSeconds(), attemptCount: serviceStarter.attempts.length,
         startUnitLogLines: logged.filter(line => line.includes('StartUnit')).length},
@@ -687,13 +661,13 @@ test('client: a StartUnit still on its way when the service appears is supersede
 test('client: a state whose snapshot was taken more than 6 s before it arrived (a service that answers while its ' +
     'sampler has stopped) shows no data at once, since that snapshot\'s time; the next Sample of the run draws', () => {
     const fixture = makeClientFixture();
-    const {proxy, notifications} = fixture;
+    const {link, notifications} = fixture;
     const staleSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC - STALL_USEC - ONE_MICROSECOND};
-    answerState(proxy, {snapshot: staleSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    answerState(link, {snapshot: staleSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     const notificationsAfterState = [...notifications];
     const lastGoodClockLabelAfterState = fixture.client.lastGoodClockLabel;
     const historiesAfterState = historiesOf(fixture);
-    emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     assertEqual({notificationsAfterState, lastGoodClockLabelAfterState, historiesAfterState, notifications}, {
         notificationsAfterState: [NO_DATA_SNAPSHOT], lastGoodClockLabelAfterState: '14:02',
         historiesAfterState: {cpu: [...STATE_HISTORIES.cpu, null], memory: [...STATE_HISTORIES.memory, null]},
@@ -703,9 +677,9 @@ test('client: a state whose snapshot was taken more than 6 s before it arrived (
 
 test('client: freshness counts from the state snapshot\'s own time: taken exactly 6 s before it arrived, it is drawn, ' +
     'and stale 1 µs later', () => {
-    const {clock, timeouts, proxy, notifications} = makeClientFixture();
+    const {clock, timeouts, link, notifications} = makeClientFixture();
     const oldSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC - STALL_USEC};
-    answerState(proxy, {snapshot: oldSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    answerState(link, {snapshot: oldSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     timeouts.fire(SAMPLE_INTERVAL_SECONDS);
     const notificationsAtExactlyStall = [...notifications];
     clock.nowUsec += ONE_MICROSECOND;
@@ -718,7 +692,7 @@ test('client: a state snapshot with no time counts from its arrival, and one sta
     () => {
         const untimed = makeClientFixture();
         const untimedSnapshot = {...STATE_SNAPSHOT, takenAtUsec: null};
-        answerState(untimed.proxy, {snapshot: untimedSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+        answerState(untimed.link, {snapshot: untimedSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
         untimed.clock.nowUsec += STALL_USEC;
         untimed.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
         const untimedAtExactlyStall = untimed.notifications.length;
@@ -726,7 +700,7 @@ test('client: a state snapshot with no time counts from its arrival, and one sta
         untimed.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
         const future = makeClientFixture();
         const futureSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC + LONG_WAIT_USEC};
-        answerState(future.proxy, {snapshot: futureSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+        answerState(future.link, {snapshot: futureSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
         future.clock.nowUsec += STALL_USEC + ONE_MICROSECOND;
         future.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
         assertEqual({untimedAtExactlyStall, untimed: untimed.notifications, future: future.notifications}, {
@@ -745,8 +719,7 @@ test('client: a Sample from another version (an unknown field, swap missing) not
     delete samplePayload.snapshot.swap;
     samplePayload.snapshot.gpu = {busyPercent: 3};
     samplePayload.servedBy = 'a newer service';
-    fixture.proxy.emitSignal(SAMPLE_SIGNAL,
-        new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, [JSON.stringify(samplePayload)]));
+    fixture.link.emitSample(new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, [JSON.stringify(samplePayload)]));
     const drawnSnapshot = fixture.notifications.at(-1);
     const drawnText = cardText(drawnSnapshot, fixture.client.lastGoodClockLabel);
     const fullText = cardText(TICK_SNAPSHOT, fixture.client.lastGoodClockLabel);
@@ -756,25 +729,25 @@ test('client: a Sample from another version (an unknown field, swap missing) not
 });
 
 test('client: WatchDetail and UnwatchDetail go out only when the wanted flag changes, with an owner, and the watch ' +
-    'is asserted again to each new owner; every call is asynchronous with DBUS_CALL_TIMEOUT_MS', () => {
-    const {client, proxyFactory, proxy} = makeClientFixture({isProxyDelivered: false});
+    'is asserted again to each new owner; every call is asynchronous (the link adds DBUS_CALL_TIMEOUT_MS)', () => {
+    const {client, link} = makeClientFixture({isOwnerReported: false});
     client.setDetailWatchWanted(true);
-    proxyFactory.deliver(proxy);
-    client.setDetailWatchWanted(true);
-    client.setDetailWatchWanted(false);
-    client.setDetailWatchWanted(false);
-    client.setDetailWatchWanted(true);
-    proxy.setNameOwner(null);
-    proxy.setNameOwner(NEXT_OWNER);
-    proxy.setNameOwner(null);
-    client.setDetailWatchWanted(false);
+    link.setNameOwner(OWNER);
     client.setDetailWatchWanted(true);
     client.setDetailWatchWanted(false);
-    proxy.setNameOwner(OWNER);
-    const callShapes = new Set(proxy.calls.map(call => `${call.timeoutMs}/${typeof call.callback}`));
-    assertEqual({calledMethodNames: proxy.calledMethodNames, callShapes: [...callShapes]}, {
+    client.setDetailWatchWanted(false);
+    client.setDetailWatchWanted(true);
+    link.setNameOwner(null);
+    link.setNameOwner(NEXT_OWNER);
+    link.setNameOwner(null);
+    client.setDetailWatchWanted(false);
+    client.setDetailWatchWanted(true);
+    client.setDetailWatchWanted(false);
+    link.setNameOwner(OWNER);
+    const callShapes = new Set(link.calls.map(call => typeof call.onAnswered));
+    assertEqual({calledMethodNames: link.calledMethodNames, callShapes: [...callShapes]}, {
         calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL, GET_STATE],
-        callShapes: [`${constantsModule.DBUS_CALL_TIMEOUT_MS}/function`],
+        callShapes: ['function'],
     });
 });
 
@@ -786,64 +759,56 @@ test('client: destroy() releases only a watch still held: none after an UnwatchD
     unwatched.client.destroy();
     const ownerLeft = makeClientFixture();
     ownerLeft.client.setDetailWatchWanted(true);
-    ownerLeft.proxy.setNameOwner(null);
+    ownerLeft.link.setNameOwner(null);
     ownerLeft.client.setDetailWatchWanted(false);
-    ownerLeft.proxy.setNameOwner(NEXT_OWNER);
+    ownerLeft.link.setNameOwner(NEXT_OWNER);
     ownerLeft.client.destroy();
-    assertEqual({unwatched: unwatched.proxy.calledMethodNames, ownerLeft: ownerLeft.proxy.calledMethodNames},
+    assertEqual({unwatched: unwatched.link.calledMethodNames, ownerLeft: ownerLeft.link.calledMethodNames},
         {unwatched: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL], ownerLeft: [GET_STATE, WATCH_DETAIL, GET_STATE]});
 });
 
-test('client: destroy() unwatches (uncancellable), cancels the pending GetState, disconnects from the proxy, removes ' +
-    'its timeouts, and nothing after it (a late reply, a watch change, start()) does anything', () => {
-    const {client, timeouts, serviceStarter, proxy, notifications} = makeClientFixture();
+test('client: destroy() unwatches (uncancellable), cancels the pending GetState, destroys the link, removes its ' +
+    'timeouts, and nothing after it (a late reply, a watch change, start()) does anything', () => {
+    const {client, timeouts, serviceStarter, link, notifications} = makeClientFixture();
     client.setDetailWatchWanted(true);
-    const pendingStateCall = proxy.callsOf(GET_STATE)[0];
+    const pendingStateCall = link.callsOf(GET_STATE)[0];
     client.destroy();
-    const unwatchCalls = proxy.callsOf(UNWATCH_DETAIL);
-    answerState(proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    const unwatchCalls = link.callsOf(UNWATCH_DETAIL);
+    answerState(link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     client.setDetailWatchWanted(false);
     client.start();
     assertEqual({
         unwatchCancellables: unwatchCalls.map(call => call.cancellable),
         isStateCallCancelled: pendingStateCall.cancellable?.is_cancelled() ?? null,
-        connectedHandlerCount: proxy.connectedHandlerCount, pending: timeouts.pendingIntervalsSeconds(),
-        notificationCount: notifications.length, calledMethodNames: proxy.calledMethodNames,
+        isLinkDestroyed: link.isDestroyed, pending: timeouts.pendingIntervalsSeconds(),
+        notificationCount: notifications.length, calledMethodNames: link.calledMethodNames,
         attemptCount: serviceStarter.attempts.length, latestSnapshot: client.latestSnapshot,
     }, {
-        unwatchCancellables: [null], isStateCallCancelled: true, connectedHandlerCount: 0, pending: [],
+        unwatchCancellables: [null], isStateCallCancelled: true, isLinkDestroyed: true, pending: [],
         notificationCount: 0, calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL], attemptCount: 1,
         latestSnapshot: null,
     });
 });
 
-test('client: destroy() while the proxy is still being created cancels it and its StartUnit retry, and a proxy that ' +
-    'arrives later is never used', () => {
-    const {client, timeouts, serviceStarter, proxyFactory, proxy} = makeClientFixture({isProxyDelivered: false});
+test('client: destroy() before the name watch first reports destroys the link and removes its StartUnit retry, and ' +
+    'an owner reported later is never used', () => {
+    const {client, timeouts, serviceStarter, link} = makeClientFixture({isOwnerReported: false});
     serviceStarter.fail();
     const pendingBeforeDestroy = timeouts.pendingIntervalsSeconds();
     client.destroy();
-    proxyFactory.deliver(proxy);
+    link.setNameOwner(OWNER);
     assertEqual({
-        pendingBeforeDestroy, isProxyRequestCancelled: proxyFactory.requests[0].cancellable.is_cancelled(),
-        connectedHandlerCount: proxy.connectedHandlerCount, calledMethodNames: proxy.calledMethodNames,
+        pendingBeforeDestroy, isLinkDestroyed: link.isDestroyed, calledMethodNames: link.calledMethodNames,
         pending: timeouts.pendingIntervalsSeconds(),
     }, {
-        pendingBeforeDestroy: [SAMPLE_INTERVAL_SECONDS, 5], isProxyRequestCancelled: true, connectedHandlerCount: 0,
-        calledMethodNames: [], pending: [],
+        pendingBeforeDestroy: [SAMPLE_INTERVAL_SECONDS, 5], isLinkDestroyed: true, calledMethodNames: [], pending: [],
     });
 });
 
-test('client: a signal other than Sample, a Sample of another signature, or text that is not JSON changes nothing; ' +
-    'each malformed Sample is logged', () => {
+test('client: a Sample of another signature, or text that is not JSON, changes nothing, and each is logged', () => {
     const fixture = makeLiveClientFixture();
-    const samplePayload = buildSamplePayload({
-        snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1,
-        sampledAtUsec: SAMPLED_AT_USEC,
-    });
-    fixture.proxy.emitSignal('Sampled', new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, [samplePayload]));
-    fixture.proxy.emitSignal(SAMPLE_SIGNAL, new GLib.Variant('(i)', [STATE_SEQUENCE + 1]));
-    fixture.proxy.emitSignal(SAMPLE_SIGNAL, new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, ['{"sequence": 8,']));
+    fixture.link.emitSample(new GLib.Variant('(i)', [STATE_SEQUENCE + 1]));
+    fixture.link.emitSample(new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, ['{"sequence": 8,']));
     assertEqual({notifications: fixture.notifications, histories: historiesOf(fixture),
         sampleLogLines: fixture.logged.filter(line => line.includes(SAMPLE_SIGNAL)).length},
     {notifications: [STATE_SNAPSHOT], histories: STATE_HISTORIES, sampleLogLines: 2});
@@ -851,15 +816,15 @@ test('client: a signal other than Sample, a Sample of another signature, or text
 
 test('client: a GetState that fails is logged and leaves no data, and the next Sample asks for the state again', () => {
     const fixture = makeClientFixture();
-    const {proxy, notifications, logged} = fixture;
-    proxy.fail(GET_STATE, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached'));
-    const stateCallsAfterFailure = proxy.callsOf(GET_STATE).length;
-    emitSample(proxy, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    const {link, notifications, logged} = fixture;
+    link.fail(GET_STATE, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached'));
+    const stateCallsAfterFailure = link.callsOf(GET_STATE).length;
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     const notificationsBeforeState = notifications.length;
-    answerState(proxy, {snapshot: TICK_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE + 1});
-    emitSample(proxy, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 2});
+    answerState(link, {snapshot: TICK_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE + 1});
+    emitSample(link, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 2});
     assertEqual({
-        stateCallsAfterFailure, notificationsBeforeState, stateCallCount: proxy.callsOf(GET_STATE).length,
+        stateCallsAfterFailure, notificationsBeforeState, stateCallCount: link.callsOf(GET_STATE).length,
         notifications, stateLogLines: logged.filter(line => line.includes(GET_STATE)).length,
     }, {
         stateCallsAfterFailure: 1, notificationsBeforeState: 0, stateCallCount: 2,
@@ -869,7 +834,7 @@ test('client: a GetState that fails is logged and leaves no data, and the next S
 
 test('client: every start() asks systemd to start the service again, from a first attempt (a 5 s retry), but connects ' +
     'and follows the service once; only the latest StartUnit\'s answer counts', () => {
-    const {client, timeouts, serviceStarter, proxyFactory, logged} = makeClientFixture({nameOwner: null});
+    const {client, timeouts, serviceStarter, linkFactory, logged} = makeClientFixture({nameOwner: null});
     client.start();
     serviceStarter.fail(FIRST_ATTEMPT_INDEX);
     const pendingAfterSupersededFailure = timeouts.pendingIntervalsSeconds();
@@ -877,10 +842,10 @@ test('client: every start() asks systemd to start the service again, from a firs
     serviceStarter.fail();
     assertEqual({
         attemptConnections: serviceStarter.attempts.map(attempt => attempt.connection),
-        proxyRequestCount: proxyFactory.requests.length, proxyConnection: proxyFactory.requests[0].connection,
+        linkCount: linkFactory.links.length, linkConnection: linkFactory.links[0].connection,
         pendingAfterSupersededFailure, loggedAfterSupersededFailure, pending: timeouts.pendingIntervalsSeconds(),
     }, {
-        attemptConnections: [FAKE_CONNECTION, FAKE_CONNECTION], proxyRequestCount: 1, proxyConnection: FAKE_CONNECTION,
+        attemptConnections: [FAKE_CONNECTION, FAKE_CONNECTION], linkCount: 1, linkConnection: FAKE_CONNECTION,
         pendingAfterSupersededFailure: [SAMPLE_INTERVAL_SECONDS], loggedAfterSupersededFailure: 0,
         pending: [SAMPLE_INTERVAL_SECONDS, 5],
     });
@@ -889,13 +854,13 @@ test('client: every start() asks systemd to start the service again, from a firs
 test('client: no data is published once however many reasons follow: a stall, then a sequence that does not move on ' +
     '(a new run that counted back up to the last one drawn), then the owner leaving', () => {
     const fixture = makeLiveClientFixture();
-    const {clock, timeouts, proxy, notifications} = fixture;
+    const {clock, timeouts, link, notifications} = fixture;
     clock.nowUsec += LONG_WAIT_USEC;
     timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-    emitSample(proxy, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4},
+    emitSample(link, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4},
         sequence: STATE_SEQUENCE});
-    proxy.setNameOwner(null);
-    assertEqual({notifications, histories: historiesOf(fixture), stateCallCount: proxy.callsOf(GET_STATE).length}, {
+    link.setNameOwner(null);
+    assertEqual({notifications, histories: historiesOf(fixture), stateCallCount: link.callsOf(GET_STATE).length}, {
         notifications: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT],
         histories: {cpu: [...STATE_HISTORIES.cpu, null], memory: [...STATE_HISTORIES.memory, null]},
         stateCallCount: 2,
@@ -905,10 +870,10 @@ test('client: no data is published once however many reasons follow: a stall, th
 test('client: "no data since" moves only with a snapshot that has numbers and a time: not with the service\'s own ' +
     'no-data snapshot, nor with a snapshot that lacks its label', () => {
     const fixture = makeLiveClientFixture();
-    emitSample(fixture.proxy, {snapshot: SERVICE_NO_DATA_SNAPSHOT, appendedHistory: {cpu: null, memory: null},
+    emitSample(fixture.link, {snapshot: SERVICE_NO_DATA_SNAPSHOT, appendedHistory: {cpu: null, memory: null},
         sequence: STATE_SEQUENCE + 1});
     const labelAfterServiceNoData = fixture.client.lastGoodClockLabel;
-    emitSample(fixture.proxy, {snapshot: {...TICK_SNAPSHOT, takenAtClockLabel: undefined},
+    emitSample(fixture.link, {snapshot: {...TICK_SNAPSHOT, takenAtClockLabel: undefined},
         appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 2});
     assertEqual({
         labelAfterServiceNoData, labelAfterUnlabelled: fixture.client.lastGoodClockLabel,
@@ -922,7 +887,7 @@ test('client: seeded with the previous client\'s last good clock label (the exte
     const labelBeforeData = fixture.client.lastGoodClockLabel;
     const cpuTextBeforeData = cardText(fixture.client.latestSnapshot, fixture.client.lastGoodClockLabel).cpuValue;
     fixture.serviceStarter.succeed();
-    answerState(fixture.proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    answerState(fixture.link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     assertEqual({labelBeforeData, cpuTextBeforeData, labelAfterData: fixture.client.lastGoodClockLabel}, {
         labelBeforeData: SEEDED_CLOCK_LABEL, cpuTextBeforeData: `${NO_DATA_TEXT} since ${SEEDED_CLOCK_LABEL}`,
         labelAfterData: STATE_SNAPSHOT.takenAtClockLabel,
@@ -931,13 +896,13 @@ test('client: seeded with the previous client\'s last good clock label (the exte
 
 test('client: a GetState answer from an owner that has since left is dropped; the new owner\'s state is drawn', () => {
     const fixture = makeClientFixture();
-    const {proxy, notifications} = fixture;
-    proxy.setNameOwner(null);
+    const {link, notifications} = fixture;
+    link.setNameOwner(null);
     // Answered while no owner is on the bus, before the next one has asked for anything.
-    answerState(proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    answerState(link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     const notificationsAfterOldAnswer = [...notifications];
-    proxy.setNameOwner(NEXT_OWNER);
-    answerState(proxy, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 1});
+    link.setNameOwner(NEXT_OWNER);
+    answerState(link, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 1});
     assertEqual({notificationsAfterOldAnswer, notifications, histories: historiesOf(fixture)},
         {notificationsAfterOldAnswer: [], notifications: [RESTARTED_SNAPSHOT], histories: RESTARTED_HISTORIES});
 });
@@ -945,11 +910,11 @@ test('client: a GetState answer from an owner that has since left is dropped; th
 test('client: a direct change of owner reads as the old one leaving and the new one arriving: no data once, then ' +
     'the new owner\'s state', () => {
     const fixture = makeLiveClientFixture();
-    const {proxy, notifications} = fixture;
-    proxy.setNameOwner(NEXT_OWNER);
+    const {link, notifications} = fixture;
+    link.setNameOwner(NEXT_OWNER);
     const notificationsBeforeState = [...notifications];
-    answerState(proxy, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 1});
-    assertEqual({notificationsBeforeState, notifications, stateCallCount: proxy.callsOf(GET_STATE).length}, {
+    answerState(link, {snapshot: RESTARTED_SNAPSHOT, histories: RESTARTED_HISTORIES, sequence: 1});
+    assertEqual({notificationsBeforeState, notifications, stateCallCount: link.callsOf(GET_STATE).length}, {
         notificationsBeforeState: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT],
         notifications: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT, RESTARTED_SNAPSHOT],
         stateCallCount: 2,
@@ -957,7 +922,7 @@ test('client: a direct change of owner reads as the old one leaving and the new 
 });
 
 test('client: a listener that throws is logged and the next still runs; a removed one is not called', () => {
-    const {client, proxy, logged} = makeClientFixture();
+    const {client, link, logged} = makeClientFixture();
     const calledListeners = [];
     client.addListener(() => {
         calledListeners.push('throwing');
@@ -966,7 +931,7 @@ test('client: a listener that throws is logged and the next still runs; a remove
     const removedListenerId = client.addListener(() => calledListeners.push('removed'));
     client.addListener(() => calledListeners.push('last'));
     client.removeListener(removedListenerId);
-    answerState(proxy, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    answerState(link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     assertEqual({calledListeners, listenerLogLines: logged.filter(line => line.includes('listener bug')).length},
         {calledListeners: ['throwing', 'last'], listenerLogLines: 1});
 });
