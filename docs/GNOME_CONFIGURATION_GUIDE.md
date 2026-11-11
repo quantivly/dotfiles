@@ -149,6 +149,13 @@ covered it is **dimmed**, repaints only every 30 s (still dimmed, from the lates
 its detail watch, so a card wrongly judged covered reads as stale, never as live; on reveal it repaints
 at once, undimmed, and takes the watch again. `Super+D` reveals it without waiting for a sample.
 
+**Nothing on a timer.** While samples flow the shell side wakes for nothing else: the sample is the tick.
+The top bar's graphs are redrawn only when a column changes by a whole device pixel, and only while the
+top bar is shown. The card is drawn through an offscreen texture, so a window drawing over it does not
+repaint it. Whether the card is covered is checked again on window changes, on the covering window's own
+moves, and on every fifteenth sample; only while the service is silent and the card covered does a
+10-second check run. The budgets, and the request that checks them: [What it costs](#what-it-costs).
+
 **The dropdown.** Clicking the top-bar graphs opens a dropdown holding a second card, live while it is
 open, and an **Open Resources** button (Resources, else System Monitor; hidden when neither is
 installed). Resting the pointer on the graphs shows a one-line summary, never while the dropdown is
@@ -410,11 +417,59 @@ rows are in the suite below.
 
 ### What it costs
 
-The budgets, at idle:
+**Inside gnome-shell.** The extension runs in the compositor, so its cost is budgeted per state: what it
+adds over the same shell with it disabled, in % of one core.
+
+| State | Budget |
+|---|---|
+| card covered, top bar on, idle machine | 0.08 |
+| card covered, top bar on, busy machine | 0.20 |
+| card visible | 0.25 |
+| card covered, under a window redrawing 60 times a second | 0.3 |
+| the main thread's median per 2 s tick, card covered: idle, busy | 1 ms, 3 ms |
+
+A percentage moves with the machine's load, so a change to the drawing side is gated on counts, which do
+not. In a 60 s window:
+
+| Count | Budget |
+|---|---|
+| major collections with the extension disabled | at most 4: more means something outlives `disable()` |
+| major collections in any enabled state | at most one more than disabled |
+| frames in any enabled state | at most the Samples, plus the disabled state's frames, plus 2 |
+| frames with the card covered and idle input | at most the disabled state's frames plus 3 |
+| top-bar paints while the top bar is hidden | none |
+| the card's offscreen redirect | always |
+
+`scripts/resource-pulse-nested.sh perf` measures both, in the isolated nested shell and never on the live
+desktop:
+
+```bash
+scripts/resource-pulse-nested.sh start --gc-log --replay
+scripts/resource-pulse-nested.sh perf   # about 9 minutes; exit 1 names every count budget it found broken
+scripts/resource-pulse-nested.sh stop
+```
+
+- **What it does.** It opens one `gnome-calculator` window in the nested session and measures five states,
+  each after its own `scenario` request and 40 s to settle, over one 60 s window: disabled; covered with idle
+  input; covered with busy input; top bar hidden and covered; visible with busy input. It prints one line a
+  state (CPU, the median per tick, collections, frames, Samples, top-bar paints, the card's redirect) and
+  then a verdict. It needs `gnome-calculator` and `jq`; a count it could not take is exit 2, never a pass.
+- **How to read it.** Run it three times. The counts must pass each time. The percentages are reported, not
+  gated: take the median, and on a busy machine read them against the shipped extension measured at the same
+  moment, not against the table. A collections budget broken by one, in one state of one run, can be
+  chance (an idle shell makes one or two a minute): run it again.
+- **Why these budgets.** `docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md` has the
+  measurements behind each. Three things cost most, and each count above guards one: a D-Bus proxy object
+  owned only by JavaScript made GJS force a full collection after every Sample; two 2-second timers cost as
+  much as the Sample itself; and the top bar and a covered card were redrawn when no pixel had changed.
+- **Not budgeted yet: nothing visible.** With the top bar hidden and the card covered the extension still
+  receives Samples, since a card judged covered may still be seen through a translucent window and is kept
+  fresh. That state is `perf`'s fourth line; taking it to zero is stage two's.
+
+**The services and memory,** at idle:
 
 | What | Budget |
 |---|---|
-| gnome-shell, added by the extension | under 0.1% of one core |
 | the service, with a detail watch held | under 0.25% of one core |
 | the service, with no watch | under 0.1% of one core |
 | the service's resident memory | at most 64 MiB, flat over 24 h |
@@ -423,13 +478,15 @@ The budgets, at idle:
 | the cockpit service's resident memory | at most 48 MiB, flat over 24 h |
 | gnome-shell's resident memory | flat over 24 h |
 
-`scripts/resource-pulse-cost.sh` measures them. The extension's cost lands in gnome-shell, so take a
-reading with the extension off and one with it on; `--service` measures the service itself, found by
-its unit's `MainPID`. Read the service once with a detail watch held (the card visible, or the
-dropdown open) and once with none (the card covered), each over 10 idle minutes:
+`scripts/resource-pulse-cost.sh` measures them, and is what `perf` reads the nested shell with. On the
+live desktop it reads gnome-shell as a whole, so take a reading with the extension off and one with it on;
+`--service` measures the service itself, found by its unit's `MainPID`. Read the service once with a
+detail watch held (the card visible, or the dropdown open) and once with none (the card covered), each
+over 10 idle minutes:
 
 ```bash
 scripts/resource-pulse-cost.sh --cpu-percent 600            # gnome-shell CPU over 10 min, % of one core
+scripts/resource-pulse-cost.sh --tick-median 120            # its main thread's median CPU per 2 s tick, ms
 scripts/resource-pulse-cost.sh --service --cpu-percent 600  # the service's
 scripts/resource-pulse-cost.sh --service --rss-kib          # the service's resident memory: at most 65536
 scripts/resource-pulse-cost.sh --cockpit --cpu-percent 600  # the cockpit service's
@@ -438,7 +495,9 @@ scripts/resource-pulse-cost.sh --rss-kib                    # gnome-shell's resi
 scripts/resource-pulse-cost.sh --rss-check <kib>            # exit 1 if gnome-shell grew more than 64 MiB since <kib>
 ```
 
-It reads only `comm`, `stat` and `status` under `/proc`. `--cockpit` measures the cockpit service by
+It reads only `comm`, `status` and each thread's `schedstat` under `/proc`: CPU comes from the scheduler's
+nanosecond counters, since `stat`'s clock ticks resolve only about 0.02% of one core over a minute, and a
+counter it cannot read is exit 2, never 0%. `--cockpit` measures the cockpit service by
 its unit's `MainPID`, as `--service` does the sampler. Either may stand anywhere on the line; the two
 together are a usage error, and so is any other word left over (exit 2), never ignored. `--rss-check` is
 gnome-shell's growth tripwire alone: `--cockpit --rss-check` (or `--service --rss-check`) is a usage error
