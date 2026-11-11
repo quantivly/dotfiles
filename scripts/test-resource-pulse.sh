@@ -282,31 +282,33 @@ check "the service/ import scan finds a static and a dynamic import of service/,
 # own, may.
 DBUS_PROXY_LITERAL='Gio.DBusProxy'
 # dbus_proxy_mentions_in <extension dir>: one line per .js file outside the
-# top-level service/ that contains DBUS_PROXY_LITERAL. A tree with no
+# top-level service/ that contains DBUS_PROXY_LITERAL, and one per such file
+# that cannot be read (an unread file is not a clean one). A tree with no
 # JavaScript is a line too.
 dbus_proxy_mentions_in() {
-  local extension_dir="$1" extension_file_path
+  local extension_dir="$1" extension_file_path relative_path extension_file_text
   local -a extension_file_paths
   mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -name '*.js' -print0 2>/dev/null)
   if (( ${#extension_file_paths[@]} == 0 )); then
     printf 'found no JavaScript under %s\n' "$extension_dir"
-    return 0
+    return
   fi
   for extension_file_path in "${extension_file_paths[@]}"; do
     [[ "$extension_file_path" == "$extension_dir/service/"* ]] && continue
-    if [[ "$(<"$extension_file_path")" == *"$DBUS_PROXY_LITERAL"* ]]; then
-      printf '%s\n' "${extension_file_path#"$extension_dir"/}"
+    relative_path="${extension_file_path#"$extension_dir"/}"
+    if [[ ! -r "$extension_file_path" ]] || ! extension_file_text="$(<"$extension_file_path")"; then
+      printf 'cannot read %s\n' "$relative_path"
+    elif [[ "$extension_file_text" == *"$DBUS_PROXY_LITERAL"* ]]; then
+      printf '%s\n' "$relative_path"
     fi
   done
-  return 0
 }
 row_name="no shell-side file names Gio.DBusProxy"
 dbus_proxy_mentions="$(dbus_proxy_mentions_in "$EXT_DIR")"
-dbus_proxy_scan_status=$?
-if (( dbus_proxy_scan_status == 0 )) && [[ -z "$dbus_proxy_mentions" ]]; then
+if [[ -z "$dbus_proxy_mentions" ]]; then
   ok "$row_name"
 else
-  bad "$row_name — scan exit $dbus_proxy_scan_status: $(tr '\n' ' ' <<<"$dbus_proxy_mentions")"
+  bad "$row_name — $(tr '\n' ' ' <<<"$dbus_proxy_mentions")"
 fi
 # The planted twin, on a copy of the extension: a call at the top level and a
 # comment in lib/ are found; service/, whose sources use proxies, is not.
@@ -3477,7 +3479,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=708
+EXPECTED_ROWS=710
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

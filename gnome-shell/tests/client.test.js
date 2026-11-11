@@ -728,8 +728,10 @@ test('client: a Sample from another version (an unknown field, swap missing) not
     });
 });
 
+// How each call goes out (asynchronously, to the owner, with DBUS_CALL_TIMEOUT_MS) is the link's, pinned by the link
+// rows in client-dbus.test.js.
 test('client: WatchDetail and UnwatchDetail go out only when the wanted flag changes, with an owner, and the watch ' +
-    'is asserted again to each new owner; every call is asynchronous (the link adds DBUS_CALL_TIMEOUT_MS)', () => {
+    'is asserted again to each new owner', () => {
     const {client, link} = makeClientFixture({isOwnerReported: false});
     client.setDetailWatchWanted(true);
     link.setNameOwner(OWNER);
@@ -744,11 +746,8 @@ test('client: WatchDetail and UnwatchDetail go out only when the wanted flag cha
     client.setDetailWatchWanted(true);
     client.setDetailWatchWanted(false);
     link.setNameOwner(OWNER);
-    const callShapes = new Set(link.calls.map(call => typeof call.onAnswered));
-    assertEqual({calledMethodNames: link.calledMethodNames, callShapes: [...callShapes]}, {
-        calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL, GET_STATE],
-        callShapes: ['function'],
-    });
+    assertEqual(link.calledMethodNames,
+        [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL, WATCH_DETAIL, GET_STATE, WATCH_DETAIL, GET_STATE]);
 });
 
 test('client: destroy() releases only a watch still held: none after an UnwatchDetail, none after the owner that ' +

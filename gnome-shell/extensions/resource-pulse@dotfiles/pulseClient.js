@@ -916,8 +916,8 @@ export class PulseClient {
     }
 
     /**
-     * Calls a method of the service through the link: asynchronously, with DBUS_CALL_TIMEOUT_MS. Only with an owner,
-     * so the link is there.
+     * Calls a method of the service's owner through the link: asynchronously, with DBUS_CALL_TIMEOUT_MS. Only with an
+     * owner, so the link is there and holds the same owner (it records each one before reporting it).
      *
      * @param {string} methodName - GetState, WatchDetail or UnwatchDetail.
      * @param {Gio.Cancellable|null} cancellable - The call's cancellable.

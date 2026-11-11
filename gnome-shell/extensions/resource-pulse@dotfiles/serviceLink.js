@@ -1,14 +1,20 @@
 // The client's link to the Resource Pulse service on the session bus, with no D-Bus proxy object: a name watch
 // reports the bus name's owner, a signal subscription on the connection delivers each Sample, and a method is a plain
-// connection.call. A D-Bus proxy object owned only by JavaScript, with handlers connected, is referenced by GDBus on
-// every incoming signal, and that makes GJS schedule a forced full garbage collection on the compositor thread 10 s
-// later: once per Sample (docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md). The watch and the
-// subscription are GDBus's own records and their callbacks plain functions, so no object that only JavaScript holds
-// is touched when a Sample arrives.
+// connection.call to the owner the watch last reported. A D-Bus proxy object owned only by JavaScript, with handlers
+// connected, is referenced by GDBus on every incoming signal, and that makes GJS schedule a forced full garbage
+// collection on the compositor thread 10 s later: once per Sample
+// (docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md). The watch and the subscription are GDBus's
+// own records and their callbacks plain functions, so no object that only JavaScript holds is touched when a Sample
+// arrives.
 //
-// Gio only (no Shell, St, Clutter or Meta), so it runs under plain gjs. Every call is asynchronous, with
+// Calls go to the owner's unique name, as a proxy's do, never to the well-known name: a call meant for an owner that
+// has just left must not reach the next one. Otherwise a WatchDetail sent to the old owner could land on the new one,
+// which the client then asserts its watch to again: two watches, and one UnwatchDetail later leaves one held.
+//
+// Gio and GLib only (no Shell, St, Clutter or Meta), so it runs under plain gjs. Every call is asynchronous, with
 // DBUS_CALL_TIMEOUT_MS, and never asks the bus to start the service: systemd does that (pulseClient.js's StartUnit).
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 
 import {DBUS_CALL_TIMEOUT_MS} from './lib/constants.js';
 import {
@@ -17,8 +23,10 @@ import {
 
 /** The watch never asks the bus to start the service either. */
 const NAME_WATCHER_FLAGS = Gio.BusNameWatcherFlags.NONE;
-/** No call asks the bus to activate a name: a name nobody owns fails the call at once. */
+/** No call asks the bus to activate a name. */
 const CALL_FLAGS = Gio.DBusCallFlags.NO_AUTO_START;
+/** What a call made while nobody owns the service's name answers, without sending anything. */
+const NO_OWNER_ERROR_MESSAGE = `nobody owns ${RESOURCE_PULSE_BUS_NAME}`;
 /** Every Sample, whatever its first argument. */
 const ANY_FIRST_ARGUMENT = null;
 /** None of the service's methods takes parameters. */
@@ -28,7 +36,7 @@ const ANY_REPLY_TYPE = null;
 
 /**
  * The service on the bus, as the client follows it: the owner of its name, its Samples while subscribed, and its
- * methods. Made by createResourcePulseLink; destroy() ends the watch and the subscription.
+ * methods, called on that owner. Made by createResourcePulseLink; destroy() ends the watch and the subscription.
  */
 class ResourcePulseLink {
     /**
@@ -42,14 +50,18 @@ class ResourcePulseLink {
      */
     constructor(connection, {onOwnerChanged, onSample}) {
         this._connection = connection;
+        this._onOwnerChanged = onOwnerChanged;
         this._onSample = onSample;
         this._isDestroyed = false;
+        // The unique name owning the service's bus name, as the watch last reported it; null while nobody does, and
+        // once destroyed.
+        this._nameOwner = null;
         // The subscription's id while subscribed, else null.
         this._sampleSubscriptionId = null;
         this._subscribeToSamples();
         this._nameWatcherId = Gio.bus_watch_name_on_connection(connection, RESOURCE_PULSE_BUS_NAME, NAME_WATCHER_FLAGS,
-            (_connection, _busName, nameOwner) => onOwnerChanged(nameOwner),
-            () => onOwnerChanged(null));
+            (_connection, _busName, nameOwner) => this._reportNameOwner(nameOwner),
+            () => this._reportNameOwner(null));
     }
 
     /** @returns {boolean} True while Samples are delivered: from creation until unsubscribed or destroyed. */
@@ -74,8 +86,9 @@ class ResourcePulseLink {
     }
 
     /**
-     * Calls a method of the service on its bus name, asynchronously, with DBUS_CALL_TIMEOUT_MS. It needs neither the
-     * watch nor the subscription, so the client's UnwatchDetail at its teardown can go out last.
+     * Calls a method of the service on the unique name of the owner the watch last reported, asynchronously, with
+     * DBUS_CALL_TIMEOUT_MS. With no owner (none reported yet, the last one gone, or the link destroyed) nothing is
+     * sent, and onAnswered gets a NAME_HAS_NO_OWNER error at once, before call() returns.
      *
      * @param {string} methodName - GetState, WatchDetail or UnwatchDetail.
      * @param {Gio.Cancellable|null} cancellable - The call's cancellable.
@@ -84,7 +97,11 @@ class ResourcePulseLink {
      * @returns {void}
      */
     call(methodName, cancellable, onAnswered) {
-        this._connection.call(RESOURCE_PULSE_BUS_NAME, RESOURCE_PULSE_OBJECT_PATH, RESOURCE_PULSE_INTERFACE_NAME,
+        if (this._nameOwner === null) {
+            onAnswered(new GLib.Error(Gio.DBusError, Gio.DBusError.NAME_HAS_NO_OWNER, NO_OWNER_ERROR_MESSAGE), null);
+            return;
+        }
+        this._connection.call(this._nameOwner, RESOURCE_PULSE_OBJECT_PATH, RESOURCE_PULSE_INTERFACE_NAME,
             methodName, NO_PARAMETERS, ANY_REPLY_TYPE, CALL_FLAGS, DBUS_CALL_TIMEOUT_MS, cancellable,
             (callingConnection, result) => {
                 let reply;
@@ -99,8 +116,9 @@ class ResourcePulseLink {
     }
 
     /**
-     * Ends the name watch and the subscription; neither callback is called after it. The subscription is dropped
-     * even if ending the watch throws, and the error then propagates. Safe twice.
+     * Ends the name watch and the subscription, and forgets the owner; neither callback is called after it, and a
+     * call answers an error at once. The subscription is dropped even if ending the watch throws, and the error then
+     * propagates. Safe twice.
      *
      * @returns {void}
      */
@@ -108,6 +126,7 @@ class ResourcePulseLink {
         if (this._isDestroyed)
             return;
         this._isDestroyed = true;
+        this._nameOwner = null;
         try {
             Gio.bus_unwatch_name(this._nameWatcherId);
         } finally {
@@ -116,7 +135,32 @@ class ResourcePulseLink {
     }
 
     /**
-     * Subscribes, on the connection, to the Sample signal from the owner of the service's name at its object.
+     * Takes the owner the watch reports, and hands it to the client; nothing once destroyed.
+     *
+     * @param {string|null} nameOwner - The owner's unique name, or null when nobody owns the name.
+     * @returns {void}
+     */
+    _reportNameOwner(nameOwner) {
+        if (this._isDestroyed)
+            return;
+        this._nameOwner = nameOwner;
+        this._onOwnerChanged(nameOwner);
+    }
+
+    /**
+     * Hands a Sample's parameters to the client; nothing once destroyed.
+     *
+     * @param {GLib.Variant} parameters - The signal's parameters.
+     * @returns {void}
+     */
+    _deliverSample(parameters) {
+        if (!this._isDestroyed)
+            this._onSample(parameters);
+    }
+
+    /**
+     * Subscribes, on the connection, to the Sample signal from the owner of the service's name at its object. The
+     * sender is the well-known name: GDBus and the bus then deliver only what its current owner sends.
      *
      * @returns {void}
      */
@@ -125,7 +169,7 @@ class ResourcePulseLink {
             RESOURCE_PULSE_INTERFACE_NAME, SAMPLE_SIGNAL_NAME, RESOURCE_PULSE_OBJECT_PATH, ANY_FIRST_ARGUMENT,
             Gio.DBusSignalFlags.NONE,
             (_connection, _senderName, _objectPath, _interfaceName, _signalName, parameters) =>
-                this._onSample(parameters));
+                this._deliverSample(parameters));
     }
 
     /**

@@ -13,7 +13,7 @@ import {createResourcePulseLink} from '../extensions/resource-pulse@dotfiles/ser
 import {ResourcePulseDBusService} from '../extensions/resource-pulse@dotfiles/service/dbusService.js';
 import {
     GET_STATE_METHOD_NAME, RESOURCE_PULSE_BUS_NAME, RESOURCE_PULSE_INTERFACE_NAME, RESOURCE_PULSE_OBJECT_PATH,
-    parseSamplePayload, parseStatePayload,
+    SAMPLE_SIGNAL_NAME, buildSamplePayload, parseSamplePayload, parseStatePayload,
 } from '../extensions/resource-pulse@dotfiles/lib/protocol.js';
 import {DBUS_CALL_TIMEOUT_MS} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
@@ -21,6 +21,10 @@ import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/error
 const BUS_ROUND_TRIP_TIMEOUT_MS = 2000;
 /** The signature of GetState's reply and of a Sample's parameters: one string. */
 const ONE_STRING_SIGNATURE = '(s)';
+/** A Sample's sequence no service run reaches in a row, so one sent by a connection that is not the owner stands out. */
+const IMPOSTOR_SAMPLE_SEQUENCE = 99;
+/** emit_signal's destination for a broadcast. */
+const BROADCAST_DESTINATION = null;
 const SYSTEMD_BUS_NAME = 'org.freedesktop.systemd1';
 const SYSTEMD_OBJECT_PATH = '/org/freedesktop/systemd1';
 const SYSTEMD_MANAGER_INTERFACE_NAME = 'org.freedesktop.systemd1.Manager';
@@ -128,6 +132,17 @@ function recordCalls(connection) {
  */
 function callThroughLink(link, methodName) {
     return new Promise(resolve => link.call(methodName, null, (error, reply) => resolve({error, reply})));
+}
+
+/**
+ * The sequence a delivered Sample carries.
+ *
+ * @param {GLib.Variant} parameters - The Sample's parameters, as the link delivered them.
+ * @returns {number|null} Its sequence; null when it is not a readable Sample.
+ */
+function sequenceOfSample(parameters) {
+    const [sampleText] = parameters.deepUnpack();
+    return parseSamplePayload(sampleText)?.sequence ?? null;
 }
 
 /**
@@ -248,7 +263,7 @@ test('link: the owner appears, GetState answers, a Sample arrives, and after des
                 isSubscribedFromCreation: true, isSubscribedAfterDestroy: false,
                 owners: [serviceName], sampleCount: 1,
                 calls: [{
-                    busName: RESOURCE_PULSE_BUS_NAME, objectPath: RESOURCE_PULSE_OBJECT_PATH,
+                    busName: serviceName, objectPath: RESOURCE_PULSE_OBJECT_PATH,
                     interfaceName: RESOURCE_PULSE_INTERFACE_NAME, methodName: GET_STATE_METHOD_NAME,
                     flags: Gio.DBusCallFlags.NO_AUTO_START, timeoutMs: DBUS_CALL_TIMEOUT_MS,
                 }],
@@ -259,6 +274,64 @@ test('link: the owner appears, GetState answers, a Sample arrives, and after des
         } finally {
             recording.link.destroy();
             control.link.destroy();
+        }
+    }));
+
+test('link: a Sample sent by a connection that does not own the name is not delivered; the owner\'s is', () =>
+    withServedResourcePulse(async ({sampler, clientConnection}) => {
+        const impostorConnection = openPrivateBusConnection();
+        const recording = makeRecordingLink(clientConnection);
+        try {
+            const isOwnerSeen = await waitUntil(() => recording.owners.length >= 1, BUS_ROUND_TRIP_TIMEOUT_MS);
+            const impostorPayload = buildSamplePayload({
+                snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: IMPOSTOR_SAMPLE_SEQUENCE,
+                sampledAtUsec: TICK_SNAPSHOT.takenAtUsec,
+            });
+            const impostorParameters = new GLib.Variant(ONE_STRING_SIGNATURE, [impostorPayload]);
+            impostorConnection.emit_signal(BROADCAST_DESTINATION, RESOURCE_PULSE_OBJECT_PATH,
+                RESOURCE_PULSE_INTERFACE_NAME, SAMPLE_SIGNAL_NAME, impostorParameters);
+            // The impostor sends in order, so its Sample has reached the client's connection, if it was routed there at
+            // all, by the time its answer to the ping is back.
+            const isImpostorFlushed = await pingPeer(clientConnection, impostorConnection.get_unique_name());
+            sampler.publish(TICK_SNAPSHOT, TICK_APPENDED_HISTORY);
+            const isOwnerSampleSeen = await waitUntil(() => recording.samples.length >= 1, BUS_ROUND_TRIP_TIMEOUT_MS);
+            assertEqual({
+                isOwnerSeen, isImpostorFlushed, isOwnerSampleSeen,
+                deliveredSequences: recording.samples.map(sequenceOfSample),
+            }, {isOwnerSeen: true, isImpostorFlushed: true, isOwnerSampleSeen: true, deliveredSequences: [1]});
+        } finally {
+            recording.link.destroy();
+            closeConnections([impostorConnection]);
+        }
+    }));
+
+test('link: a call goes to the unique name of the owner the watch reported, and with no owner it sends nothing and ' +
+    'answers an error at once', () =>
+    withServedResourcePulse(async ({serviceName, releaseName, clientConnection}) => {
+        const recordedCalls = recordCalls(clientConnection);
+        const recording = makeRecordingLink(clientConnection);
+        try {
+            const isOwnerSeen = await waitUntil(() => recording.owners.length >= 1, BUS_ROUND_TRIP_TIMEOUT_MS);
+            const ownedAnswer = await callThroughLink(recording.link, GET_STATE_METHOD_NAME);
+            releaseName();
+            const isVanishSeen = await waitUntil(() => recording.owners.at(-1) === null, BUS_ROUND_TRIP_TIMEOUT_MS);
+            let unownedAnswer = null;
+            recording.link.call(GET_STATE_METHOD_NAME, null, (error, reply) => {
+                unownedAnswer = {error, reply};
+            });
+            const isUnownedAnsweredAtOnce = unownedAnswer !== null;
+            const isNoOwnerError =
+                unownedAnswer?.error?.matches(Gio.DBusError, Gio.DBusError.NAME_HAS_NO_OWNER) ?? false;
+            assertEqual({
+                isOwnerSeen, isVanishSeen, destinations: recordedCalls.map(call => call.busName),
+                ownedError: ownedAnswer.error, isUnownedAnsweredAtOnce, isNoOwnerError,
+                unownedReply: unownedAnswer?.reply ?? null,
+            }, {
+                isOwnerSeen: true, isVanishSeen: true, destinations: [serviceName], ownedError: null,
+                isUnownedAnsweredAtOnce: true, isNoOwnerError: true, unownedReply: null,
+            });
+        } finally {
+            recording.link.destroy();
         }
     }));
 
