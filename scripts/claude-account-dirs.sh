@@ -200,20 +200,13 @@ cred_state() {
 }
 
 # The GRANT a credential carries -- its access token, refresh token and expiry,
-# canonicalised -- for deciding whether two files hold the same login and differ
-# only in what their writers store around it. The same triple claude-doctor's
-# _claude_cred_id compares, so the two cannot disagree about "identical" again.
+# canonicalised. Two files with the same grant hold the same login, whatever
+# else their writers store around it: the same triple claude-doctor's
+# _claude_cred_id compares when it says "still identical to the store".
 #
-# It used to be the whole claudeAiOauth block, which counted writer-dependent
-# fields as part of the login: on 2026-11-11 quantivly-2's account dir held its
-# store's exact grant plus subscriptionTypeSource (Claude Code writes it,
-# `clauth login` does not), and every reconcile refused the pair as undecidable
-# while the doctor called it "still identical to the store".
-#
-# Captured into a variable by the one caller and compared there; never printed.
-# The empty-token select is unreachable from cred_live_side, whose cred_state
-# checks already demand a token on both sides; it stops two token-less stubs
-# comparing "equal" for any other caller, and no state-table row can pin it.
+# Never printed: cred_same_grant captures it and compares it. The empty-token
+# select keeps two token-less stubs from comparing "equal"; no row can pin it,
+# because every path after cred_same_grant refuses a token-less pair anyway.
 cred_grant_id() {
     local f="$1"
     has_jq || return 1
@@ -221,6 +214,23 @@ cred_grant_id() {
                  | select(type == "object")
                  | select((.accessToken // "") != "")
                  | {accessToken, refreshToken, expiresAt}' "$f" 2>/dev/null || return 1
+}
+
+# Do both files carry the same grant? Exit status only; an unreadable side or a
+# missing token is "no".
+#
+# WHY IT EXISTS: on 2026-11-11 quantivly-2's account dir held its store's exact
+# grant plus subscriptionTypeSource, a field Claude Code writes and `clauth login`
+# does not. The equal-expiry tie-break compared the whole claudeAiOauth block, so
+# every reconcile refused the pair as undecidable while the doctor called it
+# identical. A shared access token is the strongest proof of "same account" this
+# script has -- stronger than the shape gate and the identity permit -- so the
+# caller asks it first.
+cred_same_grant() {  # $1, $2 = credential files
+    local grant_one grant_two
+    grant_one="$(cred_grant_id "$1")" || return 1
+    grant_two="$(cred_grant_id "$2")" || return 1
+    [[ "$grant_one" == "$grant_two" ]]
 }
 
 # Bash, not zsh: `<->` is a zsh numeric glob and is a SYNTAX ERROR here.
@@ -233,7 +243,7 @@ is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 # Every branch that cannot be certain returns "?" rather than guessing. A wrong
 # answer here overwrites a working login with a dead one.
 cred_live_side() {
-    local a="$1" s="$2" ea es ra rs ma ms grant_a grant_s
+    local a="$1" s="$2" ea es ra rs ma ms
     ea="$(cred_state "$a")" && ra=0 || ra=$?
     es="$(cred_state "$s")" && rs=0 || rs=$?
 
@@ -278,13 +288,12 @@ cred_live_side() {
     # Equal expiry, yet the files differ -- we only reach this function after
     # `cmp -s` said so. If both carry the SAME GRANT, the difference is
     # everything around it: MCP-server logins the store never had, or a field
-    # only one writer stores (rateLimitTier, subscriptionTypeSource). Adopting A
-    # keeps all of it -- cred_merge back-fills whatever A lacks -- where the old
-    # code relinked and silently discarded the MCP logins, costing one browser
-    # OAuth flow per server per profile, every time the timer ran.
-    grant_a="$(cred_grant_id "$a")" || grant_a=""
-    grant_s="$(cred_grant_id "$s")" || grant_s=""
-    if [[ -n "$grant_a" && "$grant_a" == "$grant_s" ]]; then printf 'A\n'; return 0; fi
+    # only one writer stores (subscriptionTypeSource). Adopting A keeps the MCP
+    # logins and back-fills any login field A lacks from the store (cred_merge),
+    # with the store copy backed up first; the old code relinked and silently
+    # discarded the MCP logins, one browser OAuth flow per server per profile,
+    # every time the timer ran.
+    if cred_same_grant "$a" "$s"; then printf 'A\n'; return 0; fi
 
     # Same expiry, different grants: genuinely ambiguous.
     printf '?\n'
@@ -330,17 +339,23 @@ cred_rotation_residual() {
     # the gap reopens on the spot. Observed on quantivly-1, 2026-09-08: refused,
     # re-authenticated as instructed, refused again with the identical residual.
     #
-    # WRITER-DEPENDENT, the second: subscriptionTypeSource. Claude Code writes it
-    # ("sign_in"); `clauth login` writes the store without it. Measured on
-    # quantivly-2, 2026-11-11, on two files holding the identical grant. The
-    # identity permit happened to rescue that one, but it cannot after a re-login,
-    # while the dir's .claude.json still names the previous account.
-    #
     # THE TEST FOR THIS CLASS: if a field can differ between two files that hold
     # the SAME account's login, it cannot be evidence about WHICH account the
     # login is for. Comparing it does not make the gate stricter, it makes it
     # unfixable -- and an unfixable refusal is a permanently-red checker wearing a
     # different hat.
+    #
+    # NOT EXCLUDED, DELIBERATELY: subscriptionTypeSource, writer-dependent too
+    # (Claude Code writes "sign_in"; `clauth login` does not). Excluding it was
+    # tried on 2026-11-11 and reverted in review. Right after `clauth login` moves
+    # a profile to ANOTHER account, a session still on the previous account
+    # refreshes into a real file with the field, a later expiry and a .claude.json
+    # naming that previous account, and this field is all that keeps the gate
+    # from adopting it over the re-login. It is not unfixable the way
+    # rateLimitTier was: the same grant is settled before this gate
+    # (cred_same_grant), and a same-account rotation passes on the identity
+    # permit. It is luck, not proof: cred_merge copies the field into the store,
+    # so the protection lasts only until the first adopt after a login.
     #
     # What is left -- scopes and subscriptionType -- still separates a personal
     # account from a work one. It does NOT separate two work accounts on the same
@@ -349,8 +364,7 @@ cred_rotation_residual() {
                      .claudeAiOauth.refreshToken,
                      .claudeAiOauth.expiresAt,
                      .claudeAiOauth.refreshTokenExpiresAt,
-                     .claudeAiOauth.rateLimitTier,
-                     .claudeAiOauth.subscriptionTypeSource)
+                     .claudeAiOauth.rateLimitTier)
                  | del(.mcpOAuth)' "$f" 2>/dev/null || return 1
 }
 
@@ -819,6 +833,10 @@ _reconcile_credential_locked() {
 
     # 1. Is this even shaped like a rotation? Anything else -- a different
     #    account's login above all -- is refused by name, never adopted.
+    #    The SAME GRANT on both sides skips the question: a shared access token
+    #    already proves the same account, and a field only one writer stores
+    #    (subscriptionTypeSource) must not turn one grant into a refusal, even
+    #    while the dir's .claude.json still names another account.
     local ra rs_
     ra="$(cred_rotation_residual "$A")" || ra=""
     rs_="$(cred_rotation_residual "$S")" || rs_=""
@@ -828,7 +846,7 @@ _reconcile_credential_locked() {
         warn "        refresh from a different account. Both left untouched."
         return 1
     fi
-    if [[ "$ra" != "$rs_" ]]; then
+    if [[ "$ra" != "$rs_" ]] && ! cred_same_grant "$A" "$S"; then
         # ...unless the two are PROVABLY the same account. A plain re-login of the
         # same account is not shaped like a rotation -- a fresh /login can fill in
         # fields an older stored credential left null, and one did here on
