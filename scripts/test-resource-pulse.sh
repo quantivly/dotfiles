@@ -121,6 +121,8 @@ done
 # substitution would lose find's status.
 list_files_under() {
   local search_dir="$1" listing_path
+  # A nameref: assigning to it fills the caller's array. Older ShellCheck (CI's) reads it as never used.
+  # shellcheck disable=SC2034
   local -n listed_paths="$2"
   shift 2
   listed_paths=()
