@@ -121,8 +121,6 @@ done
 # substitution would lose find's status.
 list_files_under() {
   local search_dir="$1" listing_path
-  # A nameref: assigning to it fills the caller's array. Older ShellCheck (CI's) reads it as never used.
-  # shellcheck disable=SC2034
   local -n listed_paths="$2"
   shift 2
   listed_paths=()
@@ -131,6 +129,8 @@ list_files_under() {
     rm -f "$listing_path"
     return 1
   fi
+  # listed_paths is a nameref: filling it fills the caller's array, which ShellCheck reads as never used.
+  # shellcheck disable=SC2034
   mapfile -d '' listed_paths <"$listing_path"
   rm -f "$listing_path"
   return 0
