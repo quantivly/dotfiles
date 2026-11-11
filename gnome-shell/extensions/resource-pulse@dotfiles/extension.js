@@ -4,13 +4,15 @@
 // wallpaper, below every window), at the top right of the primary monitor's work area, and follows that work area as
 // monitors and panels change. Only the card shows apps, so the client asks the service for its detail watch (the faster
 // app scan) only while the card can be seen (lib/wiring.js isDetailWatchWanted): the overview hides it, and so does a
-// window covering it, which is most of the day. While one does, the card is frozen as well: it is dimmed, records each
-// snapshot and repaints nothing until the reveal, which repaints it at once (lib/visibility.js decides what covers it),
-// except once every FROZEN_REPAINT_INTERVAL_SECONDS, still dimmed, so a card misjudged as covered never shows stale
-// numbers as live. The window-manager and display signals that trigger that check come in bursts, so they are
-// coalesced into one check before the next frame; every Sample checks at once, and so, while the card is frozen, does a
-// timer, since no Sample may come (the service may be down); that timer also makes the frozen repaint. Neither the
-// Sample's check nor the timer's schedules a frame: the shell's budget is under 0.1% of a core.
+// window covering it, which is most of the day. While one does, the card is frozen as well: it is dimmed, is told no
+// snapshot while the watch is released (the client tells the cards only while it is wanted) and repaints nothing until
+// the reveal, which repaints it at once and wants the watch again, so the client gives it the latest snapshot
+// (lib/visibility.js decides what covers it), except once every FROZEN_REPAINT_INTERVAL_SECONDS, still dimmed, from the
+// latest snapshot, so a card misjudged as covered never shows stale numbers as live. The window-manager and display
+// signals that trigger that check come in bursts, so they are coalesced into one check before the next frame; every
+// Sample that appends to the histories checks at once, and so, while the card is frozen, does a timer, since no Sample
+// may come (the service may be down); that timer also makes the frozen repaint. Neither the Sample's check nor the
+// timer's schedules a frame: the shell's budget is under 0.1% of a core.
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
@@ -257,8 +259,9 @@ export default class ResourcePulseExtension extends Extension {
      *   opened or closed), the primary monitor entering or leaving fullscreen, a minimize, an unminimize, a maximize,
      *   unmaximize or tile (size-changed), the end of a drag (grab-op-end), a workspace switch, and "show desktop"
      *   (Super+D) being toggled, which hides windows without minimizing them.
-     * - Every client update (a Sample, about every 2 s) checks at once, with no later: it comes at most once a tick,
-     *   and a later would schedule a frame each time, even under a covered card. It catches what no signal reports,
+     * - Every history update (a Sample that appends to the histories, about every 2 s, a state, or no data) checks at
+     *   once, through a client history listener, with no later: it comes at most once a tick, and a later would
+     *   schedule a frame each time, even under a covered card. It catches what no signal reports,
      *   such as a window moved over the card from the keyboard. While the card is frozen a timer does the same every
      *   SAMPLE_INTERVAL_SECONDS (_syncCoverRecheckTimer), since no Sample comes while the service is down.
      * - The card's placement (_placeCard, which already checked once in _addCard) and the overview closing
@@ -280,7 +283,7 @@ export default class ResourcePulseExtension extends Extension {
             'switch-workspace', queueCardCoverCheck,
             this);
         global.workspace_manager.connectObject('showing-desktop-changed', queueCardCoverCheck, this);
-        this._cardCoverListenerId = this._client.addListener(() => this._syncCardCover());
+        this._cardCoverListenerId = this._client.addHistoryListener(() => this._syncCardCover());
     }
 
     /**
@@ -369,10 +372,11 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * While the card is still covered, repaints it, dimmed, from the client's latest state once
+     * While the card is still covered, gives it the client's latest snapshot and repaints it, dimmed, once
      * FROZEN_REPAINT_INTERVAL_SECONDS have passed since it was last painted (lib/visibility.js isFrozenRepaintDue), so
-     * a card misjudged as covered updates, dimmed, rather than showing stale numbers. A revealed card is left alone:
-     * the reveal repainted it at once. Does nothing without a card.
+     * a card misjudged as covered updates, dimmed, rather than showing stale numbers. The snapshot is given here because
+     * the client tells a covered card none while the detail watch is released (unless the dropdown is open). A revealed
+     * card is left alone: the reveal repainted it at once. Does nothing without a card.
      *
      * @returns {void}
      */
@@ -383,6 +387,8 @@ export default class ResourcePulseExtension extends Extension {
         if (!isFrozenRepaintDue({lastFrozenPaintAtUsec: this._frozenCardPaintedAtUsec, nowUsec}))
             return;
         this._frozenCardPaintedAtUsec = nowUsec;
+        const client = this._client;
+        this._card.update(client.latestSnapshot, client.lastGoodClockLabel);
         this._card.repaintFrozen();
     }
 
@@ -527,7 +533,7 @@ export default class ResourcePulseExtension extends Extension {
             {name: 'disconnect from the dropdown menu', run: () => dropdownMenu?.disconnectObject(this)},
             {name: 'remove the covered check\'s client listener', run: () => {
                 if (cardCoverListenerId !== null)
-                    client?.removeListener(cardCoverListenerId);
+                    client?.removeHistoryListener(cardCoverListenerId);
             }},
             {name: 'cancel the pending cover check', run: () => this._cancelCardCoverCheck()},
             {name: 'remove the cover re-check timer', run: () => this._removeCoverRecheckTimer()},

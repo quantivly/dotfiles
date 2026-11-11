@@ -146,6 +146,10 @@ const OWN_FIELD_PREFIX_PATTERN = /^this\._/;
 const SIGNAL_HANDLER_PAIR_PATTERN = /'([\w:-]+)',\s*([^,]+?)\s*,/g;
 /** The receivers the covered check connects to in _followCardCover. */
 const COVER_SIGNAL_RECEIVERS = new Set(['global.display', 'global.window_manager', 'global.workspace_manager']);
+/** A call adding a client listener of either kind: a snapshot listener (addListener) or a history listener. */
+const ADD_CLIENT_LISTENER_PATTERN = /\.add(?:History)?Listener\(/g;
+/** A call removing a client listener of either kind. */
+const REMOVE_CLIENT_LISTENER_PATTERN = /\.remove(?:History)?Listener\(/g;
 
 /**
  * Reads a file of the extension as text (tests may block).
@@ -780,8 +784,8 @@ test('extension.js checks the cover on a restack, a fullscreen change, a minimiz
     assertEqual({
         connectedSignals: connectedSignals.sort(),
         receiversNeverDisconnected: [...connectedReceivers].filter(receiver => !disconnectedReceivers.has(receiver)),
-        clientListenersAdded: (extensionSource.match(/\.addListener\(/g) ?? []).length,
-        clientListenersRemovedOnTeardown: (tearDownBody.match(/\.removeListener\(/g) ?? []).length,
+        clientListenersAdded: (extensionSource.match(ADD_CLIENT_LISTENER_PATTERN) ?? []).length,
+        clientListenersRemovedOnTeardown: (tearDownBody.match(REMOVE_CLIENT_LISTENER_PATTERN) ?? []).length,
     }, {
         connectedSignals: [
             'Main.layoutManager monitors-changed',
@@ -846,7 +850,7 @@ test('extension.js: the bursty window-manager and display triggers queue the one
         coverSignalHandlers,
         queuesTheCheck: statementCount(followBody, 'const queueCardCoverCheck = () => this._queueCardCoverCheck();'),
         clientListenerChecksAtOnce: statementCount(followBody,
-            'this._cardCoverListenerId = this._client.addListener(() => this._syncCardCover());'),
+            'this._cardCoverListenerId = this._client.addHistoryListener(() => this._syncCardCover());'),
         timerChecksAtOnce: statementCount(timeoutBody, 'this._syncCardCover();'),
         timerLinesQueuingALater: trimmedLines(timeoutBody).filter(line => line.includes('_queueCardCoverCheck')).length,
     }, {

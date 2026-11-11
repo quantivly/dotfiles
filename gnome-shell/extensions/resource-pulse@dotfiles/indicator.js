@@ -68,7 +68,7 @@ class PulseIndicator extends PanelMenu.Button {
         this._isHoverLabelShown = false;
         this._showHoverLabelTimeoutId = null;
         this._placeHoverLabelLaterId = null;
-        this._snapshotListenerId = null;
+        this._historyListenerId = null;
         this._dropdownCard = null;
         this._openResourcesItem = null;
 
@@ -96,7 +96,7 @@ class PulseIndicator extends PanelMenu.Button {
         // and its handlers with it.
         this._hoverLabel.connect('notify::width', () => this._queuePlaceShownHoverLabel());
         Main.layoutManager.addTopChrome(this._hoverLabel);
-        this._snapshotListenerId = client.addListener(snapshot => this._onSnapshot(snapshot));
+        this._historyListenerId = client.addHistoryListener(() => this._onHistoriesChanged());
         St.ThemeContext.get_for_stage(global.stage).connectObject(
             'notify::scale-factor', () => this._queuePlaceShownHoverLabel(), this);
     }
@@ -170,13 +170,12 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
-     * Redraws the graphs for a new snapshot, and refreshes the hover label while it is up, so it never shows
-     * an older sample than the graphs do.
+     * Redraws the graphs once the client's histories have changed (a Sample, a state, or no data), and refreshes the
+     * hover label while it is up, from the latest snapshot, so it never shows an older sample than the graphs do.
      *
-     * @param {import('./pulseClient.js').Snapshot|null} _snapshot - The new snapshot (the label reads the latest).
      * @returns {void}
      */
-    _onSnapshot(_snapshot) {
+    _onHistoriesChanged() {
         this._cpuGraph.queue_repaint();
         this._memoryGraph.queue_repaint();
         if (this._isHoverLabelShown) {
@@ -383,9 +382,9 @@ class PulseIndicator extends PanelMenu.Button {
             this._placeHoverLabelLaterId = null;
         }
         this._cancelHoverLabelTimeout();
-        if (this._snapshotListenerId !== null) {
-            this._client.removeListener(this._snapshotListenerId);
-            this._snapshotListenerId = null;
+        if (this._historyListenerId !== null) {
+            this._client.removeHistoryListener(this._historyListenerId);
+            this._historyListenerId = null;
         }
         this._dropdownCard?.destroy();
         this._dropdownCard = null;

@@ -1,8 +1,8 @@
 // The extension's one source of numbers: a client of the Resource Pulse sampler service (service/, run by systemd as
 // resource-pulse.service) on the session bus. It keeps the interface the card and the indicator draw from (cpuHistory,
-// memoryHistory, latestSnapshot, lastGoodClockLabel, addListener and removeListener) and does no sampling, no file IO
-// and no subprocess. Gio and GLib only (no Shell, St, Clutter or Meta), so it runs under plain gjs, and its link to the
-// service, StartUnit, connection, clock and timeouts are all injectable.
+// memoryHistory, latestSnapshot, lastGoodClockLabel, isLive, and the two kinds of listener below) and does no
+// sampling, no file IO and no subprocess. Gio and GLib only (no Shell, St, Clutter or Meta), so it runs under plain
+// gjs, and its link to the service, StartUnit, connection, clock and timeouts are all injectable.
 //
 // It runs inside gnome-shell, the compositor, so:
 // - every D-Bus call is asynchronous, with DBUS_CALL_TIMEOUT_MS, and none is ever synchronous;
@@ -25,6 +25,15 @@
 // - It draws every Sample, whatever StartUnit answered (the nested harness runs the service with no systemd): the
 //   snapshot becomes the latest, and what the Sample appended is appended. A null appendedHistory (a watch start's
 //   reveal) appends nothing.
+// - Two kinds of listener. A history listener (the top bar) is told, with no argument, after every Sample that
+//   appended to the histories, every state and every no data. A snapshot listener (addListener: the card and the
+//   dropdown card) is told the snapshot on every state and every no data, on every Sample only while the detail
+//   watch is wanted, and the latest snapshot once when the watch becomes wanted while the data is live. When both
+//   kinds are told of one Sample, history listeners go first.
+// - A Sample's snapshot is parsed late, never skipped: the Sample keeps it unread, and it is parsed when first read
+//   (latestSnapshot, lastGoodClockLabel, or snapshot listeners being told). Whatever replaces an unread snapshot
+//   parses it first (a numberless Sample, a reveal, a state, no data), except a Sample that appended a number, so
+//   "no data since" names the last Sample with numbers whether anything read it or not.
 // - No data, once: when no Sample has come for longer than SAMPLE_STALL_TICKS intervals, or the service's sequence
 //   restarts, it publishes one all-null snapshot and a gap in both histories. After a stall the next Sample of the
 //   same run draws again; after a restart nothing is drawn until a fresh GetState answers.
@@ -41,7 +50,7 @@ import {RateLimitedLogger, describeError} from './lib/errorLog.js';
 import {RingBuffer} from './lib/history.js';
 import {
     GET_STATE_METHOD_NAME, SAMPLE_SIGNAL_NAME, SAMPLE_SIGNAL_SIGNATURE, UNWATCH_DETAIL_METHOD_NAME,
-    WATCH_DETAIL_METHOD_NAME, parseSamplePayload, parseStatePayload,
+    WATCH_DETAIL_METHOD_NAME, parseEnvelopeSnapshot, parseSampleEnvelope, parseStatePayload,
 } from './lib/protocol.js';
 import {runEveryStep} from './lib/teardown.js';
 import {isSampleStale, nextStartRetryDelaySeconds} from './lib/wiring.js';
@@ -191,6 +200,18 @@ function hasNumbers(snapshot) {
 }
 
 /**
+ * Says whether a Sample appended a number to either history. One that did comes from a sample with numbers, so the
+ * unread snapshot it replaces need not be parsed for "no data since"; one that did not (a numberless sample, or a
+ * reveal) may come from a service whose sampling fails.
+ *
+ * @param {{cpu: number|null, memory: number|null}|null} appendedHistory - What the Sample appended; null for nothing.
+ * @returns {boolean} True when it appended a CPU or a memory value.
+ */
+function hasAppendedNumber(appendedHistory) {
+    return appendedHistory !== null && (appendedHistory.cpu !== null || appendedHistory.memory !== null);
+}
+
+/**
  * The snapshot the client publishes when it has no fresh data: every number null, no ranking.
  *
  * @returns {Snapshot} A new one each time.
@@ -301,22 +322,45 @@ export class PulseClient {
         // True from a WatchDetail sent to the current owner until an UnwatchDetail follows or that owner leaves (its
         // watches leave with it).
         this._isDetailWatchHeld = false;
+        // The latest snapshot parsed. The newest Sample's, while unread, is not here yet: see _unreadSampleEnvelope.
         this._latestSnapshot = null;
+        // The newest Sample drawn while its snapshot is still unread (lib/protocol.js parseSampleEnvelope's result),
+        // so it is newer than _latestSnapshot; null once parsed (_parseUnreadSnapshot), and before any Sample.
+        this._unreadSampleEnvelope = null;
         this._lastGoodClockLabel = lastGoodClockLabel;
         this._cpuHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
         this._memoryHistory = new RingBuffer(CARD_HISTORY_SAMPLES);
-        this._listeners = new Map();
+        // The two kinds of listener, by id. Both take ids from one sequence, so no id is in both.
+        this._historyListeners = new Map();
+        this._snapshotListeners = new Map();
         this._nextListenerId = 1;
     }
 
-    /** @returns {Snapshot|null} The most recent snapshot, or null before the first state. */
+    /**
+     * The most recent snapshot. The newest Sample's is parsed here when first read after it arrived, then kept, so a
+     * second read gives the same object.
+     *
+     * @returns {Snapshot|null} The snapshot, or null before the first state.
+     */
     get latestSnapshot() {
+        this._parseUnreadSnapshot();
         return this._latestSnapshot;
     }
 
-    /** @returns {string|null} 'HH:MM' of the last snapshot with CPU or memory data, for "no data since". */
+    /**
+     * 'HH:MM' of the last snapshot with CPU or memory data, for "no data since". Right with latestSnapshot never
+     * read: the newest Sample, while unread, is parsed here too.
+     *
+     * @returns {string|null} The label, or null when no snapshot has had data and none was seeded.
+     */
     get lastGoodClockLabel() {
+        this._parseUnreadSnapshot();
         return this._lastGoodClockLabel;
+    }
+
+    /** @returns {boolean} True while drawing Samples: from a fresh state until no data. */
+    get isLive() {
+        return this._dataState === DataState.LIVE;
     }
 
     /** @returns {RingBuffer} CPU busy fractions 0–1, null for no data, oldest first: the service's, as received. */
@@ -364,7 +408,8 @@ export class PulseClient {
             {name: 'cancel the calls in flight', run: () => this._cancellable.cancel()},
             {name: 'remove the timeouts', run: () => this._removeTimeouts()},
             {name: 'destroy the link', run: () => this._destroyLink()},
-            {name: 'forget the listeners', run: () => this._listeners.clear()},
+            {name: 'forget the history listeners', run: () => this._historyListeners.clear()},
+            {name: 'forget the snapshot listeners', run: () => this._snapshotListeners.clear()},
         ], (stepName, error) => {
             const errorText = describeError(error);
             this._errorLog.log(`client teardown: ${stepName} failed: ${errorText}`, TEARDOWN_FAILURE_LOG_KEY);
@@ -374,7 +419,9 @@ export class PulseClient {
     /**
      * Says whether a detail watch is wanted (lib/wiring.js isDetailWatchWanted). Only a change is sent, and only to an
      * owner: WatchDetail when it becomes wanted, UnwatchDetail when it stops being. With no owner it is only recorded,
-     * and sent when one appears.
+     * and sent when one appears. Becoming wanted while the data is live also tells snapshot listeners the latest
+     * snapshot at once, since they were told of no Sample while it was not; with no data they already hold the no-data
+     * snapshot.
      *
      * @param {boolean} isWanted - True while the card can be seen or the dropdown is open.
      * @returns {void}
@@ -383,24 +430,42 @@ export class PulseClient {
         if (this._isDestroyed || isWanted === this._isDetailWatchWanted)
             return;
         this._isDetailWatchWanted = isWanted;
-        if (this._nameOwner === null)
-            return;
-        if (isWanted)
-            this._sendWatchDetail();
-        else
-            this._sendUnwatchDetail(this._cancellable);
+        this._sendDetailWatchChange(isWanted);
+        if (isWanted && this.isLive)
+            this._notifySnapshotListeners(this.latestSnapshot);
     }
 
     /**
-     * Adds a callback for each new snapshot: every state, every Sample drawn, and every no-data snapshot.
+     * Adds a history listener (the top bar): told, with no argument, after every Sample that appended to the
+     * histories, every state and every no data. It reads the histories, and latestSnapshot if it shows numbers.
      *
-     * @param {(snapshot: Snapshot|null) => void} callback - Called with the new latest snapshot.
+     * @param {() => void} callback - Called once the histories have changed.
+     * @returns {number} An id for removeHistoryListener.
+     */
+    addHistoryListener(callback) {
+        return this._registerListener(this._historyListeners, callback);
+    }
+
+    /**
+     * Removes a callback added with addHistoryListener; an unknown id is ignored.
+     *
+     * @param {number} listenerId - The id addHistoryListener returned.
+     * @returns {void}
+     */
+    removeHistoryListener(listenerId) {
+        this._historyListeners.delete(listenerId);
+    }
+
+    /**
+     * Adds a snapshot listener (the card, the dropdown card): told the snapshot on every state and every no data, on
+     * every Sample drawn while the detail watch is wanted, and the latest snapshot once when the watch becomes wanted
+     * while the data is live.
+     *
+     * @param {(snapshot: Snapshot|null) => void} callback - Called with the snapshot, which is the latest.
      * @returns {number} An id for removeListener.
      */
     addListener(callback) {
-        const listenerId = this._nextListenerId++;
-        this._listeners.set(listenerId, callback);
-        return listenerId;
+        return this._registerListener(this._snapshotListeners, callback);
     }
 
     /**
@@ -410,7 +475,37 @@ export class PulseClient {
      * @returns {void}
      */
     removeListener(listenerId) {
-        this._listeners.delete(listenerId);
+        this._snapshotListeners.delete(listenerId);
+    }
+
+    /**
+     * Adds a listener of one kind under the next id.
+     *
+     * @param {Map<number, Function>} listeners - The kind's listeners, by id.
+     * @param {Function} callback - The listener.
+     * @returns {number} Its id.
+     */
+    _registerListener(listeners, callback) {
+        const listenerId = this._nextListenerId++;
+        listeners.set(listenerId, callback);
+        return listenerId;
+    }
+
+    /**
+     * Sends a change of the wanted detail watch to the owner, if there is one: WatchDetail when it became wanted,
+     * UnwatchDetail when it stopped being. With no owner nothing goes out; the owner that appears is sent a wanted
+     * watch then (_onServiceAppeared).
+     *
+     * @param {boolean} isWanted - The watch is wanted now.
+     * @returns {void}
+     */
+    _sendDetailWatchChange(isWanted) {
+        if (this._nameOwner === null)
+            return;
+        if (isWanted)
+            this._sendWatchDetail();
+        else
+            this._sendUnwatchDetail(this._cancellable);
     }
 
     /**
@@ -678,12 +773,14 @@ export class PulseClient {
      * Takes a state whole: both histories and the snapshot replace the client's, and Samples are drawn from here on.
      * Its freshness is its snapshot's own time (freshnessOfStateSnapshot), so a state whose snapshot is already stale
      * (a service that answers while its sampler has stopped) shows no data at once, since that snapshot's time, rather
-     * than its old numbers as live; the next Sample of the same run draws again.
+     * than its old numbers as live; the next Sample of the same run draws again. A Sample still unread is parsed first,
+     * so "no data since" counts it before the state's snapshot.
      *
      * @param {object} state - lib/protocol.js parseStatePayload's result.
      * @returns {void}
      */
     _applyState(state) {
+        this._parseUnreadSnapshot();
         replaceHistory(this._cpuHistory, state.histories.cpu);
         replaceHistory(this._memoryHistory, state.histories.memory);
         this._lastAppliedSequence = state.sequence;
@@ -698,8 +795,8 @@ export class PulseClient {
     }
 
     /**
-     * Reads a Sample signal the link delivered: one of signature '(s)' holding a JSON object is drawn, and a malformed
-     * one is logged and dropped.
+     * Reads a Sample signal the link delivered: one of signature '(s)' holding a JSON object is drawn, its snapshot
+     * left unread, and a malformed one is logged and dropped.
      *
      * @param {GLib.Variant} parameters - The signal's parameters.
      * @returns {void}
@@ -713,52 +810,81 @@ export class PulseClient {
                 WRONG_SAMPLE_SIGNATURE_LOG_KEY);
             return;
         }
-        const sample = parseSamplePayload(sampleText);
-        if (sample === null) {
+        const sampleEnvelope = parseSampleEnvelope(sampleText);
+        if (sampleEnvelope === null) {
             this._errorLog.log(`dropped a ${SAMPLE_SIGNAL_NAME} that is not a JSON object`, UNREADABLE_SAMPLE_LOG_KEY);
             return;
         }
-        this._onSample(sample);
+        this._onSample(sampleEnvelope);
     }
 
     /**
      * Draws a Sample, unless no state is held (then it waits for one, asking if no GetState is on its way: the state
      * includes this Sample) or its sequence restarted (then no data, until a fresh GetState).
      *
-     * @param {object} sample - lib/protocol.js parseSamplePayload's result.
+     * @param {object} sampleEnvelope - lib/protocol.js parseSampleEnvelope's result.
      * @returns {void}
      */
-    _onSample(sample) {
+    _onSample(sampleEnvelope) {
         if (this._dataState === DataState.AWAITING_STATE) {
             if (!this._isStateRequestInFlight && this._nameOwner !== null)
                 this._requestState();
             return;
         }
-        if (isSequenceRestart(this._lastAppliedSequence, sample.sequence)) {
+        if (isSequenceRestart(this._lastAppliedSequence, sampleEnvelope.sequence)) {
             this._stopDrawing(DataState.AWAITING_STATE);
             this._requestState();
             return;
         }
-        this._applySample(sample);
+        this._applySample(sampleEnvelope);
     }
 
     /**
-     * Appends what a Sample appended (nothing for a null appendedHistory), makes its snapshot the latest and tells
-     * listeners. A stall ends here.
+     * Appends what a Sample appended (nothing for a null appendedHistory), makes it the newest Sample with its snapshot
+     * unread, and tells listeners. A stall ends here.
      *
-     * @param {object} sample - lib/protocol.js parseSamplePayload's result.
+     * @param {object} sampleEnvelope - lib/protocol.js parseSampleEnvelope's result.
      * @returns {void}
      */
-    _applySample(sample) {
-        const {appendedHistory} = sample;
+    _applySample(sampleEnvelope) {
+        const {appendedHistory} = sampleEnvelope;
         if (appendedHistory !== null) {
             this._cpuHistory.push(appendedHistory.cpu);
             this._memoryHistory.push(appendedHistory.memory);
         }
-        this._lastAppliedSequence = sample.sequence;
+        this._lastAppliedSequence = sampleEnvelope.sequence;
         this._lastFreshDataAtUsec = this._nowUsec();
         this._dataState = DataState.LIVE;
-        this._publish(sample.snapshot);
+        this._keepSampleUnread(sampleEnvelope);
+        this._notifyOfSample(appendedHistory !== null);
+    }
+
+    /**
+     * Makes a Sample the newest, with its snapshot unread. One that appended no number (a numberless sample, or a
+     * reveal) has the unread snapshot it replaces parsed first, so "no data since" still names the last Sample with
+     * numbers; one that appended a number replaces it unparsed, which is the parse a Sample nobody shows saves.
+     *
+     * @param {object} sampleEnvelope - lib/protocol.js parseSampleEnvelope's result.
+     * @returns {void}
+     */
+    _keepSampleUnread(sampleEnvelope) {
+        if (!hasAppendedNumber(sampleEnvelope.appendedHistory))
+            this._parseUnreadSnapshot();
+        this._unreadSampleEnvelope = sampleEnvelope;
+    }
+
+    /**
+     * Tells listeners of the Sample just drawn: history listeners if it appended to the histories, then, unless one of
+     * them destroyed the client, snapshot listeners while the detail watch is wanted, with its snapshot parsed now.
+     *
+     * @param {boolean} hasAppendedHistory - The Sample appended to the histories (its appendedHistory is not null).
+     * @returns {void}
+     */
+    _notifyOfSample(hasAppendedHistory) {
+        if (hasAppendedHistory)
+            this._notifyHistoryListeners();
+        if (!this._isDestroyed && this._isDetailWatchWanted)
+            this._notifySnapshotListeners(this.latestSnapshot);
     }
 
     /**
@@ -788,15 +914,35 @@ export class PulseClient {
     }
 
     /**
-     * Makes a snapshot the latest, moves "no data since" on when it has numbers and a time, and tells listeners.
+     * Makes a state's snapshot or the no-data one the latest, moves "no data since" on when it has numbers and a time,
+     * and tells both kinds of listener. A Sample still unread is parsed first: this snapshot replaces it, and "no data
+     * since" counts it.
      *
      * @param {Snapshot|null} snapshot - The new latest snapshot.
      * @returns {void}
      */
     _publish(snapshot) {
+        this._parseUnreadSnapshot();
         this._latestSnapshot = snapshot;
         this._recordLastGoodClockLabel(snapshot);
-        this._notifyListeners(snapshot);
+        this._notifyHistoryListeners();
+        this._notifySnapshotListeners(snapshot);
+    }
+
+    /**
+     * Parses the newest Sample's snapshot if it is still unread: it becomes the latest, and moves "no data since" on
+     * as it would have on arrival. A snapshot that is not an object parses to null, as it did on arrival.
+     *
+     * @returns {void}
+     */
+    _parseUnreadSnapshot() {
+        const sampleEnvelope = this._unreadSampleEnvelope;
+        if (sampleEnvelope === null)
+            return;
+        this._unreadSampleEnvelope = null;
+        const snapshot = parseEnvelopeSnapshot(sampleEnvelope.rawSnapshot);
+        this._latestSnapshot = snapshot;
+        this._recordLastGoodClockLabel(snapshot);
     }
 
     /**
@@ -811,22 +957,44 @@ export class PulseClient {
     }
 
     /**
-     * Calls every listener with a snapshot. One that throws is logged, and the rest still run.
+     * Tells every history listener that the histories changed. They take no argument.
      *
-     * @param {Snapshot|null} snapshot - The new latest snapshot.
      * @returns {void}
      */
-    _notifyListeners(snapshot) {
-        for (const [listenerId, listener] of [...this._listeners]) {
+    _notifyHistoryListeners() {
+        this._callEachListener(this._historyListeners, historyListener => historyListener());
+    }
+
+    /**
+     * Tells every snapshot listener the latest snapshot.
+     *
+     * @param {Snapshot|null} snapshot - The latest snapshot.
+     * @returns {void}
+     */
+    _notifySnapshotListeners(snapshot) {
+        this._callEachListener(this._snapshotListeners, snapshotListener => snapshotListener(snapshot));
+    }
+
+    /**
+     * Calls every listener of one kind, in the order they were added. One that throws is logged, and the rest still
+     * run.
+     *
+     * @param {Map<number, Function>} listeners - The kind's listeners, by id.
+     * @param {(listener: Function) => void} callListener - Calls one listener with what its kind is told.
+     * @returns {void}
+     */
+    _callEachListener(listeners, callListener) {
+        for (const [listenerId, listener] of [...listeners]) {
             // A listener may destroy the client or remove a later listener.
             if (this._isDestroyed)
                 return;
-            if (!this._listeners.has(listenerId))
+            if (!listeners.has(listenerId))
                 continue;
             try {
-                listener(snapshot);
+                callListener(listener);
             } catch (error) {
-                this._errorLog.log(`listener failed: ${describeError(error)}`, LISTENER_FAILURE_LOG_KEY);
+                const errorText = describeError(error);
+                this._errorLog.log(`listener failed: ${errorText}`, LISTENER_FAILURE_LOG_KEY);
             }
         }
     }

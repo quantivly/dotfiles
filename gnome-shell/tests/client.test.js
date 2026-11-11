@@ -65,6 +65,19 @@ const TICK_SNAPSHOT = {
     ...STATE_SNAPSHOT, takenAtUsec: START_USEC + SAMPLE_INTERVAL_USEC, takenAtClockLabel: '14:03', cpuBusyPercent: 50,
 };
 const TICK_APPENDED_HISTORY = {cpu: 0.5, memory: 0.25};
+/** The tick after that one, a minute later again: another label and another CPU figure. */
+const NEXT_TICK_SNAPSHOT = {
+    ...TICK_SNAPSHOT, takenAtUsec: START_USEC + 2 * SAMPLE_INTERVAL_USEC, takenAtClockLabel: '14:04',
+    cpuBusyPercent: 61,
+};
+const NEXT_TICK_APPENDED_HISTORY = {cpu: 0.61, memory: 0.26};
+/** What a Sample appends when the service's sample had no numbers: a gap in both histories. */
+const NUMBERLESS_APPENDED_HISTORY = {cpu: null, memory: null};
+/**
+ * A snapshot field a row sends missing, so that lib/protocol.js reading it, which it does only while parsing that
+ * snapshot, can be counted (countReadsOfMissingField).
+ */
+const SPIED_SNAPSHOT_FIELD = 'swap';
 /** A watch start's reveal: the tick's values with a new ranking, appending nothing. */
 const REVEAL_SNAPSHOT = {
     ...TICK_SNAPSHOT,
@@ -332,9 +345,14 @@ class FakeServiceStarter {
  * @param {string|null} [options.nameOwner] - The service's owner when the name watch first reports; null for none.
  * @param {boolean} [options.isOwnerReported] - False to leave the name watch's first report still to come.
  * @param {string|null} [options.lastGoodClockLabel] - The label the extension seeds the client with; none by default.
+ * @param {boolean} [options.isDetailWatchWanted] - True to want the detail watch from the start, as the extension does
+ *     while the card can be seen, so the snapshot listener (notifications) is told of every Sample drawn. False by
+ *     default, as while the card is covered: that listener then hears only states and no data.
  * @returns {object} {client, clock, timeouts, serviceStarter, linkFactory, link, notifications, logged}.
  */
-function makeClientFixture({nameOwner = OWNER, isOwnerReported = true, lastGoodClockLabel = undefined} = {}) {
+function makeClientFixture({
+    nameOwner = OWNER, isOwnerReported = true, lastGoodClockLabel = undefined, isDetailWatchWanted = false,
+} = {}) {
     const clock = {nowUsec: START_USEC};
     const timeouts = new FakeTimeouts();
     const serviceStarter = new FakeServiceStarter();
@@ -351,6 +369,9 @@ function makeClientFixture({nameOwner = OWNER, isOwnerReported = true, lastGoodC
     });
     const notifications = [];
     client.addListener(snapshot => notifications.push(snapshot));
+    // Before start(), as the extension asks: the watch goes out to the owner with its first GetState.
+    if (isDetailWatchWanted)
+        client.setDetailWatchWanted(true);
     client.start();
     const [link] = linkFactory.links;
     if (isOwnerReported)
@@ -388,10 +409,12 @@ function emitSample(link, {snapshot, appendedHistory, sequence}) {
  * A started client whose StartUnit succeeded and whose first GetState was answered with STATE_SNAPSHOT,
  * STATE_HISTORIES and STATE_SEQUENCE, at START_USEC.
  *
+ * @param {object} [options] - The fixture's shape.
+ * @param {boolean} [options.isDetailWatchWanted] - As makeClientFixture's; false by default.
  * @returns {object} makeClientFixture's fixture.
  */
-function makeLiveClientFixture() {
-    const fixture = makeClientFixture();
+function makeLiveClientFixture({isDetailWatchWanted = false} = {}) {
+    const fixture = makeClientFixture({isDetailWatchWanted});
     fixture.serviceStarter.succeed();
     answerState(fixture.link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     return fixture;
@@ -413,6 +436,43 @@ function pendingStartChainSeconds(timeouts) {
  */
 function historiesOf({client}) {
     return {cpu: client.cpuHistory.values(), memory: client.memoryHistory.values()};
+}
+
+/**
+ * Adds a history listener that records the arguments of each call.
+ *
+ * @param {object} client - The fixture's client.
+ * @returns {Array<Array<*>>} One entry per call, filled as the calls come: the arguments it was called with.
+ */
+function recordHistoryListenerCalls(client) {
+    const historyListenerCalls = [];
+    client.addHistoryListener((...listenerArguments) => historyListenerCalls.push(listenerArguments));
+    return historyListenerCalls;
+}
+
+/**
+ * Runs a body while every read of one field, from an object that lacks it, is counted: a getter on Object.prototype,
+ * removed afterwards whatever the body throws. lib/protocol.js reads each snapshot field only while it parses a
+ * snapshot, so for a snapshot sent without that field the count says when, and how often, the client parsed it.
+ *
+ * @param {string} fieldName - The field sent missing.
+ * @param {(fieldReads: {count: number}) => object} body - The row's steps; it reads the count as it goes.
+ * @returns {object} What the body returned.
+ */
+function countReadsOfMissingField(fieldName, body) {
+    const fieldReads = {count: 0};
+    Object.defineProperty(Object.prototype, fieldName, {
+        get() {
+            fieldReads.count++;
+            return undefined;
+        },
+        configurable: true,
+    });
+    try {
+        return body(fieldReads);
+    } finally {
+        delete Object.prototype[fieldName];
+    }
 }
 
 test('client: before the first state it draws nothing, not even a Sample: no snapshot, no history, no listener call',
@@ -446,8 +506,9 @@ test('client: GetState fills both histories, the latest snapshot and the last go
         });
     });
 
-test('client: a Sample appends its values to both histories and tells listeners its snapshot', () => {
-    const fixture = makeLiveClientFixture();
+test('client: a Sample appends its values to both histories and, while the detail watch is wanted, tells listeners ' +
+    'its snapshot', () => {
+    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
     emitSample(fixture.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
         sequence: STATE_SEQUENCE + 1});
     assertEqual({
@@ -461,7 +522,8 @@ test('client: a Sample appends its values to both histories and tells listeners 
 
 test('client: a Sample that appends nothing (a watch start\'s reveal: appendedHistory null) is drawn, and adds no ' +
     'history point', () => {
-    const fixture = makeLiveClientFixture();
+    // Watched, as a reveal answers a watch start.
+    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
     emitSample(fixture.link, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 1});
     assertEqual({histories: historiesOf(fixture), notifications: fixture.notifications},
         {histories: STATE_HISTORIES, notifications: [STATE_SNAPSHOT, REVEAL_SNAPSHOT]});
@@ -469,7 +531,7 @@ test('client: a Sample that appends nothing (a watch start\'s reveal: appendedHi
 
 test('client: no Sample for more than 6 s publishes one no-data snapshot (and a gap in both histories), keeps the ' +
     'last good time, and the next Sample of the same run draws again', () => {
-    const fixture = makeLiveClientFixture();
+    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
     const {clock, timeouts, notifications} = fixture;
     clock.nowUsec = START_USEC + STALL_USEC;
     timeouts.fire(SAMPLE_INTERVAL_SECONDS);
@@ -495,7 +557,7 @@ test('client: no Sample for more than 6 s publishes one no-data snapshot (and a 
 });
 
 test('client: a sequence that restarts publishes no data once, and draws nothing until a fresh GetState', () => {
-    const fixture = makeLiveClientFixture();
+    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
     const {link, notifications} = fixture;
     emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     emitSample(link, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4}, sequence: 1});
@@ -554,7 +616,7 @@ test('client: the service appearing ends the StartUnit retries, since it runs: n
 
 test('client: the name losing its owner publishes no data once and never calls StartUnit (a stop stays stopped); ' +
     'a new owner is read with GetState and drawn', () => {
-    const fixture = makeLiveClientFixture();
+    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
     const {clock, timeouts, serviceStarter, link, notifications} = fixture;
     emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     link.setNameOwner(null);
@@ -577,7 +639,7 @@ test('client: the name losing its owner publishes no data once and never calls S
 
 test('client: Samples are drawn although StartUnit failed (no systemd, as in the nested harness), and a StartUnit ' +
     'answered while the service runs, failed or accepted, schedules nothing', () => {
-    const fixture = makeClientFixture();
+    const fixture = makeClientFixture({isDetailWatchWanted: true});
     const {client, timeouts, serviceStarter, link, notifications} = fixture;
     serviceStarter.fail();
     answerState(link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
@@ -660,7 +722,7 @@ test('client: a StartUnit still on its way when the service appears is supersede
 
 test('client: a state whose snapshot was taken more than 6 s before it arrived (a service that answers while its ' +
     'sampler has stopped) shows no data at once, since that snapshot\'s time; the next Sample of the run draws', () => {
-    const fixture = makeClientFixture();
+    const fixture = makeClientFixture({isDetailWatchWanted: true});
     const {link, notifications} = fixture;
     const staleSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC - STALL_USEC - ONE_MICROSECOND};
     answerState(link, {snapshot: staleSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
@@ -711,7 +773,7 @@ test('client: a state snapshot with no time counts from its arrival, and one sta
 
 test('client: a Sample from another version (an unknown field, swap missing) notifies with swap null and every ' +
     'other row intact', () => {
-    const fixture = makeLiveClientFixture();
+    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
     const samplePayload = JSON.parse(buildSamplePayload({
         snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1,
         sampledAtUsec: SAMPLED_AT_USEC,
@@ -805,7 +867,8 @@ test('client: destroy() before the name watch first reports destroys the link an
 });
 
 test('client: a Sample of another signature, or text that is not JSON, changes nothing, and each is logged', () => {
-    const fixture = makeLiveClientFixture();
+    // Watched, so a Sample drawn would show in the notifications.
+    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
     fixture.link.emitSample(new GLib.Variant('(i)', [STATE_SEQUENCE + 1]));
     fixture.link.emitSample(new GLib.Variant(SAMPLE_SIGNAL_SIGNATURE, ['{"sequence": 8,']));
     assertEqual({notifications: fixture.notifications, histories: historiesOf(fixture),
@@ -814,7 +877,7 @@ test('client: a Sample of another signature, or text that is not JSON, changes n
 });
 
 test('client: a GetState that fails is logged and leaves no data, and the next Sample asks for the state again', () => {
-    const fixture = makeClientFixture();
+    const fixture = makeClientFixture({isDetailWatchWanted: true});
     const {link, notifications, logged} = fixture;
     link.fail(GET_STATE, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached'));
     const stateCallsAfterFailure = link.callsOf(GET_STATE).length;
@@ -933,4 +996,161 @@ test('client: a listener that throws is logged and the next still runs; a remove
     answerState(link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     assertEqual({calledListeners, listenerLogLines: logged.filter(line => line.includes('listener bug')).length},
         {calledListeners: ['throwing', 'last'], listenerLogLines: 1});
+});
+
+// Two kinds of listener: a history listener (the top bar) is told of every Sample that appended to the histories, a
+// snapshot listener (addListener: the cards) only while the detail watch is wanted, and a Sample's snapshot is parsed
+// only when something reads it.
+
+test('client: a history listener is told on every Sample; a snapshot listener only while the watch is wanted', () => {
+    const {client, link} = makeLiveClientFixture();
+    // One log for both kinds, so the order they are told in shows too.
+    const listenerCalls = [];
+    client.addHistoryListener((...listenerArguments) => listenerCalls.push(['history', ...listenerArguments]));
+    client.addListener(snapshot => listenerCalls.push(['snapshot', snapshot.cpuBusyPercent]));
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    emitSample(link, {snapshot: NEXT_TICK_SNAPSHOT, appendedHistory: NEXT_TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 2});
+    const callsWhileUnwatched = [...listenerCalls];
+    client.setDetailWatchWanted(true);
+    const callsOnWanting = listenerCalls.slice(callsWhileUnwatched.length);
+    const callCountBeforeWatchedSample = listenerCalls.length;
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 3});
+    assertEqual({
+        callsWhileUnwatched, callsOnWanting, callsOnWatchedSample: listenerCalls.slice(callCountBeforeWatchedSample),
+    }, {
+        callsWhileUnwatched: [['history'], ['history']],
+        callsOnWanting: [['snapshot', NEXT_TICK_SNAPSHOT.cpuBusyPercent]],
+        callsOnWatchedSample: [['history'], ['snapshot', TICK_SNAPSHOT.cpuBusyPercent]],
+    });
+});
+
+test('client: wanting the detail watch tells snapshot listeners the latest snapshot at once, only when it was not ' +
+    'wanted and only while the data is live', () => {
+    const {client, link, notifications} = makeLiveClientFixture();
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    emitSample(link, {snapshot: NEXT_TICK_SNAPSHOT, appendedHistory: NEXT_TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 2});
+    const notificationCountBeforeWanting = notifications.length;
+    client.setDetailWatchWanted(true);
+    const toldOnWanting = notifications.slice(notificationCountBeforeWanting);
+    client.setDetailWatchWanted(true);
+    const notificationCountAfterWantingAgain = notifications.length;
+    client.setDetailWatchWanted(false);
+    link.setNameOwner(null);
+    // With no data the listeners already hold the no-data snapshot.
+    client.setDetailWatchWanted(true);
+    assertEqual({
+        notificationCountBeforeWanting, toldOnWanting, notificationCountAfterWantingAgain,
+        toldSinceWantingAgain: notifications.slice(notificationCountAfterWantingAgain),
+    }, {
+        notificationCountBeforeWanting: 1, toldOnWanting: [NEXT_TICK_SNAPSHOT], notificationCountAfterWantingAgain: 2,
+        toldSinceWantingAgain: [NO_DATA_SNAPSHOT],
+    });
+});
+
+test('client: latestSnapshot is parsed when first read, and is the newest Sample\'s', () => {
+    const {client, link} = makeLiveClientFixture();
+    const tickSnapshotWithoutSpiedField = {...TICK_SNAPSHOT};
+    delete tickSnapshotWithoutSpiedField[SPIED_SNAPSHOT_FIELD];
+    const reads = countReadsOfMissingField(SPIED_SNAPSHOT_FIELD, fieldReads => {
+        emitSample(link, {snapshot: tickSnapshotWithoutSpiedField, appendedHistory: TICK_APPENDED_HISTORY,
+            sequence: STATE_SEQUENCE + 1});
+        const parsesOnArrival = fieldReads.count;
+        const firstRead = client.latestSnapshot;
+        const parsesAfterFirstRead = fieldReads.count;
+        const isSecondReadTheSameObject = client.latestSnapshot === firstRead;
+        return {parsesOnArrival, firstRead, parsesAfterFirstRead, isSecondReadTheSameObject,
+            parsesAfterSecondRead: fieldReads.count};
+    });
+    assertEqual(reads, {
+        parsesOnArrival: 0, firstRead: {...TICK_SNAPSHOT, [SPIED_SNAPSHOT_FIELD]: null}, parsesAfterFirstRead: 1,
+        isSecondReadTheSameObject: true, parsesAfterSecondRead: 1,
+    });
+});
+
+test('client: a reveal\'s Sample, with no appended history, tells no history listener and is still the latest ' +
+    'snapshot', () => {
+    // Review Focus 5: the reveal arrives while only the top bar is seen, and the card is shown afterwards.
+    const fixture = makeLiveClientFixture();
+    const {client, link, notifications} = fixture;
+    const historyListenerCalls = recordHistoryListenerCalls(client);
+    emitSample(link, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 1});
+    const notificationsBeforeShown = [...notifications];
+    client.setDetailWatchWanted(true);
+    assertEqual({
+        historyListenerCalls, histories: historiesOf(fixture), notificationsBeforeShown, notifications,
+        latestSnapshot: client.latestSnapshot,
+    }, {
+        historyListenerCalls: [], histories: STATE_HISTORIES, notificationsBeforeShown: [STATE_SNAPSHOT],
+        notifications: [STATE_SNAPSHOT, REVEAL_SNAPSHOT], latestSnapshot: REVEAL_SNAPSHOT,
+    });
+});
+
+test('client: no data is told to both kinds of listener, and names the last unread Sample\'s clock label', () => {
+    const {client, link, notifications} = makeLiveClientFixture();
+    const historyListenerCalls = recordHistoryListenerCalls(client);
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    emitSample(link, {snapshot: NEXT_TICK_SNAPSHOT, appendedHistory: NEXT_TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 2});
+    const historyCallCountBeforeNoData = historyListenerCalls.length;
+    const notificationCountBeforeNoData = notifications.length;
+    link.setNameOwner(null);
+    const lastGoodClockLabel = client.lastGoodClockLabel;
+    // Read last: a client that kept the 14:04 Sample unread through no data would hand it out here, as live.
+    const {latestSnapshot} = client;
+    assertEqual({
+        historyCallsOnNoData: historyListenerCalls.slice(historyCallCountBeforeNoData),
+        toldOnNoData: notifications.slice(notificationCountBeforeNoData), lastGoodClockLabel, latestSnapshot,
+    }, {
+        historyCallsOnNoData: [[]], toldOnNoData: [NO_DATA_SNAPSHOT], lastGoodClockLabel: '14:04',
+        latestSnapshot: NO_DATA_SNAPSHOT,
+    });
+});
+
+test('client: isLive is true while Samples are drawn and false with no data', () => {
+    const {client, clock, timeouts, link} = makeClientFixture();
+    const isLiveBeforeState = client.isLive;
+    answerState(link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    const isLiveAfterState = client.isLive;
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    const isLiveAfterSample = client.isLive;
+    clock.nowUsec += LONG_WAIT_USEC;
+    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+    const isLiveWhenStalled = client.isLive;
+    emitSample(link, {snapshot: NEXT_TICK_SNAPSHOT, appendedHistory: NEXT_TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 2});
+    const isLiveAfterNextSample = client.isLive;
+    link.setNameOwner(null);
+    assertEqual({
+        isLiveBeforeState, isLiveAfterState, isLiveAfterSample, isLiveWhenStalled, isLiveAfterNextSample,
+        isLiveWithNoOwner: client.isLive,
+    }, {
+        isLiveBeforeState: false, isLiveAfterState: true, isLiveAfterSample: true, isLiveWhenStalled: false,
+        isLiveAfterNextSample: true, isLiveWithNoOwner: false,
+    });
+});
+
+test('client: a Sample without numbers leaves "no data since" at the last Sample that had them, read or not', () => {
+    const sendNumberedSample = ({link}) => emitSample(link, {snapshot: TICK_SNAPSHOT,
+        appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    const sendNumberlessSample = ({link}) => emitSample(link, {snapshot: SERVICE_NO_DATA_SNAPSHOT,
+        appendedHistory: NUMBERLESS_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 2});
+    // The label first, as extension.js reads it at teardown: on its own, with latestSnapshot not read.
+    const labelThenCpu = ({client}) => ({
+        lastGoodClockLabel: client.lastGoodClockLabel, cpuBusyPercent: client.latestSnapshot.cpuBusyPercent,
+    });
+    const unread = makeLiveClientFixture();
+    sendNumberedSample(unread);
+    sendNumberlessSample(unread);
+    const readBetween = makeLiveClientFixture();
+    sendNumberedSample(readBetween);
+    // Read alone, with the numbered Sample still unread.
+    const labelReadBetween = readBetween.client.lastGoodClockLabel;
+    sendNumberlessSample(readBetween);
+    assertEqual({unread: labelThenCpu(unread), readBetween: labelThenCpu(readBetween), labelReadBetween}, {
+        unread: {lastGoodClockLabel: '14:03', cpuBusyPercent: null},
+        readBetween: {lastGoodClockLabel: '14:03', cpuBusyPercent: null},
+        labelReadBetween: '14:03',
+    });
 });
