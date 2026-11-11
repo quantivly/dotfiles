@@ -765,11 +765,15 @@ export class PulseClient {
     }
 
     /**
-     * Calls GetState. Only the answer to the latest call is applied.
+     * Calls GetState. Only the answer to the latest call is applied. Does nothing once destroyed: a listener told no
+     * data (a sequence restart, an owner that changed) may have destroyed the client, and its link with it, just
+     * before.
      *
      * @returns {void}
      */
     _requestState() {
+        if (this._isDestroyed)
+            return;
         this._stateRequestNumber++;
         const stateRequestNumber = this._stateRequestNumber;
         this._isStateRequestInFlight = true;
@@ -822,7 +826,7 @@ export class PulseClient {
         this._dataState = DataState.LIVE;
         const nowUsec = this._nowUsec();
         const freshAtUsec = freshnessOfStateSnapshot(state.snapshot, nowUsec);
-        if (isSampleStale({lastSampleReceivedAtUsec: freshAtUsec, nowUsec})) {
+        if (isSampleStale({lastFreshDataAtUsec: freshAtUsec, nowUsec})) {
             this._recordLastGoodClockLabel(state.snapshot);
             this._stopDrawing(DataState.STALLED);
             return;
@@ -1094,11 +1098,15 @@ export class PulseClient {
     }
 
     /**
-     * Sends WatchDetail to the owner, and records that it holds the watch.
+     * Sends WatchDetail to the owner, and records that it holds the watch. Does nothing once destroyed, as
+     * _requestState: a new owner is sent both, after a listener told no data by the old one leaving may have destroyed
+     * the client.
      *
      * @returns {void}
      */
     _sendWatchDetail() {
+        if (this._isDestroyed)
+            return;
         this._isDetailWatchHeld = true;
         this._callService(WATCH_DETAIL_METHOD_NAME, this._cancellable,
             error => this._logWatchCallFailure(WATCH_DETAIL_METHOD_NAME, error));

@@ -1018,6 +1018,50 @@ test('client: a direct change of owner reads as the old one leaving and the new 
     });
 });
 
+test('client: a listener that destroys the client while told no data, on a sequence restart or an owner change, ' +
+    'leaves no call and throws nothing', () => {
+    /**
+     * Adds a snapshot listener that destroys the client, and records what it was told and how many calls the link had
+     * once destroy() returned (its own UnwatchDetail included).
+     *
+     * @param {object} fixture - A live client fixture.
+     * @returns {{toldSnapshots: object[], callCountAtDestroy: number|null}} Filled when the listener runs.
+     */
+    const destroyWhenTold = ({client, link}) => {
+        const told = {toldSnapshots: [], callCountAtDestroy: null};
+        client.addListener(snapshot => {
+            told.toldSnapshots.push(snapshot);
+            client.destroy();
+            told.callCountAtDestroy = link.calls.length;
+        });
+        return told;
+    };
+    /**
+     * Makes the change that stops the data, as the link would deliver it, with the destroying listener added.
+     *
+     * @param {(fixture: object) => void} stopTheData - Delivers the restart or the change of owner.
+     * @returns {{toldSnapshots: object[], thrown: string|null, callsAfterDestroy: string[]}} What happened.
+     */
+    const outcomeOfDestroyingOnNoData = stopTheData => {
+        // The detail watch wanted, as while the card can be seen: a new owner is sent WatchDetail besides GetState.
+        const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
+        const told = destroyWhenTold(fixture);
+        let thrown = null;
+        try {
+            stopTheData(fixture);
+        } catch (error) {
+            thrown = `${error}`;
+        }
+        const callsAfterDestroy = fixture.link.calledMethodNames.slice(told.callCountAtDestroy ?? 0);
+        return {toldSnapshots: told.toldSnapshots, thrown, callsAfterDestroy};
+    };
+    const onRestart = outcomeOfDestroyingOnNoData(({link}) => emitSample(link,
+        {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4}, sequence: 1}));
+    const onOwnerChange = outcomeOfDestroyingOnNoData(({link}) => link.setNameOwner(NEXT_OWNER));
+    const toldNoDataOnly = {toldSnapshots: [NO_DATA_SNAPSHOT], thrown: null, callsAfterDestroy: []};
+    assertEqual({onRestart, onOwnerChange}, {onRestart: toldNoDataOnly, onOwnerChange: toldNoDataOnly});
+});
+
 test('client: a listener that throws is logged and the next still runs; a removed one is not called', () => {
     const {client, link, logged} = makeClientFixture();
     const calledListeners = [];

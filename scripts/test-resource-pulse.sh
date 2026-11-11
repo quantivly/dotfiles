@@ -29,8 +29,8 @@
 # (Ubuntu: dbus-daemon), gdbus (libglib2.0-bin; gnome-status asks the real
 # service through it), and for the card-width row the Pango typelibs
 # (gir1.2-pango-1.0) and the card's font, Ubuntu Sans (fonts-ubuntu): without
-# them that row fails, never passes; and for the row on perf's probe answers,
-# jq: without it that row fails, never passes. No network, no root.
+# them that row fails, never passes; and for the two rows on perf's probe
+# answers, jq: without it they fail, never pass. No network, no root.
 #
 # Usage: scripts/test-resource-pulse.sh
 #   RESOURCE_PULSE_EXT_DIR=<dir> points the file rows at a copy of the
@@ -112,14 +112,80 @@ for glue_file in extension.js indicator.js card.js; do
   fi
 done
 
+# list_files_under <directory> <array name> <find test>...: fills the named
+# array with every path find lists under the directory with those tests, and
+# returns non-zero when find does. find exits non-zero when it cannot read a
+# directory, and a file it never listed is a file no scan read, so a scan fails
+# then rather than passing over it; find's own message is left on stderr,
+# naming the directory. The listing goes through a file: a process
+# substitution would lose find's status.
+list_files_under() {
+  local search_dir="$1" listing_path
+  local -n listed_paths="$2"
+  shift 2
+  listed_paths=()
+  listing_path="$(mktemp -p "$WIRING_TMP" file-listing.XXXXXX)" || return 2
+  if ! find "$search_dir" "$@" -print0 >"$listing_path"; then
+    rm -f "$listing_path"
+    return 1
+  fi
+  mapfile -d '' listed_paths <"$listing_path"
+  rm -f "$listing_path"
+  return 0
+}
+# list_shell_side_javascript <extension dir> <array name>: fills the named
+# array with every .js file under the extension directory outside the top-level
+# service/, and returns non-zero when the tree cannot be listed
+# (list_files_under).
+list_shell_side_javascript() {
+  local extension_dir="$1" javascript_path
+  local -n shell_side_paths="$2"
+  local -a javascript_paths=()
+  shell_side_paths=()
+  list_files_under "$extension_dir" javascript_paths -type f -name '*.js' || return
+  for javascript_path in "${javascript_paths[@]}"; do
+    [[ "$javascript_path" == "$extension_dir/service/"* ]] || shell_side_paths+=("$javascript_path")
+  done
+  return 0
+}
+# shell_side_files_matching <extension dir> <how>: one line per shell-side .js
+# file (list_shell_side_javascript) whose text matches: with "literal:<text>"
+# when it contains the text, with "pattern:<ERE>" when the regular expression
+# matches it (newlines included, so a call may span lines). One line per such
+# file that cannot be read (an unread file is not a clean one), and a line when
+# the tree cannot be listed or holds no shell-side JavaScript.
+shell_side_files_matching() {
+  local extension_dir="$1" match_rule="$2" extension_file_path relative_path extension_file_text
+  local -a extension_file_paths=()
+  if ! list_shell_side_javascript "$extension_dir" extension_file_paths; then
+    printf 'cannot list the JavaScript under %s\n' "$extension_dir"
+    return
+  fi
+  if (( ${#extension_file_paths[@]} == 0 )); then
+    printf 'found no shell-side JavaScript under %s\n' "$extension_dir"
+    return
+  fi
+  for extension_file_path in "${extension_file_paths[@]}"; do
+    relative_path="${extension_file_path#"$extension_dir"/}"
+    if [[ ! -r "$extension_file_path" ]] || ! extension_file_text="$(<"$extension_file_path")"; then
+      printf 'cannot read %s\n' "$relative_path"
+    elif [[ "$match_rule" == literal:* && "$extension_file_text" == *"${match_rule#literal:}"* ]]; then
+      printf '%s\n' "$relative_path"
+    elif [[ "$match_rule" == pattern:* && "$extension_file_text" =~ ${match_rule#pattern:} ]]; then
+      printf '%s\n' "$relative_path"
+    fi
+  done
+}
+
 # lib/, pulseClient.js, serviceLink.js and graph.js run under plain gjs in the JS
 # rows above, which only works while they import nothing from the Shell. A
 # listed file that is missing fails the row: an absent file contains nothing,
 # which is not a pass.
 PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/serviceLink.js" "$EXT_DIR/graph.js")
-mapfile -d '' LIB_MODULE_PATHS < <(find "$EXT_DIR/lib" -type f -name '*.js' -print0 2>/dev/null)
 row_name="lib/, pulseClient.js, serviceLink.js and graph.js import nothing from resource:///"
-if (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
+if ! list_files_under "$EXT_DIR/lib" LIB_MODULE_PATHS -type f -name '*.js'; then
+  bad "$row_name — cannot list the JavaScript under $EXT_DIR/lib"
+elif (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
   bad "$row_name — found no lib/*.js under $EXT_DIR"
 else
   pure_module_problems=()
@@ -155,11 +221,15 @@ SYNCHRONOUS_IO_CALL_PATTERN+='|Sync\('
 BLOCKING_CALL_PATTERN="$SUBPROCESS_CALL_PATTERN|$SYNCHRONOUS_IO_CALL_PATTERN"
 # blocking_calls_in <extension dir>: one line, "<path>: <call>", for each file
 # making a call its place forbids: a subprocess anywhere, synchronous IO
-# anywhere but the top-level service/. A tree with no files is a line too.
+# anywhere but the top-level service/. A tree that cannot be listed
+# (list_files_under), or holds no files, is a line too.
 blocking_calls_in() {
   local extension_dir="$1" extension_file_path forbidden_call_pattern
-  local -a extension_file_paths
-  mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -print0 2>/dev/null)
+  local -a extension_file_paths=()
+  if ! list_files_under "$extension_dir" extension_file_paths -type f; then
+    printf 'cannot list the files under %s\n' "$extension_dir"
+    return 1
+  fi
   if (( ${#extension_file_paths[@]} == 0 )); then
     printf 'found no files under %s\n' "$extension_dir"
     return 0
@@ -235,24 +305,10 @@ check "the placement scan lets the top-level service/ read files but not spawn, 
 # reaches it after a slash. Comments that name service/ files are not imports.
 SERVICE_IMPORT_PATTERN="(from|import)[[:space:]]*[(]?[[:space:]]*['\"]([^'\"]*/)?service/"
 # service_imports_in <extension dir>: one line per .js file outside the
-# top-level service/ that imports from service/. A tree with no JavaScript is a
-# line too.
-service_imports_in() {
-  local extension_dir="$1" extension_file_path
-  local -a extension_file_paths
-  mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -name '*.js' -print0 2>/dev/null)
-  if (( ${#extension_file_paths[@]} == 0 )); then
-    printf 'found no JavaScript under %s\n' "$extension_dir"
-    return 0
-  fi
-  for extension_file_path in "${extension_file_paths[@]}"; do
-    [[ "$extension_file_path" == "$extension_dir/service/"* ]] && continue
-    if [[ "$(<"$extension_file_path")" =~ $SERVICE_IMPORT_PATTERN ]]; then
-      printf '%s\n' "${extension_file_path#"$extension_dir"/}"
-    fi
-  done
-  return 0
-}
+# top-level service/ that imports from service/ (shell_side_files_matching). A
+# tree that cannot be listed or holds no shell-side JavaScript, and a file that
+# cannot be read, are a line too.
+service_imports_in() { shell_side_files_matching "$1" "pattern:$SERVICE_IMPORT_PATTERN"; }
 row_name="no file outside service/ imports service/, so gnome-shell never loads the sampler"
 service_importers="$(service_imports_in "$EXT_DIR")"
 service_import_scan_status=$?
@@ -282,57 +338,6 @@ check "the service/ import scan finds a static and a dynamic import of service/,
 # serviceLink.js's name watch and subscription. The service, a process of its
 # own, may.
 DBUS_PROXY_LITERAL='Gio.DBusProxy'
-# list_shell_side_javascript <extension dir> <array name>: fills the named
-# array with every .js file under the extension directory outside the top-level
-# service/, and returns non-zero when find does. find exits non-zero when it
-# cannot read a directory, and a file it never listed is a file no scan read,
-# so a scan fails then rather than passing over it; find's own message is left
-# on stderr, naming the directory.
-list_shell_side_javascript() {
-  local extension_dir="$1" listing_path javascript_path
-  local -n shell_side_paths="$2"
-  local -a javascript_paths=()
-  shell_side_paths=()
-  listing_path="$(mktemp -p "$WIRING_TMP" shell-side-listing.XXXXXX)" || return 2
-  if ! find "$extension_dir" -type f -name '*.js' -print0 >"$listing_path"; then
-    rm -f "$listing_path"
-    return 1
-  fi
-  mapfile -d '' javascript_paths <"$listing_path"
-  rm -f "$listing_path"
-  for javascript_path in "${javascript_paths[@]}"; do
-    [[ "$javascript_path" == "$extension_dir/service/"* ]] || shell_side_paths+=("$javascript_path")
-  done
-  return 0
-}
-# shell_side_files_matching <extension dir> <how>: one line per shell-side .js
-# file (list_shell_side_javascript) whose text matches: with "literal:<text>"
-# when it contains the text, with "pattern:<ERE>" when the regular expression
-# matches it (newlines included, so a call may span lines). One line per such
-# file that cannot be read (an unread file is not a clean one), and a line when
-# the tree cannot be listed or holds no shell-side JavaScript.
-shell_side_files_matching() {
-  local extension_dir="$1" match_rule="$2" extension_file_path relative_path extension_file_text
-  local -a extension_file_paths=()
-  if ! list_shell_side_javascript "$extension_dir" extension_file_paths; then
-    printf 'cannot list the JavaScript under %s\n' "$extension_dir"
-    return
-  fi
-  if (( ${#extension_file_paths[@]} == 0 )); then
-    printf 'found no shell-side JavaScript under %s\n' "$extension_dir"
-    return
-  fi
-  for extension_file_path in "${extension_file_paths[@]}"; do
-    relative_path="${extension_file_path#"$extension_dir"/}"
-    if [[ ! -r "$extension_file_path" ]] || ! extension_file_text="$(<"$extension_file_path")"; then
-      printf 'cannot read %s\n' "$relative_path"
-    elif [[ "$match_rule" == literal:* && "$extension_file_text" == *"${match_rule#literal:}"* ]]; then
-      printf '%s\n' "$relative_path"
-    elif [[ "$match_rule" == pattern:* && "$extension_file_text" =~ ${match_rule#pattern:} ]]; then
-      printf '%s\n' "$relative_path"
-    fi
-  done
-}
 # dbus_proxy_mentions_in <extension dir>: one line per shell-side .js file that
 # contains DBUS_PROXY_LITERAL, comments included (shell_side_files_matching).
 dbus_proxy_mentions_in() { shell_side_files_matching "$1" "literal:$DBUS_PROXY_LITERAL"; }
@@ -388,6 +393,56 @@ printf '%s\n' 'GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAMPLE_INTERVAL_S
 check "no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS: a planted one is found" \
   "$(sample_interval_timeouts_in "$SAMPLE_TIMEOUT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" \
   "extension.js lib/wiring.js "
+
+# A repeating timer in the shell while Samples flow is a budget no measurement
+# here catches: perf's count budgets do not move for a timer that draws nothing,
+# and the row above knows a timer only by the sampler's interval. So every GLib
+# timeout the shell side adds is pinned, by file and count: extension.js's cover
+# fallback (1), indicator.js's hover label delay (1), and the two lines of
+# pulseClient.js's injectable GLIB_TIMEOUTS seam (2). One more anywhere, a new
+# file included, fails the row until it is counted here. The call text is counted
+# on code lines only: a line that starts as a comment (//, /* or a JSDoc *) is not
+# a call.
+SHELL_SIDE_GLIB_TIMEOUT_CALL_PATTERN='GLib[.]timeout_add(_seconds)?[(]'
+EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS='extension.js:1 indicator.js:1 pulseClient.js:2 '
+# glib_timeout_calls_in <extension dir>: one line, "<file>:<count>", per
+# shell-side .js file (list_shell_side_javascript) whose code lines add GLib
+# timeouts; one per such file awk cannot read, and one when the tree cannot be
+# listed or holds no shell-side JavaScript.
+glib_timeout_calls_in() {
+  local extension_dir="$1" extension_file_path relative_path timeout_call_count
+  local -a extension_file_paths=()
+  if ! list_shell_side_javascript "$extension_dir" extension_file_paths; then
+    printf 'cannot list the JavaScript under %s\n' "$extension_dir"
+    return
+  fi
+  if (( ${#extension_file_paths[@]} == 0 )); then
+    printf 'found no shell-side JavaScript under %s\n' "$extension_dir"
+    return
+  fi
+  for extension_file_path in "${extension_file_paths[@]}"; do
+    relative_path="${extension_file_path#"$extension_dir"/}"
+    if ! timeout_call_count="$(awk -v call_pattern="$SHELL_SIDE_GLIB_TIMEOUT_CALL_PATTERN" '
+        /^[ \t]*(\/\/|\/\*|\*)/ { next }
+        { code_line = $0; call_count += gsub(call_pattern, "", code_line) }
+        END { print call_count + 0 }' "$extension_file_path")"; then
+      printf 'cannot read %s\n' "$relative_path"
+    elif (( timeout_call_count > 0 )); then
+      printf '%s:%s\n' "$relative_path" "$timeout_call_count"
+    fi
+  done
+}
+check "the shell side adds a timeout in the places the table knows, and nowhere else" \
+  "$(glib_timeout_calls_in "$EXT_DIR" | LC_ALL=C sort | tr '\n' ' ')" "$EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS"
+# The planted twin, on a copy of the extension: one GLib.timeout_add( in
+# card.js, which adds none today, is the one difference the row sees.
+GLIB_TIMEOUT_FIXTURE_DIR="$WIRING_TMP/glib-timeout-fixture"
+cp -R "$EXT_DIR" "$GLIB_TIMEOUT_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $GLIB_TIMEOUT_FIXTURE_DIR"
+printf '%s\n' 'this._pollSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => GLib.SOURCE_CONTINUE);' \
+  >>"$GLIB_TIMEOUT_FIXTURE_DIR/card.js"
+check "the shell side adds a timeout in the places the table knows, and nowhere else: a planted one in card.js is found" \
+  "$(glib_timeout_calls_in "$GLIB_TIMEOUT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" \
+  "card.js:1 $EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS"
 
 # The compositor repaints every actor of the card's layer on each frame a window draws over it, because actors there
 # are not culled, so the card draws through an offscreen texture (one cached rectangle for those frames): _init sets
@@ -3148,8 +3203,8 @@ printf '\nresource-pulse-nested.sh (hermetic: no gnome-shell, nothing is started
 # the bus configs it renders, the environment allowlist, and its refusals. Every
 # run of it here has busctl, gsettings and gnome-shell replaced by stubs that
 # only record the call (jq too: no run of the script here needs it to really
-# run; the one row that does, on perf's probe answers, calls the function
-# itself with the real jq), and RESOURCE_PULSE_NESTED_BASE pointed at an empty
+# run; the two rows that do, on perf's probe answers, call the functions
+# themselves with the real jq), and RESOURCE_PULSE_NESTED_BASE pointed at an empty
 # directory, so a row that must refuse proves it reached none of them.
 #
 # That directory's name is deliberately longer than the script allows a run
@@ -3718,6 +3773,69 @@ perf_answer_summary+=" says-why=$(grep -c -F 'shows no sign that it ran' <<<"$pe
 check "nested: perf takes a probe answer for done only when it shows the mode it ran in; an empty, null, refused or other answer fails at once (needs jq)" \
   "$perf_answer_summary" \
   "attached-enabled=0 attached-disabled=0 read-enabled=0 read-disabled=0 empty=1 null=1 empty-object=1 other-mode=1 read-with-attach-sign=1 read-other-mode=1 refused=1 not-an-object=1 says-why=1"
+
+# perf takes an enabled state's counts only when the probe's two facts, read at
+# the end of its window, show the state set up as it is named: the card covered
+# (not visible) in the three covered states and visible in visible-busy; the top
+# bar's indicator unmapped in topbar-hidden-covered and mapped in the other three.
+# A window that did not maximize or minimize, or a top bar not hidden or not shown
+# again, would otherwise report its counts under the wrong name. A mismatch is
+# exit 2, naming the state and what was expected, with no line of readings: never
+# a pass and never a breach. So is a fact that is not true or false (null, or the
+# string "false"). Each case prints exit/its needle's count/the state's readings
+# lines, from record_perf_state on a read answer with in-budget counts. This row
+# runs the real jq: without it, it fails.
+PERF_SETUP_ANSWER_COUNTS='"mode":"enabled","frames":34,"samples":30,"topbarPaints":30,"cardRedirect":"ALWAYS"'
+# perf_setup_verdict <state> <isCardVisible, as JSON> <isIndicatorMapped, as JSON> <needle> prints the case.
+perf_setup_verdict() {
+  local setup_state="$1" setup_needle="$4" setup_answer setup_output setup_exit
+  setup_answer="{$PERF_SETUP_ANSWER_COUNTS,\"isCardVisible\":$2,\"isIndicatorMapped\":$3}"
+  setup_output="$(nested_call record_perf_state "$setup_state" "$setup_answer" 2>&1)"
+  setup_exit=$?
+  printf '%s/%s/%s' "$setup_exit" "$(grep -c -F "$setup_needle" <<<"$setup_output")" \
+    "$(grep -c -F "$setup_state: cpu=" <<<"$setup_output")"
+}
+# perf_setup_mismatch_needle <state> <what was expected, and found> prints the line a mismatch must print.
+perf_setup_mismatch_needle() { printf 'perf: could not measure %s: it was not set up as named: %s' "$1" "$2"; }
+PERF_SETUP_PROBLEM_NEEDLE='perf: could not measure'
+PERF_SETUP_CARD_COVERED_MISMATCH='expected the card covered (not visible), and it counts as visible'
+PERF_SETUP_CARD_VISIBLE_MISMATCH='expected the card visible, and it counts as covered'
+PERF_SETUP_INDICATOR_UNMAPPED_MISMATCH='expected the top bar indicator unmapped (hidden), and it is mapped'
+PERF_SETUP_INDICATOR_MAPPED_MISMATCH='expected the top bar indicator mapped (shown), and it is unmapped'
+PERF_SETUP_NOT_A_FACT_NEEDLE="perf: could not measure covered-busy: the probe's facts are not true or false"
+perf_setup_summary="set-up:"
+perf_setup_summary+=" $(perf_setup_verdict covered-idle false true "$PERF_SETUP_PROBLEM_NEEDLE")"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy false true "$PERF_SETUP_PROBLEM_NEEDLE")"
+perf_setup_summary+=" $(perf_setup_verdict topbar-hidden-covered false false "$PERF_SETUP_PROBLEM_NEEDLE")"
+perf_setup_summary+=" $(perf_setup_verdict visible-busy true true "$PERF_SETUP_PROBLEM_NEEDLE")"
+perf_setup_summary+=" card-visible-while-covered:"
+perf_setup_summary+=" $(perf_setup_verdict covered-idle true true \
+  "$(perf_setup_mismatch_needle covered-idle "$PERF_SETUP_CARD_COVERED_MISMATCH")")"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy true true \
+  "$(perf_setup_mismatch_needle covered-busy "$PERF_SETUP_CARD_COVERED_MISMATCH")")"
+perf_setup_summary+=" $(perf_setup_verdict topbar-hidden-covered true false \
+  "$(perf_setup_mismatch_needle topbar-hidden-covered "$PERF_SETUP_CARD_COVERED_MISMATCH")")"
+perf_setup_summary+=" card-covered-in-visible-busy:"
+perf_setup_summary+=" $(perf_setup_verdict visible-busy false true \
+  "$(perf_setup_mismatch_needle visible-busy "$PERF_SETUP_CARD_VISIBLE_MISMATCH")")"
+perf_setup_summary+=" indicator-mapped-while-hidden:"
+perf_setup_summary+=" $(perf_setup_verdict topbar-hidden-covered false true \
+  "$(perf_setup_mismatch_needle topbar-hidden-covered "$PERF_SETUP_INDICATOR_UNMAPPED_MISMATCH")")"
+perf_setup_summary+=" indicator-unmapped-while-shown:"
+perf_setup_summary+=" $(perf_setup_verdict covered-idle false false \
+  "$(perf_setup_mismatch_needle covered-idle "$PERF_SETUP_INDICATOR_MAPPED_MISMATCH")")"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy false false \
+  "$(perf_setup_mismatch_needle covered-busy "$PERF_SETUP_INDICATOR_MAPPED_MISMATCH")")"
+perf_setup_summary+=" $(perf_setup_verdict visible-busy true false \
+  "$(perf_setup_mismatch_needle visible-busy "$PERF_SETUP_INDICATOR_MAPPED_MISMATCH")")"
+perf_setup_summary+=" not-a-fact:"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy null true "$PERF_SETUP_NOT_A_FACT_NEEDLE")"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy '"false"' true "$PERF_SETUP_NOT_A_FACT_NEEDLE")"
+expected_perf_setup_summary="set-up: 0/0/1 0/0/1 0/0/1 0/0/1 card-visible-while-covered: 2/1/0 2/1/0 2/1/0"
+expected_perf_setup_summary+=" card-covered-in-visible-busy: 2/1/0 indicator-mapped-while-hidden: 2/1/0"
+expected_perf_setup_summary+=" indicator-unmapped-while-shown: 2/1/0 2/1/0 2/1/0 not-a-fact: 2/1/0 2/1/0"
+check "nested: perf takes an enabled state's counts only when the probe shows it set up as named (the card covered in the covered states and visible in visible-busy, the indicator unmapped only in topbar-hidden-covered); a mismatch, or a fact that is not true or false, is exit 2 naming the state and what was expected (needs jq)" \
+  "$perf_setup_summary" "$expected_perf_setup_summary"
 
 # perf's exit (end_perf_run, its EXIT trap) on a fixture, from inside one bash
 # that plays perf: two children of it stand in for the window (recorded with
@@ -4560,7 +4678,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=793
+EXPECTED_ROWS=798
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

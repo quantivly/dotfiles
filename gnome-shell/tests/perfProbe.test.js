@@ -17,6 +17,8 @@ const EXTENSION_UUID = 'resource-pulse@dotfiles';
 const OFFSCREEN_REDIRECT = Object.freeze({AUTOMATIC_FOR_OPACITY: 1, ALWAYS: 2, ON_IDLE: 4});
 /** Every part the probe attaches to with the extension enabled, by the name it reports a missing one under. */
 const ALL_PART_NAMES = ['extension', 'indicator', 'cpuGraphArea', 'memoryGraphArea', 'card', 'client'];
+/** The two facts an enabled read answers, as the fake shell starts: the card visible, the indicator mapped. */
+const VISIBLE_AND_SHOWN = Object.freeze({isCardVisible: true, isIndicatorMapped: true});
 
 /**
  * The probe's source, read when a row runs (a missing file then fails that row, not the whole run).
@@ -112,7 +114,8 @@ function makeExtensionParts() {
     const cpuArea = new FakeSignalSource();
     const memoryArea = new FakeSignalSource();
     return {
-        indicator: {_cpuGraph: {drawingArea: cpuArea}, _memoryGraph: {drawingArea: memoryArea}},
+        // Mapped, as a shown indicator is; Clutter's mapped property.
+        indicator: {_cpuGraph: {drawingArea: cpuArea}, _memoryGraph: {drawingArea: memoryArea}, mapped: true},
         cpuArea,
         memoryArea,
         card: {redirect: OFFSCREEN_REDIRECT.ALWAYS, get_offscreen_redirect() {
@@ -135,6 +138,8 @@ function makeFakeShell(parts) {
         _indicator: parts?.indicator ?? null,
         _card: parts?.card ?? null,
         _client: parts?.client ?? null,
+        // The extension's own until its first cover check (IS_CARD_VISIBLE_BEFORE_COVER_CHECK), kept while disabled.
+        _isCardVisible: true,
     };
     let doesLookupFindExtension = true;
     const extensionManager = {
@@ -194,8 +199,14 @@ test('perf probe: attach-enabled refuses, naming each missing part, and connects
     /** @type {Object<string, (shell: object, parts: object) => void>} How each case takes a part away. */
     const removals = {
         'no-extension': shell => shell.setLookupAnswersNothing(),
+        'extension-without-card-visibility': shell => {
+            delete shell.extension._isCardVisible;
+        },
         'no-indicator': shell => {
             shell.extension._indicator = null;
+        },
+        'indicator-without-mapped': (_shell, parts) => {
+            delete parts.indicator.mapped;
         },
         'no-cpu-graph-area': (_shell, parts) => {
             delete parts.indicator._cpuGraph.drawingArea;
@@ -232,7 +243,9 @@ test('perf probe: attach-enabled refuses, naming each missing part, and connects
     const refusal = missing => ({refused: true, missing, handlers: nothingConnected});
     assertEqual(outcomes, {
         'no-extension': refusal(ALL_PART_NAMES),
+        'extension-without-card-visibility': refusal(['extension']),
         'no-indicator': refusal(['indicator', 'cpuGraphArea', 'memoryGraphArea']),
+        'indicator-without-mapped': refusal(['indicator']),
         'no-cpu-graph-area': refusal(['cpuGraphArea']),
         'no-memory-graph-area': refusal(['memoryGraphArea']),
         'no-card': refusal(['card']),
@@ -291,10 +304,16 @@ test('perf probe: attach-enabled counts frames, Samples and both graphs\' paints
         firstAttach, firstRead, secondAttach, zeroedRead, otherRedirectRead, handlers: handlerCounts(shell, parts),
     }, {
         firstAttach: {attached: 'enabled', reattached: true},
-        firstRead: {mode: 'enabled', frames: 2, samples: 3, topbarPaints: 3, cardRedirect: 'ALWAYS'},
+        firstRead: {
+            mode: 'enabled', frames: 2, samples: 3, topbarPaints: 3, cardRedirect: 'ALWAYS', ...VISIBLE_AND_SHOWN,
+        },
         secondAttach: {attached: 'enabled', reattached: false},
-        zeroedRead: {mode: 'enabled', frames: 0, samples: 0, topbarPaints: 0, cardRedirect: 'ALWAYS'},
-        otherRedirectRead: {mode: 'enabled', frames: 1, samples: 0, topbarPaints: 0, cardRedirect: '4'},
+        zeroedRead: {
+            mode: 'enabled', frames: 0, samples: 0, topbarPaints: 0, cardRedirect: 'ALWAYS', ...VISIBLE_AND_SHOWN,
+        },
+        otherRedirectRead: {
+            mode: 'enabled', frames: 1, samples: 0, topbarPaints: 0, cardRedirect: '4', ...VISIBLE_AND_SHOWN,
+        },
         handlers: {stage: 1, cpuArea: 1, memoryArea: 1, client: 1},
     });
 });
@@ -323,9 +342,38 @@ test('perf probe: after the extension is enabled again it attaches to the new pa
     }, {
         staleRead: 'string',
         reattach: {attached: 'enabled', reattached: true},
-        newRead: {mode: 'enabled', frames: 0, samples: 2, topbarPaints: 2, cardRedirect: 'ALWAYS'},
+        newRead: {
+            mode: 'enabled', frames: 0, samples: 2, topbarPaints: 2, cardRedirect: 'ALWAYS', ...VISIBLE_AND_SHOWN,
+        },
         newHandlers: {stage: 1, cpuArea: 1, memoryArea: 1, client: 1},
         stageHandlers: 1,
+    });
+});
+
+test('perf probe: a read answers whether the card counts as visible and whether the indicator is mapped, as they ' +
+    'are at the end of the window, and refuses when either cannot be read', () => {
+    const parts = makeExtensionParts();
+    const shell = makeFakeShell(parts);
+    runProbe(shell.scope, 'attach-enabled');
+    // Covered and hidden after the attach, as topbar-hidden-covered is: the read answers them as they are now.
+    shell.extension._isCardVisible = false;
+    parts.indicator.mapped = false;
+    const coveredAndHiddenRead = runProbe(shell.scope, 'read');
+    delete shell.extension._isCardVisible;
+    const noCardVisibilityRead = runProbe(shell.scope, 'read');
+    shell.extension._isCardVisible = false;
+    delete parts.indicator.mapped;
+    const noMappedRead = runProbe(shell.scope, 'read');
+    const factsOf = answer => ({isCardVisible: answer.isCardVisible, isIndicatorMapped: answer.isIndicatorMapped});
+    const refusalOf = answer => ({refused: typeof answer.refused, missing: answer.missing});
+    assertEqual({
+        coveredAndHidden: factsOf(coveredAndHiddenRead),
+        noCardVisibility: refusalOf(noCardVisibilityRead),
+        noMapped: refusalOf(noMappedRead),
+    }, {
+        coveredAndHidden: {isCardVisible: false, isIndicatorMapped: false},
+        noCardVisibility: {refused: 'string', missing: ['extension']},
+        noMapped: {refused: 'string', missing: ['indicator']},
     });
 });
 

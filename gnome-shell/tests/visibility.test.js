@@ -1080,14 +1080,18 @@ test('extension.js: teardown attempts every covering window: each window\'s disc
 });
 
 test('extension.js: the fallback timeout runs exactly while coverFallbackTimerChange says so, from the cover, the ' +
-    'client\'s isLive and whether it runs, asked on each cover check and each tick; its callback keeps it, and its ' +
-    'removal forgets the id before it removes the source', () => {
+    'client\'s isLive and whether it runs, asked on each cover check and, once a tick, on a tick that did not check ' +
+    'the cover; its callback keeps it, and its removal forgets the id before it removes the source', () => {
     const extensionSource = readExtensionFile('extension.js');
     const timerLines = trimmedLines(declarationBody(extensionSource, '_syncCoverFallbackTimer() {'));
     const removeLines = trimmedLines(declarationBody(extensionSource, '_removeCoverFallbackTimer() {'));
+    const tickBody = declarationBody(extensionSource, '_onCardCoverTick() {');
+    const tickLines = trimmedLines(tickBody);
     const lineAfter = (lines, line) => (lines.includes(line) ? lines[lines.indexOf(line) + 1] : null);
     const startIndex = timerLines.indexOf('if (timerChange === CoverFallbackTimerChange.START) {');
     const askingStatement = 'this._syncCoverFallbackTimer();';
+    const backstopCondition = 'if (isCoverBackstopDue({isCovered, ticksSinceCoverCheck: this._ticksSinceCoverCheck}))';
+    const backstopIndex = tickLines.indexOf(backstopCondition);
     assertEqual({
         decides: timerLines.slice(1, 5),
         startsOnStart: startIndex < 0 ? [] : timerLines.slice(startIndex + 1, startIndex + 4),
@@ -1095,9 +1099,11 @@ test('extension.js: the fallback timeout runs exactly while coverFallbackTimerCh
         removeForgetsThenRemoves: removeLines.slice(-4, -1),
         keepsRunning: statementCount(declarationBody(extensionSource, '_onCoverFallbackTimeout() {'),
             'return GLib.SOURCE_CONTINUE;'),
-        askedOnEachCheckAndTick: [
-            statementCount(declarationBody(extensionSource, '_syncCardCover() {'), askingStatement),
-            statementCount(declarationBody(extensionSource, '_onCardCoverTick() {'), askingStatement),
+        askedOnEachCheck: statementCount(declarationBody(extensionSource, '_syncCardCover() {'), askingStatement),
+        // The tick asks itself only when the backstop did not check the cover, whose sync already asked.
+        askedOnceATick: [
+            statementCount(tickBody, askingStatement),
+            backstopIndex < 0 ? [] : tickLines.slice(backstopIndex, backstopIndex + 4),
         ],
     }, {
         decides: [
@@ -1118,7 +1124,8 @@ test('extension.js: the fallback timeout runs exactly while coverFallbackTimerCh
             'GLib.source_remove(sourceId);',
         ],
         keepsRunning: 1,
-        askedOnEachCheckAndTick: [1, 1],
+        askedOnEachCheck: 1,
+        askedOnceATick: [1, [backstopCondition, 'this._syncCardCover();', 'else', askingStatement]],
     });
 });
 

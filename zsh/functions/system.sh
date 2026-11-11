@@ -2520,13 +2520,14 @@ gnome-status() {
     # comparison the modules get. Silent when the path or its time cannot be
     # read: a unit that is not linked is reported by the lines above.
     rp_warn_when_unit_file_is_newer() {
-      local unit_name="$1" fragment_path changed_unit_file
+      local unit_name="$1" fragment_path changed_unit_file unit_file_remedy
       fragment_path="$("${rp_call_limit[@]}" systemctl --user show -p FragmentPath --value "$unit_name" 2>/dev/null)" \
         || return 0
       [ -n "$fragment_path" ] || return 0
       changed_unit_file="$(find -H "$fragment_path" -maxdepth 0 -type f -newermt "@$2" -print 2>/dev/null)" || return 0
       [ -n "$changed_unit_file" ] || return 0
-      rp_warnings+=("$unit_name runs an older unit file: it changed after the unit started — systemctl --user daemon-reload && systemctl --user try-restart $unit_name")
+      unit_file_remedy="systemctl --user daemon-reload && systemctl --user try-restart $unit_name"
+      rp_warnings+=("$unit_name runs an older unit file: it changed after the unit started — $unit_file_remedy")
     }
 
     # rp_warn_when_unit_runs_older_code <unit> <entry module> <restart note>:

@@ -17,7 +17,7 @@
 // covered asks whether the frozen repaint is due. Nothing here runs on a timer while Samples flow. Only with the card
 // covered and the service silent (the client's stall watchdog has published no data, so no Sample comes) does a
 // COVER_FALLBACK_INTERVAL_SECONDS timeout check the cover and make the frozen repaint, and the next Sample removes it.
-// The shell's budget is under 0.1% of a core.
+// The shell's budgets are per state: docs/GNOME_CONFIGURATION_GUIDE.md, "What it costs".
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
@@ -303,10 +303,11 @@ export default class ResourcePulseExtension extends Extension {
     /**
      * One tick of the client (a history notification: a Sample that appended to the histories, a state, or no data):
      * counts it, checks the cover at once when the backstop says so (lib/visibility.js isCoverBackstopDue: every tick
-     * while the card is visible, every COVER_BACKSTOP_TICKS-th while it is covered), then, whether or not it checked,
-     * repaints a covered card once its frozen repaint is due, so the repaint keeps to FROZEN_REPAINT_INTERVAL_SECONDS
-     * rather than to the backstop, and starts or removes the fallback timeout as the service's liveness says. No later,
-     * so a tick schedules no frame of its own. The client logs a listener that throws.
+     * while the card is visible, every COVER_BACKSTOP_TICKS-th while it is covered), which also starts or removes the
+     * fallback timeout, or else only starts or removes it, as the service's liveness says, so it is asked once a tick;
+     * then, whether or not it checked, repaints a covered card once its frozen repaint is due, so the repaint keeps to
+     * FROZEN_REPAINT_INTERVAL_SECONDS rather than to the backstop. No later, so a tick schedules no frame of its own.
+     * The client logs a listener that throws.
      *
      * @returns {void}
      */
@@ -315,8 +316,9 @@ export default class ResourcePulseExtension extends Extension {
         const isCovered = !this._isCardVisible;
         if (isCoverBackstopDue({isCovered, ticksSinceCoverCheck: this._ticksSinceCoverCheck}))
             this._syncCardCover();
+        else
+            this._syncCoverFallbackTimer();
         this._repaintFrozenCardIfDue();
-        this._syncCoverFallbackTimer();
     }
 
     /**
@@ -641,12 +643,13 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Undoes enable(), whatever it got to, and never throws: keeps the client's last good clock label for the next
-     * enable (a getter's read, before anything is destroyed); clears every field; then disconnects from the overview,
-     * the layout manager, the display, the window manager, the workspace manager, the card, the dropdown menu and the
-     * windows covering the card, removes the covered check's client listener, its pending check and its fallback
-     * timeout, and a pending card placement; then destroys the card (which also takes it out of the background group),
-     * the indicator and the client. Each step runs under its own guard (lib/teardown.js runEveryStep): one that throws
-     * is logged, rate-limited, and the rest still run.
+     * enable (a getter's read, before anything is destroyed, guarded as each step is: on a failure the label already
+     * held stays); clears every field; then disconnects from the overview, the layout manager, the display, the window
+     * manager, the workspace manager, the card, the dropdown menu and the windows covering the card, removes the
+     * covered check's client listener, its pending check and its fallback timeout, and a pending card placement; then
+     * destroys the card (which also takes it out of the background group), the indicator and the client. Each step runs
+     * under its own guard (lib/teardown.js runEveryStep): one that throws is logged, rate-limited, and the rest still
+     * run.
      *
      * @returns {void}
      */
@@ -656,7 +659,12 @@ export default class ResourcePulseExtension extends Extension {
         const client = this._client;
         const cardCoverListenerId = this._cardCoverListenerId;
         const dropdownMenu = this._dropdownMenu;
-        this._lastGoodClockLabel = client?.lastGoodClockLabel ?? this._lastGoodClockLabel;
+        // The getter parses a Sample still unread, so it can throw: the label already held is kept then.
+        try {
+            this._lastGoodClockLabel = client?.lastGoodClockLabel ?? this._lastGoodClockLabel;
+        } catch (error) {
+            this._logTearDownFailure('read the client\'s last good clock label', error);
+        }
         // Cleared first: whatever a step below throws, no later enable() or disable() finds a half-destroyed part.
         this._card = null;
         this._indicator = null;

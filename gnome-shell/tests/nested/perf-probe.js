@@ -10,22 +10,25 @@
 //   topbarPaints   with the extension enabled, the paints of the top bar's two graphs (the repaint signal of
 //                  _indicator._cpuGraph.drawingArea and _indicator._memoryGraph.drawingArea; St emits it as the
 //                  graph draws, mapped or not)
-// and a read with the extension enabled also answers the card's offscreen redirect ('ALWAYS', or the number).
+// and a read with the extension enabled also answers the card's offscreen redirect ('ALWAYS', or the number), and two
+// facts as they are at the end of the window, so that `perf` can tell each state was set up as it is named: whether the
+// card counts as visible (the extension's _isCardVisible) and whether the top bar indicator is mapped.
 //
 // It never attaches to nothing and counts zero, which would read as a clean run: every count of zero means it looked
 // and saw none. attach-enabled refuses, naming each missing part, and connects nothing; attach-disabled refuses while
-// the extension still has parts; a read refuses when nothing is attached, or when the extension's parts are not the
-// ones attached to (it was enabled or disabled during the window, so the counts are void). After the extension is
-// enabled again its parts are new objects, and attach-enabled attaches to those; a handler on an older part counts
-// nothing. Its state outlives each Eval in globalThis.__resourcePulsePerfProbe; the stage's handler is connected
-// once and stays for the life of the nested shell, which is test-only. Its per-frame handler is itself a cost, which
-// `perf`'s percentages include and say so.
+// the extension still has parts; a read refuses when nothing is attached, when the extension's parts are not the ones
+// attached to (it was enabled or disabled during the window, so the counts are void), or when either fact cannot be
+// read. After the extension is enabled again its parts are new objects, and attach-enabled attaches to those; a handler
+// on an older part counts nothing. Its state outlives each Eval in globalThis.__resourcePulsePerfProbe; the stage's
+// handler is connected once and stays for the life of the nested shell, which is test-only. Its per-frame handler is
+// itself a cost, which `perf`'s percentages include and say so.
 //
 // Requests: 'attach-disabled', 'attach-enabled' (each zeroes the counts), 'read'.
 // Answers: {refused: string, missing?: string[]} on a refusal; otherwise
 //   attach-disabled  {attached: 'disabled', counts: 'frames only: ...'}
 //   attach-enabled   {attached: 'enabled', reattached: boolean}
-//   read             {mode: 'disabled', frames} or {mode: 'enabled', frames, samples, topbarPaints, cardRedirect}
+//   read             {mode: 'disabled', frames} or
+//                    {mode: 'enabled', frames, samples, topbarPaints, cardRedirect, isCardVisible, isIndicatorMapped}
 
 /**
  * Attaches the counters, zeroes them, or reads them, as one request asks.
@@ -41,8 +44,8 @@ function resourcePulsePerfProbe(request) {
     const ENABLED_MODE = 'enabled';
     /** Every part attach-enabled needs, in the order a refusal names them, and how it names each. */
     const PART_DESCRIPTIONS = {
-        extension: "the extension's object (Main.extensionManager.lookup(uuid).stateObj)",
-        indicator: 'the top bar indicator (_indicator)',
+        extension: "the extension's object, with _isCardVisible (Main.extensionManager.lookup(uuid).stateObj)",
+        indicator: 'the top bar indicator, with mapped (_indicator)',
         cpuGraphArea: "the top bar CPU graph's drawing area (_indicator._cpuGraph.drawingArea)",
         memoryGraphArea: "the top bar memory graph's drawing area (_indicator._memoryGraph.drawingArea)",
         card: 'the card, with get_offscreen_redirect (_card)',
@@ -52,6 +55,8 @@ function resourcePulsePerfProbe(request) {
     const ENABLED_ONLY_PART_NAMES = ['indicator', 'card', 'client'];
     /** The parts a window's counts belong to: any of them replaced means the extension was enabled again. */
     const ATTACHED_PART_NAMES = ['indicator', 'cpuGraphArea', 'memoryGraphArea', 'card', 'client'];
+    /** The parts a read takes its two facts from: the card's visibility from one, the mapping from the other. */
+    const FACT_PART_NAMES = ['extension', 'indicator'];
 
     globalThis[PROBE_STATE_KEY] ??= {
         counters: {frames: 0, samples: 0, topbarPaints: 0},
@@ -89,6 +94,10 @@ function resourcePulsePerfProbe(request) {
     function isUsablePart(partName, part) {
         if (part === null || part === undefined)
             return false;
+        if (partName === 'extension')
+            return typeof part._isCardVisible === 'boolean';
+        if (partName === 'indicator')
+            return typeof part.mapped === 'boolean';
         if (partName === 'cpuGraphArea' || partName === 'memoryGraphArea')
             return typeof part.connect === 'function';
         if (partName === 'card')
@@ -201,7 +210,8 @@ function resourcePulsePerfProbe(request) {
     }
 
     /**
-     * read: the counts since the last attach, refused when they no longer belong to the shell's parts.
+     * read: the counts since the last attach, refused when they no longer belong to the shell's parts, and the two
+     * facts as they are now, refused when either cannot be read.
      *
      * @returns {object} The answer.
      */
@@ -220,6 +230,11 @@ function resourcePulsePerfProbe(request) {
                     'its counts are void',
             };
         }
+        const unreadable = FACT_PART_NAMES.filter(partName => !isUsablePart(partName, parts[partName]));
+        if (unreadable.length > 0) {
+            const unreadableDescriptions = unreadable.map(partName => PART_DESCRIPTIONS[partName]).join('; ');
+            return {refused: `cannot read the state's facts from ${unreadableDescriptions}`, missing: unreadable};
+        }
         const cardRedirect = parts.card.get_offscreen_redirect();
         const alwaysRedirect = imports.gi.Clutter.OffscreenRedirect.ALWAYS;
         return {
@@ -228,6 +243,8 @@ function resourcePulsePerfProbe(request) {
             samples: probe.counters.samples,
             topbarPaints: probe.counters.topbarPaints,
             cardRedirect: cardRedirect === alwaysRedirect ? ALWAYS_REDIRECT_NAME : String(cardRedirect),
+            isCardVisible: parts.extension._isCardVisible,
+            isIndicatorMapped: parts.indicator.mapped,
         };
     }
 

@@ -103,6 +103,9 @@
 #       state's plus three; a top-bar paint while the top bar is hidden; the card
 #       not drawn through its offscreen texture; and the disabled state's own
 #       major collections more than four (a defect that outlives disable()).
+#       An enabled state the probe does not find set up as it is named (the card
+#       covered in the covered states and visible in visible-busy, the top bar
+#       hidden only in topbar-hidden-covered) stops it there, with exit 2.
 #       Every exit once it acts on the run (a breach, a failure or a signal too)
 #       puts the run back: its window and its background measurement ended, the
 #       extension enabled and the top bar shown again
@@ -121,7 +124,8 @@
 # Exit: 0 ok; 1 the nested shell ran the request and it failed (an Eval that
 #       threw, a screenshot it could not take, a perf count over its budget);
 #       2 refused, bad usage or could not run (for perf, also a count it could not
-#       judge: never a pass and never a breach).
+#       judge, or a state not set up as it is named: never a pass and never a
+#       breach).
 
 set -uo pipefail
 
@@ -215,6 +219,11 @@ readonly PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED=0
 readonly PERF_WANTED_CARD_REDIRECT='ALWAYS'
 # How many words an enabled state's record has: major collections, frames, Samples, top-bar paints, card redirect.
 readonly PERF_ENABLED_RECORD_WORD_COUNT=5
+# The fields of the two facts a read answers about how an enabled state was set up (the extension's _isCardVisible,
+# the indicator's mapped), and what jq prints for a fact: check_perf_state_setup compares them with each state's name.
+readonly PERF_CARD_VISIBLE_FIELD='isCardVisible'
+readonly PERF_INDICATOR_MAPPED_FIELD='isIndicatorMapped'
+readonly PERF_FACT_PATTERN='^(true|false)$'
 # A count as perf's readings write it: no leading zero, which bash arithmetic would read as octal.
 readonly PERF_COUNT_PATTERN='^(0|[1-9][0-9]*)$'
 # SpiderMonkey's collection lines in the shell's log (`start --gc-log`): the line's first column, then its pid.
@@ -1875,6 +1884,67 @@ perf_count_verdict() {
 }
 
 #######################################
+# Succeed when an enabled state was set up as it is named, from the probe's two
+# facts read at the end of its window: the card covered (not visible) in the
+# covered states and visible in visible-busy; the top bar indicator unmapped
+# in topbar-hidden-covered and mapped in every other. Otherwise print why,
+# naming the state and what was expected, and return 2: a window that did not
+# maximize or minimize, or a top bar not hidden or not shown again, would
+# report its counts under the wrong name, so the state could not be measured,
+# which is neither a pass nor a breach. Pure: it reads no file and starts
+# nothing.
+# Arguments:
+#   $1 - state name (one of PERF_ENABLED_STATE_NAMES)
+#   $2 - whether the card counts as visible: true or false
+#   $3 - whether the indicator is mapped: true or false
+# Returns:
+#   0 set up as named; 2 not, a fact that is not true or false, or a name that
+#   is not an enabled state's
+#######################################
+check_perf_state_setup() {
+    local state_name="$1" is_card_visible="$2" is_indicator_mapped="$3" expected_indicator_mapped=true
+    local indicator_mismatch='expected the top bar indicator mapped (shown), and it is unmapped'
+    local joined_mismatches listed_mismatch
+    local not_set_up_lead="perf: could not measure $state_name: it was not set up as named:"
+    local facts_text="card visible '$is_card_visible', indicator mapped '$is_indicator_mapped'"
+    local -a mismatches=()
+    case "$state_name" in
+        "$PERF_COVERED_IDLE_STATE" | "$PERF_COVERED_BUSY_STATE" | "$PERF_TOPBAR_HIDDEN_STATE" | \
+            "$PERF_VISIBLE_BUSY_STATE") ;;
+        *)
+            printf "perf: could not measure '%s': not an enabled state\n" "$state_name"
+            return "$EXIT_REFUSED" ;;
+    esac
+    if [[ ! "$is_card_visible" =~ $PERF_FACT_PATTERN || ! "$is_indicator_mapped" =~ $PERF_FACT_PATTERN ]]; then
+        printf "perf: could not measure %s: the probe's facts are not true or false: %s\n" "$state_name" "$facts_text"
+        return "$EXIT_REFUSED"
+    fi
+    # The covered states: perf's window, maximized, covers the card.
+    if [[ "$state_name" != "$PERF_VISIBLE_BUSY_STATE" && "$is_card_visible" != false ]]; then
+        mismatches+=("expected the card covered (not visible), and it counts as visible")
+    fi
+    # visible-busy: that window minimized, the card can be seen.
+    if [[ "$state_name" == "$PERF_VISIBLE_BUSY_STATE" && "$is_card_visible" != true ]]; then
+        mismatches+=("expected the card visible, and it counts as covered")
+    fi
+    # The top bar: hidden only in topbar-hidden-covered, and shown again before visible-busy.
+    if [[ "$state_name" == "$PERF_TOPBAR_HIDDEN_STATE" ]]; then
+        expected_indicator_mapped=false
+        indicator_mismatch='expected the top bar indicator unmapped (hidden), and it is mapped'
+    fi
+    if [[ "$is_indicator_mapped" != "$expected_indicator_mapped" ]]; then
+        mismatches+=("$indicator_mismatch")
+    fi
+    (( ${#mismatches[@]} == 0 )) && return 0
+    joined_mismatches="${mismatches[0]}"
+    for listed_mismatch in "${mismatches[@]:1}"; do
+        joined_mismatches+="; $listed_mismatch"
+    done
+    printf '%s %s\n' "$not_set_up_lead" "$joined_mismatches"
+    return "$EXIT_REFUSED"
+}
+
+#######################################
 # Run one of perf's steps in the nested shell; exit 2 when it did not run or
 # threw, since the state it was setting up is then unknown.
 # Arguments:
@@ -1949,6 +2019,18 @@ run_perf_probe() {
 #######################################
 perf_probe_answer_field() {
     jq -r --arg field_name "$2" '.[$field_name] // empty' <<<"$1"
+}
+
+#######################################
+# Print one true-or-false field of the probe's JSON answer, or nothing when it
+# has none or it is not a boolean (jq's // would print nothing for false, so
+# perf_probe_answer_field cannot read one).
+# Arguments:
+#   $1 - the probe's answer
+#   $2 - field name
+#######################################
+perf_probe_answer_boolean() {
+    jq -r --arg field_name "$2" '.[$field_name] | select(type == "boolean")' <<<"$1"
 }
 
 #######################################
@@ -2108,14 +2190,16 @@ measure_perf_window() {
 # Keep and print one state's readings: the window's (measure_perf_window) and
 # the probe's read. The disabled state's are kept for the others, with its
 # Samples counted by time (no client); an enabled state's record is appended to
-# PERF_ENABLED_STATE_RECORDS, and its CPU reported over the disabled state's.
+# PERF_ENABLED_STATE_RECORDS, and its CPU reported over the disabled state's,
+# once the probe's facts show it set up as it is named (check_perf_state_setup):
+# exit 2 otherwise, with nothing kept or printed under its name.
 # Arguments:
 #   $1 - state name
 #   $2 - the probe's answer to read
 #######################################
 record_perf_state() {
     local state_name="$1" probe_answer="$2" frames samples topbar_paints card_redirect cpu_over_disabled
-    local samples_by_time cpu_report
+    local samples_by_time cpu_report is_card_visible is_indicator_mapped
     local state_line_format='%s: cpu=%s tick-median=%sms major-collections=%s'
     state_line_format+=' frames=%s samples=%s top-bar-paints=%s card-redirect=%s\n'
     frames="$(perf_probe_answer_field "$probe_answer" frames)"
@@ -2129,6 +2213,9 @@ record_perf_state() {
             "$PERF_WINDOW_MAJOR_COLLECTIONS" "$frames" "$samples_by_time (by time: no client while disabled)" - -
         return 0
     fi
+    is_card_visible="$(perf_probe_answer_boolean "$probe_answer" "$PERF_CARD_VISIBLE_FIELD")"
+    is_indicator_mapped="$(perf_probe_answer_boolean "$probe_answer" "$PERF_INDICATOR_MAPPED_FIELD")"
+    check_perf_state_setup "$state_name" "$is_card_visible" "$is_indicator_mapped" || exit "$EXIT_REFUSED"
     samples="$(perf_probe_answer_field "$probe_answer" samples)"
     topbar_paints="$(perf_probe_answer_field "$probe_answer" topbarPaints)"
     card_redirect="$(perf_probe_answer_field "$probe_answer" cardRedirect)"
@@ -2180,7 +2267,8 @@ measure_perf_state() {
 # budgets (see the header). Refuses (exit 2) before anything runs in the nested
 # shell unless the run is a verified, live run of this script started with
 # both options, its replay service runs, gnome-calculator is on PATH and the
-# shell's log holds a collection line of the recorded gnome-shell. Returns
+# shell's log holds a collection line of the recorded gnome-shell. Exits 2 at
+# an enabled state the probe does not find set up as it is named. Returns
 # perf_count_verdict's status: 0 within every budget, 1 a budget broken, 2 the
 # counts cannot be judged.
 #######################################
