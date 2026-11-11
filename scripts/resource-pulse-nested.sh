@@ -33,7 +33,14 @@
 #   service      the run's copy of the sampler service (service/main.js under gjs), started
 #                on the private session bus before the shell, with the same allowlist and
 #                nothing more; the extension's StartUnit finds no systemd there, and it
-#                draws from the service's Samples whatever StartUnit answered
+#                draws from the service's Samples whatever StartUnit answered. With --replay
+#                the run's copy of tests/nested/replay-service.js starts in its place, given
+#                the run's copy of the extension: the same bus name and protocol, synthetic
+#                Samples from a fixed seed, and it refuses any bus but the run's private one
+#   gc log       with --gc-log, gnome-shell alone gets JS_GC_PROFILE=0 and
+#                JS_GC_PROFILE_NURSERY=0 on top of the allowlist (set after both services
+#                start), so SpiderMonkey logs every collection (MajorGC: and MinorGC:
+#                lines) to its stderr, log/shell.log
 #   cockpit      the run's copy of the cockpit service (service/cockpit.js under gjs), started
 #                the same way after the sampler, reading the config template copied into the
 #                run's XDG_CONFIG_HOME; it finds no herdr (whose socket it looks for under that
@@ -41,8 +48,14 @@
 #   identity     a run's launcher, supervisor, services and gnome-shell are recorded by pid AND start
 #                time (stat field 22), and count only while both match: a pid alone can be
 #                reused once its process ends
-#   requests     eval and screenshot go only to a live run: its supervisor running, and its
-#                recorded gnome-shell running, as gnome-shell, in the run's own session
+#   requests     eval, screenshot, scenario and perf go only to a live run: its supervisor
+#                running, and its recorded gnome-shell running, as gnome-shell, in the run's
+#                own session; scenario and perf also need the run started with --replay, and
+#                its replay service running; perf also needs --gc-log
+#   perf         measures that recorded gnome-shell and nothing else: the cost script is given
+#                its pid, never left to look for "the" gnome-shell (the live one is the
+#                user's); the window it opens is a client of the nested shell only (the run's
+#                environment, its Wayland display in the run's runtime dir, its private bus)
 #   lifetime     setsid + timeout --kill-after. stop signals only the run's own session, and
 #                only while that session is still led by the run's recorded launcher
 #                (timeout, same pid and start time); a run whose session is gone is only
@@ -56,30 +69,63 @@
 # scripts/test-resource-pulse.sh.
 #
 # Usage:
-#   scripts/resource-pulse-nested.sh start
+#   scripts/resource-pulse-nested.sh start [--gc-log] [--replay]
 #       start a nested shell with the checkout's Resource Pulse enabled, and its
 #       sampler and cockpit services on the same private bus; print that bus's
-#       address on stdout and the run directory on stderr
+#       address on stdout and the run directory on stderr. Each option at most
+#       once, in either order, recorded in state/run.values (gc-log=1, replay=1):
+#         --gc-log  SpiderMonkey logs every collection to log/shell.log
+#         --replay  the replay service publishes fixed, synthetic input in place of
+#                   the sampler's (busy until a scenario is asked for)
 #   scripts/resource-pulse-nested.sh eval <javascript>|-
 #       run JavaScript in the nested shell (org.gnome.Shell.Eval) and print the
 #       JSON result; '-' reads the code from stdin
 #   scripts/resource-pulse-nested.sh screenshot <name.png> [x y width height]
 #       save the nested stage (or an area of it, in logical pixels) as
 #       <run dir>/shots/<name.png>, and print that path
+#   scripts/resource-pulse-nested.sh scenario <idle|light|busy>
+#       write the word, and a token new to this request, to <run dir>/run/rp-scenario
+#       of a live --replay run; from its next tick the replay service plays that
+#       scenario from the start of its sequence, even when it is the one playing:
+#       idle CPU 1-4%, light 2-14%, busy a walk between 15% and 90%
+#   scripts/resource-pulse-nested.sh perf
+#       measure a live run started with --gc-log --replay against the count budgets,
+#       in about nine minutes: open one gnome-calculator window, then for each state
+#       (disabled; card covered, idle input; covered, busy; top bar hidden, covered,
+#       busy; card visible, busy) request its scenario, set it up, wait 40 s, and
+#       measure one 60 s window with no eval running. Prints a line per state (CPU %
+#       of one core and the main thread's median per tick, reported only; major
+#       collections, frames, Samples, top-bar paints and the card's redirect, counted
+#       by an in-shell probe), then one verdict line naming each broken budget
+#       (exit 1): an enabled state's major collections more than the disabled
+#       state's plus one; its frames more than its Samples plus the disabled
+#       state's frames plus two; covered and idle, more frames than the disabled
+#       state's plus three; a top-bar paint while the top bar is hidden; the card
+#       not drawn through its offscreen texture; and the disabled state's own
+#       major collections more than four (a defect that outlives disable()).
+#       An enabled state the probe does not find set up as it is named (the card
+#       covered in the covered states and visible in visible-busy, the top bar
+#       hidden only in topbar-hidden-covered) stops it there, with exit 2.
+#       Every exit once it acts on the run (a breach, a failure or a signal too)
+#       puts the run back: its window and its background measurement ended, the
+#       extension enabled and the top bar shown again
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services and everything else it started;
-#       logs (log/service.log is the sampler's, log/cockpit.log the cockpit's) and
-#       shots stay
+#       logs (log/service.log is the sampler's, or with --replay the replay
+#       service's; log/cockpit.log the cockpit's) and shots stay
 #
 # Environment:
-#   RESOURCE_PULSE_NESTED_DIR     the run directory eval, screenshot and stop act on
+#   RESOURCE_PULSE_NESTED_DIR     the run directory eval, screenshot, scenario, perf and stop act on
 #                                 (needed only while more than one run is live)
 #   RESOURCE_PULSE_NESTED_BASE    where run directories are made: yours, with no group or
 #                                 other access (default $XDG_RUNTIME_DIR, else $TMPDIR)
 #   RESOURCE_PULSE_NESTED_LIFETIME_SECONDS  a run's hard lifetime (default 1200)
 #
 # Exit: 0 ok; 1 the nested shell ran the request and it failed (an Eval that
-#       threw, a screenshot it could not take); 2 refused, bad usage or could not run.
+#       threw, a screenshot it could not take, a perf count over its budget);
+#       2 refused, bad usage or could not run (for perf, also a count it could not
+#       judge, or a state not set up as it is named: never a pass and never a
+#       breach).
 
 set -uo pipefail
 
@@ -97,12 +143,147 @@ readonly DCONF_SERVICE_FILE='ca.desrt.dconf.service'
 readonly DCONF_SERVICE_NAME='ca.desrt.dconf'
 readonly DCONF_SERVICE_EXECUTABLE='/usr/libexec/dconf-service'
 readonly FAKE_DISPLAY_MANAGER_NAME='org.gnome.DisplayManager'
+# The run's own copy of the extension, relative to the run directory.
+readonly RUN_EXTENSION_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID"
 # The sampler service: the run's own copy of it, and the name it owns on the private session bus.
-readonly SERVICE_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/main.js"
+readonly SERVICE_MAIN_RELATIVE_PATH="$RUN_EXTENSION_RELATIVE_PATH/service/main.js"
 readonly SERVICE_BUS_NAME='io.github.quantivly.dotfiles.ResourcePulse1'
 # The cockpit service: the run's own copy of it, and the name it owns on the private session bus.
-readonly COCKPIT_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/cockpit.js"
+readonly COCKPIT_MAIN_RELATIVE_PATH="$RUN_EXTENSION_RELATIVE_PATH/service/cockpit.js"
 readonly COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
+# The replay service (--replay): the checkout's files copied into this directory of the run, and its entry module,
+# which owns the sampler's bus name in the sampler's place.
+readonly REPLAY_RELATIVE_DIR='replay'
+readonly REPLAY_MAIN_FILE_NAME='replay-service.js'
+readonly -a REPLAY_FILE_NAMES=("$REPLAY_MAIN_FILE_NAME" replayGenerator.js)
+readonly REPLAY_MAIN_RELATIVE_PATH="$REPLAY_RELATIVE_DIR/$REPLAY_MAIN_FILE_NAME"
+# The replay service's scenario words, and the file it reads the current one from: in the run's runtime dir.
+readonly IDLE_SCENARIO_NAME='idle'
+readonly LIGHT_SCENARIO_NAME='light'
+readonly BUSY_SCENARIO_NAME='busy'
+readonly -a REPLAY_SCENARIO_NAMES=("$IDLE_SCENARIO_NAME" "$LIGHT_SCENARIO_NAME" "$BUSY_SCENARIO_NAME")
+readonly REPLAY_SCENARIO_RELATIVE_PATH='run/rp-scenario'
+
+# perf: the cost script that reads the nested shell's CPU (always given the shell's pid, never left to find one),
+# the in-shell probe sent through Eval (gnome-shell/tests/nested/perf-probe.js) and the function its text declares,
+# with its three requests.
+readonly COST_SCRIPT_PATH="$REPO_ROOT/scripts/resource-pulse-cost.sh"
+readonly PERF_PROBE_PATH="$NESTED_FILES_DIR/perf-probe.js"
+readonly PERF_PROBE_FUNCTION_NAME='resourcePulsePerfProbe'
+readonly PERF_PROBE_ATTACH_DISABLED_REQUEST='attach-disabled'
+readonly PERF_PROBE_ATTACH_ENABLED_REQUEST='attach-enabled'
+readonly PERF_PROBE_READ_REQUEST='read'
+# The probe's two modes, and where an answer shows which one it ran in: .attached after an attach, .mode after a read.
+readonly PERF_PROBE_DISABLED_MODE='disabled'
+readonly PERF_PROBE_ENABLED_MODE='enabled'
+readonly PERF_PROBE_ATTACHED_KEY='attached'
+readonly PERF_PROBE_MODE_KEY='mode'
+# The window perf opens over the card, started as a client of the nested shell only, on Wayland alone.
+readonly PERF_WINDOW_COMMAND_NAME='gnome-calculator'
+readonly PERF_WINDOW_GDK_BACKEND='wayland'
+readonly PERF_WINDOW_APPEAR_TIMEOUT_SECONDS=30
+readonly PERF_WINDOW_POLL_INTERVAL_SECONDS=1
+# Each state: its scenario request, PERF_WARM_UP_SECONDS for the shell to settle into it (the performance design's
+# 40 s warm-up), then one window of PERF_WINDOW_SECONDS with no eval running.
+readonly PERF_WARM_UP_SECONDS=40
+readonly PERF_WINDOW_SECONDS=60
+# Where a window's CPU % is written while the main thread's median is read at the same time, in the run directory.
+readonly PERF_CPU_PERCENT_RELATIVE_PATH='state/perf-cpu-percent'
+# The extension's SAMPLE_INTERVAL_SECONDS (lib/constants.js): the disabled state has no client to count Samples, so
+# they are counted by time there, for the report only.
+readonly PERF_SAMPLE_INTERVAL_SECONDS=2
+# The five states, in the order perf measures them. Each begins with its own scenario request, so every run sees the
+# same input: idle while disabled and covered; busy, which changes the top bar on every tick, for the rest, the top
+# bar hidden included, so that a top bar painting while unmapped would paint on every tick there.
+readonly PERF_DISABLED_STATE='disabled'
+readonly PERF_COVERED_IDLE_STATE='covered-idle'
+readonly PERF_COVERED_BUSY_STATE='covered-busy'
+readonly PERF_TOPBAR_HIDDEN_STATE='topbar-hidden-covered'
+readonly PERF_VISIBLE_BUSY_STATE='visible-busy'
+readonly -a PERF_ENABLED_STATE_NAMES=("$PERF_COVERED_IDLE_STATE" "$PERF_COVERED_BUSY_STATE" "$PERF_TOPBAR_HIDDEN_STATE"
+    "$PERF_VISIBLE_BUSY_STATE")
+# The count budgets (docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md, "Budgets"), the counted
+# ones over the disabled state of the same run: an enabled state's major collections at most the disabled state's
+# plus one; its frames at most its Samples plus the disabled state's frames plus two; covered and idle, at most the
+# disabled state's frames plus three (the nested panel's clock and the covered card's dimmed repaint draw a few frames
+# in any window); no top-bar paint while the top bar is hidden; the card drawn through an offscreen texture (ALWAYS).
+readonly PERF_MAJOR_COLLECTIONS_ALLOWANCE=1
+# And one absolute bound, on the disabled state itself, since the counted budgets are relative to it: an idle nested
+# shell makes one or two major collections a minute (three have been seen), and a forced-collection defect five or
+# six. One that outlives disable() (a proxy left receiving Samples, say) raises the disabled state with the rest, and
+# would pass a budget measured against it.
+readonly PERF_MAX_DISABLED_MAJOR_COLLECTIONS=4
+readonly PERF_FRAMES_OVER_SAMPLES_ALLOWANCE=2
+readonly PERF_COVERED_IDLE_FRAMES_ALLOWANCE=3
+readonly PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED=0
+readonly PERF_WANTED_CARD_REDIRECT='ALWAYS'
+# How many words an enabled state's record has: major collections, frames, Samples, top-bar paints, card redirect.
+readonly PERF_ENABLED_RECORD_WORD_COUNT=5
+# The fields of the two facts a read answers about how an enabled state was set up (the extension's _isCardVisible,
+# the indicator's mapped), and what jq prints for a fact: check_perf_state_setup compares them with each state's name.
+readonly PERF_CARD_VISIBLE_FIELD='isCardVisible'
+readonly PERF_INDICATOR_MAPPED_FIELD='isIndicatorMapped'
+readonly PERF_FACT_PATTERN='^(true|false)$'
+# A count as perf's readings write it: no leading zero, which bash arithmetic would read as octal.
+readonly PERF_COUNT_PATTERN='^(0|[1-9][0-9]*)$'
+# SpiderMonkey's collection lines in the shell's log (`start --gc-log`): the line's first column, then its pid.
+readonly MAJOR_COLLECTION_LINE_PREFIX='MajorGC:'
+readonly MINOR_COLLECTION_LINE_PREFIX='MinorGC:'
+# What perf runs in the nested shell around the probe: the windows of the session, the one window perf opened (an
+# error unless there is exactly one), and each state's steps. Each answers a word, or throws.
+readonly PERF_NORMAL_WINDOWS_JS='global.display.list_all_windows()
+    .filter(window => window.get_window_type() === Meta.WindowType.NORMAL)'
+readonly PERF_ONE_WINDOW_JS="(() => {
+    const normalWindows = $PERF_NORMAL_WINDOWS_JS;
+    if (normalWindows.length !== 1)
+        throw new Error('perf expects exactly one window in the nested session, found ' + normalWindows.length);
+    return normalWindows[0];
+})()"
+readonly PERF_EXTENSION_JS="Main.extensionManager.lookup('$EXTENSION_UUID').stateObj"
+readonly PERF_COUNT_WINDOWS_JS="$PERF_NORMAL_WINDOWS_JS.length"
+readonly PERF_DISABLE_EXTENSION_JS="(() => {
+    Main.extensionManager.disableExtension('$EXTENSION_UUID');
+    return 'disabled';
+})()"
+readonly PERF_ENABLE_EXTENSION_JS="(() => {
+    Main.extensionManager.enableExtension('$EXTENSION_UUID');
+    return 'enabled';
+})()"
+readonly PERF_COVER_CARD_JS="(() => {
+    const coveringWindow = $PERF_ONE_WINDOW_JS;
+    coveringWindow.unminimize();
+    coveringWindow.maximize(Meta.MaximizeFlags.BOTH);
+    return 'covered';
+})()"
+readonly PERF_UNCOVER_CARD_JS="(() => { $PERF_ONE_WINDOW_JS.minimize(); return 'uncovered'; })()"
+readonly PERF_HIDE_TOPBAR_JS="(() => { $PERF_EXTENSION_JS._indicator.hide(); return 'hidden'; })()"
+readonly PERF_SHOW_TOPBAR_JS="(() => { $PERF_EXTENSION_JS._indicator.show(); return 'shown'; })()"
+# perf's exit, on every path, puts the run back as perf found it: the extension enabled when it has no indicator
+# (perf disabled it), then the indicator shown when it has one (perf hid it). Neither throws for a part that is not
+# there.
+readonly PERF_INDICATOR_OR_NULL_JS="Main.extensionManager.lookup('$EXTENSION_UUID')?.stateObj?._indicator ?? null"
+readonly PERF_RESTORE_EXTENSION_JS="(() => {
+    if ($PERF_INDICATOR_OR_NULL_JS)
+        return 'enabled already';
+    Main.extensionManager.enableExtension('$EXTENSION_UUID');
+    return 'enabled';
+})()"
+readonly PERF_RESTORE_TOPBAR_JS="(() => {
+    const indicator = $PERF_INDICATOR_OR_NULL_JS;
+    indicator?.show();
+    return indicator ? 'shown' : 'no indicator';
+})()"
+
+# start's options, and the run value each records as requested (name=1) in state/run.values.
+readonly GC_LOG_OPTION='--gc-log'
+readonly REPLAY_OPTION='--replay'
+readonly GC_LOG_RUN_VALUE_NAME='gc-log'
+readonly REPLAY_RUN_VALUE_NAME='replay'
+readonly REQUESTED_RUN_VALUE='1'
+# With --gc-log, the nested gnome-shell's environment gains these and nothing else. Each is a threshold (in ms for
+# major collections, in µs for nursery ones) past which SpiderMonkey logs a collection to stderr, as MajorGC: and
+# MinorGC: lines: 0 logs every one.
+readonly -a GC_LOG_ENVIRONMENT_ASSIGNMENTS=(JS_GC_PROFILE=0 JS_GC_PROFILE_NURSERY=0)
 # The cockpit's layout config: the checkout's template, copied to this path under the run's XDG_CONFIG_HOME.
 readonly COCKPIT_CONFIG_TEMPLATE="$REPO_ROOT/examples/resource-pulse-cockpit.json.template"
 readonly COCKPIT_CONFIG_RELATIVE_PATH='resource-pulse/cockpit.json'
@@ -161,6 +342,8 @@ readonly EVAL_REFUSED_REPLY_PREFIX='{"type":"bs","data":[false,'
 # /proc/<pid>/stat after the last ") ": state (field 3), ppid, pgrp, session (field 6).
 readonly STAT_STATE_INDEX_AFTER_COMM=0
 readonly STAT_SESSION_INDEX_AFTER_COMM=3
+# The parent's pid (field 4), counted the same way.
+readonly STAT_PARENT_INDEX_AFTER_COMM=1
 # Field 22, the start time in clock ticks after boot: with the pid it names one process, even after a reuse.
 readonly STAT_STARTTIME_INDEX_AFTER_COMM=19
 readonly DEAD_PROCESS_STATES='ZX'
@@ -177,6 +360,26 @@ STAT_FIELDS_AFTER_COMM=()
 # The pids collect_session_pids found, and how many of them count_remaining_session_pids left in.
 SESSION_PIDS=()
 REMAINING_SESSION_PID_COUNT=0
+# The run values start's options ask for (gc-log, replay), in the order given, filled by parse_start_options.
+REQUESTED_START_RUN_VALUE_NAMES=()
+# The window perf opened over the card, by pid and start time (end_perf_window ends only that process, and only
+# while it is still perf's own child); the start time stays empty when it could not be read.
+PERF_WINDOW_PID=""
+PERF_WINDOW_STARTTIME=""
+# The run's verified private bus, once perf has it: what end_perf_run restores the run over.
+PERF_ADDRESS=""
+# The window's --cpu-percent job, while it runs in the background of a measurement (end_perf_cost_job ends it).
+PERF_COST_JOB_PID=""
+# What measure_perf_window read of the window just measured.
+PERF_WINDOW_CPU_PERCENT=""
+PERF_WINDOW_TICK_MEDIAN_MS=""
+PERF_WINDOW_MAJOR_COLLECTIONS=""
+# The disabled state's readings, which every enabled state is judged and reported against.
+PERF_DISABLED_MAJOR_COLLECTIONS=""
+PERF_DISABLED_FRAMES=""
+PERF_DISABLED_CPU_PERCENT=""
+# Each enabled state's record for perf_count_verdict, in PERF_ENABLED_STATE_NAMES's order.
+PERF_ENABLED_STATE_RECORDS=()
 
 #######################################
 # Print a message to stderr.
@@ -202,9 +405,11 @@ die() {
 #######################################
 print_usage() {
     cat <<'USAGE'
-usage: scripts/resource-pulse-nested.sh start
+usage: scripts/resource-pulse-nested.sh start [--gc-log] [--replay]
        scripts/resource-pulse-nested.sh eval <javascript>|-
        scripts/resource-pulse-nested.sh screenshot <name.png> [x y width height]
+       scripts/resource-pulse-nested.sh scenario <idle|light|busy>
+       scripts/resource-pulse-nested.sh perf
        scripts/resource-pulse-nested.sh stop
 USAGE
 }
@@ -218,6 +423,65 @@ usage_error() {
     note "$1"
     print_usage >&2
     exit "$EXIT_REFUSED"
+}
+
+#######################################
+# Fill REQUESTED_START_RUN_VALUE_NAMES from start's options: --gc-log and
+# --replay, in either order, each at most once. Anything else is a usage error
+# (exit 2), before anything is looked at or made.
+# Arguments:
+#   $@ - the arguments after `start`
+#######################################
+parse_start_options() {
+    local start_option
+    REQUESTED_START_RUN_VALUE_NAMES=()
+    for start_option in "$@"; do
+        case "$start_option" in
+            "$GC_LOG_OPTION") add_requested_start_run_value "$GC_LOG_RUN_VALUE_NAME" "$start_option" ;;
+            "$REPLAY_OPTION") add_requested_start_run_value "$REPLAY_RUN_VALUE_NAME" "$start_option" ;;
+            *) usage_error "start takes only $GC_LOG_OPTION and $REPLAY_OPTION, got: '$start_option'" ;;
+        esac
+    done
+}
+
+#######################################
+# Add one run value to REQUESTED_START_RUN_VALUE_NAMES; a usage error (exit 2)
+# when its option was already given.
+# Arguments:
+#   $1 - run value name
+#   $2 - the option that asks for it
+#######################################
+add_requested_start_run_value() {
+    local run_value_name="$1" start_option="$2" requested_name
+    for requested_name in "${REQUESTED_START_RUN_VALUE_NAMES[@]}"; do
+        [[ "$requested_name" == "$run_value_name" ]] && usage_error "start takes $start_option at most once"
+    done
+    REQUESTED_START_RUN_VALUE_NAMES+=("$run_value_name")
+}
+
+#######################################
+# Record each run value start's options asked for as name=1 in the run's
+# state/run.values, where the in-bus stage and `scenario` read them: an option
+# crosses the `env -i` launch only through the run directory, so the isolated
+# environment never grows for it.
+# Arguments:
+#   $1 - run directory
+#######################################
+record_requested_start_options() {
+    local run_value_name
+    for run_value_name in "${REQUESTED_START_RUN_VALUE_NAMES[@]}"; do
+        record_run_value "$1" "$run_value_name" "$REQUESTED_RUN_VALUE" || return 1
+    done
+}
+
+#######################################
+# Succeed when the run recorded a run value as requested (name=1).
+# Arguments:
+#   $1 - run directory
+#   $2 - run value name (gc-log, replay)
+#######################################
+is_requested_in_run() {
+    [[ "$(recorded_run_value "$1" "$2")" == "$REQUESTED_RUN_VALUE" ]]
 }
 
 #######################################
@@ -493,19 +757,24 @@ render_bus_config() {
 #######################################
 # Lay out a fresh run directory: the private homes and runtime dir, the bus
 # configs, the one dconf service, the session mode, the app masks, the
-# unsafe-mode helper, a copy of the checkout's extension, and the cockpit's
-# config template in the run's config home.
+# unsafe-mode helper, a copy of the checkout's extension, a copy of the replay
+# service (which only --replay starts), and the cockpit's config template in
+# the run's config home.
 # Arguments:
 #   $1 - run directory (exists, empty, 0700)
 #   $2 - run suffix
 #######################################
 prepare_run_directory() {
-    local run_dir="$1" run_suffix="$2"
+    local run_dir="$1" run_suffix="$2" replay_file_name
     local cockpit_config_dir="config/${COCKPIT_CONFIG_RELATIVE_PATH%/*}"
     local -a subdirectories=(run config "$cockpit_config_dir" cache home tmp data/applications
-        data/gnome-shell/extensions sysdata/gnome-shell/modes bus/session-services state log shots)
+        data/gnome-shell/extensions sysdata/gnome-shell/modes bus/session-services state log shots
+        "$REPLAY_RELATIVE_DIR")
     # Every directory private to the user, intermediate ones included (the runtime dir must be 0700).
     (umask "$PRIVATE_UMASK" && mkdir -p "${subdirectories[@]/#/$run_dir/}") || return 1
+    for replay_file_name in "${REPLAY_FILE_NAMES[@]}"; do
+        cp -- "$NESTED_FILES_DIR/$replay_file_name" "$run_dir/$REPLAY_RELATIVE_DIR/" || return 1
+    done
     printf '%s\n' "$run_suffix" >"$run_dir/$RUN_DIR_MARKER_FILE" || return 1
     render_bus_config "$NESTED_FILES_DIR/session-bus.conf.in" "$run_dir" >"$run_dir/bus/session-bus.conf" || return 1
     render_bus_config "$NESTED_FILES_DIR/system-bus.conf.in" "$run_dir" >"$run_dir/bus/system-bus.conf" || return 1
@@ -682,7 +951,7 @@ is_nested_shell_live() {
 }
 
 #######################################
-# Print the run directory eval, screenshot and stop act on:
+# Print the run directory eval, screenshot, scenario, perf and stop act on:
 # RESOURCE_PULSE_NESTED_DIR, else the one run under the base that is live: not
 # stopped, not ended, and with its supervisor or launcher still running (a run
 # whose lifetime ran out, or that crashed, is skipped). Exit 2 when there is
@@ -1007,20 +1276,53 @@ wait_for_nested_service() {
 #   $2 - the name to record it under (service, cockpit)
 #   $3 - its entry module, relative to the run directory
 #   $4 - the bus name it owns
+#   $@ - the entry module's own arguments, if any
 #######################################
 start_nested_service() {
     local run_dir="$1" process_name="$2" main_relative_path="$3" bus_name="$4"
     local log_relative_path="log/$process_name.log"
-    gjs -m "$run_dir/$main_relative_path" >"$run_dir/$log_relative_path" 2>&1 &
+    shift 4
+    gjs -m "$run_dir/$main_relative_path" "$@" >"$run_dir/$log_relative_path" 2>&1 &
     record_running_process "$run_dir" "$process_name" "$!"
     wait_for_nested_service "$run_dir" "$process_name" "$bus_name" \
         || refuse_run "$run_dir" "the service at $main_relative_path did not take $bus_name ($log_relative_path)"
 }
 
 #######################################
+# Start what publishes the Samples, recorded as the run's `service`: the run's
+# copy of the sampler service, or with --replay (replay=1 recorded) the run's
+# copy of the replay service in its place, given the run's copy of the
+# extension, whose protocol it speaks.
+# Arguments:
+#   $1 - run directory
+#######################################
+start_nested_sampler() {
+    local run_dir="$1"
+    if is_requested_in_run "$run_dir" "$REPLAY_RUN_VALUE_NAME"; then
+        start_nested_service "$run_dir" service "$REPLAY_MAIN_RELATIVE_PATH" "$SERVICE_BUS_NAME" \
+            "$run_dir/$RUN_EXTENSION_RELATIVE_PATH"
+    else
+        start_nested_service "$run_dir" service "$SERVICE_MAIN_RELATIVE_PATH" "$SERVICE_BUS_NAME"
+    fi
+}
+
+#######################################
+# With --gc-log (gc-log=1 recorded), export the two collection-log variables
+# and nothing else. Called last before `exec gnome-shell`, after both services
+# started, so the shell alone gets them.
+# Arguments:
+#   $1 - run directory
+#######################################
+export_gc_log_variables_when_requested() {
+    is_requested_in_run "$1" "$GC_LOG_RUN_VALUE_NAME" || return 0
+    export "${GC_LOG_ENVIRONMENT_ASSIGNMENTS[@]}"
+}
+
+#######################################
 # Stage 3, inside the private session bus: refuse unless isolated, write the
-# nested settings, start the sampler service and then the cockpit service,
-# record the bus, then become gnome-shell (same pid).
+# nested settings, start the sampler service (or the replay service) and then
+# the cockpit service, record the bus, then become gnome-shell (same pid), with
+# the collection log's two variables when asked for.
 # Arguments:
 #   $1 - run directory
 #######################################
@@ -1032,10 +1334,11 @@ run_inside_private_session_bus() {
         || refuse_run "$run_dir" "the session bus is not this run's private one: '${DBUS_SESSION_BUS_ADDRESS:-}'"
     write_nested_settings || refuse_run "$run_dir" "a nested setting could not be written"
     [[ -s "$XDG_CONFIG_HOME/dconf/user" ]] || refuse_run "$run_dir" "the settings did not land in the nested dconf"
-    start_nested_service "$run_dir" service "$SERVICE_MAIN_RELATIVE_PATH" "$SERVICE_BUS_NAME"
+    start_nested_sampler "$run_dir"
     start_nested_service "$run_dir" cockpit "$COCKPIT_MAIN_RELATIVE_PATH" "$COCKPIT_BUS_NAME"
     record_running_process "$run_dir" gnome-shell "$$"
     printf '%s\n' "$DBUS_SESSION_BUS_ADDRESS" >"$run_dir/state/session.addr"
+    export_gc_log_variables_when_requested "$run_dir"
     exec gnome-shell --headless --wayland --no-x11 --virtual-monitor "$NESTED_MONITOR_SIZE" \
         --wayland-display "$NESTED_WAYLAND_DISPLAY" --mode "$NESTED_SESSION_MODE"
 }
@@ -1145,10 +1448,11 @@ confirm_nested_shell_isolation() {
 }
 
 #######################################
-# `start`: make and lay out a run directory under a private base, check the
-# bus configs, launch the supervisor under setsid + timeout with the isolated
-# environment, wait for the shell, confirm its isolation, and print its private
-# bus address.
+# `start [--gc-log] [--replay]` (the options already parsed into
+# REQUESTED_START_RUN_VALUE_NAMES): make and lay out a run directory under a
+# private base, check the bus configs, record the options, launch the
+# supervisor under setsid + timeout with the isolated environment, wait for the
+# shell, confirm its isolation, and print its private bus address.
 #######################################
 start_subcommand() {
     local base_dir run_dir run_suffix lifetime_seconds address
@@ -1177,6 +1481,10 @@ start_subcommand() {
         ! system_bus_config_activates_nothing "$run_dir/bus/system-bus.conf"; then
         rm -rf -- "$run_dir"
         die "refusing: a rendered bus config could activate more than dconf"
+    fi
+    if ! record_requested_start_options "$run_dir"; then
+        rm -rf -- "$run_dir"
+        die "could not record start's options in $run_dir/state/run.values"
     fi
     build_isolated_env_command "$run_dir" || die "cannot build the isolated environment"
 
@@ -1330,6 +1638,72 @@ screenshot_subcommand() {
 }
 
 #######################################
+# Succeed when a word is one of the replay service's scenarios.
+# Arguments:
+#   $1 - word
+#######################################
+is_replay_scenario_name() {
+    local scenario_name
+    for scenario_name in "${REPLAY_SCENARIO_NAMES[@]}"; do
+        [[ "$1" == "$scenario_name" ]] && return 0
+    done
+    return 1
+}
+
+#######################################
+# Replace a run's scenario file with one request, in one rename, so the replay
+# service never reads it half written: the word, then a token new to this
+# request (request_id: the random suffix of the staging file's mktemp name).
+# The replay service restarts whenever the request it reads is not the one it
+# read last, so asking again for the word already playing restarts it too. The
+# run directory is the user's own and 0700 (verified_run_suffix), so nothing
+# else can have placed a link there.
+# Arguments:
+#   $1 - run directory
+#   $2 - scenario word
+#######################################
+write_scenario_word() {
+    local run_dir="$1" scenario_name="$2" scenario_path staging_path request_id
+    scenario_path="$run_dir/$REPLAY_SCENARIO_RELATIVE_PATH"
+    [[ -d "${scenario_path%/*}" && ! -L "${scenario_path%/*}" ]] || return 1
+    staging_path="$(mktemp "$scenario_path.XXXXXX")" || return 1
+    request_id="${staging_path##*.}"
+    if ! printf '%s %s\n' "$scenario_name" "$request_id" >"$staging_path" ||
+        ! mv -f -- "$staging_path" "$scenario_path"; then
+        rm -f -- "$staging_path"
+        return 1
+    fi
+}
+
+#######################################
+# `scenario <idle|light|busy>`: write the word and a new request token to
+# <run dir>/run/rp-scenario of a live run started with --replay. From its next
+# tick the replay service plays that scenario from the start of its sequence,
+# even when it is the one playing. Any other word is a usage error, refused
+# before a run is looked for; a run not started with --replay, not live, or
+# whose replay service is not running is refused (exit 2), and nothing is
+# written.
+# Arguments:
+#   $1 - scenario word
+#######################################
+scenario_subcommand() {
+    local scenario_name="$1" run_dir
+    is_replay_scenario_name "$scenario_name" \
+        || usage_error "not a scenario: '$scenario_name' (one of: ${REPLAY_SCENARIO_NAMES[*]})"
+    require_tools stat mktemp mv
+    run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
+    verified_run_suffix "$run_dir" >/dev/null || die "not a run directory of this script: $run_dir"
+    is_requested_in_run "$run_dir" "$REPLAY_RUN_VALUE_NAME" \
+        || die "refusing: the run in $run_dir was not started with $REPLAY_OPTION"
+    is_nested_shell_live "$run_dir" || die "refusing: the run in $run_dir is not live"
+    is_recorded_process_running "$run_dir" service \
+        || die "refusing: the run's replay service is not running (see $run_dir/log/service.log)"
+    write_scenario_word "$run_dir" "$scenario_name" \
+        || die "could not write $run_dir/$REPLAY_SCENARIO_RELATIVE_PATH"
+    note "scenario $scenario_name: the replay service takes it at its next tick, from the start of its sequence"
+}
+
+#######################################
 # `stop`
 #######################################
 stop_subcommand() {
@@ -1340,11 +1714,623 @@ stop_subcommand() {
     stop_run "$run_dir" || exit "$EXIT_REFUSED"
 }
 
+#######################################
+# Print how many major collections the nested shell logged past a byte offset
+# of its log: the MajorGC: lines whose pid column is the shell's. The column
+# header, MinorGC: lines, another process's lines and a line that only mentions
+# MajorGC: are not counted. Fails when the log cannot be read: never a count of
+# 0 that would pass for one.
+# Arguments:
+#   $1 - log path
+#   $2 - the byte offset the window began at
+#   $3 - the nested shell's pid
+#######################################
+count_major_collections_since() {
+    local log_path="$1" window_start_offset="$2" shell_pid="$3" first_window_byte
+    first_window_byte=$(( window_start_offset + 1 ))
+    tail -c "+$first_window_byte" "$log_path" \
+        | awk -v line_prefix="$MAJOR_COLLECTION_LINE_PREFIX" -v shell_pid="$shell_pid" \
+            '$1 == line_prefix && $2 == shell_pid { major_collection_count++ }
+            END { print major_collection_count + 0 }'
+}
+
+#######################################
+# Succeed when the shell's log holds a collection line (MajorGC: or MinorGC:)
+# of the given pid: SpiderMonkey logs that shell's collections. Without one,
+# every count of collections would read 0.
+# Arguments:
+#   $1 - log path
+#   $2 - the nested shell's pid
+#######################################
+has_collection_lines_of() {
+    awk -v major_prefix="$MAJOR_COLLECTION_LINE_PREFIX" -v minor_prefix="$MINOR_COLLECTION_LINE_PREFIX" \
+        -v shell_pid="$2" \
+        '($1 == major_prefix || $1 == minor_prefix) && $2 == shell_pid { has_collection_line = 1; exit }
+        END { exit !has_collection_line }' "$1"
+}
+
+#######################################
+# Print the line perf_count_verdict prints for counts it cannot judge.
+# Arguments:
+#   $1 - why
+#######################################
+print_unjudgeable_counts() {
+    printf 'perf: could not judge the counts: %s\n' "$1"
+}
+
+#######################################
+# Succeed when every argument is a count: a whole number written with no
+# leading zero (PERF_COUNT_PATTERN).
+# Arguments:
+#   $@ - words
+#######################################
+are_counts() {
+    local word
+    for word in "$@"; do
+        [[ "$word" =~ $PERF_COUNT_PATTERN ]] || return 1
+    done
+    return 0
+}
+
+#######################################
+# Judge a perf run's counts against the count budgets and print one line: the
+# pass, each broken budget by name, or why the counts cannot be judged. Pure:
+# it reads no file and starts nothing. Every enabled state is judged against
+# the disabled state of the same run: its major collections, at most the
+# disabled state's plus PERF_MAJOR_COLLECTIONS_ALLOWANCE; its frames, at most
+# its Samples plus the disabled state's frames plus
+# PERF_FRAMES_OVER_SAMPLES_ALLOWANCE; covered and idle, its frames at most the
+# disabled state's plus PERF_COVERED_IDLE_FRAMES_ALLOWANCE; with the top bar
+# hidden, no top-bar paint; and the card's offscreen redirect ALWAYS. The
+# disabled state itself has one absolute bound: at most
+# PERF_MAX_DISABLED_MAJOR_COLLECTIONS major collections, so that a defect that
+# outlives disable() cannot hide in the state the others are measured against.
+# Arguments:
+#   $1 - the disabled state's major collections
+#   $2 - the disabled state's frames
+#   $3.. - each enabled state, in PERF_ENABLED_STATE_NAMES's order, as one word
+#          list: "<major collections> <frames> <Samples> <top-bar paints>
+#          <card redirect>"
+# Returns:
+#   0 every count within its budget; 1 a budget broken; 2 the counts cannot be
+#   judged: a state missing, a record of the wrong length, a count that is not
+#   a whole number, or a visible-busy window in which the probe counted no
+#   frame, no Sample or no paint, where each must happen (a probe that is not
+#   counting would make every budget pass)
+#######################################
+perf_count_verdict() {
+    local disabled_major_collections="${1:-}" disabled_frames="${2:-}" state_index state_name breach listed_breach
+    local major_collections frames samples topbar_paints card_redirect joined_breaches budget_noun unjudgeable_reason
+    local major_collections_limit frames_limit covered_idle_frames_limit
+    local expected_argument_count=$(( 2 + ${#PERF_ENABLED_STATE_NAMES[@]} ))
+    local -a enabled_records=("${@:3}") record_words breaches=()
+    if (( $# != expected_argument_count )); then
+        unjudgeable_reason="wanted the disabled state's two counts and a record per enabled state"
+        print_unjudgeable_counts "$unjudgeable_reason ($expected_argument_count arguments), got $#"
+        return "$EXIT_REFUSED"
+    fi
+    if ! are_counts "$disabled_major_collections" "$disabled_frames"; then
+        unjudgeable_reason="the disabled state's counts are not whole numbers"
+        print_unjudgeable_counts "$unjudgeable_reason: '$disabled_major_collections' '$disabled_frames'"
+        return "$EXIT_REFUSED"
+    fi
+    # Every record is checked before any is judged: a count that cannot be trusted voids the run, breaches included.
+    for state_index in "${!PERF_ENABLED_STATE_NAMES[@]}"; do
+        state_name="${PERF_ENABLED_STATE_NAMES[state_index]}"
+        read -r -a record_words <<<"${enabled_records[state_index]}"
+        if (( ${#record_words[@]} != PERF_ENABLED_RECORD_WORD_COUNT )) || ! are_counts "${record_words[@]:0:4}"
+        then
+            unjudgeable_reason="$state_name's record is not four whole numbers and the card's redirect"
+            print_unjudgeable_counts "$unjudgeable_reason: '${enabled_records[state_index]}'"
+            return "$EXIT_REFUSED"
+        fi
+        if [[ "$state_name" == "$PERF_VISIBLE_BUSY_STATE" ]] &&
+            (( record_words[1] == 0 || record_words[2] == 0 || record_words[3] == 0 )); then
+            unjudgeable_reason="the probe counted no frame, Sample or top-bar paint in $state_name,"
+            print_unjudgeable_counts "$unjudgeable_reason where each must happen: it is not counting"
+            return "$EXIT_REFUSED"
+        fi
+    done
+    if (( disabled_major_collections > PERF_MAX_DISABLED_MAJOR_COLLECTIONS )); then
+        breach="disabled-collections: $PERF_DISABLED_STATE had $disabled_major_collections major collections,"
+        breach+=" more than $PERF_MAX_DISABLED_MAJOR_COLLECTIONS: something outlives disable(), or the run is not idle"
+        breaches+=("$breach")
+    fi
+    major_collections_limit=$(( disabled_major_collections + PERF_MAJOR_COLLECTIONS_ALLOWANCE ))
+    covered_idle_frames_limit=$(( disabled_frames + PERF_COVERED_IDLE_FRAMES_ALLOWANCE ))
+    for state_index in "${!PERF_ENABLED_STATE_NAMES[@]}"; do
+        state_name="${PERF_ENABLED_STATE_NAMES[state_index]}"
+        read -r major_collections frames samples topbar_paints card_redirect <<<"${enabled_records[state_index]}"
+        frames_limit=$(( samples + disabled_frames + PERF_FRAMES_OVER_SAMPLES_ALLOWANCE ))
+        if (( major_collections > major_collections_limit )); then
+            breach="collections: $state_name had $major_collections major collections,"
+            breach+=" more than the disabled state's $disabled_major_collections plus $PERF_MAJOR_COLLECTIONS_ALLOWANCE"
+            breaches+=("$breach")
+        fi
+        if (( frames > frames_limit )); then
+            breach="frames-per-sample: $state_name drew $frames frames, more than its $samples Samples"
+            breach+=" plus the disabled state's $disabled_frames frames plus $PERF_FRAMES_OVER_SAMPLES_ALLOWANCE"
+            breaches+=("$breach")
+        fi
+        if [[ "$state_name" == "$PERF_COVERED_IDLE_STATE" ]] && (( frames > covered_idle_frames_limit )); then
+            breach="covered-idle-frames: $state_name drew $frames frames,"
+            breach+=" more than the disabled state's $disabled_frames frames plus $PERF_COVERED_IDLE_FRAMES_ALLOWANCE"
+            breaches+=("$breach")
+        fi
+        if [[ "$state_name" == "$PERF_TOPBAR_HIDDEN_STATE" ]] &&
+            (( topbar_paints > PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED )); then
+            breach="hidden-topbar-paints: $state_name painted the top bar while it was hidden"
+            breach+=" (top-bar paints $topbar_paints, allowed $PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED)"
+            breaches+=("$breach")
+        fi
+        if [[ "$card_redirect" != "$PERF_WANTED_CARD_REDIRECT" ]]; then
+            breach="card-redirect: $state_name found the card's offscreen redirect $card_redirect,"
+            breach+=" not $PERF_WANTED_CARD_REDIRECT"
+            breaches+=("$breach")
+        fi
+    done
+    if (( ${#breaches[@]} == 0 )); then
+        printf 'perf: PASS: every count within its budget\n'
+        return 0
+    fi
+    joined_breaches="${breaches[0]}"
+    for listed_breach in "${breaches[@]:1}"; do
+        joined_breaches+="; $listed_breach"
+    done
+    budget_noun='budgets'
+    (( ${#breaches[@]} == 1 )) && budget_noun='budget'
+    printf 'perf: FAIL: %s count %s broken: %s\n' "${#breaches[@]}" "$budget_noun" "$joined_breaches"
+    return "$EXIT_REQUEST_FAILED"
+}
+
+#######################################
+# Succeed when an enabled state was set up as it is named, from the probe's two
+# facts read at the end of its window: the card covered (not visible) in the
+# covered states and visible in visible-busy; the top bar indicator unmapped
+# in topbar-hidden-covered and mapped in every other. Otherwise print why,
+# naming the state and what was expected, and return 2: a window that did not
+# maximize or minimize, or a top bar not hidden or not shown again, would
+# report its counts under the wrong name, so the state could not be measured,
+# which is neither a pass nor a breach. Pure: it reads no file and starts
+# nothing.
+# Arguments:
+#   $1 - state name (one of PERF_ENABLED_STATE_NAMES)
+#   $2 - whether the card counts as visible: true or false
+#   $3 - whether the indicator is mapped: true or false
+# Returns:
+#   0 set up as named; 2 not, a fact that is not true or false, or a name that
+#   is not an enabled state's
+#######################################
+check_perf_state_setup() {
+    local state_name="$1" is_card_visible="$2" is_indicator_mapped="$3" expected_indicator_mapped=true
+    local indicator_mismatch='expected the top bar indicator mapped (shown), and it is unmapped'
+    local joined_mismatches listed_mismatch
+    local not_set_up_lead="perf: could not measure $state_name: it was not set up as named:"
+    local facts_text="card visible '$is_card_visible', indicator mapped '$is_indicator_mapped'"
+    local -a mismatches=()
+    case "$state_name" in
+        "$PERF_COVERED_IDLE_STATE" | "$PERF_COVERED_BUSY_STATE" | "$PERF_TOPBAR_HIDDEN_STATE" | \
+            "$PERF_VISIBLE_BUSY_STATE") ;;
+        *)
+            printf "perf: could not measure '%s': not an enabled state\n" "$state_name"
+            return "$EXIT_REFUSED" ;;
+    esac
+    if [[ ! "$is_card_visible" =~ $PERF_FACT_PATTERN || ! "$is_indicator_mapped" =~ $PERF_FACT_PATTERN ]]; then
+        printf "perf: could not measure %s: the probe's facts are not true or false: %s\n" "$state_name" "$facts_text"
+        return "$EXIT_REFUSED"
+    fi
+    # The covered states: perf's window, maximized, covers the card.
+    if [[ "$state_name" != "$PERF_VISIBLE_BUSY_STATE" && "$is_card_visible" != false ]]; then
+        mismatches+=("expected the card covered (not visible), and it counts as visible")
+    fi
+    # visible-busy: that window minimized, the card can be seen.
+    if [[ "$state_name" == "$PERF_VISIBLE_BUSY_STATE" && "$is_card_visible" != true ]]; then
+        mismatches+=("expected the card visible, and it counts as covered")
+    fi
+    # The top bar: hidden only in topbar-hidden-covered, and shown again before visible-busy.
+    if [[ "$state_name" == "$PERF_TOPBAR_HIDDEN_STATE" ]]; then
+        expected_indicator_mapped=false
+        indicator_mismatch='expected the top bar indicator unmapped (hidden), and it is mapped'
+    fi
+    if [[ "$is_indicator_mapped" != "$expected_indicator_mapped" ]]; then
+        mismatches+=("$indicator_mismatch")
+    fi
+    (( ${#mismatches[@]} == 0 )) && return 0
+    joined_mismatches="${mismatches[0]}"
+    for listed_mismatch in "${mismatches[@]:1}"; do
+        joined_mismatches+="; $listed_mismatch"
+    done
+    printf '%s %s\n' "$not_set_up_lead" "$joined_mismatches"
+    return "$EXIT_REFUSED"
+}
+
+#######################################
+# Run one of perf's steps in the nested shell; exit 2 when it did not run or
+# threw, since the state it was setting up is then unknown.
+# Arguments:
+#   $1 - verified private bus address
+#   $2 - what the step does, for the message
+#   $3 - JavaScript
+#######################################
+run_perf_step() {
+    eval_in_nested_shell "$1" "$3" >/dev/null || die "perf could not $2 in the nested shell"
+}
+
+#######################################
+# Succeed only when the probe's answer shows that the request ran: a JSON
+# object, no refusal, and the mode it attached in (attach-disabled,
+# attach-enabled: .attached) or read in (read: .mode) the one expected. An
+# empty answer, null, an object without that sign or with another mode (a
+# completion value lost on the way, or a probe that did not run as asked) is
+# not taken for success, so it fails here and not nine minutes later at the
+# verdict. Says why on stderr.
+# Arguments:
+#   $1 - request (attach-disabled, attach-enabled, read)
+#   $2 - the mode the answer must show (disabled, enabled)
+#   $3 - the probe's answer
+#######################################
+is_successful_perf_probe_answer() {
+    local probe_request="$1" expected_mode="$2" probe_answer="$3" probe_refusal answered_mode
+    local success_key="$PERF_PROBE_ATTACHED_KEY"
+    [[ "$probe_request" == "$PERF_PROBE_READ_REQUEST" ]] && success_key="$PERF_PROBE_MODE_KEY"
+    if ! probe_refusal="$(jq -r '.refused // empty' <<<"$probe_answer" 2>/dev/null)"; then
+        note "the in-shell probe's answer to $probe_request is not a JSON object: '$probe_answer'"
+        return 1
+    fi
+    if [[ -n "$probe_refusal" ]]; then
+        note "the in-shell probe refused $probe_request: $probe_refusal"
+        return 1
+    fi
+    answered_mode="$(jq -r --arg success_key "$success_key" '.[$success_key] // empty' <<<"$probe_answer")"
+    if [[ "$answered_mode" != "$expected_mode" ]]; then
+        note "the in-shell probe's answer to $probe_request shows no sign that it ran" \
+            "($success_key is '$answered_mode', not '$expected_mode'): '$probe_answer'"
+        return 1
+    fi
+}
+
+#######################################
+# Print the in-shell probe's JSON answer to one request: perf-probe.js's text,
+# then one call of its function, through Eval. Exit 2 when the call fails, the
+# probe throws or refuses, or its answer shows no sign that it ran in the mode
+# expected (is_successful_perf_probe_answer): it never attaches to nothing.
+# Arguments:
+#   $1 - verified private bus address
+#   $2 - request (attach-disabled, attach-enabled, read)
+#   $3 - the mode the answer must show (disabled, enabled)
+#######################################
+run_perf_probe() {
+    local address="$1" probe_request="$2" expected_mode="$3" probe_source probe_call probe_code probe_answer
+    probe_source="$(<"$PERF_PROBE_PATH")" || die "cannot read $PERF_PROBE_PATH"
+    probe_call="$PERF_PROBE_FUNCTION_NAME('$probe_request');"
+    probe_code="$probe_source"$'\n'"$probe_call"
+    probe_answer="$(eval_in_nested_shell "$address" "$probe_code")" \
+        || die "the in-shell probe's $probe_request did not run"
+    is_successful_perf_probe_answer "$probe_request" "$expected_mode" "$probe_answer" || exit "$EXIT_REFUSED"
+    printf '%s\n' "$probe_answer"
+}
+
+#######################################
+# Print one field of the probe's JSON answer, or nothing when it has none
+# (perf_count_verdict then refuses to judge the record).
+# Arguments:
+#   $1 - the probe's answer
+#   $2 - field name
+#######################################
+perf_probe_answer_field() {
+    jq -r --arg field_name "$2" '.[$field_name] // empty' <<<"$1"
+}
+
+#######################################
+# Print one true-or-false field of the probe's JSON answer, or nothing when it
+# has none or it is not a boolean (jq's // would print nothing for false, so
+# perf_probe_answer_field cannot read one).
+# Arguments:
+#   $1 - the probe's answer
+#   $2 - field name
+#######################################
+perf_probe_answer_boolean() {
+    jq -r --arg field_name "$2" '.[$field_name] | select(type == "boolean")' <<<"$1"
+}
+
+#######################################
+# Start the window perf covers the card with: gnome-calculator, as a client of
+# the nested shell only, through the run's isolated environment plus its
+# Wayland display (a socket in the run's runtime dir), the Wayland backend and
+# the run's private bus; logged to log/gnome-calculator.log. Records it in
+# PERF_WINDOW_PID and PERF_WINDOW_STARTTIME for end_perf_window.
+# Arguments:
+#   $1 - run directory
+#   $2 - verified private bus address
+#   $3 - gnome-calculator's path
+#######################################
+start_perf_window() {
+    local run_dir="$1" address="$2" window_command_path="$3"
+    local window_log_path="$run_dir/log/$PERF_WINDOW_COMMAND_NAME.log"
+    build_isolated_env_command "$run_dir" || die "cannot build the isolated environment"
+    "${ISOLATED_ENV_COMMAND[@]}" "WAYLAND_DISPLAY=$NESTED_WAYLAND_DISPLAY" "GDK_BACKEND=$PERF_WINDOW_GDK_BACKEND" \
+        "DBUS_SESSION_BUS_ADDRESS=$address" "$window_command_path" </dev/null >"$window_log_path" 2>&1 &
+    PERF_WINDOW_PID=$!
+    PERF_WINDOW_STARTTIME="$(starttime_of_process /proc "$PERF_WINDOW_PID")" || PERF_WINDOW_STARTTIME=""
+}
+
+#######################################
+# Succeed while a pid is a running child of this shell: what perf started in
+# the background and has not reaped. A pid reused by any other process has
+# another parent.
+# Arguments:
+#   $1 - pid
+#######################################
+is_own_child_process() {
+    [[ "$1" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || return 1
+    read_stat_fields /proc "$1" || return 1
+    [[ "${STAT_FIELDS_AFTER_COMM[$STAT_PARENT_INDEX_AFTER_COMM]:-}" == "$$" ]]
+}
+
+#######################################
+# Succeed while the window perf started is still the process it recorded: its
+# own child, with the start time recorded at launch (when that could be read).
+#######################################
+is_perf_window_running() {
+    is_own_child_process "$PERF_WINDOW_PID" || return 1
+    [[ -z "$PERF_WINDOW_STARTTIME" ||
+        "$(starttime_of_process /proc "$PERF_WINDOW_PID")" == "$PERF_WINDOW_STARTTIME" ]]
+}
+
+#######################################
+# End the window perf started, only while it is still that process (also when
+# its start time could not be read: then by the pid recorded at launch, which
+# must still be perf's own child).
+#######################################
+end_perf_window() {
+    is_perf_window_running && kill -TERM "$PERF_WINDOW_PID" 2>/dev/null
+    return 0
+}
+
+#######################################
+# End a window's background --cpu-percent job, only while it is still perf's
+# own child.
+#######################################
+end_perf_cost_job() {
+    is_own_child_process "$PERF_COST_JOB_PID" && kill -TERM "$PERF_COST_JOB_PID" 2>/dev/null
+    return 0
+}
+
+#######################################
+# Put the nested run's extension back as perf found it, over the run's verified
+# private bus (nothing before perf has one): enabled, then its indicator shown.
+# Each step runs whatever the one before did, and a failure is only reported.
+#######################################
+restore_perf_extension() {
+    [[ -n "$PERF_ADDRESS" ]] || return 0
+    eval_in_nested_shell "$PERF_ADDRESS" "$PERF_RESTORE_EXTENSION_JS" >/dev/null \
+        || note "perf could not enable the extension again in the nested shell"
+    eval_in_nested_shell "$PERF_ADDRESS" "$PERF_RESTORE_TOPBAR_JS" >/dev/null \
+        || note "perf could not show the top bar again in the nested shell"
+    return 0
+}
+
+#######################################
+# perf's exit, on every path once it has started acting on the run (the EXIT
+# trap): end the window it opened and its background measurement job, then
+# enable the extension and show the top bar again. Each step is guarded, so one
+# that fails never skips the others, and none exits: it acts on the nested run
+# and perf's own children only.
+#######################################
+end_perf_run() {
+    end_perf_window
+    end_perf_cost_job
+    restore_perf_extension
+    return 0
+}
+
+#######################################
+# Wait until the nested session holds exactly one window (the one perf
+# started); fail as soon as that process is gone, or after
+# PERF_WINDOW_APPEAR_TIMEOUT_SECONDS.
+# Arguments:
+#   $1 - verified private bus address
+#######################################
+wait_for_perf_window() {
+    local address="$1" deadline=$((SECONDS + PERF_WINDOW_APPEAR_TIMEOUT_SECONDS)) window_count
+    while (( SECONDS < deadline )); do
+        window_count="$(eval_in_nested_shell "$address" "$PERF_COUNT_WINDOWS_JS")" || return 1
+        [[ "$window_count" == 1 ]] && return 0
+        is_perf_window_running || { note "$PERF_WINDOW_COMMAND_NAME exited before its window appeared"; return 1; }
+        sleep "$PERF_WINDOW_POLL_INTERVAL_SECONDS"
+    done
+    note "no single window appeared within $PERF_WINDOW_APPEAR_TIMEOUT_SECONDS s"
+    return 1
+}
+
+#######################################
+# Write a scenario request for the run's replay service, after checking it
+# still runs; exit 2 otherwise.
+# Arguments:
+#   $1 - run directory
+#   $2 - scenario word
+#######################################
+request_perf_scenario() {
+    local run_dir="$1" scenario_name="$2"
+    is_recorded_process_running "$run_dir" service \
+        || die "refusing: the run's replay service is not running (see $run_dir/log/service.log)"
+    write_scenario_word "$run_dir" "$scenario_name" || die "could not write $run_dir/$REPLAY_SCENARIO_RELATIVE_PATH"
+}
+
+#######################################
+# Measure one window of PERF_WINDOW_SECONDS with no eval running: the nested
+# shell's CPU % and its main thread's median per tick (the cost script, both at
+# once, given the nested shell's pid and the real /proc, never left to look for
+# a gnome-shell), and the major collections it logged meanwhile. Sets
+# PERF_WINDOW_CPU_PERCENT, PERF_WINDOW_TICK_MEDIAN_MS and
+# PERF_WINDOW_MAJOR_COLLECTIONS; exit 2 when any of them cannot be read.
+# Arguments:
+#   $1 - run directory
+#   $2 - the nested shell's pid
+#######################################
+measure_perf_window() {
+    local run_dir="$1" shell_pid="$2" window_start_offset
+    local shell_log_path="$run_dir/log/shell.log" cpu_percent_path="$run_dir/$PERF_CPU_PERCENT_RELATIVE_PATH"
+    local -a cost_command=(env "GNOME_SHELL_PID=$shell_pid" PROC_ROOT=/proc bash "$COST_SCRIPT_PATH")
+    window_start_offset="$(stat -c %s "$shell_log_path")" || die "cannot read the size of $shell_log_path"
+    "${cost_command[@]}" --cpu-percent "$PERF_WINDOW_SECONDS" >"$cpu_percent_path" &
+    # Kept where perf's exit finds it: a failure below, or a signal, ends the job (end_perf_cost_job).
+    PERF_COST_JOB_PID=$!
+    if ! PERF_WINDOW_TICK_MEDIAN_MS="$("${cost_command[@]}" --tick-median "$PERF_WINDOW_SECONDS")"; then
+        die "the cost script could not read the nested shell's main thread"
+    fi
+    wait "$PERF_COST_JOB_PID" || die "the cost script could not read the nested shell's CPU"
+    PERF_COST_JOB_PID=""
+    PERF_WINDOW_CPU_PERCENT="$(<"$cpu_percent_path")"
+    PERF_WINDOW_MAJOR_COLLECTIONS="$(count_major_collections_since "$shell_log_path" "$window_start_offset" \
+        "$shell_pid")" || die "cannot count the collections in $shell_log_path"
+}
+
+#######################################
+# Keep and print one state's readings: the window's (measure_perf_window) and
+# the probe's read. The disabled state's are kept for the others, with its
+# Samples counted by time (no client); an enabled state's record is appended to
+# PERF_ENABLED_STATE_RECORDS, and its CPU reported over the disabled state's,
+# once the probe's facts show it set up as it is named (check_perf_state_setup):
+# exit 2 otherwise, with nothing kept or printed under its name.
+# Arguments:
+#   $1 - state name
+#   $2 - the probe's answer to read
+#######################################
+record_perf_state() {
+    local state_name="$1" probe_answer="$2" frames samples topbar_paints card_redirect cpu_over_disabled
+    local samples_by_time cpu_report is_card_visible is_indicator_mapped
+    local state_line_format='%s: cpu=%s tick-median=%sms major-collections=%s'
+    state_line_format+=' frames=%s samples=%s top-bar-paints=%s card-redirect=%s\n'
+    frames="$(perf_probe_answer_field "$probe_answer" frames)"
+    if [[ "$state_name" == "$PERF_DISABLED_STATE" ]]; then
+        PERF_DISABLED_MAJOR_COLLECTIONS="$PERF_WINDOW_MAJOR_COLLECTIONS"
+        PERF_DISABLED_FRAMES="$frames"
+        PERF_DISABLED_CPU_PERCENT="$PERF_WINDOW_CPU_PERCENT"
+        samples_by_time=$(( PERF_WINDOW_SECONDS / PERF_SAMPLE_INTERVAL_SECONDS ))
+        # shellcheck disable=SC2059  # The format is the two literals above, split only for the line's length.
+        printf "$state_line_format" "$state_name" "$PERF_WINDOW_CPU_PERCENT%" "$PERF_WINDOW_TICK_MEDIAN_MS" \
+            "$PERF_WINDOW_MAJOR_COLLECTIONS" "$frames" "$samples_by_time (by time: no client while disabled)" - -
+        return 0
+    fi
+    is_card_visible="$(perf_probe_answer_boolean "$probe_answer" "$PERF_CARD_VISIBLE_FIELD")"
+    is_indicator_mapped="$(perf_probe_answer_boolean "$probe_answer" "$PERF_INDICATOR_MAPPED_FIELD")"
+    check_perf_state_setup "$state_name" "$is_card_visible" "$is_indicator_mapped" || exit "$EXIT_REFUSED"
+    samples="$(perf_probe_answer_field "$probe_answer" samples)"
+    topbar_paints="$(perf_probe_answer_field "$probe_answer" topbarPaints)"
+    card_redirect="$(perf_probe_answer_field "$probe_answer" cardRedirect)"
+    PERF_ENABLED_STATE_RECORDS+=("$PERF_WINDOW_MAJOR_COLLECTIONS $frames $samples $topbar_paints $card_redirect")
+    cpu_over_disabled="$(awk -v state_percent="$PERF_WINDOW_CPU_PERCENT" \
+        -v disabled_percent="$PERF_DISABLED_CPU_PERCENT" 'BEGIN { printf "%+.3f", state_percent - disabled_percent }')"
+    cpu_report="$PERF_WINDOW_CPU_PERCENT% ($cpu_over_disabled over disabled)"
+    # shellcheck disable=SC2059  # The format is the two literals above, split only for the line's length.
+    printf "$state_line_format" "$state_name" "$cpu_report" "$PERF_WINDOW_TICK_MEDIAN_MS" \
+        "$PERF_WINDOW_MAJOR_COLLECTIONS" "$frames" "$samples" "$topbar_paints" "$card_redirect"
+}
+
+#######################################
+# Measure one state: request its scenario (so every run sees the same input),
+# run its setup steps, wait PERF_WARM_UP_SECONDS, attach or reset the probe for
+# it, measure one window with no eval running, read the probe, then keep and
+# print the readings.
+# Arguments:
+#   $1 - run directory
+#   $2 - verified private bus address
+#   $3 - the nested shell's pid
+#   $4 - state name
+#   $5 - its scenario
+#   $@ - its setup steps' JavaScript, in order
+#######################################
+measure_perf_state() {
+    local run_dir="$1" address="$2" shell_pid="$3" state_name="$4" scenario_name="$5" setup_js
+    local attach_request="$PERF_PROBE_ATTACH_ENABLED_REQUEST" probe_mode="$PERF_PROBE_ENABLED_MODE" probe_answer
+    local settling_note="$scenario_name input, $PERF_WARM_UP_SECONDS s to settle, then a $PERF_WINDOW_SECONDS s window"
+    shift 5
+    note "perf: $state_name: $settling_note"
+    request_perf_scenario "$run_dir" "$scenario_name"
+    for setup_js in "$@"; do
+        run_perf_step "$address" "set up $state_name" "$setup_js"
+    done
+    sleep "$PERF_WARM_UP_SECONDS"
+    if [[ "$state_name" == "$PERF_DISABLED_STATE" ]]; then
+        attach_request="$PERF_PROBE_ATTACH_DISABLED_REQUEST"
+        probe_mode="$PERF_PROBE_DISABLED_MODE"
+    fi
+    run_perf_probe "$address" "$attach_request" "$probe_mode" >/dev/null
+    measure_perf_window "$run_dir" "$shell_pid"
+    probe_answer="$(run_perf_probe "$address" "$PERF_PROBE_READ_REQUEST" "$probe_mode")" || exit "$EXIT_REFUSED"
+    record_perf_state "$state_name" "$probe_answer"
+}
+
+#######################################
+# `perf`: measure a live run started with --gc-log --replay against the count
+# budgets (see the header). Refuses (exit 2) before anything runs in the nested
+# shell unless the run is a verified, live run of this script started with
+# both options, its replay service runs, gnome-calculator is on PATH and the
+# shell's log holds a collection line of the recorded gnome-shell. Exits 2 at
+# an enabled state the probe does not find set up as it is named. Returns
+# perf_count_verdict's status: 0 within every budget, 1 a budget broken, 2 the
+# counts cannot be judged.
+#######################################
+perf_subcommand() {
+    local run_dir address shell_pid window_command_path window_count verdict_status header_line
+    require_tools stat
+    run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
+    verified_run_suffix "$run_dir" >/dev/null || die "not a run directory of this script: $run_dir"
+    is_requested_in_run "$run_dir" "$GC_LOG_RUN_VALUE_NAME" \
+        || die "refusing: the run in $run_dir was not started with $GC_LOG_OPTION"
+    is_requested_in_run "$run_dir" "$REPLAY_RUN_VALUE_NAME" \
+        || die "refusing: the run in $run_dir was not started with $REPLAY_OPTION"
+    address="$(live_run_session_address "$run_dir")" || exit "$EXIT_REFUSED"
+    is_recorded_process_running "$run_dir" service \
+        || die "refusing: the run's replay service is not running (see $run_dir/log/service.log)"
+    # Looked for only now: a refusal above never depends on which tools are installed.
+    require_tools "$PERF_WINDOW_COMMAND_NAME"
+    require_tools busctl jq awk tail sort env mktemp mv
+    window_command_path="$(command -v "$PERF_WINDOW_COMMAND_NAME")"
+    # The pid is_nested_shell_live just verified as the run's gnome-shell (same start time, in the run's session).
+    shell_pid="$(recorded_run_value "$run_dir" gnome-shell)"
+    [[ "$shell_pid" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || die "refusing: the run has no recorded gnome-shell pid"
+    has_collection_lines_of "$run_dir/log/shell.log" "$shell_pid" \
+        || die "refusing: $run_dir/log/shell.log holds no collection line of the nested shell ($shell_pid):" \
+            "is the GC log on?"
+
+    window_count="$(eval_in_nested_shell "$address" "$PERF_COUNT_WINDOWS_JS")" || exit "$EXIT_REFUSED"
+    [[ "$window_count" == 0 ]] \
+        || die "refusing: the nested session already has $window_count window(s); perf covers the card with its own"
+    # From here perf acts on the run: every exit, a failure, a breach or a signal included, puts it back.
+    PERF_ADDRESS="$address"
+    trap end_perf_run EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    start_perf_window "$run_dir" "$address" "$window_command_path"
+    wait_for_perf_window "$address" || die "the $PERF_WINDOW_COMMAND_NAME window did not open (see $run_dir/log/)"
+
+    header_line="perf: nested gnome-shell $shell_pid of $run_dir; each state: its scenario,"
+    header_line+=" $PERF_WARM_UP_SECONDS s to settle, one $PERF_WINDOW_SECONDS s window with no eval running;"
+    header_line+=" cpu is % of one core for the whole nested shell, the probe's own per-frame counting included,"
+    header_line+=" reported and not gated; the counts are gated"
+    printf '%s\n' "$header_line"
+    measure_perf_state "$run_dir" "$address" "$shell_pid" "$PERF_DISABLED_STATE" "$IDLE_SCENARIO_NAME" \
+        "$PERF_DISABLE_EXTENSION_JS"
+    measure_perf_state "$run_dir" "$address" "$shell_pid" "$PERF_COVERED_IDLE_STATE" "$IDLE_SCENARIO_NAME" \
+        "$PERF_ENABLE_EXTENSION_JS" "$PERF_COVER_CARD_JS"
+    measure_perf_state "$run_dir" "$address" "$shell_pid" "$PERF_COVERED_BUSY_STATE" "$BUSY_SCENARIO_NAME"
+    measure_perf_state "$run_dir" "$address" "$shell_pid" "$PERF_TOPBAR_HIDDEN_STATE" "$BUSY_SCENARIO_NAME" \
+        "$PERF_HIDE_TOPBAR_JS"
+    measure_perf_state "$run_dir" "$address" "$shell_pid" "$PERF_VISIBLE_BUSY_STATE" "$BUSY_SCENARIO_NAME" \
+        "$PERF_SHOW_TOPBAR_JS" "$PERF_UNCOVER_CARD_JS"
+    perf_count_verdict "$PERF_DISABLED_MAJOR_COLLECTIONS" "$PERF_DISABLED_FRAMES" "${PERF_ENABLED_STATE_RECORDS[@]}"
+    verdict_status=$?
+    return "$verdict_status"
+}
+
 main() {
     local subcommand="${1:-}"
     case "$subcommand" in
         start)
-            (( $# == 1 )) || usage_error "start takes no arguments"
+            shift
+            parse_start_options "$@"
             start_subcommand ;;
         eval)
             (( $# == 2 )) || usage_error "eval takes one argument: the JavaScript, or -"
@@ -1352,6 +2338,12 @@ main() {
         screenshot)
             shift
             screenshot_subcommand "$@" ;;
+        scenario)
+            (( $# == 2 )) || usage_error "scenario takes one word: ${REPLAY_SCENARIO_NAMES[*]}"
+            scenario_subcommand "$2" ;;
+        perf)
+            (( $# == 1 )) || usage_error "perf takes no arguments"
+            perf_subcommand ;;
         stop)
             (( $# == 1 )) || usage_error "stop takes no arguments"
             stop_subcommand ;;

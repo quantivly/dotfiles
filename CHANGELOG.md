@@ -116,8 +116,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Status and cost.** `gnome-status` gains a `Resource Pulse:` line (linked, enabled from the
     setting, shell State) and a `service:` line (its state, protocol and the age of its last sample),
     with a ⚠ line, naming its remedy, for a missing, failed, restarting, stopped, silent, stalled or
-    out-of-date service and for a desktop that runs an older copy of the drawing code. Every call it
-    makes is bounded at 3 s. `scripts/resource-pulse-cost.sh` measures gnome-shell, and with
+    out-of-date service and for a desktop that runs an older copy of the drawing code. Two more name a
+    running unit that is behind the checkout: one for older code (a module in its import closure
+    changed after it started), with a "cannot tell" ⚠ when that closure cannot be worked out, and one
+    for an older unit file (its file changed after it started; the remedy is
+    `systemctl --user daemon-reload && systemctl --user try-restart <unit>`). Both are suppressed for
+    a unit that is not running, for the cockpit as for the sampler. Every call it makes is bounded at
+    3 s. `scripts/resource-pulse-cost.sh` measures gnome-shell, and with
     `--service` (anywhere on the line; a leftover word is a usage error) the service; every number and budget is defined in `docs/GNOME_CONFIGURATION_GUIDE.md`.
     `check-timer-health.sh` reports a unit with no `[Install]` as started on demand, not as an arming
     decision.
@@ -444,6 +449,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dev". `test-dev-sync.sh`: 211 rows; rabota +2 tests; secret guard +2 rows (it now refuses reads of the token file). 28 mutants, 28 deaths.
 
 ### Changed
+
+- **Resource Pulse costs gnome-shell a quarter to two thirds of what it did, and no longer forces a full
+  garbage collection every 10 seconds.** Stage one of
+  `docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md`, built from
+  `docs/superpowers/plans/2026-11-11-resource-pulse-performance-stage-one.md`. Nothing under `service/` and
+  no field of `ResourcePulse1` changed, and the look is the same. It takes effect at the next login. The
+  deploy restarts the sampler once, since two shared modules it loads gained names (`lib/constants.js`,
+  `lib/protocol.js`): the graphs' history starts again and refills within five minutes.
+  - **Measured,** the shipped extension against this one side by side in the isolated nested shell, % of one
+    core for the whole shell, median of three rounds: card covered with idle input 0.326 → 0.075; covered
+    with busy input 0.329 → 0.156; card visible with busy input 0.418 → 0.264; major collections a minute
+    6 → 1, an idle shell's own rate.
+  - **No D-Bus proxy object.** `PulseClient` follows the service through a name watch, a signal
+    subscription and calls on the shell's shared connection (`serviceLink.js`). A proxy owned only by
+    JavaScript, with handlers, made GJS force a full, non-incremental collection 10 s after every Sample:
+    22–56 ms on the compositor's thread on the live shell.
+  - **Nothing on a timer while Samples flow.** One watchdog, pushed back by each Sample, replaces the
+    client's 2-second stale check, so a silent service shows "no data" 6 s after its last sample, where it
+    took 6 to 9. The card's cover is checked on window changes, on the covering window's own moves and
+    workspace, and on a Sample (every one while the card is visible, every fifteenth while it is
+    covered); the 2-second re-check timer is gone, and a 10-second check
+    runs only while the service is silent and the card covered.
+  - **Nothing drawn that did not change.** The top bar's graphs redraw only when a column changes by a
+    whole device pixel, and only while the top bar is shown. The card is drawn through an offscreen
+    texture, so a window drawing over it does not repaint it. A covered card is told no snapshot, and a
+    Sample's snapshot is parsed only when something reads it.
+  - **A gate.** `scripts/resource-pulse-nested.sh perf` measures five states in the nested shell and fails
+    on count budgets: forced collections, frames, top-bar paints while hidden, the card's offscreen
+    redirect. A row of the state table counts every timeout the shell side adds, since no measurement
+    catches a timer that draws nothing. `start` gains `--gc-log` and `--replay`, and `scenario` chooses
+    the replayed input.
+    `scripts/resource-pulse-cost.sh` reads CPU from the scheduler's nanosecond counters and gains
+    `--tick-median`. The in-shell budget is per state now, in place of the single 0.1%: the guide's "What
+    it costs".
+  - **Not built: dropping the subscription under a fullscreen window.** It would freeze a covered card
+    that is still seen through a translucent window. The design records the decision under "Stage one as
+    built" and moves that budget to stage two.
+  - **The module-closure helper** follows an import that comes after a block comment closed on the same
+    line, so a change to such a module restarts the service that loads it.
 
 - **`scripts/dev-sync` is now `scripts/host-sync`, one sync loop for every agent host, and it reads
   the host profile (DO-894).** Step 6 of the shared-configuration design

@@ -1,6 +1,9 @@
 # Resource Pulse performance: profiling report and design
 
-**Status:** approved by the owner on 2026-11-11. Nothing here is built yet. **Measured:** 2026-11-10.
+**Status:** approved by the owner on 2026-11-11. **Stage one is built** (plan:
+[2026-11-11-resource-pulse-performance-stage-one.md](../plans/2026-11-11-resource-pulse-performance-stage-one.md));
+what the build changed, and what it measured, is under "Stage one as built". Stage two is not started.
+**Measured:** 2026-11-10.
 **Measured on** `origin/main` at 0b873b8. `main` has since merged the cockpit's data side (#375) and its
 drawing-side plan (#376); "Order of work" below says what that changes.
 **Builds on** [2026-11-08-resource-pulse-service-design.md](2026-11-08-resource-pulse-service-design.md) (v2) and
@@ -344,7 +347,7 @@ the extension toggled with `gnome-extensions`, 130 s windows, % of one core for 
 | A lean tick while only the top bar is seen | Part of the factor of two to three under load | The snapshot is parsed when something that shows it asks | **Do.** |
 | Draw the top bar only on a visible change, in whole device pixels, and only while mapped | Idle: no frame, 4.1–5.2 ms a tick → 0.5. Under load: nothing | A comparison before `queue_repaint()`; `ceil`, so an idle CPU stays inside one pixel | **Do.** |
 | Draw the card through an offscreen texture, always | Under a repainting window: 1.2 points → 0.1–0.3 covered; 0.55 → 0 partly covered; 0.8 points on the live shell at 15 frames a second | One property; about 1 MiB of texture; the look is unchanged | **Do.** |
-| Drop the subscription while nothing is visible (fullscreen) | Not measured; by construction the cost of the disabled state | Resubscribe and `GetState` on return | **Do.** |
+| Drop the subscription while nothing is visible (fullscreen) | Not measured; by construction the cost of the disabled state | Resubscribe and `GetState` on return | **Do.** *Not built in stage one: it conflicts with keeping a covered card fresh. See "Stage one as built".* |
 | Graphs painted from JavaScript as GPU rectangles | None that can be measured over cairo drawn on change | New widget; JavaScript on every frame that touches it, 1.1–2.4 points under a 60 fps window unless cached | **No.** |
 | The service renders the top bar to pixels; the shell shows them | At idle the shell is not woken: about 0.5 ms a tick. Under load: none that can be measured | A second signal, the shell's geometry told to the service, staleness moved to a supervisor | **Not in stage one.** It fits a compiled service (stage two). |
 | A compiled sampler service | Floor: 0.074% against 0.291%; 2.5 MiB against 38 MiB | A second language and a build; about 1,500 lines to port with their rows | **Stage two** (decided). See below. |
@@ -396,6 +399,7 @@ the extension toggled with `gnome-extensions`, 130 s windows, % of one core for 
   6–9 s after.
 - **While nothing is visible** (the card covered and the top bar unmapped) the client drops its subscription and
   its watchdog. On return it subscribes and calls `GetState`, whose histories are complete, as after an unlock.
+  *Not built in stage one: see "Stage one as built". The client stays subscribed while the extension is enabled.*
 
 ### Stage one: the cover check
 
@@ -486,6 +490,129 @@ since the last scan. One way to shorten it, not measured here: the service reads
 scan's five leaders on every tick, about ten small reads, so a reveal's ranking is at most 2 s old for them, and
 the full scan still finds new leaders.
 
+## Stage one as built (2026-11-11)
+
+Stage one was built from the plan, task by task, each reviewed and each checked in the isolated nested shell.
+This section records where the build departed from the design above, why, and what it measured. Everything
+above that it does not mention was built as written.
+
+### Not built: dropping the subscription while nothing is visible
+
+The design says two things that cannot both hold. It keeps ruling R21 as it is: a card judged covered is
+dimmed and repainted every 30 s, so a card wrongly judged covered never shows stale numbers. And it drops the
+Sample subscription while the card is covered and the top bar unmapped.
+
+- **Where they collide.** The cover test is geometric, a card is always placed, and this repository's own
+  Alacritty template is 90% opaque. A fullscreen translucent window unmaps the top bar and covers a card that
+  is still seen through it.
+- **What the drop would do there.** The dimmed card's numbers freeze for as long as the window is fullscreen.
+  Publishing "no data" at the drop instead is honest, but then leaving fullscreen can show one frame of "no
+  data" before the state arrives, and the card behind a translucent terminal reads "no data" all day.
+- **What keeping both costs.** A 30 s pull while unsubscribed needs a second timer, a pulse state and new
+  teardown paths inside the compositor, to save a few hundredths of a percent of one core only while a window
+  is fullscreen.
+- **Decided.** The client stays subscribed while the extension is enabled. The "Nothing visible" budget moves
+  to stage two, where the service can send a slow signal for a covered card (follow-up 9). The link's
+  subscribe switch, which then had no caller, was removed.
+
+### Decided during the build
+
+Each was a point the design left open, or a defect a review or a nested check found.
+
+- **Calls go to the service's unique owner,** as the proxy's did, not to the well-known name. A watch sent
+  across a restart could otherwise be counted twice by the new service. With no owner a call is answered with
+  an error at once and nothing is sent. The Sample subscription keeps the well-known name as its sender, and a
+  row proves a Sample from any other connection is not delivered.
+- **"No data since" stays exact with late parsing.** An unread Sample is parsed before a Sample that appended
+  no number replaces it, and both `latestSnapshot` and `lastGoodClockLabel` resolve the unread Sample when
+  read. Otherwise a service that starts publishing numberless snapshots while the card is unwatched would
+  leave the label naming the minute the card was last watched.
+- **The watchdog after a state covers only what is left of the stall,** counted from the state's snapshot
+  time. A full 6 s after a state already 5 s old would show old numbers as live for 11 s.
+- **The top bar compares at the height it last drew at.** St allows `get_surface_size()` only inside a
+  `repaint` handler; outside one it logs a critical and gives 0. The first version read it on the tick, so the
+  comparison never matched and both graphs still repainted on every Sample, with nothing visibly wrong. The
+  review and the nested check each caught it. A row now fails if the surface or the context is read anywhere
+  but the repaint handler.
+- **The covered card's 30 s clock is checked on every Sample,** not only at the fifteenth-Sample backstop. A
+  backstop landing a moment before the 30 s are up would have skipped the dimmed repaint to 60 s.
+- **A covering window is followed by four signals:** `position-changed`, `size-changed`, `unmanaged` and
+  `workspace-changed`. The last two were added in review: a covering window closed, or sent to another
+  workspace, would otherwise be noticed only at the backstop, where the old timer caught it in 2 s. The
+  connections change only when the covering set changes.
+- **The cover check's later and the teardown's disconnect loop are each guarded,** since a covering window's
+  drag now runs the later on every frame, and one bad window must not leave the rest connected.
+- **The `perf` request's frame budgets count over the disabled state's frames in the same run.** The nested
+  panel's clock alone draws a frame a minute, and the covered card's dimmed repaint two or three.
+- **A sixth count budget: the disabled state may make at most 4 major collections a minute.** A counter-test
+  planted the old proxy, never released, and `perf` passed it: the defect outlived `disable()`, the disabled
+  state made six collections too, and the relative budget saw six against six. With the proxy released at
+  `disable()`, as the shipped client's was, the relative budget fails it in all four enabled states.
+- **The replay restarts on every `scenario` request,** also for the word already playing, so "busy" is the
+  same input every run and not an offset of the shell's start time.
+- **Timers are guarded by rows in the state table, not by `perf`.** "Budgets" below says `perf` fails on a
+  repeating timer. It does not look for one, and no count moves for a timer that draws nothing. One row,
+  with a planted twin, pins every timeout the shell side adds, by file and count (GLib's two calls and
+  GJS's own `setTimeout` and `setInterval`), so a new one fails until it is counted there on purpose. Three
+  more rows say what the known ones are: none of the Sample interval, the extension's one is the fallback's,
+  and the client's only timeout while Samples flow is the watchdog. The whole-branch review found the gap.
+
+### The deploy restarts the sampler once
+
+The plan said a deploy of this work restarts no service, since nothing under `service/` changed. That was
+wrong. `./install`'s refresh step try-restarts a running unit when a module in its import closure changed
+after it started, and this work adds names to `lib/constants.js` (in both services' closures) and to
+`lib/protocol.js` (in the sampler's). So at the deploy the sampler restarts, its histories start again and
+refill within five minutes, and the extension still running shows "no data" for a moment; the cockpit
+service restarts too if it is running. Both changes only add, so nothing else follows. The whole-branch
+review found it. No code was moved to avoid it.
+
+### Measured after the build
+
+The machine was never idle during the build: other sessions held its load between 3 and 6 on 8 cores, and
+higher at times. So the closing readings were taken side by side, the shipped extension (`main` at 4589006)
+and the built one in two isolated nested shells at the same moment, with the tooling of the baseline: the
+replay service's input, the collection log, no in-shell counters, 60 s windows after a 40 s warm-up. % of one
+core for the whole nested shell, three rounds, the median in brackets.
+
+| State | Shipped | Built |
+|---|---|---|
+| Card covered, top bar on, idle input | 0.326, 0.280, 0.330 (0.326) | 0.079, 0.064, 0.075 (0.075) |
+| Card covered, top bar on, light input | 0.342, 0.285, 0.330 (0.330) | 0.142, 0.138, 0.170 (0.142) |
+| Card covered, top bar on, busy input | 0.365, 0.255, 0.329 (0.329) | 0.150, 0.156, 0.165 (0.156) |
+| Card visible, top bar on, busy input | 0.418, 0.441, 0.372 (0.418) | 0.226, 0.391, 0.264 (0.264) |
+| Card visible, top bar on, idle input | 0.528, 0.726, 0.410 (0.528) | 0.221, 0.705, 0.288 (0.288) |
+| The main thread's median per tick, covered and idle | 2.87 ms | 0.53 ms |
+| Major collections a minute, every state | 6 | 1 |
+
+The nested `perf` request passed three runs out of three on the built branch. What the extension adds over
+the same run's disabled state, with the probe's own counting included, median of three:
+
+| State | Budget | Added | The main thread's median per tick |
+|---|---|---|---|
+| Card covered, idle input | 0.08 | 0.049 | 0.47 ms (budget 1 ms) |
+| Card covered, busy input | 0.20 | 0.155 | 2.85 ms (budget 3 ms) |
+| Card visible, busy input | 0.25 | 0.180 | 3.19 ms |
+| Top bar hidden and card covered, busy input | 0.01, moved to stage two | 0.068 | 0.60 ms |
+
+- **The counts,** in every run: major collections 1 or 2 in every state, the disabled one included; 3 frames
+  a minute with the card covered and idle input, and 31 or 32 for 30 or 31 Samples under busy input; no
+  top-bar paint while the top bar was hidden; the card's offscreen redirect always.
+- **The gate was tested against the defect it guards.** With a proxy owned only by JavaScript planted and
+  released at `disable()`, `perf` fails on the relative collections budget in all four enabled states (5 or
+  6 against 1). With the same proxy never released it fails on the disabled state's own bound (6, more than
+  4).
+- **Under a window redrawing at the display's rate** the card as built costs what a hidden card costs, inside
+  the noise, and switching the redirect off adds 1.3 to 2.4 points in each of five rounds. The whole
+  extension against that state's 0.3 budget is not resolved: four valid rounds read -0.17, +0.05, +0.33 and
+  +0.71 over the disabled shell (median 0.19), a spread wider than the budget, because the state itself, about
+  4% of a core for the window's own frames, moved by half a point with the load.
+- **Not measured yet: the live shell.** The second live reading follows the owner's next login
+  (follow-up 6).
+
+Raw output, the scripts and the full tables: `~/Projects/handoffs/resource-pulse-perf-tools/2026-11-11-stage-one/`
+(`result.md`).
+
 ## Budgets
 
 Measured as this session did: the nested shell, one at a time, the replay service's input, three 60 s windows
@@ -498,7 +625,7 @@ subtracted. % of one core, added by the extension.
 | Card covered, top bar on, busy machine | 0.20 | 0.26 | 0.09–0.18, once 0.29 |
 | Card visible | 0.25 | 0.32 | 0.12–0.23 |
 | Cockpit visible: four cards, the top bar | 0.5 | — | not built |
-| Nothing visible | 0.01 | 0.17 | not built |
+| Nothing visible | 0.01, moved to stage two (see "Stage one as built") | 0.17 | not built |
 | Card covered, under a window redrawing 60 times a second | 0.3 | 1.2–1.3 | 0.1–0.3 |
 | The main thread's median per tick, covered: idle, busy | 1 ms, 3 ms | 4–5 ms, 2.5–4.6 ms | 0.5 ms, 1.5–2.7 ms |
 | Forced collections the extension causes | none | 6 a minute | none beyond the idle shell's 1–2 |
@@ -523,7 +650,8 @@ subtracted. % of one core, added by the extension.
 - **What gates a merge.** The counts do: the nested `perf` request fails on a repeating timer, on a paint while
   unmapped, on more than one frame a tick, and on more forced collections than the disabled shell showed in the
   same run. The percentages are reported, not gated. A median more than 0.05 over its budget is raised with the
-  owner before merging.
+  owner before merging. *As built, `perf` does not look for a timer; a row of the state table counts the
+  shell side's timeouts instead. See "Stage one as built".*
 
 ## Testing and the measurement harness
 
@@ -596,6 +724,15 @@ description, so it travels with the merge.
 7. **Stage two, the compiled sampler** (decided): its own design and plan, after stage one.
 8. **The watched service's burst scans** under a bursty load (finding 13). With stage two, or as one constant
    before it.
+9. **Nothing visible: no Samples at all** (added 2026-11-11, during the build). Stage one keeps the
+   subscription under a fullscreen window, so a covered card stays fresh. Taking that state to zero needs a
+   way to keep the covered card's 30 s repaint fresh without the 2 s Samples: with stage two, from the service
+   side (a slow signal for a covered card). See "Stage one as built".
+10. **The glue checks, in the repository** (added 2026-11-11, by the whole-branch review). The shell-side
+    glue cannot run under plain `gjs`; its behaviour was proved by four scripts run in the nested shell
+    (listeners, the watchdog, the top bar's repaints, the cover check with a real window), which live with
+    the measurement tools outside the repository. Bring the cover check in as a nested request when the
+    cockpit adds cards, and teach `perf`'s probe the cockpit's objects.
 
 ## My calls (for the owner to check)
 

@@ -29,7 +29,8 @@
 # (Ubuntu: dbus-daemon), gdbus (libglib2.0-bin; gnome-status asks the real
 # service through it), and for the card-width row the Pango typelibs
 # (gir1.2-pango-1.0) and the card's font, Ubuntu Sans (fonts-ubuntu): without
-# them that row fails, never passes. No network, no root.
+# them that row fails, never passes; and for the two rows on perf's probe
+# answers, jq: without it they fail, never pass. No network, no root.
 #
 # Usage: scripts/test-resource-pulse.sh
 #   RESOURCE_PULSE_EXT_DIR=<dir> points the file rows at a copy of the
@@ -111,13 +112,82 @@ for glue_file in extension.js indicator.js card.js; do
   fi
 done
 
-# lib/, pulseClient.js and graph.js run under plain gjs in the JS rows above,
-# which only works while they import nothing from the Shell. A listed file that
-# is missing fails the row: an absent file contains nothing, which is not a pass.
-PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/graph.js")
-mapfile -d '' LIB_MODULE_PATHS < <(find "$EXT_DIR/lib" -type f -name '*.js' -print0 2>/dev/null)
-row_name="lib/, pulseClient.js and graph.js import nothing from resource:///"
-if (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
+# list_files_under <directory> <array name> <find test>...: fills the named
+# array with every path find lists under the directory with those tests, and
+# returns non-zero when find does. find exits non-zero when it cannot read a
+# directory, and a file it never listed is a file no scan read, so a scan fails
+# then rather than passing over it; find's own message is left on stderr,
+# naming the directory. The listing goes through a file: a process
+# substitution would lose find's status.
+list_files_under() {
+  local search_dir="$1" listing_path
+  local -n listed_paths="$2"
+  shift 2
+  listed_paths=()
+  listing_path="$(mktemp -p "$WIRING_TMP" file-listing.XXXXXX)" || return 2
+  if ! find "$search_dir" "$@" -print0 >"$listing_path"; then
+    rm -f "$listing_path"
+    return 1
+  fi
+  # listed_paths is a nameref: filling it fills the caller's array, which ShellCheck reads as never used.
+  # shellcheck disable=SC2034
+  mapfile -d '' listed_paths <"$listing_path"
+  rm -f "$listing_path"
+  return 0
+}
+# list_shell_side_javascript <extension dir> <array name>: fills the named
+# array with every .js file under the extension directory outside the top-level
+# service/, and returns non-zero when the tree cannot be listed
+# (list_files_under).
+list_shell_side_javascript() {
+  local extension_dir="$1" javascript_path
+  local -n shell_side_paths="$2"
+  local -a javascript_paths=()
+  shell_side_paths=()
+  list_files_under "$extension_dir" javascript_paths -type f -name '*.js' || return
+  for javascript_path in "${javascript_paths[@]}"; do
+    [[ "$javascript_path" == "$extension_dir/service/"* ]] || shell_side_paths+=("$javascript_path")
+  done
+  return 0
+}
+# shell_side_files_matching <extension dir> <how>: one line per shell-side .js
+# file (list_shell_side_javascript) whose text matches: with "literal:<text>"
+# when it contains the text, with "pattern:<ERE>" when the regular expression
+# matches it (newlines included, so a call may span lines). One line per such
+# file that cannot be read (an unread file is not a clean one), and a line when
+# the tree cannot be listed or holds no shell-side JavaScript.
+shell_side_files_matching() {
+  local extension_dir="$1" match_rule="$2" extension_file_path relative_path extension_file_text
+  local -a extension_file_paths=()
+  if ! list_shell_side_javascript "$extension_dir" extension_file_paths; then
+    printf 'cannot list the JavaScript under %s\n' "$extension_dir"
+    return
+  fi
+  if (( ${#extension_file_paths[@]} == 0 )); then
+    printf 'found no shell-side JavaScript under %s\n' "$extension_dir"
+    return
+  fi
+  for extension_file_path in "${extension_file_paths[@]}"; do
+    relative_path="${extension_file_path#"$extension_dir"/}"
+    if [[ ! -r "$extension_file_path" ]] || ! extension_file_text="$(<"$extension_file_path")"; then
+      printf 'cannot read %s\n' "$relative_path"
+    elif [[ "$match_rule" == literal:* && "$extension_file_text" == *"${match_rule#literal:}"* ]]; then
+      printf '%s\n' "$relative_path"
+    elif [[ "$match_rule" == pattern:* && "$extension_file_text" =~ ${match_rule#pattern:} ]]; then
+      printf '%s\n' "$relative_path"
+    fi
+  done
+}
+
+# lib/, pulseClient.js, serviceLink.js and graph.js run under plain gjs in the JS
+# rows above, which only works while they import nothing from the Shell. A
+# listed file that is missing fails the row: an absent file contains nothing,
+# which is not a pass.
+PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/serviceLink.js" "$EXT_DIR/graph.js")
+row_name="lib/, pulseClient.js, serviceLink.js and graph.js import nothing from resource:///"
+if ! list_files_under "$EXT_DIR/lib" LIB_MODULE_PATHS -type f -name '*.js'; then
+  bad "$row_name — cannot list the JavaScript under $EXT_DIR/lib"
+elif (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
   bad "$row_name — found no lib/*.js under $EXT_DIR"
 else
   pure_module_problems=()
@@ -153,11 +223,15 @@ SYNCHRONOUS_IO_CALL_PATTERN+='|Sync\('
 BLOCKING_CALL_PATTERN="$SUBPROCESS_CALL_PATTERN|$SYNCHRONOUS_IO_CALL_PATTERN"
 # blocking_calls_in <extension dir>: one line, "<path>: <call>", for each file
 # making a call its place forbids: a subprocess anywhere, synchronous IO
-# anywhere but the top-level service/. A tree with no files is a line too.
+# anywhere but the top-level service/. A tree that cannot be listed
+# (list_files_under), or holds no files, is a line too.
 blocking_calls_in() {
   local extension_dir="$1" extension_file_path forbidden_call_pattern
-  local -a extension_file_paths
-  mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -print0 2>/dev/null)
+  local -a extension_file_paths=()
+  if ! list_files_under "$extension_dir" extension_file_paths -type f; then
+    printf 'cannot list the files under %s\n' "$extension_dir"
+    return 1
+  fi
   if (( ${#extension_file_paths[@]} == 0 )); then
     printf 'found no files under %s\n' "$extension_dir"
     return 0
@@ -233,24 +307,10 @@ check "the placement scan lets the top-level service/ read files but not spawn, 
 # reaches it after a slash. Comments that name service/ files are not imports.
 SERVICE_IMPORT_PATTERN="(from|import)[[:space:]]*[(]?[[:space:]]*['\"]([^'\"]*/)?service/"
 # service_imports_in <extension dir>: one line per .js file outside the
-# top-level service/ that imports from service/. A tree with no JavaScript is a
-# line too.
-service_imports_in() {
-  local extension_dir="$1" extension_file_path
-  local -a extension_file_paths
-  mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -name '*.js' -print0 2>/dev/null)
-  if (( ${#extension_file_paths[@]} == 0 )); then
-    printf 'found no JavaScript under %s\n' "$extension_dir"
-    return 0
-  fi
-  for extension_file_path in "${extension_file_paths[@]}"; do
-    [[ "$extension_file_path" == "$extension_dir/service/"* ]] && continue
-    if [[ "$(<"$extension_file_path")" =~ $SERVICE_IMPORT_PATTERN ]]; then
-      printf '%s\n' "${extension_file_path#"$extension_dir"/}"
-    fi
-  done
-  return 0
-}
+# top-level service/ that imports from service/ (shell_side_files_matching). A
+# tree that cannot be listed or holds no shell-side JavaScript, and a file that
+# cannot be read, are a line too.
+service_imports_in() { shell_side_files_matching "$1" "pattern:$SERVICE_IMPORT_PATTERN"; }
 row_name="no file outside service/ imports service/, so gnome-shell never loads the sampler"
 service_importers="$(service_imports_in "$EXT_DIR")"
 service_import_scan_status=$?
@@ -271,6 +331,186 @@ printf '%s\n' "import {ServiceSampler} from './sampler.js';" "import {RingBuffer
   "import {ResourcePulseDBusService} from '../service/dbusService.js';" >"$SERVICE_IMPORT_FIXTURE_DIR/service/main.js"
 check "the service/ import scan finds a static and a dynamic import of service/, and neither a comment nor service/'s own" \
   "$(service_imports_in "$SERVICE_IMPORT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" "extension.js lib/loader.js "
+
+# A D-Bus proxy object owned only by JavaScript, with handlers connected, is
+# referenced by GDBus on every incoming signal, and that makes GJS schedule a
+# forced full garbage collection on the compositor thread 10 s later: once per
+# Sample. So no shell-side file (every .js outside the top-level service/) may
+# name one, not even in a comment: the client follows the service through
+# serviceLink.js's name watch and subscription. The service, a process of its
+# own, may.
+DBUS_PROXY_LITERAL='Gio.DBusProxy'
+# dbus_proxy_mentions_in <extension dir>: one line per shell-side .js file that
+# contains DBUS_PROXY_LITERAL, comments included (shell_side_files_matching).
+dbus_proxy_mentions_in() { shell_side_files_matching "$1" "literal:$DBUS_PROXY_LITERAL"; }
+row_name="no shell-side file names Gio.DBusProxy"
+dbus_proxy_mentions="$(dbus_proxy_mentions_in "$EXT_DIR")"
+if [[ -z "$dbus_proxy_mentions" ]]; then
+  ok "$row_name"
+else
+  bad "$row_name — $(tr '\n' ' ' <<<"$dbus_proxy_mentions")"
+fi
+# The planted twin, on a copy of the extension: a call at the top level and a
+# comment in lib/ are found; service/, whose sources use proxies, is not.
+DBUS_PROXY_FIXTURE_DIR="$WIRING_TMP/dbus-proxy-fixture"
+cp -R "$EXT_DIR" "$DBUS_PROXY_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $DBUS_PROXY_FIXTURE_DIR"
+printf '%s\n' 'Gio.DBusProxy.new(connection, flags, null, busName, objectPath, interfaceName, cancellable, callback);' \
+  >>"$DBUS_PROXY_FIXTURE_DIR/pulseClient.js"
+printf '%s\n' '// Built with Gio.DBusProxy.new(connection, ...), once.' >>"$DBUS_PROXY_FIXTURE_DIR/lib/wiring.js"
+check "a planted Gio.DBusProxy.new( in a shell-side copy is found" \
+  "$(dbus_proxy_mentions_in "$DBUS_PROXY_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" "lib/wiring.js pulseClient.js "
+
+# While Samples flow they are the shell's tick, and a timer at the same rate
+# costs about as much as handling one (the card's old cover re-check timer did,
+# measured), so nothing shell-side may wake on the sampler's interval: no
+# shell-side file adds a timeout whose arguments name SAMPLE_INTERVAL_SECONDS,
+# whether a GLib timeout of any kind, the client's injectable addSeconds or
+# addMilliseconds, or setTimeout or setInterval. The call is matched up to the
+# end of its statement, across lines, comments included. service/, the sampler,
+# ticks at that interval by design.
+SAMPLE_INTERVAL_TIMEOUT_PATTERN='(timeout_add[a-z_]*|addSeconds|addMilliseconds|setTimeout|setInterval)\([^;]*'
+SAMPLE_INTERVAL_TIMEOUT_PATTERN+='SAMPLE_INTERVAL_SECONDS'
+# sample_interval_timeouts_in <extension dir>: one line per shell-side .js file
+# that adds such a timeout (shell_side_files_matching).
+sample_interval_timeouts_in() { shell_side_files_matching "$1" "pattern:$SAMPLE_INTERVAL_TIMEOUT_PATTERN"; }
+row_name="no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS"
+sample_interval_timeouts="$(sample_interval_timeouts_in "$EXT_DIR")"
+if [[ -z "$sample_interval_timeouts" ]]; then
+  ok "$row_name"
+else
+  bad "$row_name — $(tr '\n' ' ' <<<"$sample_interval_timeouts")"
+fi
+# The planted twin, on a copy of the extension: the cover re-check timer this
+# row replaced, put back in extension.js with its interval on the next line, and
+# a watchdog-style addMilliseconds in lib/, are found; the same timeout in
+# service/ is not.
+SAMPLE_TIMEOUT_FIXTURE_DIR="$WIRING_TMP/sample-timeout-fixture"
+cp -R "$EXT_DIR" "$SAMPLE_TIMEOUT_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $SAMPLE_TIMEOUT_FIXTURE_DIR"
+printf '%s\n' 'this._coverRecheckSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,' \
+  '    SAMPLE_INTERVAL_SECONDS, () => this._onCoverRecheckTimeout());' >>"$SAMPLE_TIMEOUT_FIXTURE_DIR/extension.js"
+printf '%s\n' 'this._timeouts.addMilliseconds(SAMPLE_INTERVAL_SECONDS * 1000, () => this._onTick());' \
+  >>"$SAMPLE_TIMEOUT_FIXTURE_DIR/lib/wiring.js"
+printf '%s\n' 'GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAMPLE_INTERVAL_SECONDS, () => this._onTimeout());' \
+  >>"$SAMPLE_TIMEOUT_FIXTURE_DIR/service/sampler.js"
+check "no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS: a planted one is found" \
+  "$(sample_interval_timeouts_in "$SAMPLE_TIMEOUT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" \
+  "extension.js lib/wiring.js "
+
+# A repeating timer in the shell while Samples flow is a budget no measurement
+# here catches: perf's count budgets do not move for a timer that draws nothing,
+# and the row above knows a timer only by the sampler's interval. So every
+# timeout the shell side adds is pinned, by file and count: extension.js's cover
+# fallback (1), indicator.js's hover label delay (1), and the two lines of
+# pulseClient.js's injectable GLIB_TIMEOUTS seam (2). One more anywhere, a new
+# file included, fails the row until it is counted here. GJS's own setTimeout( and
+# setInterval( are timeouts too and are counted with GLib's two calls (the shell
+# side uses neither today); a method whose name merely ends that way (a letter,
+# digit, _ or . before "set") is not one. The call text is counted on code lines
+# only: a line that starts as a comment (//, /* or a JSDoc *) is not a call.
+SHELL_SIDE_GLIB_TIMEOUT_CALL_PATTERN='GLib[.]timeout_add(_seconds)?[(]|(^|[^A-Za-z0-9_.])set(Timeout|Interval)[(]'
+EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS='extension.js:1 indicator.js:1 pulseClient.js:2 '
+# glib_timeout_calls_in <extension dir>: one line, "<file>:<count>", per
+# shell-side .js file (list_shell_side_javascript) whose code lines add GLib
+# timeouts; one per such file awk cannot read, and one when the tree cannot be
+# listed or holds no shell-side JavaScript.
+glib_timeout_calls_in() {
+  local extension_dir="$1" extension_file_path relative_path timeout_call_count
+  local -a extension_file_paths=()
+  if ! list_shell_side_javascript "$extension_dir" extension_file_paths; then
+    printf 'cannot list the JavaScript under %s\n' "$extension_dir"
+    return
+  fi
+  if (( ${#extension_file_paths[@]} == 0 )); then
+    printf 'found no shell-side JavaScript under %s\n' "$extension_dir"
+    return
+  fi
+  for extension_file_path in "${extension_file_paths[@]}"; do
+    relative_path="${extension_file_path#"$extension_dir"/}"
+    if ! timeout_call_count="$(awk -v call_pattern="$SHELL_SIDE_GLIB_TIMEOUT_CALL_PATTERN" '
+        /^[ \t]*(\/\/|\/\*|\*)/ { next }
+        { code_line = $0; call_count += gsub(call_pattern, "", code_line) }
+        END { print call_count + 0 }' "$extension_file_path")"; then
+      printf 'cannot read %s\n' "$relative_path"
+    elif (( timeout_call_count > 0 )); then
+      printf '%s:%s\n' "$relative_path" "$timeout_call_count"
+    fi
+  done
+}
+check "the shell side adds a timeout in the places the table knows, and nowhere else" \
+  "$(glib_timeout_calls_in "$EXT_DIR" | LC_ALL=C sort | tr '\n' ' ')" "$EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS"
+# The planted twin, on a copy of the extension: one GLib.timeout_add( and one
+# setInterval( in card.js, which adds none today, are the one difference the row
+# sees; a row blind to either form would count 1 there, not 2. A method named
+# resetTimeout( planted beside them is not a timeout and is not counted.
+GLIB_TIMEOUT_FIXTURE_DIR="$WIRING_TMP/glib-timeout-fixture"
+cp -R "$EXT_DIR" "$GLIB_TIMEOUT_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $GLIB_TIMEOUT_FIXTURE_DIR"
+printf '%s\n' 'this._pollSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => GLib.SOURCE_CONTINUE);' \
+  '    setInterval(() => this._poll(), 2000);' 'this.resetTimeout(5);' >>"$GLIB_TIMEOUT_FIXTURE_DIR/card.js"
+check "the shell side adds a timeout in the places the table knows, and nowhere else: planted ones in card.js are found" \
+  "$(glib_timeout_calls_in "$GLIB_TIMEOUT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" \
+  "card.js:2 $EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS"
+
+# The compositor repaints every actor of the card's layer on each frame a window draws over it, because actors there
+# are not culled, so the card draws through an offscreen texture (one cached rectangle for those frames): _init sets
+# the redirect to ALWAYS. card.js imports the Shell and cannot run here, so the row reads its text. The call is
+# counted inside _init's body only: a call elsewhere in the file does not redirect a card at construction.
+OFFSCREEN_REDIRECT_CALL='this.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);'
+# offscreen_redirect_calls_in_init <card.js>: how many times _init's body (from its signature to the closing brace
+# at the method's indentation) holds a line that IS OFFSCREEN_REDIRECT_CALL: nothing but whitespace before it and
+# nothing after it, so a call in a // or /* */ comment is not counted. awk does it all, so a zero is an answer and
+# an unreadable file is awk's failure status (returned), not an empty count; "no _init body" when there is none.
+offscreen_redirect_calls_in_init() {
+  awk -v call="$OFFSCREEN_REDIRECT_CALL" '
+    /^    _init\(client\) \{$/ { in_init = 1 }
+    in_init { line = $0; sub(/^[ \t]+/, "", line); if (line == call) found++ }
+    in_init && /^    \}$/ { exit }
+    END { if (in_init) print found + 0; else print "no _init body" }' "$1"
+}
+real_card_redirect_calls="$(offscreen_redirect_calls_in_init "$EXT_DIR/card.js")"
+check "card.js sets the offscreen redirect to ALWAYS in _init" "$real_card_redirect_calls" 1
+# The planted twin, on copies of card.js: the call deleted, the call moved out of _init to the end of the file, and
+# the call commented out with // in place, each count 0 (neither a call outside _init nor a commented one may satisfy
+# the row).
+OFFSCREEN_FIXTURE_DIR="$WIRING_TMP/offscreen-fixture"
+mkdir "$OFFSCREEN_FIXTURE_DIR" || fatal "cannot create $OFFSCREEN_FIXTURE_DIR"
+awk -v call="$OFFSCREEN_REDIRECT_CALL" 'index($0, call) == 0' "$EXT_DIR/card.js" \
+  >"$OFFSCREEN_FIXTURE_DIR/deleted.js" || fatal "cannot write $OFFSCREEN_FIXTURE_DIR/deleted.js"
+awk -v call="$OFFSCREEN_REDIRECT_CALL" 'index($0, call) { print "        // " call; next } { print }' \
+  "$EXT_DIR/card.js" >"$OFFSCREEN_FIXTURE_DIR/commented.js" || fatal "cannot write $OFFSCREEN_FIXTURE_DIR/commented.js"
+{ cat "$OFFSCREEN_FIXTURE_DIR/deleted.js"; printf '    %s\n' "$OFFSCREEN_REDIRECT_CALL"; } \
+  >"$OFFSCREEN_FIXTURE_DIR/moved.js"
+deleted_card_redirect_calls="$(offscreen_redirect_calls_in_init "$OFFSCREEN_FIXTURE_DIR/deleted.js")"
+moved_card_redirect_calls="$(offscreen_redirect_calls_in_init "$OFFSCREEN_FIXTURE_DIR/moved.js")"
+check "card.js sets the offscreen redirect to ALWAYS in _init: a deleted call and a moved one are not counted" \
+  "$deleted_card_redirect_calls|$moved_card_redirect_calls" "0|0"
+commented_card_redirect_calls="$(offscreen_redirect_calls_in_init "$OFFSCREEN_FIXTURE_DIR/commented.js")"
+check "card.js sets the offscreen redirect to ALWAYS in _init: a commented-out call is not counted" \
+  "$commented_card_redirect_calls" 0
+
+# A JavaScript paint override runs in the compositor's paint path on every frame the actor draws, and GJS cannot
+# do that cheaply: no shell-side file overrides the paint vfunc or its node variant. The scan matches the text
+# anywhere, comments included, so no comment spells it either; the literal below also covers the _node variant.
+PAINT_OVERRIDE_LITERAL='vfunc_paint'
+# paint_overrides_in <extension dir>: one line per shell-side .js file that contains PAINT_OVERRIDE_LITERAL
+# (shell_side_files_matching).
+paint_overrides_in() { shell_side_files_matching "$1" "literal:$PAINT_OVERRIDE_LITERAL"; }
+row_name="no shell-side file overrides vfunc_paint or vfunc_paint_node"
+paint_overrides="$(paint_overrides_in "$EXT_DIR")"
+if [[ -z "$paint_overrides" ]]; then
+  ok "$row_name"
+else
+  bad "$row_name — $(tr '\n' ' ' <<<"$paint_overrides")"
+fi
+# The planted twin, on a copy of the extension: an override in the card and a node override in lib/ are found;
+# service/ is not scanned.
+PAINT_OVERRIDE_FIXTURE_DIR="$WIRING_TMP/paint-override-fixture"
+cp -R "$EXT_DIR" "$PAINT_OVERRIDE_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $PAINT_OVERRIDE_FIXTURE_DIR"
+printf '%s\n' '    vfunc_paint(paintContext) { super.vfunc_paint(paintContext); }' \
+  >>"$PAINT_OVERRIDE_FIXTURE_DIR/card.js"
+printf '%s\n' '    vfunc_paint_node() {}' >>"$PAINT_OVERRIDE_FIXTURE_DIR/lib/wiring.js"
+printf '%s\n' '    vfunc_paint(paintContext) {}' >>"$PAINT_OVERRIDE_FIXTURE_DIR/service/sampler.js"
+check "no shell-side file overrides vfunc_paint or vfunc_paint_node: a planted override is found" \
+  "$(paint_overrides_in "$PAINT_OVERRIDE_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" "card.js lib/wiring.js "
 
 # extension.js imports the Shell, so its teardown cannot run here. lib/teardown.js
 # (runEveryStep, whose rows are in lifecycle.test.js) guards each step; these
@@ -328,6 +568,169 @@ on_destroy_removes_later="$(sed -n '/^    _onDestroy() {/,/^    }/p' "$EXT_DIR/i
 check "a width change moves the card and the hover label in a BEFORE_REDRAW later, never during allocation" \
   "$deferred_placement_summary| teardown-step=$teardown_cancels_placement on-destroy=$on_destroy_removes_later" \
   "extension.js:2/2/1 indicator.js:1/1/1 | teardown-step=1 on-destroy=1"
+
+# The top bar asks for a frame only when a graph's columns change by a whole
+# device pixel, and only while the indicator is mapped. The arithmetic is
+# lib/topbarColumns.js, with its rows in gnome-shell/tests/topbarColumns.test.js;
+# the glue runs only inside gnome-shell, so these rows read it. A drawing area's
+# queue_repaint() is neither cheap nor lazy, so indicator.js calls it in exactly
+# one place, behind the decision that compares columns: one call more, anywhere,
+# redraws identical pixels on every tick, as the top bar did before.
+REPAINT_CALL_NEEDLE='queue_repaint('
+REPAINT_DECISION_DECLARATION='_isRepaintNeeded(topbarGraph)'
+# indicator_method_lines <indicator.js path> <declaration>: the method's body,
+# from its declaration line to the closing brace at its indent, each line
+# trimmed. A missing file or method is no lines, so every count below is 0.
+indicator_method_lines() { sed -n "/^    $2 {\$/,/^    }\$/p" "$1" 2>/dev/null | sed 's/^[[:space:]]*//'; }
+# count_occurrences <text> <needle>: how many times the text contains the
+# needle. Counted in the text, not by grep -c, which counts lines: two on one
+# line are two.
+count_occurrences() {
+  local text="$1" needle="$2" text_without_needle
+  text_without_needle="${text//"$needle"/}"
+  printf '%s' "$(( (${#text} - ${#text_without_needle}) / ${#needle} ))"
+}
+# repaint_call_summary <indicator.js path>: how many times the file says
+# queue_repaint(, the trimmed line before each one, and how many lines of the
+# decision method compare columns (lib/topbarColumns.js isGraphRepaintNeeded).
+# An unreadable file is a line of its own.
+repaint_call_summary() {
+  local indicator_path="$1" indicator_text guard_lines comparison_count
+  if [[ ! -r "$indicator_path" ]] || ! indicator_text="$(<"$indicator_path")"; then
+    printf 'cannot read %s' "$indicator_path"
+    return
+  fi
+  guard_lines="$(awk -v needle="$REPAINT_CALL_NEEDLE" '
+    index($0, needle) { sub(/^[ \t]+/, "", previous_line); guards = guards separator previous_line; separator = "|" }
+    { previous_line = $0 }
+    END { print guards }' "$indicator_path")"
+  comparison_count="$(indicator_method_lines "$indicator_path" "$REPAINT_DECISION_DECLARATION" \
+    | grep -c -F 'isGraphRepaintNeeded(')"
+  printf 'calls=%s guards=[%s] compares=%s' "$(count_occurrences "$indicator_text" "$REPAINT_CALL_NEEDLE")" \
+    "$guard_lines" "$comparison_count"
+}
+check "indicator.js calls queue_repaint( in one place, behind the column comparison" \
+  "$(repaint_call_summary "$EXT_DIR/indicator.js")" \
+  "calls=1 guards=[if (this._isRepaintNeeded(topbarGraph))] compares=1"
+# The planted twin, on a copy of the extension: the unguarded call the history
+# listener made before, put back, is found.
+TOPBAR_REPAINT_FIXTURE_DIR="$WIRING_TMP/topbar-repaint-fixture"
+cp -R "$EXT_DIR" "$TOPBAR_REPAINT_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $TOPBAR_REPAINT_FIXTURE_DIR"
+awk '{ print } $0 == "    _onHistoriesChanged() {" { print "        this._cpuGraph.drawingArea.queue_repaint();" }' \
+  "$EXT_DIR/indicator.js" >"$TOPBAR_REPAINT_FIXTURE_DIR/indicator.js" \
+  || fatal "cannot plant an unguarded repaint in $TOPBAR_REPAINT_FIXTURE_DIR/indicator.js"
+check "a planted unguarded queue_repaint( in a copy of indicator.js is found" \
+  "$(repaint_call_summary "$TOPBAR_REPAINT_FIXTURE_DIR/indicator.js")" \
+  "calls=2 guards=[if (this._isRepaintNeeded(topbarGraph))|_onHistoriesChanged() {] compares=1"
+# A repaint skipped while the indicator is unmapped is owed: the decision
+# answers false then and leaves the columns last drawn as they are, and
+# notify::mapped runs the same comparison again, so a graph whose columns
+# changed while it was hidden draws once when it is shown.
+MAPPED_HANDLER_CONNECT="this.connect('notify::mapped', () => this._onMappedChanged());"
+# mapped_repaint_summary <indicator.js path>: how many lines connect
+# notify::mapped to _onMappedChanged, how many lines of that handler ask the
+# changed graphs to repaint, and how many lines of the decision skip while
+# unmapped.
+mapped_repaint_summary() {
+  local indicator_path="$1"
+  printf 'connected=%s draws-there=%s skips-while-unmapped=%s' \
+    "$(grep -c -F "$MAPPED_HANDLER_CONNECT" "$indicator_path" 2>/dev/null)" \
+    "$(indicator_method_lines "$indicator_path" '_onMappedChanged()' \
+      | grep -c -x -F 'this._queueRepaintsOfChangedGraphs();')" \
+    "$(indicator_method_lines "$indicator_path" "$REPAINT_DECISION_DECLARATION" \
+      | grep -c -x -F 'if (this._client === null || !this.mapped)')"
+}
+check "indicator.js connects notify::mapped and draws the owed repaint there" \
+  "$(mapped_repaint_summary "$EXT_DIR/indicator.js")" "connected=1 draws-there=1 skips-while-unmapped=1"
+# The planted twin, on a copy: a notify::mapped handler that only follows the
+# hover label, as it did before, is found.
+TOPBAR_MAPPED_FIXTURE_DIR="$WIRING_TMP/topbar-mapped-fixture"
+cp -R "$EXT_DIR" "$TOPBAR_MAPPED_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $TOPBAR_MAPPED_FIXTURE_DIR"
+awk '
+  $0 == "    _onMappedChanged() {" { is_inside_handler = 1 }
+  is_inside_handler && $0 == "        this._queueRepaintsOfChangedGraphs();" { next }
+  $0 == "    }" { is_inside_handler = 0 }
+  { print }' "$EXT_DIR/indicator.js" >"$TOPBAR_MAPPED_FIXTURE_DIR/indicator.js" \
+  || fatal "cannot plant a handler that does not draw in $TOPBAR_MAPPED_FIXTURE_DIR/indicator.js"
+check "a copy of indicator.js whose notify::mapped handler does not draw is found" \
+  "$(mapped_repaint_summary "$TOPBAR_MAPPED_FIXTURE_DIR/indicator.js")" \
+  "connected=1 draws-there=0 skips-while-unmapped=1"
+# St lets a drawing area report its surface size, and hand out its cairo
+# context, only inside its repaint handler: anywhere else it logs a CRITICAL and
+# the size reads 0, which made the column comparison see a change on every tick.
+# So indicator.js reads each exactly once, in _paintGraph, and compares at the
+# height its last paint recorded. Counted over the whole file, comments
+# included, as the Gio.DBusProxy row does (indicator.js's comments never spell
+# either call): a comment only adds to the counts, so it cannot hide a read
+# outside the handler.
+SURFACE_READ_NEEDLES=('get_surface_size(' 'get_context(')
+PAINT_HANDLER_DECLARATION='_paintGraph(topbarGraph)'
+# surface_reads_summary <indicator.js path>: for each needle, how many times the
+# file says it and how many times _paintGraph's body does. An unreadable file is
+# a line of its own.
+surface_reads_summary() {
+  local indicator_path="$1" indicator_text paint_handler_text needle summary="" separator=""
+  if [[ ! -r "$indicator_path" ]] || ! indicator_text="$(<"$indicator_path")"; then
+    printf 'cannot read %s' "$indicator_path"
+    return
+  fi
+  paint_handler_text="$(indicator_method_lines "$indicator_path" "$PAINT_HANDLER_DECLARATION")"
+  for needle in "${SURFACE_READ_NEEDLES[@]}"; do
+    summary+="$separator$needle file=$(count_occurrences "$indicator_text" "$needle")"
+    summary+=" repaint=$(count_occurrences "$paint_handler_text" "$needle")"
+    separator="; "
+  done
+  printf '%s' "$summary"
+}
+check "indicator.js reads the drawing area's surface size and context only inside the repaint handler" \
+  "$(surface_reads_summary "$EXT_DIR/indicator.js")" \
+  "get_surface_size( file=1 repaint=1; get_context( file=1 repaint=1"
+# The planted twin, on a copy: the surface read the decision made at tick time,
+# put back, is found.
+TOPBAR_SURFACE_FIXTURE_DIR="$WIRING_TMP/topbar-surface-fixture"
+cp -R "$EXT_DIR" "$TOPBAR_SURFACE_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $TOPBAR_SURFACE_FIXTURE_DIR"
+awk '{ print } $0 == "    _isRepaintNeeded(topbarGraph) {" {
+  print "        const [, heightPx] = topbarGraph.drawingArea.get_surface_size();" }' \
+  "$EXT_DIR/indicator.js" >"$TOPBAR_SURFACE_FIXTURE_DIR/indicator.js" \
+  || fatal "cannot plant a surface read in $TOPBAR_SURFACE_FIXTURE_DIR/indicator.js"
+check "a planted get_surface_size( outside the repaint handler in a copy of indicator.js is found" \
+  "$(surface_reads_summary "$TOPBAR_SURFACE_FIXTURE_DIR/indicator.js")" \
+  "get_surface_size( file=2 repaint=1; get_context( file=1 repaint=1"
+
+# The desktop card's cover check runs on the Samples and the window signals,
+# with no timer while Samples flow. extension.js's one timer is the fallback
+# that checks a covered card while the service is silent (when it runs is
+# lib/visibility.js coverFallbackTimerChange, its wiring pinned in
+# gnome-shell/tests/visibility.test.js): every timeout the file adds, of any
+# kind, is counted in the text, and the one there is must be of
+# COVER_FALLBACK_INTERVAL_SECONDS.
+FALLBACK_TIMEOUT_CALL='GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, COVER_FALLBACK_INTERVAL_SECONDS,'
+# extension_timeouts_summary <extension.js path>: how many times the file says
+# timeout_add (any kind), setTimeout( or setInterval(, and how many times it
+# adds the fallback timeout. An unreadable file is a line of its own.
+extension_timeouts_summary() {
+  local extension_path="$1" extension_text timeout_count
+  if [[ ! -r "$extension_path" ]] || ! extension_text="$(<"$extension_path")"; then
+    printf 'cannot read %s' "$extension_path"
+    return
+  fi
+  timeout_count=$(( $(count_occurrences "$extension_text" 'timeout_add') \
+    + $(count_occurrences "$extension_text" 'setTimeout(') + $(count_occurrences "$extension_text" 'setInterval(') ))
+  printf 'timeouts=%s fallback=%s' "$timeout_count" "$(count_occurrences "$extension_text" "$FALLBACK_TIMEOUT_CALL")"
+}
+check "extension.js's one timeout_add_seconds uses COVER_FALLBACK_INTERVAL_SECONDS" \
+  "$(extension_timeouts_summary "$EXTENSION_JS")" "timeouts=1 fallback=1"
+# Teardown removes what the covered check adds while the card is covered, each
+# in a guarded step of its own (runEveryStep): the fallback timeout, and every
+# covering window's position-changed, size-changed, workspace-changed and
+# unmanaged.
+FALLBACK_TEARDOWN_STEP="{name: 'remove the cover fallback timeout', run: () => this._removeCoverFallbackTimer()},"
+COVERING_WINDOWS_TEARDOWN_STEP="{name: 'disconnect from the covering windows', run: () => "
+COVERING_WINDOWS_TEARDOWN_STEP+="this._disconnectCoveringWindows()},"
+fallback_teardown_steps="$(grep -c -x -F "$FALLBACK_TEARDOWN_STEP" <<<"$teardown_lines")"
+covering_windows_teardown_steps="$(grep -c -x -F "$COVERING_WINDOWS_TEARDOWN_STEP" <<<"$teardown_lines")"
+check "_tearDown removes the fallback timeout and disconnects the covering windows" \
+  "fallback=$fallback_teardown_steps covering-windows=$covering_windows_teardown_steps" "fallback=1 covering-windows=1"
 
 # metadata.json, parsed as JSON by gjs (never grepped). Each field is printed
 # on its own prefixed line, so an unreadable or malformed file prints none and
@@ -499,9 +902,12 @@ sorted_closure() {
   printf '%sexit=%s' "$(LC_ALL=C sort <<<"$closure_output" | tr '\n' ' ')" "$closure_exit"
 }
 # Read from the import lines of today's tree, by hand: the shell side's
-# seventeen modules and the service side's seventeen, seven of them (constants,
+# nineteen modules and the service side's seventeen, seven of them (constants,
 # errorLog, history, jsonFields, pressure, protocol, teardown) on both.
-EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
+EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js '
+EXPECTED_SHELL_CLOSURE+='lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js '
+EXPECTED_SHELL_CLOSURE+='lib/teardown.js lib/topbarColumns.js lib/visibility.js lib/wiring.js '
+EXPECTED_SHELL_CLOSURE+='pulseClient.js serviceLink.js '
 EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/jsonFields.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/fileIo.js service/main.js service/sampler.js '
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
@@ -553,6 +959,39 @@ done
 check "closure: follows multi-line, side-effect, re-exported and literal dynamic imports; never a JSDoc type, a comment, import.meta or gi://" \
   "$(sorted_closure "$CLOSURE_FIXTURE_DIR" entry.js)" \
   "entry.js lazy.js lib/multi-line.js re-exported.js shared.js side-effect.js exit=0"
+
+# An import written after block comments that close on the same line is a real
+# import, and the closure must name its file (a change to it restarts the
+# service that loads it); a line that is all comment, closed or not, hides what
+# it says, and so does a block comment left open on its line.
+CLOSURE_BLOCK_FIXTURE_DIR="$WIRING_TMP/closure-block-fixture"
+rm -rf "$CLOSURE_BLOCK_FIXTURE_DIR"
+mkdir -p "$CLOSURE_BLOCK_FIXTURE_DIR" || fatal "cannot create $CLOSURE_BLOCK_FIXTURE_DIR"
+printf '%s\n' \
+  "/* note */ import {after_one} from './after-one.js';" \
+  "/* first */ /* second */ import {after_two} from './after-two.js';" \
+  "/* import {all_comment} from './all-comment.js'; */" \
+  "/* a */ // import {x} from './line-hidden.js';" >"$CLOSURE_BLOCK_FIXTURE_DIR/entry.js"
+for closure_block_module in after-one.js after-two.js all-comment.js line-hidden.js; do
+  : >"$CLOSURE_BLOCK_FIXTURE_DIR/$closure_block_module"
+done
+check "closure: an import after a block comment closed on its own line is followed" \
+  "$(sorted_closure "$CLOSURE_BLOCK_FIXTURE_DIR" entry.js)" \
+  "after-one.js after-two.js entry.js exit=0"
+CLOSURE_OPEN_COMMENT_FIXTURE_DIR="$WIRING_TMP/closure-open-comment-fixture"
+rm -rf "$CLOSURE_OPEN_COMMENT_FIXTURE_DIR"
+mkdir -p "$CLOSURE_OPEN_COMMENT_FIXTURE_DIR" || fatal "cannot create $CLOSURE_OPEN_COMMENT_FIXTURE_DIR"
+printf '%s\n' \
+  "/* import {hidden} from './hidden.js'; this comment closes on a later line" \
+  ' */' \
+  "/* closed */ /* import {also_hidden} from './also-hidden.js'; still open" \
+  ' */' >"$CLOSURE_OPEN_COMMENT_FIXTURE_DIR/entry.js"
+for closure_open_comment_module in hidden.js also-hidden.js; do
+  : >"$CLOSURE_OPEN_COMMENT_FIXTURE_DIR/$closure_open_comment_module"
+done
+check "closure: a block comment that does not close on its line still hides the line" \
+  "$(sorted_closure "$CLOSURE_OPEN_COMMENT_FIXTURE_DIR" entry.js)" \
+  "entry.js exit=0"
 
 # Each shape it cannot follow: exit 2, nothing on stdout, and a line on stderr
 # naming the module and its line.
@@ -665,6 +1104,10 @@ case "$*" in
       "$active_state" "${GNOME_STATUS_SERVICE_SUB_STATE:-$(default_sub_state "$active_state")}" ;;
   "--user show -p ActiveEnterTimestamp --value --timestamp=unix resource-pulse.service")
     printf '%s\n' "${GNOME_STATUS_SERVICE_STARTED_AT-}" ;;
+  "--user show -p FragmentPath --value resource-pulse.service")
+    printf '%s\n' "${GNOME_STATUS_SERVICE_UNIT_FILE-}" ;;
+  "--user show -p FragmentPath --value cockpit.service")
+    printf '%s\n' "${GNOME_STATUS_COCKPIT_UNIT_FILE-}" ;;
   "--user show -p LoadState -p ActiveState -p SubState -p ConditionResult cockpit.service")
     [[ -z "${GNOME_STATUS_NO_MANAGER:-}" ]] || { echo "Failed to connect to user scope bus" >&2; exit 1; }
     printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nConditionResult=%s\n' "${GNOME_STATUS_COCKPIT_LOAD_STATE:-loaded}" \
@@ -1235,6 +1678,59 @@ cockpit_older_code_summary+="unchanged=$(status_warnings_naming 'runs older code
 check "gnome-status: a module service/cockpit.js runs (itself, lib/cockpitProtocol.js, or the shared service/fileIo.js) changed after the cockpit started is a ⚠ that it runs older code; a sampler-only module is not" \
   "$cockpit_older_code_summary" \
   "service/cockpit.js=1/1/sampler:0 lib/cockpitProtocol.js=1/1/sampler:0 service/fileIo.js=1/1/sampler:1 service/sampler.js=0/0/sampler:1 service/main.js=0/0/sampler:1 unchanged=0"
+
+# The unit file as systemd sees it is the link's TARGET (the checkout's systemd/<unit>): the link in the
+# user's unit directory is created now, so its own time is always after the unit started and would hide
+# the difference. FragmentPath names the link; the target's time is the one that counts.
+UNIT_FILE_FIXTURE_DIR="$WIRING_TMP/gnome-status-unit-files"
+# unit_files_with_target_mtime <epoch>: fresh unit-file links whose targets carry that mtime.
+unit_files_with_target_mtime() {
+  local unit_name
+  rm -rf "$UNIT_FILE_FIXTURE_DIR"
+  mkdir -p "$UNIT_FILE_FIXTURE_DIR/checkout" "$UNIT_FILE_FIXTURE_DIR/unit-dir" || fatal "cannot create $UNIT_FILE_FIXTURE_DIR"
+  for unit_name in resource-pulse.service cockpit.service; do
+    : >"$UNIT_FILE_FIXTURE_DIR/checkout/$unit_name"
+    touch -d "@$1" "$UNIT_FILE_FIXTURE_DIR/checkout/$unit_name" || fatal "touch -d @$1 failed"
+    ln -s "$UNIT_FILE_FIXTURE_DIR/checkout/$unit_name" "$UNIT_FILE_FIXTURE_DIR/unit-dir/$unit_name" || fatal "cannot link $unit_name"
+  done
+}
+# status_unit_file_run <cockpit ActiveState> <sampler ActiveState>: gnome-status over the linked extension, both
+# units started when the suite started, their unit files as the fixture left them.
+status_unit_file_run() {
+  reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+  gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT" \
+    "GNOME_STATUS_SERVICE_ACTIVE_STATE=$2" "GNOME_STATUS_COCKPIT_ACTIVE_STATE=$1" "$COCKPIT_STARTED_AT" \
+    "GNOME_STATUS_SERVICE_UNIT_FILE=$UNIT_FILE_FIXTURE_DIR/unit-dir/resource-pulse.service" \
+    "GNOME_STATUS_COCKPIT_UNIT_FILE=$UNIT_FILE_FIXTURE_DIR/unit-dir/cockpit.service"
+}
+status_unit_file_warnings_naming() { status_warnings_naming "$1 runs an older unit file"; }
+unit_file_newer_summary=""
+unit_files_with_target_mtime "$AFTER_SHELL_START_EPOCH"
+status_unit_file_run active active
+for unit_name in resource-pulse.service cockpit.service; do
+  unit_file_newer_summary+="$unit_name=$(status_warnings_naming "$unit_name runs an older unit file: it changed after the unit started — systemctl --user daemon-reload && systemctl --user try-restart $unit_name")/$(status_unit_file_warnings_naming "$unit_name") "
+done
+unit_file_newer_summary+="total=$(status_warning_count)"
+check "gnome-status: a unit file (the link's target) changed after its unit started is one ⚠ naming daemon-reload and try-restart, for the sampler and for the cockpit" \
+  "$unit_file_newer_summary" "resource-pulse.service=1/1 cockpit.service=1/1 total=2"
+
+unit_file_older_summary=""
+unit_files_with_target_mtime "$BEFORE_SHELL_START_EPOCH"
+status_unit_file_run active active
+unit_file_older_summary+="older=$(status_warnings_naming 'runs an older unit file') "
+# Changed in the very second the unit started: not newer.
+unit_files_with_target_mtime "$SUITE_STARTED_AT_EPOCH"
+status_unit_file_run active active
+unit_file_older_summary+="same-second=$(status_warnings_naming 'runs an older unit file')"
+check "gnome-status: a unit file older than its unit's start, or changed in the same second, is no ⚠ (the link's own newer time does not count)" \
+  "$unit_file_older_summary" "older=0 same-second=0"
+
+unit_file_stopped_summary=""
+unit_files_with_target_mtime "$AFTER_SHELL_START_EPOCH"
+status_unit_file_run inactive inactive
+unit_file_stopped_summary+="stopped=$(status_warnings_naming 'runs an older unit file')"
+check "gnome-status: a unit that is not running gets no older-unit-file ⚠ even when its file is newer than its last start" \
+  "$unit_file_stopped_summary" "stopped=0"
 
 cockpit_gdbus_summary=""
 gnome_status_run "$ASKED_FOR_SETTING" true
@@ -2256,13 +2752,13 @@ check "refresh: a unit not active (inactive, failed, activating) is reloaded for
   "$refresh_not_active_summary" \
   "inactive:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] failed:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] activating:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] "
 reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
-check "refresh: an active unit with nothing under service/ or lib/ changed since it started is left alone, silently" \
+check "refresh: an active unit with nothing in its import closure changed since it started is left alone, silently" \
   "$(run_refresh 0 0 active "$STARTED_AT" 0)" "exit=0 calls=[$CALLS_UP_TO_START_TIME] output=[]"
 reset_refresh_extension "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
 service_changed_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
 reset_refresh_extension "$BEFORE_START_EPOCH" "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH"
 lib_changed_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
-check "refresh: a file under service/ or lib/ newer than the unit's start try-restarts it, after the reload, and says so" \
+check "refresh: a file in the unit's import closure newer than the unit's start try-restarts it, after the reload, and says so" \
   "service:${service_changed_summary%% output=*} $(grep -c -F 'restarted' <<<"$service_changed_summary") lib:${lib_changed_summary%% output=*} $(grep -c -F 'restarted' <<<"$lib_changed_summary")" \
   "service:exit=0 calls=[$CALLS_WITH_RESTART] 1 lib:exit=0 calls=[$CALLS_WITH_RESTART] 1"
 reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$AFTER_START_EPOCH"
@@ -2429,12 +2925,20 @@ check "refresh: a failure deciding one unit warns in a line naming that unit, an
   "sampler-state-unreadable:exit=0 calls=[$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$COCKPIT_CHECKED_CALLS$COCKPIT_RESTART_CALL] warned=1 said=[$COCKPIT_ENTRY_RESTART_LINE] cockpit-start-unparseable:exit=0 calls=[$CALLS_SAMPLER_RESTARTED] warned=1 said=[$SAMPLER_ENTRY_RESTART_LINE]"
 
 printf '\nresource-pulse-cost.sh (fake PROC_ROOT)\n'
-# make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry.
+# make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry. Its
+# stat carries clock ticks (utime 100, stime 50), which the cost script must
+# never read for CPU: reading them, or falling back to them, gives a reading
+# where a row expects a different one or exit 2.
 make_fake_proc() {
   mkdir -p "$1/$2"
   printf '%s\n' "$3" >"$1/$2/comm"
   printf 'Name:\t%s\nVmRSS:\t%s kB\n' "$3" "$4" >"$1/$2/status"
   printf '%s (%s) S 1 1 1 0 -1 0 0 0 0 0 100 50 0 0 20 0 1 0 1 0 0\n' "$2" "$3" >"$1/$2/stat"
+}
+# write_fake_schedstat <root> <pid> <tid> <line> writes one thread's <root>/<pid>/task/<tid>/schedstat: the
+# scheduler's time on a CPU (ns), time waiting (ns) and timeslices.
+write_fake_schedstat() {
+  mkdir -p "$1/$2/task/$3" && printf '%s\n' "$4" >"$1/$2/task/$3/schedstat"
 }
 ONE_SHELL_ROOT="$WIRING_TMP/proc-one"
 TWO_SHELLS_ROOT="$WIRING_TMP/proc-two"
@@ -2463,52 +2967,142 @@ check "cost: two gnome-shell candidates exit 2" "$COST_EXIT" 2
 cost_run "$NO_SHELL_ROOT" --rss-kib
 check "cost: no gnome-shell candidate exits 2" "$COST_EXIT" 2
 
-# --cpu-percent over a fake window: `sleep` and `getconf` are stubs on PATH.
-# The sleep stub records the window and moves the fake gnome-shell's stat on,
-# as the window would; getconf says CLK_TCK is 250, so a hard-coded 100 Hz
-# shows. utime (field 14) goes 100 -> 160 and stime (15) 50 -> 80: 90 ticks
-# over 2 s at 250 Hz is 18.00% of one core. The neighbours move by other
-# amounts (cmajflt 13: +37, cutime 16: +50, cstime 17: +90), so reading the
-# wrong fields gives another number, as does dividing by the wrong thing.
-CPU_PROC_ROOT="$WIRING_TMP/proc-cpu"
+# CPU comes from the scheduler's own nanosecond counters, one per thread
+# (<proc>/<pid>/task/<tid>/schedstat, first field), never from stat's clock
+# ticks. `sleep` is a stub on PATH: it records each call's argument and, on its
+# Nth call, copies <steps dir>/<N>/ over the fake proc root, as that much of the
+# window would move the counters on.
 COST_STUB_BIN="$WIRING_TMP/cost-bin"
 COST_SLEEP_CALLS="$WIRING_TMP/cost-sleep-calls"
-COST_STAT_AFTER="$WIRING_TMP/cost-stat-after"
 COST_WINDOW_SECONDS=2
-make_fake_proc "$CPU_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
-printf '4242 (gnome-shell) S 1 1 1 0 -1 0 0 0 0 3 100 50 7 9 20 0 1 0 1 0 0\n' >"$CPU_PROC_ROOT/4242/stat"
-printf '4242 (gnome-shell) S 1 1 1 0 -1 0 0 0 5 40 160 80 57 99 20 0 1 0 1 0 0\n' >"$COST_STAT_AFTER"
-# shellcheck disable=SC2016  # The stubs' own source: their variables expand when they run.
+# shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
 install_stub "$COST_STUB_BIN" sleep '#!/usr/bin/env bash
 printf "%s\n" "$*" >>"$COST_SLEEP_CALLS"
-cp "$COST_STAT_AFTER" "$COST_STAT_PATH"'
-# shellcheck disable=SC2016
-install_stub "$COST_STUB_BIN" getconf '#!/usr/bin/env bash
-[[ "$1" == CLK_TCK ]] && echo 250'
-: >"$COST_SLEEP_CALLS"
-cpu_percent_output="$(PATH="$COST_STUB_BIN:$PATH" GNOME_SHELL_PID=4242 PROC_ROOT="$CPU_PROC_ROOT" \
-  COST_SLEEP_CALLS="$COST_SLEEP_CALLS" COST_STAT_AFTER="$COST_STAT_AFTER" COST_STAT_PATH="$CPU_PROC_ROOT/4242/stat" \
-  bash "$COST_SCRIPT" --cpu-percent "$COST_WINDOW_SECONDS" 2>&1)"
-cpu_percent_exit=$?
-check "cost: --cpu-percent is Δ(utime+stime) / (CLK_TCK × window) × 100, over the window it was given" \
-  "exit=$cpu_percent_exit percent=$cpu_percent_output slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
-  "exit=0 percent=18.00 slept=$COST_WINDOW_SECONDS "
+sleep_call_number=$(( $(wc -l <"$COST_SLEEP_CALLS") ))
+step_dir="$COST_SLEEP_STEPS/$sleep_call_number"
+if [[ -d "$step_dir" ]]; then cp -R "$step_dir/." "$COST_SLEEP_PROC_ROOT/"; fi'
+# cost_steps_run <proc root> <steps dir> <args...> runs the cost script against
+# a fake proc root (GNOME_SHELL_PID names its gnome-shell, 4242), the sleep stub
+# moving it through the steps; leaves COST_OUTPUT, COST_EXIT and the sleep calls.
+cost_steps_run() {
+  local proc_root="$1" steps_dir="$2"
+  shift 2
+  : >"$COST_SLEEP_CALLS"
+  COST_OUTPUT="$(PATH="$COST_STUB_BIN:$PATH" GNOME_SHELL_PID=4242 PROC_ROOT="$proc_root" \
+    COST_SLEEP_CALLS="$COST_SLEEP_CALLS" COST_SLEEP_STEPS="$steps_dir" COST_SLEEP_PROC_ROOT="$proc_root" \
+    bash "$COST_SCRIPT" "$@" 2>&1)"
+  COST_EXIT=$?
+}
+# --cpu-percent over a fake window, two threads: 4 ms and 6 ms on a CPU before,
+# each 5 ms more after, so 10 ms over 2 s is 0.500% of one core (one thread
+# alone reads 0.250). The other two fields (time waiting, timeslices) move by
+# other amounts, so reading the wrong field gives another number.
+CPU_PROC_ROOT="$WIRING_TMP/proc-cpu"
+CPU_SLEEP_STEPS="$WIRING_TMP/cost-cpu-steps"
+make_fake_proc "$CPU_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+write_fake_schedstat "$CPU_PROC_ROOT" 4242 4242 '4000000 0 1'
+write_fake_schedstat "$CPU_PROC_ROOT" 4242 4243 '6000000 0 1'
+write_fake_schedstat "$CPU_SLEEP_STEPS/1" 4242 4242 '9000000 3000000 4'
+write_fake_schedstat "$CPU_SLEEP_STEPS/1" 4242 4243 '11000000 8000000 9'
+cost_steps_run "$CPU_PROC_ROOT" "$CPU_SLEEP_STEPS" --cpu-percent "$COST_WINDOW_SECONDS"
+check "cost: --cpu-percent is every thread's Δ schedstat time on a CPU (ns) / the window × 100, over the window it was given" \
+  "exit=$COST_EXIT percent=$COST_OUTPUT slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
+  "exit=0 percent=0.500 slept=$COST_WINDOW_SECONDS "
+
+# --tick-median reads the main thread (its tid is the pid) once a tick, at the
+# extension's SAMPLE_INTERVAL_SECONDS (read here from lib/constants.js, so the
+# cost script's copy of it cannot drift unseen), and prints the median of its
+# CPU per tick in ms. Five ticks of 3, 1, 40 (a collection), 1.5 and 2.5 ms: the
+# median is 2.50 and the mean 9.60; the other thread's 100 ms a tick shows if
+# every thread were read. A window under one tick is a usage error.
+SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS="$(sed -n 's/^export const SAMPLE_INTERVAL_SECONDS = \([0-9][0-9]*\);$/\1/p' \
+  "$EXT_DIR/lib/constants.js" 2>/dev/null)"
+[[ "$SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS" =~ ^[1-9][0-9]*$ ]] \
+  || fatal "cannot read SAMPLE_INTERVAL_SECONDS from $EXT_DIR/lib/constants.js"
+TICK_PROC_ROOT="$WIRING_TMP/proc-tick"
+TICK_SLEEP_STEPS="$WIRING_TMP/cost-tick-steps"
+TICK_MAIN_THREAD_NANOSECONDS=(3000000 1000000 40000000 1500000 2500000)
+TICK_OTHER_THREAD_NANOSECONDS=100000000
+make_fake_proc "$TICK_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+write_fake_schedstat "$TICK_PROC_ROOT" 4242 4242 '1000000 0 1'
+write_fake_schedstat "$TICK_PROC_ROOT" 4242 4243 '0 0 1'
+tick_main_thread_total=1000000
+tick_other_thread_total=0
+expected_tick_sleeps=""
+for tick_index in "${!TICK_MAIN_THREAD_NANOSECONDS[@]}"; do
+  tick_main_thread_total=$((tick_main_thread_total + TICK_MAIN_THREAD_NANOSECONDS[tick_index]))
+  tick_other_thread_total=$((tick_other_thread_total + TICK_OTHER_THREAD_NANOSECONDS))
+  write_fake_schedstat "$TICK_SLEEP_STEPS/$((tick_index + 1))" 4242 4242 "$tick_main_thread_total 0 1"
+  write_fake_schedstat "$TICK_SLEEP_STEPS/$((tick_index + 1))" 4242 4243 "$tick_other_thread_total 0 1"
+  expected_tick_sleeps+="$SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS "
+done
+tick_window_seconds=$(( ${#TICK_MAIN_THREAD_NANOSECONDS[@]} * SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS ))
+cost_steps_run "$TICK_PROC_ROOT" "$TICK_SLEEP_STEPS" --tick-median "$tick_window_seconds"
+tick_median_summary="exit=$COST_EXIT median=$COST_OUTPUT slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")"
+# An even count, as perf's 30 ticks are: the first four ticks, 3, 1, 40 and 1.5 ms, sort to 1, 1.5, 3, 40, and the
+# script reports the UPPER of the two middle ones, 3.00 (the lower would be 1.50, their mean 2.25).
+write_fake_schedstat "$TICK_PROC_ROOT" 4242 4242 '1000000 0 1'
+write_fake_schedstat "$TICK_PROC_ROOT" 4242 4243 '0 0 1'
+cost_steps_run "$TICK_PROC_ROOT" "$TICK_SLEEP_STEPS" --tick-median $(( 4 * SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS ))
+tick_median_summary+=" even-count=$COST_EXIT/$COST_OUTPUT"
+cost_steps_run "$TICK_PROC_ROOT" "$TICK_SLEEP_STEPS" --tick-median $((SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS - 1))
+tick_median_summary+=" under-one-tick=$COST_EXIT/$(grep -c -F 'needs at least one tick' <<<"$COST_OUTPUT")"
+check "cost: --tick-median prints the median ms of the main thread's CPU per tick, read every SAMPLE_INTERVAL_SECONDS of lib/constants.js; under one tick is a usage error" \
+  "$tick_median_summary" "exit=0 median=2.50 slept=$expected_tick_sleeps even-count=0/3.00 under-one-tick=2/1"
+
+# A counter that cannot be read is exit 2, never a reading of 0: a thread
+# listed with no schedstat (a kernel that keeps none), a process with no task
+# directory, and a first field that is not a number, in both modes. Each case
+# prints its exit and whether any number came out.
+MISSING_SCHEDSTAT_PROC_ROOT="$WIRING_TMP/proc-no-schedstat"
+NO_TASK_DIR_PROC_ROOT="$WIRING_TMP/proc-no-task-dir"
+MALFORMED_SCHEDSTAT_PROC_ROOT="$WIRING_TMP/proc-malformed-schedstat"
+NO_COST_STEPS="$WIRING_TMP/cost-no-steps"
+make_fake_proc "$MISSING_SCHEDSTAT_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+mkdir -p "$MISSING_SCHEDSTAT_PROC_ROOT/4242/task/4242"
+write_fake_schedstat "$MISSING_SCHEDSTAT_PROC_ROOT" 4242 4243 '6000000 0 1'
+make_fake_proc "$NO_TASK_DIR_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+make_fake_proc "$MALFORMED_SCHEDSTAT_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+write_fake_schedstat "$MALFORMED_SCHEDSTAT_PROC_ROOT" 4242 4242 'n/a 0 1'
+# unreadable_counter_verdict <proc root> <mode> prints exit/no-reading, or exit/the reading it printed.
+unreadable_counter_verdict() {
+  cost_steps_run "$1" "$NO_COST_STEPS" "$2" "$COST_WINDOW_SECONDS"
+  if grep -q -E '^[0-9]+(\.[0-9]+)?$' <<<"$COST_OUTPUT"; then
+    printf '%s/reading-%s' "$COST_EXIT" "$(grep -E '^[0-9]+(\.[0-9]+)?$' <<<"$COST_OUTPUT" | head -n 1)"
+  else
+    printf '%s/no-reading' "$COST_EXIT"
+  fi
+}
+unreadable_counter_summary=""
+for unreadable_mode in --cpu-percent --tick-median; do
+  unreadable_counter_summary+="${unreadable_mode#--}:"
+  unreadable_counter_summary+=" no-schedstat=$(unreadable_counter_verdict "$MISSING_SCHEDSTAT_PROC_ROOT" \
+    "$unreadable_mode")"
+  unreadable_counter_summary+=" no-task-dir=$(unreadable_counter_verdict "$NO_TASK_DIR_PROC_ROOT" "$unreadable_mode")"
+  unreadable_counter_summary+=" malformed=$(unreadable_counter_verdict "$MALFORMED_SCHEDSTAT_PROC_ROOT" \
+    "$unreadable_mode") "
+done
+check "cost: a schedstat that is missing, a process with no task dir and a counter that is not a number are exit 2 in both modes, never a reading" \
+  "$unreadable_counter_summary" \
+  "cpu-percent: no-schedstat=2/no-reading no-task-dir=2/no-reading malformed=2/no-reading tick-median: no-schedstat=2/no-reading no-task-dir=2/no-reading malformed=2/no-reading "
 
 # --service measures the sampler service the same way, found by its unit's
 # MainPID: a systemctl stub answers that one property and records the call,
 # behind the barrier, so no real user manager is ever asked. The fake root
 # holds a gnome-shell too, named by GNOME_SHELL_PID, which --service must never
-# measure. The service's stat moves from utime 10 / stime 5 to 40 / 20: 45 ticks
-# over 2 s at 250 Hz is 9.00% of one core (its neighbours move by other amounts).
+# measure. The service's main thread goes from 10 ms to 28 ms on a CPU: 18 ms
+# over 2 s is 0.900% of one core; gnome-shell's moves by 50 ms (2.500%), so
+# measuring it instead shows.
 SERVICE_PROC_ROOT="$WIRING_TMP/proc-service"
+SERVICE_SLEEP_STEPS="$WIRING_TMP/cost-service-steps"
 FAKE_SERVICE_PID=5151
 FAKE_SERVICE_RSS_KIB=52000
 SERVICE_UNIT_NAME="resource-pulse.service"
+FAKE_SCHEDSTAT_BEFORE='10000000 0 1'
 make_fake_proc "$SERVICE_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
 make_fake_proc "$SERVICE_PROC_ROOT" "$FAKE_SERVICE_PID" gjs "$FAKE_SERVICE_RSS_KIB"
-FAKE_SERVICE_STAT_BEFORE="$FAKE_SERVICE_PID (gjs) S 1 1 1 0 -1 0 0 0 0 3 10 5 7 9 20 0 1 0 1 0 0"
-COST_SERVICE_STAT_AFTER="$WIRING_TMP/cost-service-stat-after"
-printf '%s (gjs) S 1 1 1 0 -1 0 0 0 5 40 40 20 57 99 20 0 1 0 1 0 0\n' "$FAKE_SERVICE_PID" >"$COST_SERVICE_STAT_AFTER"
+write_fake_schedstat "$SERVICE_SLEEP_STEPS/1" "$FAKE_SERVICE_PID" "$FAKE_SERVICE_PID" '28000000 4000000 7'
+write_fake_schedstat "$SERVICE_SLEEP_STEPS/1" 4242 4242 '60000000 9000000 11'
 COST_SYSTEMCTL_STUB_BIN="$WIRING_TMP/cost-systemctl-bin"
 COST_SYSTEMCTL_CALLS="$WIRING_TMP/cost-systemctl-calls"
 # shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
@@ -2522,18 +3116,21 @@ esac
 exit "${COST_SYSTEMCTL_EXIT:-0}"'
 # cost_service_run <MainPID answer> <args...> [-- with COST_SYSTEMCTL_EXIT in the
 # caller's environment]; leaves COST_OUTPUT, COST_EXIT and the systemctl calls.
-# Each run starts from the service's "before" stat, which the sleep stub moves on.
+# Each run starts the service's and gnome-shell's counters from "before", which
+# the sleep stub moves on.
 cost_service_run() {
   local main_pid_answer="$1"
   shift
-  printf '%s\n' "$FAKE_SERVICE_STAT_BEFORE" >"$SERVICE_PROC_ROOT/$FAKE_SERVICE_PID/stat" \
-    || fatal "cannot reset the fake service's stat"
+  if ! write_fake_schedstat "$SERVICE_PROC_ROOT" "$FAKE_SERVICE_PID" "$FAKE_SERVICE_PID" "$FAKE_SCHEDSTAT_BEFORE" ||
+    ! write_fake_schedstat "$SERVICE_PROC_ROOT" 4242 4242 "$FAKE_SCHEDSTAT_BEFORE"; then
+    fatal "cannot reset the fake service's and gnome-shell's schedstat"
+  fi
   : >"$COST_SYSTEMCTL_CALLS"
   : >"$COST_SLEEP_CALLS"
   COST_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$COST_STUB_BIN:$COST_SYSTEMCTL_STUB_BIN:$PATH" \
     GNOME_SHELL_PID=4242 PROC_ROOT="$SERVICE_PROC_ROOT" COST_SYSTEMCTL_CALLS="$COST_SYSTEMCTL_CALLS" \
     COST_SERVICE_MAIN_PID="$main_pid_answer" COST_SLEEP_CALLS="$COST_SLEEP_CALLS" \
-    COST_STAT_AFTER="$COST_SERVICE_STAT_AFTER" COST_STAT_PATH="$SERVICE_PROC_ROOT/$FAKE_SERVICE_PID/stat" \
+    COST_SLEEP_STEPS="$SERVICE_SLEEP_STEPS" COST_SLEEP_PROC_ROOT="$SERVICE_PROC_ROOT" \
     bash "$COST_SCRIPT" "$@" 2>&1)"
   COST_EXIT=$?
 }
@@ -2543,9 +3140,9 @@ check "cost: --service --rss-kib prints the service's VmRSS, found by its unit's
   "exit=$COST_EXIT rss=$COST_OUTPUT calls=[$(tr '\n' ';' <"$COST_SYSTEMCTL_CALLS")]" \
   "exit=0 rss=$FAKE_SERVICE_RSS_KIB calls=[$SERVICE_MAIN_PID_CALL]"
 cost_service_run "$FAKE_SERVICE_PID" --service --cpu-percent "$COST_WINDOW_SECONDS"
-check "cost: --service --cpu-percent measures the service's own stat over the window, as for gnome-shell" \
+check "cost: --service --cpu-percent measures the service's own schedstat over the window, as for gnome-shell" \
   "exit=$COST_EXIT percent=$COST_OUTPUT slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
-  "exit=0 percent=9.00 slept=$COST_WINDOW_SECONDS "
+  "exit=0 percent=0.900 slept=$COST_WINDOW_SECONDS "
 cost_unmeasurable_summary=""
 cost_service_run 0 --service --rss-kib
 cost_unmeasurable_summary+="not-running=$COST_EXIT/$(grep -c -F 'is not running' <<<"$COST_OUTPUT")"
@@ -2570,7 +3167,7 @@ cost_flag_order_summary+="rss-kib=$COST_EXIT/$COST_OUTPUT"
 cost_service_run "$FAKE_SERVICE_PID" --cpu-percent "$COST_WINDOW_SECONDS" --service
 cost_flag_order_summary+=" cpu-percent=$COST_EXIT/$COST_OUTPUT"
 check "cost: --service after the mode still measures the service" \
-  "$cost_flag_order_summary" "rss-kib=0/$FAKE_SERVICE_RSS_KIB cpu-percent=0/9.00"
+  "$cost_flag_order_summary" "rss-kib=0/$FAKE_SERVICE_RSS_KIB cpu-percent=0/0.900"
 # --cockpit measures cockpit.service the same way, by its own unit's MainPID:
 # the fake root holds the sampler's process as well as gnome-shell, and the
 # stub answers both units, so measuring either neighbour shows as its number.
@@ -2611,8 +3208,9 @@ printf '\nresource-pulse-nested.sh (hermetic: no gnome-shell, nothing is started
 # here. These rows cover what it decides before anything starts: its usage,
 # the bus configs it renders, the environment allowlist, and its refusals. Every
 # run of it here has busctl, gsettings and gnome-shell replaced by stubs that
-# only record the call (jq too: CI does not install it, and no row here needs
-# it to really run), and RESOURCE_PULSE_NESTED_BASE pointed at an empty
+# only record the call (jq too: no run of the script here needs it to really
+# run; the two rows that do, on perf's probe answers, call the functions
+# themselves with the real jq), and RESOURCE_PULSE_NESTED_BASE pointed at an empty
 # directory, so a row that must refuse proves it reached none of them.
 #
 # That directory's name is deliberately longer than the script allows a run
@@ -2708,6 +3306,13 @@ nested_run launch
 check "nested: no subcommand and an unknown one both exit 2, say why, and create nothing" \
   "$no_subcommand_exit:$NESTED_EXIT:$(grep -c -F "unknown subcommand: 'launch'" <<<"$NESTED_OUTPUT"):$(find "$NESTED_BASE" -mindepth 1 | wc -l)" \
   "2:2:1:0"
+
+# The usage block, as a usage error prints it: whole lines, so a line that merely mentions an option is not enough.
+nested_run
+usage_summary="start=$(grep -c -x -F 'usage: scripts/resource-pulse-nested.sh start [--gc-log] [--replay]' <<<"$NESTED_OUTPUT")"
+usage_summary+=" scenario=$(grep -c -x -F '       scripts/resource-pulse-nested.sh scenario <idle|light|busy>' <<<"$NESTED_OUTPUT")"
+check "nested: the usage lists start's --gc-log and --replay, and the scenario request" "$usage_summary" \
+  "start=1 scenario=1"
 
 nested_run eval '1 + 1'
 check "nested: eval with no run refuses (exit 2) and never calls busctl" \
@@ -2831,8 +3436,466 @@ reused_pid_summary+=" discovery=$(grep -c -F 'no live run' <<<"$NESTED_OUTPUT")"
 check "nested: a recorded pid with another start time (a reused pid) passes nowhere: stop, eval, or looking for a run" \
   "$reused_pid_summary" "stop=left-running eval=refused discovery=1"
 rm -rf "$REUSED_PID_RUN" "$SUPERVISOR_REUSED_RUN"
+
+# `scenario` takes exactly one of three words, and refuses any other before it
+# looks for a run. Each case prints exit/its own message/whether it looked.
+# scenario_word_verdict <needle> <args...>
+scenario_word_verdict() {
+  local scenario_needle="$1"
+  shift
+  nested_run scenario "$@"
+  printf '%s/%s/%s' "$NESTED_EXIT" "$(grep -c -F "$scenario_needle" <<<"$NESTED_OUTPUT")" \
+    "$(grep -c -F 'no live run' <<<"$NESTED_OUTPUT")"
+}
+scenario_word_summary="heavy=$(scenario_word_verdict "not a scenario: 'heavy'" heavy)"
+scenario_word_summary+=" upper-case=$(scenario_word_verdict "not a scenario: 'IDLE'" IDLE)"
+scenario_word_summary+=" empty=$(scenario_word_verdict "not a scenario: ''" '')"
+scenario_word_summary+=" two-words=$(scenario_word_verdict 'scenario takes one word' idle light)"
+scenario_word_summary+=" no-word=$(scenario_word_verdict 'scenario takes one word')"
+# The list the request accepts, read by sourcing the script: a fourth word added there fails this row.
+# shellcheck disable=SC2016  # Expanded by the child bash.
+scenario_word_summary+=" words=[$(bash -c 'source "$1" || exit 99; printf "%s " "${REPLAY_SCENARIO_NAMES[@]}"' \
+  scenario-words "$NESTED_SCRIPT")]"
+check "nested: scenario takes exactly idle, light or busy, and refuses any other word (exit 2) before looking for a run" \
+  "$scenario_word_summary" \
+  "heavy=2/1/0 upper-case=2/1/0 empty=2/1/0 two-words=2/1/0 no-word=2/1/0 words=[idle light busy ]"
+
+# `scenario idle` on a run recorded with the given values; each case defeats
+# one requirement: replay=1 recorded, the run live (its supervisor, and its
+# gnome-shell in its session), and its replay service running. The last meets
+# them all and so writes the word, which proves the fixture otherwise good.
+# The file holds the word, then a token new to each request, so the replay
+# service restarts even for the word already playing: asked again, the same
+# word must come with a new token, and no staging file may be left behind.
+SCENARIO_RUN="$NESTED_BASE/rpn.Scenari1"
+SCENARIO_FILE="$SCENARIO_RUN/run/rp-scenario"
+# scenario_file_summary prints the scenario file's first field and whether a request token follows it, or none.
+scenario_file_summary() {
+  local scenario_word="" request_id=""
+  [[ -e "$SCENARIO_FILE" ]] || { printf none; return 0; }
+  read -r scenario_word request_id _ <"$SCENARIO_FILE"
+  printf '%s+%s' "$scenario_word" "$([[ -n "$request_id" ]] && printf token || printf no-token)"
+}
+# scenario_run_verdict <needle> <run values...> prints exit/needle count/what the file holds.
+scenario_run_verdict() {
+  local scenario_needle="$1"
+  shift
+  rm -rf "$SCENARIO_RUN"
+  make_run_dir "$SCENARIO_RUN" "$@"
+  mkdir -p "$SCENARIO_RUN/run"
+  NESTED_RUN_DIR="$SCENARIO_RUN" nested_run scenario idle
+  printf '%s/%s/%s' "$NESTED_EXIT" "$(grep -c -F "$scenario_needle" <<<"$NESTED_OUTPUT")" "$(scenario_file_summary)"
+}
+live_supervisor_values=("supervisor=$$" "supervisor-starttime=$(starttime_of "$$")")
+live_shell_values=("session=$test_session_id" "gnome-shell=$fake_shell_pid"
+  "gnome-shell-starttime=$(starttime_of "$fake_shell_pid")")
+live_service_values=("service=$$" "service-starttime=$(starttime_of "$$")")
+scenario_run_summary="no-replay=$(scenario_run_verdict 'was not started with --replay' \
+  "${live_supervisor_values[@]}" "${live_shell_values[@]}" "${live_service_values[@]}")"
+scenario_run_summary+=" not-live=$(scenario_run_verdict 'is not live' "supervisor=$NEVER_RUNNING_PID" \
+  "${live_shell_values[@]}" "${live_service_values[@]}" replay=1)"
+scenario_run_summary+=" service-gone=$(scenario_run_verdict 'replay service is not running' \
+  "${live_supervisor_values[@]}" "${live_shell_values[@]}" "service=$NEVER_RUNNING_PID" replay=1)"
+scenario_run_summary+=" live=$(scenario_run_verdict 'replay service takes' \
+  "${live_supervisor_values[@]}" "${live_shell_values[@]}" "${live_service_values[@]}" replay=1)"
+first_scenario_request="$(cat "$SCENARIO_FILE" 2>/dev/null)"
+NESTED_RUN_DIR="$SCENARIO_RUN" nested_run scenario idle
+scenario_run_summary+=" again=$NESTED_EXIT/$(scenario_file_summary)"
+scenario_run_summary+="/$([[ -n "$first_scenario_request" && "$(cat "$SCENARIO_FILE" 2>/dev/null)" != "$first_scenario_request" ]] && printf new-request || printf same-request)"
+scenario_run_summary+=" staging-left=$(find "$SCENARIO_RUN/run" -mindepth 1 -name 'rp-scenario.*' | wc -l)"
+check "nested: scenario refuses a run without replay=1, one not live and one whose replay service is gone (exit 2); a live replay run gets the word and a new request token in run/rp-scenario" \
+  "$scenario_run_summary" \
+  "no-replay=2/1/none not-live=2/1/none service-gone=2/1/none live=0/1/idle+token again=0/idle+token/new-request staging-left=0"
+rm -rf "$SCENARIO_RUN"
+
+# `perf` acts only on a live run started with --gc-log and --replay whose
+# replay service runs, with gnome-calculator on PATH, and a shell log holding a
+# collection line of the run's gnome-shell (the GC log is on). Each case below
+# defeats one requirement; the last meets them all and so reaches busctl (the
+# stub), which proves the fixture otherwise good. No case may start
+# gnome-calculator (its stub records any call). Each prints exit/its own
+# message/busctl calls/gnome-calculator calls.
+PERF_RUN="$NESTED_BASE/rpn.PerfRun1"
+PERF_CALCULATOR_STUB_BIN="$WIRING_TMP/perf-calculator-bin"
+PERF_CALCULATOR_CALLS="$WIRING_TMP/perf-calculator-calls"
+# The real gnome-calculator is in /usr/bin beside every tool, so the case
+# without it runs on a PATH of the stubs and only what perf runs before it looks
+# for gnome-calculator.
+PERF_MINIMAL_BIN="$WIRING_TMP/perf-minimal-bin"
+mkdir -p "$PERF_MINIMAL_BIN" || fatal "cannot create $PERF_MINIMAL_BIN"
+for perf_minimal_tool in bash readlink dirname stat; do
+  ln -sf "$(command -v "$perf_minimal_tool")" "$PERF_MINIMAL_BIN/$perf_minimal_tool" \
+    || fatal "cannot link $perf_minimal_tool into $PERF_MINIMAL_BIN"
+done
+# Its calls file is written into its source: a launch under `env -i` would carry no variable naming it.
+install_stub "$PERF_CALCULATOR_STUB_BIN" gnome-calculator \
+  "$(printf '#!/bin/bash\nprintf "gnome-calculator %%s\\n" "$*" >>%q' "$PERF_CALCULATOR_CALLS")"
+PERF_STUBBED_PATH="$PERF_CALCULATOR_STUB_BIN:$NESTED_STUB_BIN:$PATH"
+# The case without jq: gnome-calculator's stub, busctl's stub alone (the stub dir holds a jq stub too), and the
+# minimal tools; jq is the next tool perf looks for.
+PERF_BUSCTL_ONLY_BIN="$WIRING_TMP/perf-busctl-only-bin"
+if ! mkdir -p "$PERF_BUSCTL_ONLY_BIN" || ! ln -sf "$NESTED_STUB_BIN/busctl" "$PERF_BUSCTL_ONLY_BIN/busctl"; then
+  fatal "cannot lay out $PERF_BUSCTL_ONLY_BIN"
+fi
+PERF_WITHOUT_JQ_PATH="$PERF_CALCULATOR_STUB_BIN:$PERF_BUSCTL_ONLY_BIN:$PERF_MINIMAL_BIN"
+# A collection line of the run's gnome-shell, and a log with none: only another process's line, and a word.
+PERF_COLLECTING_LOG="MinorGC:   $fake_shell_pid 0x5f2aea7ebe60   0.015299 OUT_OF_NURSERY         8.1%    256    512"
+PERF_SILENT_LOG="$(printf 'gnome-shell started\nMajorGC:   %s 0x5f2aea7ebe60  10.918717 MEM_PRESSURE\n' \
+  "$NEVER_RUNNING_PID")"
+# perf_refusal_verdict <needle> <PATH> <shell log> [run values...] prints exit/needle count/busctl
+# calls/gnome-calculator calls for `perf` on the fixture run made with these values, named; with no values there is
+# no run, and none is named.
+perf_refusal_verdict() {
+  local perf_needle="$1" perf_path="$2" perf_shell_log="$3" perf_output perf_exit
+  shift 3
+  rm -rf "$PERF_RUN"
+  : >"$NESTED_STUB_CALLS"
+  : >"$PERF_CALCULATOR_CALLS"
+  if (( $# > 0 )); then
+    make_run_dir "$PERF_RUN" "$@"
+    mkdir -p "$PERF_RUN/log" "$PERF_RUN/run" || fatal "cannot lay out $PERF_RUN"
+    printf '%s\n' "unix:path=$PERF_RUN/bus/session.sock,guid=0123456789abcdef" >"$PERF_RUN/state/session.addr"
+    printf '%s\n' "$perf_shell_log" >"$PERF_RUN/log/shell.log"
+  fi
+  perf_output="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" \
+    ${1:+RESOURCE_PULSE_NESTED_DIR="$PERF_RUN"} PATH="$perf_path" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" \
+    RESOURCE_PULSE_NESTED_BASE="$NESTED_BASE" bash "$NESTED_SCRIPT" perf 2>&1)"
+  perf_exit=$?
+  printf '%s/%s/%s/%s' "$perf_exit" "$(grep -c -F "$perf_needle" <<<"$perf_output")" \
+    "$(grep -c '^busctl ' "$NESTED_STUB_CALLS")" "$(wc -l <"$PERF_CALCULATOR_CALLS")"
+}
+perf_live_run_values=("${live_supervisor_values[@]}" "${live_shell_values[@]}" "${live_service_values[@]}")
+nested_run perf now
+perf_refusal_summary="extra-argument=$NESTED_EXIT/$(grep -c -F 'perf takes no arguments' <<<"$NESTED_OUTPUT")"
+perf_refusal_summary+=" no-run=$(perf_refusal_verdict 'no live run' "$PERF_STUBBED_PATH" '')"
+perf_refusal_summary+=" not-live=$(perf_refusal_verdict 'is not live' "$PERF_STUBBED_PATH" "$PERF_COLLECTING_LOG" \
+  "supervisor=$NEVER_RUNNING_PID" "${live_shell_values[@]}" "${live_service_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" no-gc-log=$(perf_refusal_verdict 'was not started with --gc-log' "$PERF_STUBBED_PATH" \
+  "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" replay=1)"
+perf_refusal_summary+=" no-replay=$(perf_refusal_verdict 'was not started with --replay' "$PERF_STUBBED_PATH" \
+  "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1)"
+perf_refusal_summary+=" service-gone=$(perf_refusal_verdict 'replay service is not running' "$PERF_STUBBED_PATH" \
+  "$PERF_COLLECTING_LOG" "${live_supervisor_values[@]}" "${live_shell_values[@]}" "service=$NEVER_RUNNING_PID" \
+  gc-log=1 replay=1)"
+perf_refusal_summary+=" no-calculator=$(perf_refusal_verdict 'gnome-calculator is required' \
+  "$NESTED_STUB_BIN:$PERF_MINIMAL_BIN" "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" no-jq=$(perf_refusal_verdict 'jq is required' "$PERF_WITHOUT_JQ_PATH" \
+  "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" gc-log-silent=$(perf_refusal_verdict 'holds no collection line' "$PERF_STUBBED_PATH" \
+  "$PERF_SILENT_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" all-met=$(perf_refusal_verdict 'the Eval call failed' "$PERF_STUBBED_PATH" \
+  "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" usage=$(grep -c -x -F '       scripts/resource-pulse-nested.sh perf' <<<"$NESTED_OUTPUT")"
+check "nested: perf refuses (exit 2), before busctl and without starting gnome-calculator, a run that is not live, one without gc-log=1 or replay=1, a stopped replay service, no gnome-calculator or jq on PATH and a silent GC log" \
+  "$perf_refusal_summary" \
+  "extra-argument=2/1 no-run=2/1/0/0 not-live=2/1/0/0 no-gc-log=2/1/0/0 no-replay=2/1/0/0 service-gone=2/1/0/0 no-calculator=2/1/0/0 no-jq=2/1/0/0 gc-log-silent=2/1/0/0 all-met=2/1/1/0 usage=1"
+rm -rf "$PERF_RUN"
 kill "$fake_shell_pid" 2>/dev/null
 wait "$fake_shell_pid" 2>/dev/null
+
+# perf counts a window's major collections in the shell's log (SpiderMonkey's
+# MajorGC: lines, as `start --gc-log` makes it write them): only the lines past
+# the byte offset the window began at, and only those whose PID column is the
+# nested shell's, never the column header, a MinorGC: line, another process's
+# line or one that merely mentions MajorGC:. A log it cannot read is a failure,
+# never a count of 0.
+PERF_GC_LOG="$WIRING_TMP/perf-gc-shell.log"
+PERF_GC_SHELL_PID=3353150
+PERF_GC_HEADER='MajorGC: PID     Runtime        Timestamp  Reason               States FSNR SizeKB'
+perf_gc_line() { printf '%s:   %s 0x5f2aea7ebe60  %s %s         0 -> 0 F N      5772\n' "$1" "$2" "$3" "$4"; }
+{
+  printf '%s\n' "$PERF_GC_HEADER"
+  perf_gc_line MajorGC "$PERF_GC_SHELL_PID" 1.002 MEM_PRESSURE
+} >"$PERF_GC_LOG"
+perf_gc_window_offset="$(stat -c %s "$PERF_GC_LOG")"
+{
+  printf '%s\n' "$PERF_GC_HEADER"
+  perf_gc_line MajorGC "$PERF_GC_SHELL_PID" 10.918 MEM_PRESSURE
+  perf_gc_line MinorGC "$PERF_GC_SHELL_PID" 11.002 OUT_OF_NURSERY
+  perf_gc_line MajorGC 3353318 12.500 ALLOC_TRIGGER
+  printf 'JS LOG: resource-pulse: MajorGC:   %s seen\n' "$PERF_GC_SHELL_PID"
+  perf_gc_line MajorGC "$PERF_GC_SHELL_PID" 20.950 MEM_PRESSURE
+} >>"$PERF_GC_LOG"
+perf_gc_summary="window=$(nested_call count_major_collections_since "$PERF_GC_LOG" "$perf_gc_window_offset" \
+  "$PERF_GC_SHELL_PID")"
+perf_gc_summary+=" whole-log=$(nested_call count_major_collections_since "$PERF_GC_LOG" 0 "$PERF_GC_SHELL_PID")"
+if nested_call count_major_collections_since "$WIRING_TMP/no-such-shell.log" 0 "$PERF_GC_SHELL_PID" >/dev/null 2>&1
+then perf_gc_summary+=" unreadable=passed"
+else perf_gc_summary+=" unreadable=failed"; fi
+check "nested: perf counts the MajorGC: lines of the shell's own pid past the window's start, never the header, a MinorGC: line or another process's; an unreadable log fails" \
+  "$perf_gc_summary" "window=2 whole-log=3 unreadable=failed"
+
+# perf's verdict, a pure function of the counts. The disabled state shows 4
+# major collections and 2 frames; each enabled state is "<major collections>
+# <frames> <Samples> <top-bar paints> <card redirect>", in perf's order:
+# covered-idle, covered-busy, topbar-hidden-covered, visible-busy. The in-budget
+# counts sit on every bound's edge, and the disabled state's frames are above
+# zero, so a comparison off by one either way, or a frame bound that leaves the
+# disabled state's frames out, moves a row: the disabled state's own collections
+# on their absolute bound, 4; an enabled state's 4 + 1 = 5; frames 30 Samples +
+# 2 + 2 = 34, and covered-idle's 2 + 3 = 5; no top-bar paint while hidden.
+PERF_VERDICT_DISABLED_MAJORS=4
+PERF_VERDICT_DISABLED_FRAMES=2
+PERF_VERDICT_DISABLED_COUNTS=("$PERF_VERDICT_DISABLED_MAJORS" "$PERF_VERDICT_DISABLED_FRAMES")
+PERF_VERDICT_EDGE_MAJORS=5
+PERF_VERDICT_STATE_NAMES=(covered-idle covered-busy topbar-hidden-covered visible-busy)
+PERF_VERDICT_EDGE_RECORDS=("$PERF_VERDICT_EDGE_MAJORS 5 30 0 ALWAYS" "$PERF_VERDICT_EDGE_MAJORS 34 30 30 ALWAYS"
+  "$PERF_VERDICT_EDGE_MAJORS 34 30 0 ALWAYS" "$PERF_VERDICT_EDGE_MAJORS 34 30 60 ALWAYS")
+# perf_verdict_run <records...> runs the verdict on the disabled counts and these records; leaves
+# PERF_VERDICT_OUTPUT and PERF_VERDICT_EXIT.
+perf_verdict_run() {
+  PERF_VERDICT_OUTPUT="$(nested_call perf_count_verdict "${PERF_VERDICT_DISABLED_COUNTS[@]}" "$@" 2>&1)"
+  PERF_VERDICT_EXIT=$?
+}
+# perf_breach_verdict <state index> <record> <needle> runs the verdict with one state's record replaced, and prints
+# exit/needle count/whether the line names exactly one broken budget.
+perf_breach_verdict() {
+  local -a breach_records=("${PERF_VERDICT_EDGE_RECORDS[@]}")
+  breach_records[$1]="$2"
+  perf_verdict_run "${breach_records[@]}"
+  printf '%s/%s/%s' "$PERF_VERDICT_EXIT" "$(grep -c -F "$3" <<<"$PERF_VERDICT_OUTPUT")" \
+    "$(grep -c -F 'FAIL: 1 count budget broken: ' <<<"$PERF_VERDICT_OUTPUT")"
+}
+perf_verdict_run "${PERF_VERDICT_EDGE_RECORDS[@]}"
+check "nested: perf's verdict passes (exit 0) counts on every budget's edge, in one line" \
+  "exit=$PERF_VERDICT_EXIT lines=$(wc -l <<<"$PERF_VERDICT_OUTPUT") [$PERF_VERDICT_OUTPUT]" \
+  "exit=0 lines=1 [perf: PASS: every count within its budget]"
+
+# The disabled state's own collections one past their absolute bound: a defect that outlives disable() raises
+# the disabled state with the enabled ones, and every relative budget then holds. Only this budget breaks: the
+# enabled states' 5 stay within 5 + 1.
+PERF_VERDICT_DISABLED_COUNTS=($((PERF_VERDICT_DISABLED_MAJORS + 1)) "$PERF_VERDICT_DISABLED_FRAMES")
+perf_disabled_breach_needle="disabled-collections: disabled had 5 major collections, more than 4: something outlives"
+perf_disabled_breach_needle+=" disable(), or the run is not idle"
+perf_verdict_run "${PERF_VERDICT_EDGE_RECORDS[@]}"
+PERF_VERDICT_DISABLED_COUNTS=("$PERF_VERDICT_DISABLED_MAJORS" "$PERF_VERDICT_DISABLED_FRAMES")
+check "nested: perf's verdict fails (exit 1) a disabled state with one more major collection than its absolute bound of 4, naming only that budget" \
+  "$PERF_VERDICT_EXIT/$(grep -c -F "$perf_disabled_breach_needle" <<<"$PERF_VERDICT_OUTPUT")/$(grep -c -F 'FAIL: 1 count budget broken: ' <<<"$PERF_VERDICT_OUTPUT")" \
+  "1/1/1"
+
+perf_collections_summary=""
+perf_frames_summary=""
+perf_redirect_summary=""
+for perf_state_index in "${!PERF_VERDICT_STATE_NAMES[@]}"; do
+  perf_state_name="${PERF_VERDICT_STATE_NAMES[perf_state_index]}"
+  read -r _ edge_frames edge_samples edge_paints _ <<<"${PERF_VERDICT_EDGE_RECORDS[perf_state_index]}"
+  collections_breach_needle="collections: $perf_state_name had 6 major collections, more than the disabled state's"
+  collections_breach_needle+=" 4 plus 1"
+  perf_collections_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" \
+    "6 $edge_frames $edge_samples $edge_paints ALWAYS" "$collections_breach_needle")"
+  # One frame past Samples + 2 + 2. In covered-idle that is with no Sample at all, so that its own tighter bound
+  # (the disabled state's 2 frames + 3) still holds and only this one breaks.
+  if [[ "$perf_state_name" == covered-idle ]]; then frames_breach_record="$PERF_VERDICT_EDGE_MAJORS 5 0 0 ALWAYS"
+  else frames_breach_record="$PERF_VERDICT_EDGE_MAJORS 35 30 $edge_paints ALWAYS"; fi
+  read -r _ breach_frames breach_samples _ _ <<<"$frames_breach_record"
+  frames_breach_needle="frames-per-sample: $perf_state_name drew $breach_frames frames, more than its"
+  frames_breach_needle+=" $breach_samples Samples plus the disabled state's 2 frames plus 2"
+  perf_frames_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" "$frames_breach_record" \
+    "$frames_breach_needle")"
+  perf_redirect_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" \
+    "$PERF_VERDICT_EDGE_MAJORS $edge_frames $edge_samples $edge_paints 0" \
+    "card-redirect: $perf_state_name found the card's offscreen redirect 0, not ALWAYS")"
+done
+check "nested: perf's verdict fails (exit 1) one more major collection than the disabled state's + 1 in any enabled state, naming it" \
+  "$perf_collections_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
+check "nested: perf's verdict fails (exit 1) one more frame than Samples + the disabled state's frames + 2 in any enabled state, naming it" \
+  "$perf_frames_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
+covered_idle_breach_needle="covered-idle-frames: covered-idle drew 6 frames, more than the disabled state's 2 frames"
+covered_idle_breach_needle+=" plus 3"
+check "nested: perf's verdict fails (exit 1) covered-idle at one more frame than the disabled state's frames + 3, naming it" \
+  "$(perf_breach_verdict 0 "$PERF_VERDICT_EDGE_MAJORS 6 30 0 ALWAYS" "$covered_idle_breach_needle")" "1/1/1"
+hidden_paint_breach_needle="hidden-topbar-paints: topbar-hidden-covered painted the top bar while it was hidden"
+hidden_paint_breach_needle+=" (top-bar paints 1, allowed 0)"
+check "nested: perf's verdict fails (exit 1) one top-bar paint while the top bar is hidden, naming it" \
+  "$(perf_breach_verdict 2 "$PERF_VERDICT_EDGE_MAJORS 34 30 1 ALWAYS" "$hidden_paint_breach_needle")" "1/1/1"
+check "nested: perf's verdict fails (exit 1) a card whose offscreen redirect is not ALWAYS in any enabled state, naming it" \
+  "$perf_redirect_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
+
+# Counts it cannot judge are exit 2, never a pass or a breach: a state missing,
+# a count that is not a whole number, a record short or long by a field, and a
+# visible-busy window in which the probe counted no frame, no Sample or no
+# paint, where each must happen (a probe that is not counting reads as clean).
+# perf_unjudgeable_verdict <records...> prints exit/whether it said it could not judge.
+perf_unjudgeable_verdict() {
+  perf_verdict_run "$@"
+  printf '%s/%s' "$PERF_VERDICT_EXIT" "$(grep -c -F 'perf: could not judge the counts: ' <<<"$PERF_VERDICT_OUTPUT")"
+}
+PERF_VERDICT_OTHER_EDGE_RECORDS=("${PERF_VERDICT_EDGE_RECORDS[@]:1}")
+perf_unjudgeable_summary="state-missing=$(perf_unjudgeable_verdict "${PERF_VERDICT_EDGE_RECORDS[@]:0:3}")"
+perf_unjudgeable_summary+=" not-a-number=$(perf_unjudgeable_verdict '5 x 30 0 ALWAYS' \
+  "${PERF_VERDICT_OTHER_EDGE_RECORDS[@]}")"
+# A leading zero, which bash arithmetic would read as octal (08 is not a number to it).
+perf_unjudgeable_summary+=" leading-zero=$(perf_unjudgeable_verdict '5 08 30 0 ALWAYS' \
+  "${PERF_VERDICT_OTHER_EDGE_RECORDS[@]}")"
+perf_unjudgeable_summary+=" short-record=$(perf_unjudgeable_verdict '5 5 30 ALWAYS' \
+  "${PERF_VERDICT_OTHER_EDGE_RECORDS[@]}")"
+perf_unjudgeable_summary+=" long-record=$(perf_unjudgeable_verdict '5 5 30 0 ALWAYS 9' \
+  "${PERF_VERDICT_OTHER_EDGE_RECORDS[@]}")"
+for perf_dead_counter in frames Samples paints; do
+  case "$perf_dead_counter" in
+    frames) perf_dead_record='5 0 30 60 ALWAYS' ;;
+    Samples) perf_dead_record='5 34 0 60 ALWAYS' ;;
+    paints) perf_dead_record='5 34 30 0 ALWAYS' ;;
+  esac
+  perf_unjudgeable_summary+=" visible-busy-no-$perf_dead_counter=$(perf_unjudgeable_verdict \
+    "${PERF_VERDICT_EDGE_RECORDS[@]:0:3}" "$perf_dead_record")"
+done
+PERF_VERDICT_DISABLED_COUNTS=("$PERF_VERDICT_DISABLED_MAJORS" '')
+perf_unjudgeable_summary+=" disabled-frames-empty=$(perf_unjudgeable_verdict "${PERF_VERDICT_EDGE_RECORDS[@]}")"
+PERF_VERDICT_DISABLED_COUNTS=("$PERF_VERDICT_DISABLED_MAJORS" "$PERF_VERDICT_DISABLED_FRAMES")
+check "nested: perf's verdict cannot judge (exit 2, never 0 or 1) a missing state, a count that is not a whole number, a record of the wrong length, or a visible-busy window with no frame, Sample or paint" \
+  "$perf_unjudgeable_summary" \
+  "state-missing=2/1 not-a-number=2/1 leading-zero=2/1 short-record=2/1 long-record=2/1 visible-busy-no-frames=2/1 visible-busy-no-Samples=2/1 visible-busy-no-paints=2/1 disabled-frames-empty=2/1"
+
+# What a probe answer must show before perf takes the request for done: a JSON
+# object, no refusal, and the mode the request ran in (.attached after an
+# attach, .mode after a read) the one expected. An answer lost on the way (empty,
+# null) must fail at the attach, not nine minutes later at the verdict. Each case
+# prints the check's status; only the four real answers succeed. This row runs
+# the real jq (the stub is only for runs of the script): without jq it fails.
+# perf_probe_answer_status <request> <expected mode> <answer> prints the check's status.
+perf_probe_answer_status() {
+  nested_call is_successful_perf_probe_answer "$1" "$2" "$3" 2>/dev/null
+  printf '%s' "$?"
+}
+PERF_ENABLED_READ_ANSWER='{"mode":"enabled","frames":2,"samples":3,"topbarPaints":3,"cardRedirect":"ALWAYS"}'
+perf_answer_summary="attached-enabled=$(perf_probe_answer_status attach-enabled enabled \
+  '{"attached":"enabled","reattached":true}')"
+perf_answer_summary+=" attached-disabled=$(perf_probe_answer_status attach-disabled disabled \
+  '{"attached":"disabled","counts":"frames only: with the extension disabled there is no client"}')"
+perf_answer_summary+=" read-enabled=$(perf_probe_answer_status read enabled "$PERF_ENABLED_READ_ANSWER")"
+perf_answer_summary+=" read-disabled=$(perf_probe_answer_status read disabled '{"mode":"disabled","frames":1}')"
+perf_answer_summary+=" empty=$(perf_probe_answer_status attach-enabled enabled '')"
+perf_answer_summary+=" null=$(perf_probe_answer_status attach-enabled enabled 'null')"
+perf_answer_summary+=" empty-object=$(perf_probe_answer_status attach-enabled enabled '{}')"
+perf_answer_summary+=" other-mode=$(perf_probe_answer_status attach-enabled enabled '{"attached":"disabled"}')"
+perf_answer_summary+=" read-with-attach-sign=$(perf_probe_answer_status read enabled '{"attached":"enabled"}')"
+perf_answer_summary+=" read-other-mode=$(perf_probe_answer_status read disabled "$PERF_ENABLED_READ_ANSWER")"
+perf_answer_summary+=" refused=$(perf_probe_answer_status attach-enabled enabled \
+  '{"refused":"missing the card","missing":["card"]}')"
+perf_answer_summary+=" not-an-object=$(perf_probe_answer_status attach-enabled enabled '"enabled"')"
+perf_empty_answer_output="$(nested_call is_successful_perf_probe_answer attach-enabled enabled '' 2>&1)"
+perf_answer_summary+=" says-why=$(grep -c -F 'shows no sign that it ran' <<<"$perf_empty_answer_output")"
+check "nested: perf takes a probe answer for done only when it shows the mode it ran in; an empty, null, refused or other answer fails at once (needs jq)" \
+  "$perf_answer_summary" \
+  "attached-enabled=0 attached-disabled=0 read-enabled=0 read-disabled=0 empty=1 null=1 empty-object=1 other-mode=1 read-with-attach-sign=1 read-other-mode=1 refused=1 not-an-object=1 says-why=1"
+
+# perf takes an enabled state's counts only when the probe's two facts, read at
+# the end of its window, show the state set up as it is named: the card covered
+# (not visible) in the three covered states and visible in visible-busy; the top
+# bar's indicator unmapped in topbar-hidden-covered and mapped in the other three.
+# A window that did not maximize or minimize, or a top bar not hidden or not shown
+# again, would otherwise report its counts under the wrong name. A mismatch is
+# exit 2, naming the state and what was expected, with no line of readings: never
+# a pass and never a breach. So is a fact that is not true or false (null, or the
+# string "false"). Each case prints exit/its needle's count/the state's readings
+# lines, from record_perf_state on a read answer with in-budget counts. This row
+# runs the real jq: without it, it fails.
+PERF_SETUP_ANSWER_COUNTS='"mode":"enabled","frames":34,"samples":30,"topbarPaints":30,"cardRedirect":"ALWAYS"'
+# perf_setup_verdict <state> <isCardVisible, as JSON> <isIndicatorMapped, as JSON> <needle> prints the case.
+perf_setup_verdict() {
+  local setup_state="$1" setup_needle="$4" setup_answer setup_output setup_exit
+  setup_answer="{$PERF_SETUP_ANSWER_COUNTS,\"isCardVisible\":$2,\"isIndicatorMapped\":$3}"
+  setup_output="$(nested_call record_perf_state "$setup_state" "$setup_answer" 2>&1)"
+  setup_exit=$?
+  printf '%s/%s/%s' "$setup_exit" "$(grep -c -F "$setup_needle" <<<"$setup_output")" \
+    "$(grep -c -F "$setup_state: cpu=" <<<"$setup_output")"
+}
+# perf_setup_mismatch_needle <state> <what was expected, and found> prints the line a mismatch must print.
+perf_setup_mismatch_needle() { printf 'perf: could not measure %s: it was not set up as named: %s' "$1" "$2"; }
+PERF_SETUP_PROBLEM_NEEDLE='perf: could not measure'
+PERF_SETUP_CARD_COVERED_MISMATCH='expected the card covered (not visible), and it counts as visible'
+PERF_SETUP_CARD_VISIBLE_MISMATCH='expected the card visible, and it counts as covered'
+PERF_SETUP_INDICATOR_UNMAPPED_MISMATCH='expected the top bar indicator unmapped (hidden), and it is mapped'
+PERF_SETUP_INDICATOR_MAPPED_MISMATCH='expected the top bar indicator mapped (shown), and it is unmapped'
+PERF_SETUP_NOT_A_FACT_NEEDLE="perf: could not measure covered-busy: the probe's facts are not true or false"
+perf_setup_summary="set-up:"
+perf_setup_summary+=" $(perf_setup_verdict covered-idle false true "$PERF_SETUP_PROBLEM_NEEDLE")"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy false true "$PERF_SETUP_PROBLEM_NEEDLE")"
+perf_setup_summary+=" $(perf_setup_verdict topbar-hidden-covered false false "$PERF_SETUP_PROBLEM_NEEDLE")"
+perf_setup_summary+=" $(perf_setup_verdict visible-busy true true "$PERF_SETUP_PROBLEM_NEEDLE")"
+perf_setup_summary+=" card-visible-while-covered:"
+perf_setup_summary+=" $(perf_setup_verdict covered-idle true true \
+  "$(perf_setup_mismatch_needle covered-idle "$PERF_SETUP_CARD_COVERED_MISMATCH")")"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy true true \
+  "$(perf_setup_mismatch_needle covered-busy "$PERF_SETUP_CARD_COVERED_MISMATCH")")"
+perf_setup_summary+=" $(perf_setup_verdict topbar-hidden-covered true false \
+  "$(perf_setup_mismatch_needle topbar-hidden-covered "$PERF_SETUP_CARD_COVERED_MISMATCH")")"
+perf_setup_summary+=" card-covered-in-visible-busy:"
+perf_setup_summary+=" $(perf_setup_verdict visible-busy false true \
+  "$(perf_setup_mismatch_needle visible-busy "$PERF_SETUP_CARD_VISIBLE_MISMATCH")")"
+perf_setup_summary+=" indicator-mapped-while-hidden:"
+perf_setup_summary+=" $(perf_setup_verdict topbar-hidden-covered false true \
+  "$(perf_setup_mismatch_needle topbar-hidden-covered "$PERF_SETUP_INDICATOR_UNMAPPED_MISMATCH")")"
+perf_setup_summary+=" indicator-unmapped-while-shown:"
+perf_setup_summary+=" $(perf_setup_verdict covered-idle false false \
+  "$(perf_setup_mismatch_needle covered-idle "$PERF_SETUP_INDICATOR_MAPPED_MISMATCH")")"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy false false \
+  "$(perf_setup_mismatch_needle covered-busy "$PERF_SETUP_INDICATOR_MAPPED_MISMATCH")")"
+perf_setup_summary+=" $(perf_setup_verdict visible-busy true false \
+  "$(perf_setup_mismatch_needle visible-busy "$PERF_SETUP_INDICATOR_MAPPED_MISMATCH")")"
+perf_setup_summary+=" not-a-fact:"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy null true "$PERF_SETUP_NOT_A_FACT_NEEDLE")"
+perf_setup_summary+=" $(perf_setup_verdict covered-busy '"false"' true "$PERF_SETUP_NOT_A_FACT_NEEDLE")"
+expected_perf_setup_summary="set-up: 0/0/1 0/0/1 0/0/1 0/0/1 card-visible-while-covered: 2/1/0 2/1/0 2/1/0"
+expected_perf_setup_summary+=" card-covered-in-visible-busy: 2/1/0 indicator-mapped-while-hidden: 2/1/0"
+expected_perf_setup_summary+=" indicator-unmapped-while-shown: 2/1/0 2/1/0 2/1/0 not-a-fact: 2/1/0 2/1/0"
+check "nested: perf takes an enabled state's counts only when the probe shows it set up as named (the card covered in the covered states and visible in visible-busy, the indicator unmapped only in topbar-hidden-covered); a mismatch, or a fact that is not true or false, is exit 2 naming the state and what was expected (needs jq)" \
+  "$perf_setup_summary" "$expected_perf_setup_summary"
+
+# perf's exit (end_perf_run, its EXIT trap) on a fixture, from inside one bash
+# that plays perf: two children of it stand in for the window (recorded with
+# no start time, as when it could not be read) and the background measurement
+# job, and busctl is the stub, which fails every call, so each restore step
+# fails. Every step must still run: both children ended, and busctl asked once
+# to enable the extension and once to show the top bar. A recorded window that
+# is not perf's child (a process of another session) must be left alone. And
+# perf installs it as its EXIT trap.
+PERF_CLEANUP_ADDRESS="unix:path=$WIRING_TMP/perf-cleanup/bus/session.sock"
+# perf_cleanup_verdict <own-child | the pid of a process that is not its child> prints, for the window then the
+# measurement job, ended or left-running, then end_perf_run's status.
+perf_cleanup_verdict() {
+  : >"$NESTED_STUB_CALLS"
+  # shellcheck disable=SC2016  # Expanded by the child bash, which plays perf.
+  env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$NESTED_STUB_BIN:$PATH" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" \
+    bash -c '
+      source "$1" || exit 99
+      sleep 300 &
+      own_window_pid=$!
+      sleep 300 &
+      PERF_COST_JOB_PID=$!
+      cost_job_pid=$PERF_COST_JOB_PID
+      if [[ "$2" == own-child ]]; then PERF_WINDOW_PID=$own_window_pid; else PERF_WINDOW_PID=$2; fi
+      PERF_WINDOW_STARTTIME=""
+      PERF_ADDRESS="$3"
+      end_perf_run 2>/dev/null
+      cleanup_status=$?
+      # A child ended by a signal is a zombie until reaped, which read_stat_fields does not count as running.
+      process_fate() {
+        local poll
+        for poll in 1 2 3 4 5 6 7 8 9 10; do
+          read_stat_fields /proc "$1" || { printf ended; return 0; }
+          sleep 0.1
+        done
+        printf left-running
+      }
+      printf "window=%s cost-job=%s status=%s" "$(process_fate "$PERF_WINDOW_PID")" \
+        "$(process_fate "$cost_job_pid")" "$cleanup_status"
+      kill "$own_window_pid" "$cost_job_pid" 2>/dev/null
+    ' perf-cleanup "$NESTED_SCRIPT" "$1" "$PERF_CLEANUP_ADDRESS"
+}
+perf_cleanup_summary="own-child: $(perf_cleanup_verdict own-child)"
+perf_cleanup_summary+=" busctl=$(grep -c '^busctl ' "$NESTED_STUB_CALLS")"
+perf_cleanup_summary+=" enable=$(grep -c -F 'Main.extensionManager.enableExtension(' "$NESTED_STUB_CALLS")"
+perf_cleanup_summary+=" show=$(grep -c -F 'indicator?.show()' "$NESTED_STUB_CALLS")"
+other_session_process_id="$(start_sacrificial_session sleep 60)"
+other_session_process_starttime="$(starttime_of "$other_session_process_id")"
+perf_cleanup_summary+=" not-a-child: $(perf_cleanup_verdict "$other_session_process_id")"
+kill_sacrifice "$other_session_process_id" sleep "$other_session_process_starttime"
+perf_cleanup_summary+=" installed=$(grep -c -x -F '    trap end_perf_run EXIT' "$NESTED_SCRIPT")"
+check "nested: perf's exit ends its window (by pid when its start time is unknown, only if it is perf's child) and its measurement job, then asks to enable the extension and show the top bar, each step despite a failed one" \
+  "$perf_cleanup_summary" \
+  "own-child: window=ended cost-job=ended status=0 busctl=2 enable=1 show=1 not-a-child: window=left-running cost-job=ended status=0 installed=1"
 
 # `stop` signals a session only while its leader is this run's recorded
 # launcher, `timeout`: a session id is a pid, and once a run's processes are all
@@ -2952,6 +4015,51 @@ check "nested: start refuses a base directory others can read, before making any
   "$public_base_exit:$(grep -c -F 'is not private' <<<"$public_base_output"):$(find "$PUBLIC_BASE" -mindepth 1 | wc -l):$(nested_stub_call_count)" \
   "2:1:0:0"
 
+# `start` against that public base: options it accepts reach its first refusal
+# (the base is not private), and options it does not are a usage error before
+# it. Each case prints exit/its own message/whether it reached that refusal.
+# start_options_verdict <needle> <options...>
+start_options_verdict() {
+  local start_needle="$1" start_options_output start_options_exit
+  shift
+  start_options_output="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" PATH="$NESTED_STUB_BIN:$PATH" \
+    NESTED_STUB_CALLS="$NESTED_STUB_CALLS" RESOURCE_PULSE_NESTED_BASE="$PUBLIC_BASE" \
+    bash "$NESTED_SCRIPT" start "$@" 2>&1)"
+  start_options_exit=$?
+  printf '%s/%s/%s' "$start_options_exit" "$(grep -c -F "$start_needle" <<<"$start_options_output")" \
+    "$(grep -c -F 'is not private' <<<"$start_options_output")"
+}
+: >"$NESTED_STUB_CALLS"
+start_options_summary="both=$(start_options_verdict 'usage:' --gc-log --replay)"
+start_options_summary+=" reversed=$(start_options_verdict 'usage:' --replay --gc-log)"
+start_options_summary+=" gc-log=$(start_options_verdict 'usage:' --gc-log)"
+start_options_summary+=" replay=$(start_options_verdict 'usage:' --replay)"
+start_options_summary+=" twice=$(start_options_verdict 'start takes --gc-log at most once' --gc-log --replay --gc-log)"
+start_options_summary+=" unknown=$(start_options_verdict "start takes only --gc-log and --replay, got: '--verbose'" --verbose)"
+start_options_summary+=" extra=$(start_options_verdict "start takes only --gc-log and --replay, got: 'now'" --replay now)"
+start_options_summary+=" created=$(find "$PUBLIC_BASE" -mindepth 1 | wc -l) stub-calls=$(nested_stub_call_count)"
+check "nested: start takes --gc-log and --replay in either order, each once; anything else is a usage error (exit 2) before anything runs" \
+  "$start_options_summary" \
+  "both=2/0/1 reversed=2/0/1 gc-log=2/0/1 replay=2/0/1 twice=2/1/0 unknown=2/1/0 extra=2/1/0 created=0 stub-calls=0"
+
+# What `start` records for its options, where the in-bus stage and `scenario`
+# read them: the run's state/run.values. (Run here on a scratch run directory:
+# `start` itself never gets as far as recording them in this suite.)
+START_VALUES_RUN="$WIRING_TMP/start-values"
+# recorded_start_values <options...> prints the values recorded for these options, space-separated.
+recorded_start_values() {
+  rm -rf "$START_VALUES_RUN"
+  mkdir -p "$START_VALUES_RUN/state" && : >"$START_VALUES_RUN/state/run.values"
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  bash -c 'source "$1" || exit 99; run_dir="$2"; shift 2
+    parse_start_options "$@" && record_requested_start_options "$run_dir"' \
+    start-values "$NESTED_SCRIPT" "$START_VALUES_RUN" "$@" || printf 'exit-%s ' "$?"
+  tr '\n' ' ' <"$START_VALUES_RUN/state/run.values"
+}
+check "nested: start records gc-log=1 and replay=1 in state/run.values for the options given, and nothing for the others" \
+  "both=[$(recorded_start_values --replay --gc-log)] gc-log=[$(recorded_start_values --gc-log)] replay=[$(recorded_start_values --replay)] none=[$(recorded_start_values)]" \
+  "both=[replay=1 gc-log=1 ] gc-log=[gc-log=1 ] replay=[replay=1 ] none=[]"
+
 nested_run screenshot ../escape.png
 check "nested: a screenshot name with a / in it is refused before anything runs" \
   "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'a screenshot name is a plain file name' <<<"$NESTED_OUTPUT")" "2:0:1"
@@ -3029,6 +4137,56 @@ done
 check "nested: HOME, TMPDIR and every XDG home and runtime dir are in the run; the system bus is the fake one" \
   "${dirs_outside_the_run:-none}:$(grep -c -x -F "DBUS_SYSTEM_BUS_ADDRESS=unix:path=$PREPARED_RUN/bus/system.sock" <<<"$NESTED_ENVIRONMENT")" "none:1"
 
+# perf's window is a GUI process, so it must reach the nested shell and nothing
+# else: started any other way it would open on the live desktop. start_perf_window
+# launches a stand-in gnome-calculator (by the path perf resolves) on a prepared
+# run, from a caller whose environment carries a decoy variable, a display, a
+# Wayland display and an X authority. The stand-in records the names in its
+# environment and the values its isolation rests on. Its names must be exactly
+# the run's allowlist, the three perf adds and bash's own (PWD, SHLVL); its
+# runtime dir and session bus the run's; its Wayland display the nested one.
+PERF_WINDOW_RUN="$WIRING_TMP/perf-window/rpn.PerfWin1"
+PERF_WINDOW_STAND_IN_DIR="$WIRING_TMP/perf-window-bin"
+PERF_WINDOW_STAND_IN="$PERF_WINDOW_STAND_IN_DIR/gnome-calculator"
+# What the stand-in writes, beside itself: under `env -i` no variable could name another place.
+PERF_WINDOW_ENV_NAMES="$PERF_WINDOW_STAND_IN_DIR/env-names"
+PERF_WINDOW_ENV_VALUES="$PERF_WINDOW_STAND_IN_DIR/env-values"
+PERF_WINDOW_RUN_BUS="unix:path=$PERF_WINDOW_RUN/bus/session.sock"
+if ! mkdir -p "$PERF_WINDOW_RUN" "$PERF_WINDOW_STAND_IN_DIR" || ! chmod 700 "$PERF_WINDOW_RUN" ||
+  ! nested_call prepare_run_directory "$PERF_WINDOW_RUN" PerfWin1; then
+  fatal "cannot prepare $PERF_WINDOW_RUN"
+fi
+cat >"$PERF_WINDOW_STAND_IN" <<'STAND_IN'
+#!/bin/bash
+# Stands in for gnome-calculator: records the names in its environment, and the values perf relies on, beside itself.
+record_dir="${BASH_SOURCE[0]%/*}"
+compgen -e >"$record_dir/env-names"
+printf '%s\n' "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR-unset}" "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS-unset}" \
+  "WAYLAND_DISPLAY=${WAYLAND_DISPLAY-unset}" "GDK_BACKEND=${GDK_BACKEND-unset}" >"$record_dir/env-values"
+STAND_IN
+chmod +x "$PERF_WINDOW_STAND_IN" || fatal "cannot make $PERF_WINDOW_STAND_IN executable"
+: >"$PERF_WINDOW_ENV_NAMES"
+: >"$PERF_WINDOW_ENV_VALUES"
+# shellcheck disable=SC2016  # Expanded by the child bash.
+env "${LIVE_SETTINGS_BARRIER[@]}" PERF_WINDOW_DECOY=decoy-must-not-arrive DISPLAY=:99 WAYLAND_DISPLAY=wayland-decoy \
+  XAUTHORITY="$WIRING_TMP/decoy-xauthority" \
+  bash -c 'source "$1" || exit 99; shift; start_perf_window "$@" && wait "$PERF_WINDOW_PID"' perf-window \
+  "$NESTED_SCRIPT" "$PERF_WINDOW_RUN" "$PERF_WINDOW_RUN_BUS" "$PERF_WINDOW_STAND_IN"
+perf_window_summary="exit=$?"
+# bash exports PWD and SHLVL itself; `_` only when it inherits one, which `env -i` never gives it.
+perf_window_expected_names="$( { nested_call nested_environment_assignments "$PERF_WINDOW_RUN" | cut -d= -f1
+  printf '%s\n' WAYLAND_DISPLAY GDK_BACKEND DBUS_SESSION_BUS_ADDRESS PWD SHLVL
+} | LC_ALL=C sort -u)"
+perf_window_seen_names="$(LC_ALL=C sort -u "$PERF_WINDOW_ENV_NAMES")"
+perf_window_summary+=" unexpected=[$(LC_ALL=C comm -13 <(printf '%s\n' "$perf_window_expected_names") \
+  <(printf '%s\n' "$perf_window_seen_names") | tr '\n' ' ')]"
+perf_window_summary+=" missing=[$(LC_ALL=C comm -23 <(printf '%s\n' "$perf_window_expected_names") \
+  <(printf '%s\n' "$perf_window_seen_names") | tr '\n' ' ')]"
+perf_window_summary+=" values=[$(tr '\n' ' ' <"$PERF_WINDOW_ENV_VALUES")]"
+check "nested: perf's window starts with only the run's allowlist plus its Wayland display, Wayland backend and private bus: nothing of the caller's display, X authority or other variables" \
+  "$perf_window_summary" \
+  "exit=0 unexpected=[] missing=[] values=[XDG_RUNTIME_DIR=$PERF_WINDOW_RUN/run DBUS_SESSION_BUS_ADDRESS=$PERF_WINDOW_RUN_BUS WAYLAND_DISPLAY=rp-nested-0 GDK_BACKEND=wayland ]"
+
 # fake_gdm_verdict <run dir or ''> <address> prints refused, or whatever else happened.
 FAKE_GDM_REFUSAL='refusing to connect to anything but the fake system bus'
 fake_gdm_verdict() {
@@ -3043,6 +4201,42 @@ fake_gdm_summary+=" real-bus=$(fake_gdm_verdict "$PREPARED_RUN" 'unix:path=/run/
 fake_gdm_summary+=" own-bus=$(fake_gdm_verdict "$PREPARED_RUN" "unix:path=$PREPARED_RUN/bus/system.sock")"
 check "nested: fake-gdm.js refuses any bus but its run's fake one, before connecting" \
   "$fake_gdm_summary" "no-run=refused real-bus=refused own-bus=tried-to-connect"
+
+# The replay service owns the real service's bus name, so it must never serve on
+# any bus but its run's private one. Every address below that is not the run's
+# is the barrier's dead bus, so even a broken guard reaches nothing live. A D-Bus
+# address can be a list, tried in order: the run's bus followed by another one
+# is not the run's bus.
+REPLAY_SERVICE_REFUSAL='refusing to serve on anything but the private session bus'
+REPLAY_SERVICE_CONNECT_FAILURE='cannot connect to'
+REPLAY_EXTENSION_DIR="$PREPARED_RUN/data/gnome-shell/extensions/$EXTENSION_UUID"
+# replay_service_verdict <run dir or ''> <session bus address> prints refused, tried-to-connect, or other.
+replay_service_verdict() {
+  local replay_service_output
+  replay_service_output="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" \
+    ${1:+RESOURCE_PULSE_NESTED_DIR="$1"} DBUS_SESSION_BUS_ADDRESS="$2" \
+    timeout "$GLUE_PARSE_TIMEOUT_SECONDS" gjs -m "$NESTED_FILES/replay-service.js" "$REPLAY_EXTENSION_DIR" 2>&1)"
+  if [[ "$replay_service_output" == *"$REPLAY_SERVICE_REFUSAL"* ]]; then printf refused
+  elif [[ "$replay_service_output" == *"$REPLAY_SERVICE_CONNECT_FAILURE"* ]]; then printf tried-to-connect
+  else printf other; fi
+}
+REPLAY_RUN_BUS="unix:path=$PREPARED_RUN/bus/session.sock"
+replay_guard_summary="no-run=$(replay_service_verdict '' "$REPLAY_RUN_BUS")"
+replay_guard_summary+=" other-bus=$(replay_service_verdict "$PREPARED_RUN" "$LIVE_SETTINGS_BARRIER_BUS")"
+replay_guard_summary+=" address-list=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS;$LIVE_SETTINGS_BARRIER_BUS")"
+replay_guard_summary+=" bad-guid=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS,guid=0123456789abcdef,x=1")"
+# A run directory the harness could never make, with the address built from it as the bus: one that is itself an
+# address list (the run's socket, then another dead one), and one outside the shell's safe-path rule (a space).
+# Either would otherwise match its own address exactly.
+CRAFTED_REPLAY_RUN_DIR="$PREPARED_RUN/bus/session.sock;unix:path=$WIRING_TMP/crafted-replay-run"
+replay_guard_summary+=" crafted-dir=$(replay_service_verdict "$CRAFTED_REPLAY_RUN_DIR" "unix:path=$CRAFTED_REPLAY_RUN_DIR/bus/session.sock")"
+UNSAFE_REPLAY_RUN_DIR="$WIRING_TMP/unsafe replay run"
+replay_guard_summary+=" unsafe-dir=$(replay_service_verdict "$UNSAFE_REPLAY_RUN_DIR" "unix:path=$UNSAFE_REPLAY_RUN_DIR/bus/session.sock")"
+# The run's own (absent) socket, as dbus-run-session names it: accepted, so it tries to connect and fails there.
+replay_guard_summary+=" own-bus=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS,guid=0123456789abcdef")"
+check "nested: replay-service.js refuses any bus but its run's private session bus, and any run directory the harness could not make, before connecting" \
+  "$replay_guard_summary" \
+  "no-run=refused other-bus=refused address-list=refused bad-guid=refused crafted-dir=refused unsafe-dir=refused own-bus=tried-to-connect"
 
 # The two apps whose presence makes GNOME 50 check extensions.gnome.org for
 # updates (extensionSystem.js updatesSupported): masked, and copied into the run.
@@ -3156,14 +4350,16 @@ check "nested: the in-bus stage refuses a live environment and a missing private
 # in its environment and the bus it was given, under its entry module's file
 # name, then waits, or exits at once; like gjs, it exits at once when its module
 # is not there); busctl says a name is owned once the stand-in for the module
-# that owns it has started; gnome-shell records whether each service was
+# that owns it has started; gnome-shell records the names in its environment,
+# the two collection-log variables' values, and whether each service was
 # recorded before it, then exits. The stage runs in its isolated environment
 # with the run's private bus address (a socket nobody listens on), inside
 # `setsid timeout`, from a caller whose own environment carries a display, the
 # live bus and a token.
 NESTED_SERVICE_STUB_BIN="$WIRING_TMP/nested-service-bin"
 NESTED_SERVICE_CALLS="$WIRING_TMP/nested-service-calls"
-# Each of the next three is a prefix: a stand-in writes <prefix>.<its entry module's file name>.
+# Each of the next three is a prefix: a stand-in writes <prefix>.<its entry module's file name>, and the
+# gnome-shell stand-in writes <env names prefix>.gnome-shell.
 NESTED_SERVICE_ENV_NAMES="$WIRING_TMP/nested-service-env-names"
 NESTED_SERVICE_BUS_SEEN="$WIRING_TMP/nested-service-bus-seen"
 NESTED_SERVICE_STARTED="$WIRING_TMP/nested-service-started"
@@ -3171,11 +4367,17 @@ NESTED_SERVICE_RUN_LIMIT_SECONDS=30
 NESTED_SERVICE_STAND_IN_TEXT='stand-in service started'
 SAMPLER_ENTRY_FILE_NAME='main.js'
 COCKPIT_ENTRY_FILE_NAME='cockpit.js'
+REPLAY_ENTRY_FILE_NAME='replay-service.js'
+NESTED_SHELL_ENV_NAMES_SUFFIX='gnome-shell'
 # Which bus name the stand-in for each entry module owns once started (file name=bus name, space-separated).
 NESTED_SERVICE_BUS_NAME_BY_ENTRY="$SAMPLER_ENTRY_FILE_NAME=$RESOURCE_PULSE_BUS_NAME $COCKPIT_ENTRY_FILE_NAME=$COCKPIT_BUS_NAME"
-# Pinned here, not read from the script: the run's own copies of the two services.
+NESTED_SERVICE_BUS_NAME_BY_ENTRY+=" $REPLAY_ENTRY_FILE_NAME=$RESOURCE_PULSE_BUS_NAME"
+# Pinned here, not read from the script: the run's own copies of the two services, of the replay service, and of
+# the extension the replay service is given.
 NESTED_SERVICE_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/$SAMPLER_ENTRY_FILE_NAME"
 NESTED_COCKPIT_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/$COCKPIT_ENTRY_FILE_NAME"
+NESTED_REPLAY_MAIN_RELATIVE_PATH="replay/$REPLAY_ENTRY_FILE_NAME"
+NESTED_EXTENSION_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID"
 # nested_constant_text <name>: one of the script's readonly values, read by sourcing it; empty when it has none.
 nested_constant_text() {
   # shellcheck disable=SC2016  # Expanded by the child bash.
@@ -3216,6 +4418,9 @@ if [[ -e "$NESTED_SERVICE_STARTED.${!#}" ]]; then echo "b true"; else echo "b fa
 # shellcheck disable=SC2016
 install_stub "$NESTED_SERVICE_STUB_BIN" gnome-shell '#!/usr/bin/env bash
 printf "gnome-shell %s\n" "$*" >>"$NESTED_SERVICE_CALLS"
+compgen -e >"$NESTED_SERVICE_ENV_NAMES.gnome-shell"
+printf "shell-gc-variables=JS_GC_PROFILE=%s,JS_GC_PROFILE_NURSERY=%s\n" "${JS_GC_PROFILE-unset}" \
+  "${JS_GC_PROFILE_NURSERY-unset}" >>"$NESTED_SERVICE_CALLS"
 for process_name in service cockpit; do
   printf "%s-recorded-before-the-shell=%s\n" "$process_name" \
     "$(grep -c "^$process_name=" "$RESOURCE_PULSE_NESTED_DIR/state/run.values")" >>"$NESTED_SERVICE_CALLS"
@@ -3239,9 +4444,10 @@ run_in_bus_stage_with_service() {
   local run_dir="$1" started_seconds=$SECONDS entry_file_name
   rm -f "$NESTED_SERVICE_STARTED".*
   : >"$NESTED_SERVICE_CALLS"
-  for entry_file_name in "$SAMPLER_ENTRY_FILE_NAME" "$COCKPIT_ENTRY_FILE_NAME"; do
+  for entry_file_name in "$SAMPLER_ENTRY_FILE_NAME" "$COCKPIT_ENTRY_FILE_NAME" "$REPLAY_ENTRY_FILE_NAME"; do
     : >"$NESTED_SERVICE_ENV_NAMES.$entry_file_name"; : >"$NESTED_SERVICE_BUS_SEEN.$entry_file_name"
   done
+  : >"$NESTED_SERVICE_ENV_NAMES.$NESTED_SHELL_ENV_NAMES_SUFFIX"
   # shellcheck disable=SC2016  # Expanded by the child bash.
   WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 GH_TOKEN=poison-not-a-token DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
     setsid --wait timeout "$NESTED_SERVICE_RUN_LIMIT_SECONDS" \
@@ -3328,6 +4534,53 @@ SERVICE_RUN_CONFIG_HOME="$(nested_call nested_environment_assignments "$SERVICE_
 check "nested: the run's XDG_CONFIG_HOME holds the cockpit config template as resource-pulse/cockpit.json" \
   "$(cmp -s "$COCKPIT_CONFIG_TEMPLATE" "$SERVICE_RUN_CONFIG_HOME/$COCKPIT_CONFIG_RELATIVE_PATH" && printf same || printf differs-or-missing)" \
   same
+
+# The collection log: the nested gnome-shell's environment, as its stand-in
+# recorded it, beyond the allowlist and what this row passes the stubs. The run
+# above was started with neither option; the next records gc-log=1, as
+# `start --gc-log` does. The two variables are the shell's alone: both services
+# start before they are set.
+NESTED_SHELL_ENV_NAMES_SEEN="$NESTED_SERVICE_ENV_NAMES.$NESTED_SHELL_ENV_NAMES_SUFFIX"
+# shell_environment_summary prints the shell's unexpected names, how many allowlist names it held, and the two
+# variables' values.
+shell_environment_summary() {
+  printf 'unexpected=[%s] allowlist=%s %s' "$(unexpected_env_names "$NESTED_SHELL_ENV_NAMES_SEEN")" \
+    "$(allowlist_names_seen_in "$NESTED_SHELL_ENV_NAMES_SEEN")" "$(grep '^shell-gc-variables=' "$NESTED_SERVICE_CALLS")"
+}
+gc_log_summary="without: exit=$NESTED_SERVICE_EXIT $(shell_environment_summary)"
+GC_LOG_RUN="$(make_service_run GcLog001)"
+printf 'gc-log=1\n' >>"$GC_LOG_RUN/state/run.values" || fatal "cannot record gc-log=1 in $GC_LOG_RUN"
+run_in_bus_stage_with_service "$GC_LOG_RUN" waits
+gc_log_summary+=" with: exit=$NESTED_SERVICE_EXIT $(shell_environment_summary)"
+gc_log_summary+=" sampler=[$(unexpected_env_names "$SAMPLER_ENV_NAMES_SEEN")]"
+gc_log_summary+=" cockpit=[$(unexpected_env_names "$COCKPIT_ENV_NAMES_SEEN")]"
+end_recorded_stand_ins "$GC_LOG_RUN"
+check "nested: with gc-log=1 the nested gnome-shell gets exactly JS_GC_PROFILE=0 and JS_GC_PROFILE_NURSERY=0 beyond the allowlist, without it neither, and the services never" \
+  "$gc_log_summary" \
+  "without: exit=0 unexpected=[] allowlist=22 shell-gc-variables=JS_GC_PROFILE=unset,JS_GC_PROFILE_NURSERY=unset with: exit=0 unexpected=[JS_GC_PROFILE JS_GC_PROFILE_NURSERY ] allowlist=22 shell-gc-variables=JS_GC_PROFILE=0,JS_GC_PROFILE_NURSERY=0 sampler=[] cockpit=[]"
+
+# Fixed input: with replay=1 recorded, as `start --replay` does, the run's copy
+# of the replay service starts in place of service/main.js, given the run's copy
+# of the extension, on the private bus with only the allowlist, recorded and
+# logged as the service (so `stop` ends it), before the cockpit and the shell.
+REPLAY_SERVICE_RUN="$(make_service_run Replay01)"
+printf 'replay=1\n' >>"$REPLAY_SERVICE_RUN/state/run.values" || fatal "cannot record replay=1 in $REPLAY_SERVICE_RUN"
+run_in_bus_stage_with_service "$REPLAY_SERVICE_RUN" waits
+REPLAY_ENV_NAMES_SEEN="$NESTED_SERVICE_ENV_NAMES.$REPLAY_ENTRY_FILE_NAME"
+replay_start_summary="exit=$NESTED_SERVICE_EXIT"
+replay_start_summary+=" starts=[$(grep '^gjs ' "$NESTED_SERVICE_CALLS" | sed "s|$REPLAY_SERVICE_RUN/||g" | tr '\n' ';')]"
+replay_start_summary+=" copies=$(cmp -s "$NESTED_FILES/$REPLAY_ENTRY_FILE_NAME" "$REPLAY_SERVICE_RUN/$NESTED_REPLAY_MAIN_RELATIVE_PATH" &&
+  cmp -s "$NESTED_FILES/replayGenerator.js" "$REPLAY_SERVICE_RUN/replay/replayGenerator.js" && printf same || printf differ)"
+replay_start_summary+=" bus=$([[ "$(<"$NESTED_SERVICE_BUS_SEEN.$REPLAY_ENTRY_FILE_NAME")" == "unix:path=$REPLAY_SERVICE_RUN/bus/session.sock" ]] && printf private || printf other)"
+replay_start_summary+=" allowlist-seen=$(allowlist_names_seen_in "$REPLAY_ENV_NAMES_SEEN") unexpected=[$(unexpected_env_names "$REPLAY_ENV_NAMES_SEEN")]"
+replay_start_summary+=" recorded=$(grep -c -E '^service(-starttime)?=[0-9]+$' "$REPLAY_SERVICE_RUN/state/run.values")"
+replay_start_summary+=" $(grep '^service-recorded-before-the-shell=' "$NESTED_SERVICE_CALLS")"
+replay_start_summary+=" asked-the-private-bus=$(grep -c -x -F "busctl --address=unix:path=$REPLAY_SERVICE_RUN/bus/session.sock call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s $RESOURCE_PULSE_BUS_NAME" "$NESTED_SERVICE_CALLS" | sed 's/^[1-9][0-9]*$/yes/')"
+replay_start_summary+=" logged=$(grep -c -x -F "$NESTED_SERVICE_STAND_IN_TEXT" "$REPLAY_SERVICE_RUN/log/service.log" 2>/dev/null)"
+end_recorded_stand_ins "$REPLAY_SERVICE_RUN"
+check "nested: with replay=1 the in-bus stage starts the run's copy of replay-service.js in place of service/main.js, given the run's extension, on the private bus, as the service" \
+  "$replay_start_summary" \
+  "exit=0 starts=[gjs -m $NESTED_REPLAY_MAIN_RELATIVE_PATH $NESTED_EXTENSION_RELATIVE_PATH;gjs -m $NESTED_COCKPIT_MAIN_RELATIVE_PATH;] copies=same bus=private allowlist-seen=22 unexpected=[] recorded=2 service-recorded-before-the-shell=1 asked-the-private-bus=yes logged=1"
 
 # A run whose copy of the extension has no service/cockpit.js: the cockpit's
 # stand-in exits at once, as gjs does, and the run must refuse, naming it.
@@ -3431,7 +4684,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=701
+EXPECTED_ROWS=798
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

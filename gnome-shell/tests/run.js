@@ -24,8 +24,10 @@ import './cockpitSources.test.js';
 import './service-sampler.test.js';
 import './client.test.js';
 import './graph.test.js';
+import './topbarColumns.test.js';
 import './lifecycle.test.js';
 import './nestedHarness.test.js';
+import './perfProbe.test.js';
 import './imports.test.js';
 
 const EXIT_CODE_TEST_FAILURE = 1;

@@ -37,7 +37,8 @@ export const SAMPLE_SIGNAL_NAME = 'Sample';
 /** The Sample signal's parameters as a GLib.Variant type: one string, the sample JSON. */
 export const SAMPLE_SIGNAL_SIGNATURE = '(s)';
 /**
- * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side and a proxy on the client side:
+ * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side; the client (serviceLink.js) calls and
+ * subscribes by the names above:
  * - GetState() → s: the state JSON (buildStatePayload), for a client that has just connected, and for gnome-status;
  * - WatchDetail() and UnwatchDetail(): a caller holds a detail watch while its card is visible or its dropdown open;
  *   the service counts them per caller and drops a caller's watches when its connection closes;
@@ -145,7 +146,40 @@ export function parseStatePayload(text) {
 }
 
 /**
- * Reads a Sample's JSON, skew-tolerantly (see the file header).
+ * Reads a Sample's small fields and leaves its snapshot unread, so a client that does not show the snapshot on this
+ * tick never pays for parsing it. Skew-tolerant (see the file header).
+ *
+ * @param {*} text - The JSON text.
+ * @returns {{sequence: number|null, sampledAtUsec: number|null, appendedHistory: AppendedHistory|null,
+ *     rawSnapshot: *}|null} The envelope, or null for text that is not a JSON object. A missing or mistyped
+ *     appendedHistory is null, like a reveal's: the client appends nothing for it. rawSnapshot is the payload's
+ *     `snapshot` value as parsed from JSON, for parseEnvelopeSnapshot.
+ */
+export function parseSampleEnvelope(text) {
+    const payload = parseJsonObject(text);
+    if (payload === null)
+        return null;
+    return {
+        sequence: countOrNull(payload.sequence),
+        sampledAtUsec: finiteNumberOrNull(payload.sampledAtUsec),
+        appendedHistory: parseAppendedHistory(payload.appendedHistory),
+        rawSnapshot: payload.snapshot,
+    };
+}
+
+/**
+ * Reads the snapshot an envelope carried, skew-tolerantly: the second step of reading a Sample.
+ *
+ * @param {*} rawSnapshot - A parseSampleEnvelope result's rawSnapshot.
+ * @returns {object|null} The snapshot, field by field as parseStatePayload reads GetState's; null unless an object.
+ */
+export function parseEnvelopeSnapshot(rawSnapshot) {
+    return parseSnapshot(rawSnapshot);
+}
+
+/**
+ * Reads a Sample's JSON, skew-tolerantly (see the file header): parseSampleEnvelope, then parseEnvelopeSnapshot on
+ * the envelope's snapshot.
  *
  * @param {*} text - The JSON text.
  * @returns {{snapshot: object|null, appendedHistory: AppendedHistory|null, sequence: number|null,
@@ -153,14 +187,14 @@ export function parseStatePayload(text) {
  *     mistyped appendedHistory is null, like a reveal's: the client appends nothing for it.
  */
 export function parseSamplePayload(text) {
-    const payload = parseJsonObject(text);
-    if (payload === null)
+    const envelope = parseSampleEnvelope(text);
+    if (envelope === null)
         return null;
     return {
-        snapshot: parseSnapshot(payload.snapshot),
-        appendedHistory: parseAppendedHistory(payload.appendedHistory),
-        sequence: countOrNull(payload.sequence),
-        sampledAtUsec: finiteNumberOrNull(payload.sampledAtUsec),
+        snapshot: parseEnvelopeSnapshot(envelope.rawSnapshot),
+        appendedHistory: envelope.appendedHistory,
+        sequence: envelope.sequence,
+        sampledAtUsec: envelope.sampledAtUsec,
     };
 }
 

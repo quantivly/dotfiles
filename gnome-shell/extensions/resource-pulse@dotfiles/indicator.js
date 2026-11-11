@@ -2,11 +2,14 @@
 // below it once the pointer has rested on it for HOVER_LABEL_DELAY_MS (never while the menu is open). A click opens a
 // dropdown: a second card (card.js), unfrozen exactly while the menu is open, and an "Open Resources" item.
 //
-// Shell glue only: every number comes from the client, every string from lib/format.js and every shape from
-// graph.js. It runs inside gnome-shell, so destroying it removes everything it added outside itself (the hover
-// label, which lives in the layout manager's chrome, its timeout, and its client listener), and nothing it
-// schedules can outlive it. The menu is registered with the panel's menu manager by Main.panel.addToStatusArea and
-// destroyed with the button, which destroys the dropdown card inside it.
+// Shell glue only: every number comes from the client, every string from lib/format.js, every shape from graph.js
+// and every column from lib/topbarColumns.js. A graph asks for a repaint only when its columns, in whole device
+// pixels, differ from the ones it last drew, and only while the indicator is mapped: a repaint is neither cheap nor
+// lazy, and on an idle machine nearly every one would redraw the same pixels. A graph skipped while unmapped draws
+// once when it is mapped again. It runs inside gnome-shell, so destroying it removes everything it added outside
+// itself (the hover label, which lives in the layout manager's chrome, its timeout, and its client listener), and
+// nothing it schedules can outlive it. The menu is registered with the panel's menu manager by
+// Main.panel.addToStatusArea and destroyed with the button, which destroys the dropdown card inside it.
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
@@ -25,6 +28,7 @@ import {
 } from './lib/constants.js';
 import {hoverLabel} from './lib/format.js';
 import {hoverLabelPosition} from './lib/layout.js';
+import {columnFractions, deviceLevelCount, isGraphRepaintNeeded, quantisedColumns} from './lib/topbarColumns.js';
 
 const ACCESSIBLE_NAME = 'Resource Pulse';
 /** PanelMenu.Button's menu alignment: 0.5 puts the dropdown's arrow under the middle of the graphs. */
@@ -50,6 +54,27 @@ const UNCONSTRAINED_HEIGHT = -1;
 /** The stage's left edge, for the fallback when the indicator is on no monitor. */
 const STAGE_LEFT_EDGE_PX = 0;
 
+/**
+ * The columns a graph last drew (a GraphColumns of lib/topbarColumns.js), with the height it drew them at.
+ *
+ * @typedef {object} DrawnColumns
+ * @property {number[]} columns - One level per slot, or GAP_COLUMN for a gap.
+ * @property {number} levelCount - deviceLevelCount() of heightPx and the resource scale they were drawn at.
+ * @property {number} heightPx - The graph's height in logical pixels at that repaint. St reports a drawing area's
+ *     size only inside its repaint handler (anywhere else it logs a CRITICAL and the size reads 0), and repaints by
+ *     itself on any change of size, so this is the height the comparison quantises at between repaints.
+ */
+
+/**
+ * One top-bar graph: its drawing area, what it draws, and the columns it last drew.
+ *
+ * @typedef {object} TopbarGraph
+ * @property {St.DrawingArea} drawingArea - The graph's actor.
+ * @property {import('./lib/history.js').RingBuffer} history - The fractions it draws.
+ * @property {number[]} fillRgba - Its colour, as [red, green, blue, alpha], each 0–1.
+ * @property {DrawnColumns|null} drawnColumns - What its repaint handler last drew; null until it first draws.
+ */
+
 export const PulseIndicator = GObject.registerClass(
 class PulseIndicator extends PanelMenu.Button {
     /**
@@ -68,7 +93,7 @@ class PulseIndicator extends PanelMenu.Button {
         this._isHoverLabelShown = false;
         this._showHoverLabelTimeoutId = null;
         this._placeHoverLabelLaterId = null;
-        this._snapshotListenerId = null;
+        this._historyListenerId = null;
         this._dropdownCard = null;
         this._openResourcesItem = null;
 
@@ -87,7 +112,8 @@ class PulseIndicator extends PanelMenu.Button {
 
         this.connect('notify::hover', () => this._syncHoverLabel());
         // Hidden while hovered (say, a fullscreen window hides the panel): the label must not stay up above it.
-        this.connect('notify::mapped', () => this._syncHoverLabel());
+        // Mapped again, a graph whose columns changed while it was hidden draws once.
+        this.connect('notify::mapped', () => this._onMappedChanged());
 
         this._hoverLabel = new St.Label({style_class: HOVER_LABEL_STYLE_CLASS, visible: false});
         // The label's first width after it is shown can be stale: one hidden across a display-scale change
@@ -96,7 +122,7 @@ class PulseIndicator extends PanelMenu.Button {
         // and its handlers with it.
         this._hoverLabel.connect('notify::width', () => this._queuePlaceShownHoverLabel());
         Main.layoutManager.addTopChrome(this._hoverLabel);
-        this._snapshotListenerId = client.addListener(snapshot => this._onSnapshot(snapshot));
+        this._historyListenerId = client.addHistoryListener(() => this._onHistoriesChanged());
         St.ThemeContext.get_for_stage(global.stage).connectObject(
             'notify::scale-factor', () => this._queuePlaceShownHoverLabel(), this);
     }
@@ -134,51 +160,122 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
-     * Adds one mini graph that draws a history on every repaint.
+     * Reacts to the indicator being mapped or unmapped: the hover label follows, and once the indicator is mapped
+     * again each graph whose columns changed while it was not draws once, now (the repaint owed).
+     *
+     * @returns {void}
+     */
+    _onMappedChanged() {
+        this._syncHoverLabel();
+        this._queueRepaintsOfChangedGraphs();
+    }
+
+    /**
+     * Adds one mini graph, which draws its history on every repaint.
      *
      * @param {St.BoxLayout} graphBox - Where the graph goes.
      * @param {import('./lib/history.js').RingBuffer} history - The fractions it draws.
      * @param {number[]} fillRgba - The graph's colour, as [red, green, blue, alpha], each 0–1.
-     * @returns {St.DrawingArea} The graph.
+     * @returns {TopbarGraph} The graph, which has drawn nothing yet.
      */
     _addGraph(graphBox, history, fillRgba) {
-        const graph = new St.DrawingArea({style: GRAPH_SIZE_STYLE, y_align: Clutter.ActorAlign.CENTER});
-        graph.connect('repaint', () => this._paintGraph(graph, history, fillRgba));
-        graphBox.add_child(graph);
-        return graph;
+        const drawingArea = new St.DrawingArea({style: GRAPH_SIZE_STYLE, y_align: Clutter.ActorAlign.CENTER});
+        const topbarGraph = {drawingArea, history, fillRgba, drawnColumns: null};
+        drawingArea.connect('repaint', () => this._paintGraph(topbarGraph));
+        graphBox.add_child(drawingArea);
+        return topbarGraph;
     }
 
     /**
-     * Draws the newest TOPBAR_HISTORY_SAMPLES of a history into a graph, right-aligned, and frees the context
-     * whatever happens (as the shell's own drawing areas do).
+     * The columns a graph's history gives now: its newest TOPBAR_HISTORY_SAMPLES, right-aligned, quantised to whole
+     * device pixels of the given height and resource scale.
      *
-     * @param {St.DrawingArea} graph - The graph being repainted.
-     * @param {import('./lib/history.js').RingBuffer} history - The fractions to draw.
-     * @param {number[]} fillRgba - The graph's colour.
+     * @param {TopbarGraph} topbarGraph - The graph.
+     * @param {number} heightPx - Its height in logical pixels.
+     * @param {number} resourceScale - Its resource scale.
+     * @returns {import('./lib/topbarColumns.js').GraphColumns} The columns, with the level count they were quantised
+     *     to.
+     */
+    _currentColumns(topbarGraph, heightPx, resourceScale) {
+        const newestFractions = topbarGraph.history.lastValues(TOPBAR_HISTORY_SAMPLES);
+        const slotFractions = padWithLeadingGaps(newestFractions, TOPBAR_HISTORY_SAMPLES);
+        return {
+            columns: quantisedColumns(slotFractions, heightPx, resourceScale),
+            levelCount: deviceLevelCount(heightPx, resourceScale),
+        };
+    }
+
+    /**
+     * Draws a graph's current columns (columnFractions, so the levels drawn are the levels compared), records them as
+     * the columns it last drew with the height it drew them at, and frees the context whatever happens (as the
+     * shell's own drawing areas do). The repaint handler is the one place the graph's size and cairo context may be
+     * read: St allows both only while it repaints. St emits repaint on its own too (at the first allocation, on a
+     * style or a scale change), so the columns are always computed here, from the history at the size and scale
+     * being drawn: it never draws stale levels, and the next comparison is against what is on screen.
+     *
+     * @param {TopbarGraph} topbarGraph - The graph being repainted.
      * @returns {void}
      */
-    _paintGraph(graph, history, fillRgba) {
-        const newestFractions = history.lastValues(TOPBAR_HISTORY_SAMPLES);
-        const slotFractions = padWithLeadingGaps(newestFractions, TOPBAR_HISTORY_SAMPLES);
-        const [widthPx, heightPx] = graph.get_surface_size();
-        const cr = graph.get_context();
+    _paintGraph(topbarGraph) {
+        const {drawingArea, fillRgba} = topbarGraph;
+        const [widthPx, heightPx] = drawingArea.get_surface_size();
+        const resourceScale = drawingArea.get_resource_scale();
+        const columnsToDraw = this._currentColumns(topbarGraph, heightPx, resourceScale);
+        const slotFractions = columnFractions(columnsToDraw.columns, heightPx, resourceScale);
+        const cr = drawingArea.get_context();
         try {
             drawAreaGraph(cr, widthPx, heightPx, slotFractions, fillRgba, BASELINE_RGBA);
+            topbarGraph.drawnColumns = {...columnsToDraw, heightPx};
         } finally {
             cr.$dispose();
         }
     }
 
     /**
-     * Redraws the graphs for a new snapshot, and refreshes the hover label while it is up, so it never shows
-     * an older sample than the graphs do.
+     * Says whether a graph must draw again (lib/topbarColumns.js isGraphRepaintNeeded): only while the indicator is
+     * mapped, and only when it has drawn nothing yet or the columns its history gives now differ from the ones it
+     * last drew, or were quantised to another number of device pixels. The current columns are quantised at the
+     * height recorded by the last repaint and the live resource scale: St reports a drawing area's size only inside
+     * its repaint handler, and repaints by itself on any change of size, so the size is never read here. Unmapped it
+     * computes nothing and answers false, and the columns last drawn stay as they are: the repaint is owed, and the
+     * first comparison once the indicator is mapped again (notify::mapped) draws it. False once destroyed.
      *
-     * @param {import('./pulseClient.js').Snapshot|null} _snapshot - The new snapshot (the label reads the latest).
+     * @param {TopbarGraph} topbarGraph - The graph.
+     * @returns {boolean} True when a repaint would change what the graph shows.
+     */
+    _isRepaintNeeded(topbarGraph) {
+        if (this._client === null || !this.mapped)
+            return false;
+        const {drawingArea, drawnColumns} = topbarGraph;
+        // Nothing drawn yet means no height to quantise at; isGraphRepaintNeeded answers true without one.
+        const currentColumns = drawnColumns === null ? null
+            : this._currentColumns(topbarGraph, drawnColumns.heightPx, drawingArea.get_resource_scale());
+        return isGraphRepaintNeeded({drawnColumns, currentColumns});
+    }
+
+    /**
+     * Asks each graph that must draw again for a repaint: the one place the indicator asks, since St.DrawingArea's
+     * repaint is neither cheap nor lazy. Both graphs are asked in the same notification, so a tick costs one frame at
+     * most, and none when no column changed or the indicator is unmapped.
+     *
      * @returns {void}
      */
-    _onSnapshot(_snapshot) {
-        this._cpuGraph.queue_repaint();
-        this._memoryGraph.queue_repaint();
+    _queueRepaintsOfChangedGraphs() {
+        for (const topbarGraph of [this._cpuGraph, this._memoryGraph]) {
+            if (this._isRepaintNeeded(topbarGraph))
+                topbarGraph.drawingArea.queue_repaint();
+        }
+    }
+
+    /**
+     * Redraws the graphs whose columns changed once the client's histories have changed (a Sample, a state, or no
+     * data), and refreshes the hover label while it is up, from the latest snapshot, so it never shows an older
+     * sample than the graphs do.
+     *
+     * @returns {void}
+     */
+    _onHistoriesChanged() {
+        this._queueRepaintsOfChangedGraphs();
         if (this._isHoverLabelShown) {
             this._updateHoverLabelText();
             this._placeHoverLabel();
@@ -383,9 +480,9 @@ class PulseIndicator extends PanelMenu.Button {
             this._placeHoverLabelLaterId = null;
         }
         this._cancelHoverLabelTimeout();
-        if (this._snapshotListenerId !== null) {
-            this._client.removeListener(this._snapshotListenerId);
-            this._snapshotListenerId = null;
+        if (this._historyListenerId !== null) {
+            this._client.removeHistoryListener(this._historyListenerId);
+            this._historyListenerId = null;
         }
         this._dropdownCard?.destroy();
         this._dropdownCard = null;

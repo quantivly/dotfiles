@@ -3,10 +3,15 @@
 /** Seconds between CPU, memory and pressure samples. */
 export const SAMPLE_INTERVAL_SECONDS = 2;
 /**
- * Sample intervals the extension's client waits for a Sample. A Sample older than that is stale (lib/wiring.js
+ * Sample intervals the extension's client waits for a Sample. Data older than that is stale (lib/wiring.js
  * isSampleStale): both surfaces go to no data, once, rather than show its numbers as live.
  */
 export const SAMPLE_STALL_TICKS = 3;
+/**
+ * The same stall in milliseconds: what the client's stall watchdog, which each Sample re-arms, waits before it shows
+ * no data. Milliseconds, so the watchdog fires exactly the stall after the last Sample, not on a whole second.
+ */
+export const SAMPLE_STALL_MS = SAMPLE_STALL_TICKS * SAMPLE_INTERVAL_SECONDS * 1000;
 /**
  * Seconds the client waits after a failed StartUnit before asking systemd again: the first delay after the first
  * failure, the second after the second, and the last one for every failure after that. A success, or the service
@@ -65,11 +70,23 @@ export const ERROR_LOG_REPEAT_INTERVAL_USEC = 600_000_000;
 /** Distance of the desktop card from the screen edge, in pixels. */
 export const CARD_MARGIN_PX = 24;
 /**
- * Seconds between repaints of the desktop card while it counts as covered (frozen). The cover re-check timer repaints
- * it, dimmed, from the client's latest state this often, so a card misjudged as covered shows numbers at most this
- * old, dimmed, rather than stale ones that read as live (ruling R21).
+ * Seconds between repaints of the desktop card while it counts as covered (frozen). The extension repaints it,
+ * dimmed, from the client's latest state this often (asked on every Sample, or by the cover fallback timeout while the
+ * service is silent), so a card misjudged as covered shows numbers at most this old, dimmed, rather than stale ones
+ * that read as live (ruling R21).
  */
 export const FROZEN_REPAINT_INTERVAL_SECONDS = 30;
+/**
+ * Samples after which a covered card's cover is checked again, as a backstop for what no window signal reports: 30 s
+ * of Samples, R21's repaint interval. A visible card is checked on every Sample.
+ */
+export const COVER_BACKSTOP_TICKS = 15;
+/**
+ * Seconds between cover checks while the card is covered and the service is silent (no Sample comes to check it). The
+ * client's stall watchdog going off starts this timeout and the next Sample removes it, so it never runs while
+ * Samples flow.
+ */
+export const COVER_FALLBACK_INTERVAL_SECONDS = 10;
 /** Desktop IDs of the system monitors a click may open, in order of preference. */
 export const RESOURCES_APP_IDS = ['net.nokyan.Resources.desktop', 'org.gnome.SystemMonitor.desktop'];
 /** Milliseconds the pointer rests on a top-bar item before its label shows. */

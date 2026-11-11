@@ -1,5 +1,6 @@
-// lib/wiring.js: the pure decisions behind the extension's client: when to hold a detail watch, when the latest
-// Sample is too old to draw as live, and how long to wait before asking systemd to start the service again.
+// lib/wiring.js: the pure decisions behind the extension's client: when to hold a detail watch, when the data a state
+// carries (the service's latest sample) is too old to draw as live, and how long to wait before asking systemd to start
+// the service again.
 import {test, assertEqual} from './harness.js';
 // Read through the namespace, so a missing export fails its row rather than the whole run.
 import * as wiringModule from '../extensions/resource-pulse@dotfiles/lib/wiring.js';
@@ -7,7 +8,7 @@ import * as wiringModule from '../extensions/resource-pulse@dotfiles/lib/wiring.
 const USEC_PER_SECOND = 1_000_000;
 /** SAMPLE_STALL_TICKS (3) × SAMPLE_INTERVAL_SECONDS (2), in microseconds: the design's 6 s, written out. */
 const STALL_USEC = 6 * USEC_PER_SECOND;
-const LAST_SAMPLE_RECEIVED_AT_USEC = 50_000_000;
+const LAST_FRESH_DATA_AT_USEC = 50_000_000;
 const ONE_MICROSECOND = 1;
 
 test('wiring: a detail watch is wanted while the card is visible outside the overview, or the dropdown is open', () => {
@@ -35,11 +36,11 @@ test('wiring: a detail watch is wanted while the card is visible outside the ove
 
 test('wiring: a Sample exactly 6 s old is not stale, 6 s + 1 µs is, and a client that never had one is', () => {
     const isStaleAt = nowUsec =>
-        wiringModule.isSampleStale({lastSampleReceivedAtUsec: LAST_SAMPLE_RECEIVED_AT_USEC, nowUsec});
+        wiringModule.isSampleStale({lastFreshDataAtUsec: LAST_FRESH_DATA_AT_USEC, nowUsec});
     assertEqual({
-        exactlyStall: isStaleAt(LAST_SAMPLE_RECEIVED_AT_USEC + STALL_USEC),
-        justPastStall: isStaleAt(LAST_SAMPLE_RECEIVED_AT_USEC + STALL_USEC + ONE_MICROSECOND),
-        neverReceived: wiringModule.isSampleStale({lastSampleReceivedAtUsec: null, nowUsec: STALL_USEC}),
+        exactlyStall: isStaleAt(LAST_FRESH_DATA_AT_USEC + STALL_USEC),
+        justPastStall: isStaleAt(LAST_FRESH_DATA_AT_USEC + STALL_USEC + ONE_MICROSECOND),
+        neverReceived: wiringModule.isSampleStale({lastFreshDataAtUsec: null, nowUsec: STALL_USEC}),
     }, {exactlyStall: false, justPastStall: true, neverReceived: true});
 });
 

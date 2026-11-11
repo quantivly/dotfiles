@@ -4,13 +4,20 @@
 // wallpaper, below every window), at the top right of the primary monitor's work area, and follows that work area as
 // monitors and panels change. Only the card shows apps, so the client asks the service for its detail watch (the faster
 // app scan) only while the card can be seen (lib/wiring.js isDetailWatchWanted): the overview hides it, and so does a
-// window covering it, which is most of the day. While one does, the card is frozen as well: it is dimmed, records each
-// snapshot and repaints nothing until the reveal, which repaints it at once (lib/visibility.js decides what covers it),
-// except once every FROZEN_REPAINT_INTERVAL_SECONDS, still dimmed, so a card misjudged as covered never shows stale
-// numbers as live. The window-manager and display signals that trigger that check come in bursts, so they are
-// coalesced into one check before the next frame; every Sample checks at once, and so, while the card is frozen, does a
-// timer, since no Sample may come (the service may be down); that timer also makes the frozen repaint. Neither the
-// Sample's check nor the timer's schedules a frame: the shell's budget is under 0.1% of a core.
+// window covering it, which is most of the day. While one does, the card is frozen as well: it is dimmed, is told no
+// snapshot while the watch is released (the client tells the cards only while it is wanted) and repaints nothing until
+// the reveal, which repaints it at once and wants the watch again, so the client gives it the latest snapshot
+// (lib/visibility.js decides what covers it), except once every FROZEN_REPAINT_INTERVAL_SECONDS, still dimmed, from the
+// latest snapshot, so a card misjudged as covered never shows stale numbers as live. The cover is checked on the
+// window-manager and display signals, and, while the card is covered, on the moves, resizes, closing and workspace
+// changes of the windows that cover it (so a window moved from the keyboard, or sent to another workspace, is seen);
+// those come in bursts, so they are coalesced into one check before the next frame. The Samples that append to the
+// histories check it at once, with no later of their own: every one while the card is visible, every
+// COVER_BACKSTOP_TICKS-th while it is covered (a backstop for what no signal reports), and each one while it is
+// covered asks whether the frozen repaint is due. Nothing here runs on a timer while Samples flow. Only with the card
+// covered and the service silent (the client's stall watchdog has published no data, so no Sample comes) does a
+// COVER_FALLBACK_INTERVAL_SECONDS timeout check the cover and make the frozen repaint, and the next Sample removes it.
+// The shell's budgets are per state: docs/GNOME_CONFIGURATION_GUIDE.md, "What it costs".
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
@@ -26,8 +33,9 @@
 //   failure there shows "no data" and is retried or logged by the client, never thrown.
 // - a synchronous failure tears down whatever was built and rethrows, so the shell logs it once and reports the
 //   extension as ERROR (which `gnome-extensions info` shows).
-// - disable() works at any point, and twice in a row. It disconnects every signal (the covered check's too) and removes
-//   its client listener before destroying anything, so no handler runs against a half-destroyed card.
+// - disable() works at any point, and twice in a row. It disconnects every signal (the covered check's and the
+//   covering windows' too), removes its client listener, its pending check and the fallback timeout before destroying
+//   anything, so no handler runs against a half-destroyed card.
 // - each teardown step runs under its own guard (lib/teardown.js), card first: a step that throws is logged and
 //   the rest still run, so one failure can neither leave a frozen card drawn as live nor mask the error enable()
 //   is already rethrowing, and the fields are cleared first, so a later enable() starts clean.
@@ -42,12 +50,12 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {PulseCard} from './card.js';
 import {PulseIndicator} from './indicator.js';
 import {PulseClient} from './pulseClient.js';
-import {SAMPLE_INTERVAL_SECONDS} from './lib/constants.js';
+import {COVER_FALLBACK_INTERVAL_SECONDS} from './lib/constants.js';
 import {RateLimitedLogger, describeErrorWithStack} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
 import {
-    CoverRecheckTimerChange, canWindowCoverCard, coverRecheckTimerChange, doRectsOverlap, isCardCovered,
-    isFrozenRepaintDue,
+    CoverFallbackTimerChange, canWindowCoverCard, coverFallbackTimerChange, coveringWindowChanges, doRectsOverlap,
+    indexesOfRectsCoveringCard, isCardCovered, isCoverBackstopDue, isFrozenRepaintDue,
 } from './lib/visibility.js';
 import {isDetailWatchWanted} from './lib/wiring.js';
 
@@ -88,7 +96,12 @@ export default class ResourcePulseExtension extends Extension {
         this._cardPlacementLaterId = null;
         this._cardCoverListenerId = null;
         this._cardCoverCheckLaterId = null;
-        this._coverRecheckSourceId = null;
+        this._coverFallbackSourceId = null;
+        // The windows that covered the card at the last check, each followed (_followCoveringWindows).
+        this._coveringWindows = new Set();
+        // History notifications since the cover was last checked, for the backstop (lib/visibility.js
+        // isCoverBackstopDue).
+        this._ticksSinceCoverCheck = 0;
         // Monotonic µs of the frozen card's last paint: the freeze's own, then each frozen repaint's.
         this._frozenCardPaintedAtUsec = null;
         this._isOverviewVisible = false;
@@ -257,10 +270,14 @@ export default class ResourcePulseExtension extends Extension {
      *   opened or closed), the primary monitor entering or leaving fullscreen, a minimize, an unminimize, a maximize,
      *   unmaximize or tile (size-changed), the end of a drag (grab-op-end), a workspace switch, and "show desktop"
      *   (Super+D) being toggled, which hides windows without minimizing them.
-     * - Every client update (a Sample, about every 2 s) checks at once, with no later: it comes at most once a tick,
-     *   and a later would schedule a frame each time, even under a covered card. It catches what no signal reports,
-     *   such as a window moved over the card from the keyboard. While the card is frozen a timer does the same every
-     *   SAMPLE_INTERVAL_SECONDS (_syncCoverRecheckTimer), since no Sample comes while the service is down.
+     * - While the card is covered, each window that covers it is followed too: a move or a resize of it (even from the
+     *   keyboard, which no other signal reports) or its being sent to another workspace queues the same check, and its
+     *   closing drops it and queues the check (_followCoveringWindows).
+     * - Every history update (a Sample that appends to the histories, about every 2 s, a state, or no data) is a tick
+     *   (_onCardCoverTick, a client history listener). While the card is visible each tick checks at once, with no
+     *   later: it comes at most once a tick, and a later would schedule a frame each time. While it is covered only
+     *   every COVER_BACKSTOP_TICKS-th tick checks, as a backstop, and every tick asks whether the frozen repaint is
+     *   due. With the service silent no tick comes, so the fallback timeout checks instead (_syncCoverFallbackTimer).
      * - The card's placement (_placeCard, which already checked once in _addCard) and the overview closing
      *   (_onOverviewHidden) check at once too.
      *
@@ -280,12 +297,36 @@ export default class ResourcePulseExtension extends Extension {
             'switch-workspace', queueCardCoverCheck,
             this);
         global.workspace_manager.connectObject('showing-desktop-changed', queueCardCoverCheck, this);
-        this._cardCoverListenerId = this._client.addListener(() => this._syncCardCover());
+        this._cardCoverListenerId = this._client.addHistoryListener(() => this._onCardCoverTick());
     }
 
     /**
-     * Checks the cover before the next frame, once however many window-manager and display signals come before then
-     * (a restack can come several times in one frame), in a BEFORE_REDRAW later as _queueCardPlacement does.
+     * One tick of the client (a history notification: a Sample that appended to the histories, a state, or no data):
+     * counts it, checks the cover at once when the backstop says so (lib/visibility.js isCoverBackstopDue: every tick
+     * while the card is visible, every COVER_BACKSTOP_TICKS-th while it is covered), which also starts or removes the
+     * fallback timeout, or else only starts or removes it, as the service's liveness says, so it is asked once a tick;
+     * then, whether or not it checked, repaints a covered card once its frozen repaint is due, so the repaint keeps to
+     * FROZEN_REPAINT_INTERVAL_SECONDS rather than to the backstop. No later, so a tick schedules no frame of its own.
+     * The client logs a listener that throws.
+     *
+     * @returns {void}
+     */
+    _onCardCoverTick() {
+        this._ticksSinceCoverCheck += 1;
+        const isCovered = !this._isCardVisible;
+        if (isCoverBackstopDue({isCovered, ticksSinceCoverCheck: this._ticksSinceCoverCheck}))
+            this._syncCardCover();
+        else
+            this._syncCoverFallbackTimer();
+        this._repaintFrozenCardIfDue();
+    }
+
+    /**
+     * Checks the cover before the next frame, once however many window-manager, display and covering-window signals
+     * come before then (a restack can come several times in one frame, a dragged window moves on every one), in a
+     * BEFORE_REDRAW later as _queueCardPlacement does. The later forgets its id first, so a failure cannot leave the
+     * check marked pending for good; it never throws out of its callback, which runs inside the compositor's frame (a
+     * failure is logged, rate-limited); and it returns GLib.SOURCE_REMOVE on every path.
      *
      * @returns {void}
      */
@@ -294,7 +335,12 @@ export default class ResourcePulseExtension extends Extension {
             return;
         this._cardCoverCheckLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
             this._cardCoverCheckLaterId = null;
-            this._syncCardCover();
+            try {
+                this._syncCardCover();
+            } catch (error) {
+                const errorText = describeErrorWithStack(error);
+                this._errorLog.log(`could not check the cover: ${errorText}`);
+            }
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -313,51 +359,61 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Freezes the card while a window covers it and unfreezes it, repainting it at once, when none does; runs the
-     * re-check timer exactly while it is covered; then updates the detail watch, wanted only while the card can be
-     * seen. Does nothing without a card.
+     * Freezes the card while a window covers it and unfreezes it, repainting it at once, when none does, and stamps the
+     * freeze's paint, which the frozen repaint counts from; restarts the backstop's count; starts or removes the
+     * fallback timeout; updates the detail watch, wanted only while the card can be seen; and only then follows the
+     * windows that cover it, so a failure connecting or disconnecting one can never skip the freeze, the reveal, or the
+     * detail watch a revealed card needs to be told its snapshots. Does nothing without a card.
      *
      * @returns {void}
      */
     _syncCardCover() {
         if (this._card === null)
             return;
-        const isCovered = this._isCardCovered();
+        const {isCovered, coveringWindows} = this._readCardCover();
+        this._ticksSinceCoverCheck = 0;
+        if (isCovered && this._isCardVisible)
+            this._frozenCardPaintedAtUsec = GLib.get_monotonic_time();
         this._card.setFrozen(isCovered);
         this._isCardVisible = !isCovered;
-        this._syncCoverRecheckTimer(isCovered);
+        this._syncCoverFallbackTimer();
         this._syncDetailWatch();
+        this._followCoveringWindows(coveringWindows);
     }
 
     /**
-     * Starts the timer that re-checks a covered card every SAMPLE_INTERVAL_SECONDS, or removes it on the reveal
-     * (lib/visibility.js coverRecheckTimerChange). It starts as the card freezes, whose one repaint the frozen repaint
-     * then counts from.
+     * Starts the fallback timeout, which checks a covered card every COVER_FALLBACK_INTERVAL_SECONDS while the service
+     * is silent, or removes it once the card is revealed or the service is live again (lib/visibility.js
+     * coverFallbackTimerChange). Asked on each cover check (the cover may have changed) and on each tick (the
+     * liveness may have: the stall watchdog's no data starts it, the next Sample removes it).
      *
-     * @param {boolean} isCovered - The card is covered now.
      * @returns {void}
      */
-    _syncCoverRecheckTimer(isCovered) {
-        const timerChange = coverRecheckTimerChange({isCovered, isTimerRunning: this._coverRecheckSourceId !== null});
-        if (timerChange === CoverRecheckTimerChange.START) {
-            this._frozenCardPaintedAtUsec = GLib.get_monotonic_time();
-            this._coverRecheckSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAMPLE_INTERVAL_SECONDS,
-                () => this._onCoverRecheckTimeout());
-        } else if (timerChange === CoverRecheckTimerChange.STOP) {
-            this._removeCoverRecheckTimer();
+    _syncCoverFallbackTimer() {
+        const timerChange = coverFallbackTimerChange({
+            isCovered: !this._isCardVisible,
+            isServiceLive: this._client?.isLive === true,
+            isTimerRunning: this._coverFallbackSourceId !== null,
+        });
+        if (timerChange === CoverFallbackTimerChange.START) {
+            const onFallbackTimeout = () => this._onCoverFallbackTimeout();
+            this._coverFallbackSourceId =
+                GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, COVER_FALLBACK_INTERVAL_SECONDS, onFallbackTimeout);
+        } else if (timerChange === CoverFallbackTimerChange.STOP) {
+            this._removeCoverFallbackTimer();
         }
     }
 
     /**
-     * The re-check timer: checks the cover at once, with no later, so a covered card schedules no frame, then repaints
-     * a card still covered once its frozen repaint is due (_repaintFrozenCardIfDue). A reveal removes this very source
-     * from inside it (_syncCoverRecheckTimer), which GLib allows; the value returned after that is ignored. It never
-     * throws out of the callback, which would end the source behind the id the extension keeps; a failure is logged,
-     * rate-limited.
+     * The fallback timeout: checks the cover at once, with no later, then repaints a card still covered once its frozen
+     * repaint is due (_repaintFrozenCardIfDue). A reveal removes this very source from inside it
+     * (_syncCoverFallbackTimer), which GLib allows; the value returned after that is ignored, and the id is already
+     * forgotten, so nothing removes the source again. It never throws out of the callback, which would end the source
+     * behind the id the extension keeps; a failure is logged, rate-limited.
      *
      * @returns {boolean} GLib.SOURCE_CONTINUE, always.
      */
-    _onCoverRecheckTimeout() {
+    _onCoverFallbackTimeout() {
         try {
             this._syncCardCover();
             this._repaintFrozenCardIfDue();
@@ -369,10 +425,12 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * While the card is still covered, repaints it, dimmed, from the client's latest state once
+     * While the card is still covered, gives it the client's latest snapshot and repaints it, dimmed, once
      * FROZEN_REPAINT_INTERVAL_SECONDS have passed since it was last painted (lib/visibility.js isFrozenRepaintDue), so
-     * a card misjudged as covered updates, dimmed, rather than showing stale numbers. A revealed card is left alone:
-     * the reveal repainted it at once. Does nothing without a card.
+     * a card misjudged as covered updates, dimmed, rather than showing stale numbers. Asked on every tick and by the
+     * fallback timeout. The snapshot is given here because the client tells a covered card none while the detail watch
+     * is released (unless the dropdown is open). A revealed card is left alone: the reveal repainted it at once. Does
+     * nothing without a card.
      *
      * @returns {void}
      */
@@ -383,37 +441,125 @@ export default class ResourcePulseExtension extends Extension {
         if (!isFrozenRepaintDue({lastFrozenPaintAtUsec: this._frozenCardPaintedAtUsec, nowUsec}))
             return;
         this._frozenCardPaintedAtUsec = nowUsec;
+        const client = this._client;
+        this._card.update(client.latestSnapshot, client.lastGoodClockLabel);
         this._card.repaintFrozen();
     }
 
     /**
-     * Removes the re-check timer, if it runs.
+     * Removes the fallback timeout, if it runs. The id is forgotten first, so a removal from inside its own callback
+     * leaves nothing to remove again.
      *
      * @returns {void}
      */
-    _removeCoverRecheckTimer() {
-        if (this._coverRecheckSourceId === null)
+    _removeCoverFallbackTimer() {
+        if (this._coverFallbackSourceId === null)
             return;
-        const sourceId = this._coverRecheckSourceId;
-        this._coverRecheckSourceId = null;
+        const sourceId = this._coverFallbackSourceId;
+        this._coverFallbackSourceId = null;
         GLib.source_remove(sourceId);
     }
 
     /**
-     * Says whether the card is covered (lib/visibility.js isCardCovered): the primary monitor is fullscreen, or one
-     * window that can cover it contains its whole rectangle. With no monitor at all it counts as visible.
+     * Reads the card's cover: whether it is covered (lib/visibility.js isCardCovered: the primary monitor is
+     * fullscreen, or one window that can cover it contains its whole rectangle), and the windows that contain it
+     * (indexesOfRectsCoveringCard), which _followCoveringWindows follows. With no monitor at all it counts as visible,
+     * with no covering window.
      *
-     * @returns {boolean} True when covered.
+     * @returns {{isCovered: boolean, coveringWindows: Meta.Window[]}} The cover.
      */
-    _isCardCovered() {
+    _readCardCover() {
         const {primaryMonitor} = Main.layoutManager;
         if (!primaryMonitor)
-            return false;
-        return isCardCovered({
-            isPrimaryMonitorInFullscreen: primaryMonitor.inFullscreen,
-            cardRect: this._cardRectOnStage(),
-            windowRects: this._coveringWindowRects(primaryMonitor),
+            return {isCovered: false, coveringWindows: []};
+        const cardRect = this._cardRectOnStage();
+        const {metaWindows, frameRects: windowRects} = this._windowsThatCanCoverCard(primaryMonitor);
+        const isPrimaryMonitorInFullscreen = primaryMonitor.inFullscreen;
+        const coveringIndexes = indexesOfRectsCoveringCard({cardRect, windowRects});
+        return {
+            isCovered: isCardCovered({isPrimaryMonitorInFullscreen, cardRect, windowRects}),
+            coveringWindows: coveringIndexes.map(windowIndex => metaWindows[windowIndex]),
+        };
+    }
+
+    /**
+     * Follows exactly the windows that cover the card now: connects to those it does not follow yet and disconnects
+     * from those that stopped covering it (lib/visibility.js coveringWindowChanges), so a check that finds the same
+     * windows connects and disconnects nothing.
+     *
+     * @param {Meta.Window[]} coveringWindows - The windows that contain the card now.
+     * @returns {void}
+     */
+    _followCoveringWindows(coveringWindows) {
+        const {windowsToFollow, windowsToRelease} = coveringWindowChanges({
+            heldWindows: [...this._coveringWindows],
+            coveringWindows,
         });
+        for (const metaWindow of windowsToRelease)
+            this._stopFollowingCoveringWindow(metaWindow);
+        for (const metaWindow of windowsToFollow)
+            this._startFollowingCoveringWindow(metaWindow);
+    }
+
+    /**
+     * Follows a window that covers the card: its move and its resize (from a drag, the keyboard or the application),
+     * and its being sent to another workspace (which no global signal reports when the user does not follow it), queue
+     * the coalesced cover check, and its closing drops it at once (_onCoveringWindowUnmanaged).
+     *
+     * @param {Meta.Window} metaWindow - A window that contains the card.
+     * @returns {void}
+     */
+    _startFollowingCoveringWindow(metaWindow) {
+        const queueCardCoverCheck = () => this._queueCardCoverCheck();
+        metaWindow.connectObject(
+            'position-changed', queueCardCoverCheck,
+            'size-changed', queueCardCoverCheck,
+            'workspace-changed', queueCardCoverCheck,
+            'unmanaged', () => this._onCoveringWindowUnmanaged(metaWindow),
+            this);
+        this._coveringWindows.add(metaWindow);
+    }
+
+    /**
+     * Stops following a window: forgets it, then disconnects every handler connected to it.
+     *
+     * @param {Meta.Window} metaWindow - A window followed until now.
+     * @returns {void}
+     */
+    _stopFollowingCoveringWindow(metaWindow) {
+        this._coveringWindows.delete(metaWindow);
+        metaWindow.disconnectObject(this);
+    }
+
+    /**
+     * A covering window was closed: it is dropped at once, so no handler runs against it afterwards, and the cover is
+     * checked again before the next frame (the card may now be visible).
+     *
+     * @param {Meta.Window} metaWindow - The window that was unmanaged.
+     * @returns {void}
+     */
+    _onCoveringWindowUnmanaged(metaWindow) {
+        this._stopFollowingCoveringWindow(metaWindow);
+        this._queueCardCoverCheck();
+    }
+
+    /**
+     * Stops following every covering window, for teardown. The set is emptied first, so a later enable() starts with
+     * none whatever a disconnection throws, and each window is disconnected under its own guard, so one that throws is
+     * logged, rate-limited, and every other window is still disconnected.
+     *
+     * @returns {void}
+     */
+    _disconnectCoveringWindows() {
+        const coveringWindows = [...this._coveringWindows];
+        this._coveringWindows.clear();
+        for (const metaWindow of coveringWindows) {
+            try {
+                metaWindow.disconnectObject(this);
+            } catch (error) {
+                this._logTearDownFailure('disconnect from a covering window', error);
+            }
+        }
     }
 
     /**
@@ -433,17 +579,19 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * The frame rectangles of the windows that can cover the card: those whose state allows it (lib/visibility.js
+     * The windows that can cover the card, with their frame rectangles: those whose state allows it (lib/visibility.js
      * canWindowCoverCard: normal and dialog windows, not minimized, showing on their workspace, on the active
      * workspace or on all of them), and whose frame overlaps the primary monitor. The state is checked first, so only
      * those windows' frames are read. Frame rects are in stage (logical) coordinates, as the card's rectangle is.
      *
      * @param {{x: number, y: number, width: number, height: number}} primaryMonitor - The primary monitor's geometry.
-     * @returns {Array<{x: number, y: number, width: number, height: number}>} The rectangles.
+     * @returns {{metaWindows: Meta.Window[], frameRects: Array<{x: number, y: number, width: number, height: number}>}}
+     *     The windows, and each one's frame rectangle at the same index.
      */
-    _coveringWindowRects(primaryMonitor) {
+    _windowsThatCanCoverCard(primaryMonitor) {
         const activeWorkspace = global.workspace_manager.get_active_workspace();
-        const coveringWindowRects = [];
+        const metaWindows = [];
+        const frameRects = [];
         for (const metaWindow of global.display.list_all_windows()) {
             const canCover = canWindowCoverCard({
                 isNormalOrDialog: COVERING_WINDOW_TYPES.has(metaWindow.get_window_type()),
@@ -455,10 +603,12 @@ export default class ResourcePulseExtension extends Extension {
             if (!canCover)
                 continue;
             const frameRect = metaWindow.get_frame_rect();
-            if (doRectsOverlap(frameRect, primaryMonitor))
-                coveringWindowRects.push(frameRect);
+            if (doRectsOverlap(frameRect, primaryMonitor)) {
+                metaWindows.push(metaWindow);
+                frameRects.push(frameRect);
+            }
         }
-        return coveringWindowRects;
+        return {metaWindows, frameRects};
     }
 
     /**
@@ -493,11 +643,13 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Undoes enable(), whatever it got to, and never throws: keeps the client's last good clock label for the next
-     * enable (a getter's read, before anything is destroyed); clears every field; then disconnects from the overview,
-     * the layout manager, the display, the window manager, the workspace manager, the card and the dropdown menu, removes the covered
-     * check's client listener, its pending check and its re-check timer, and a pending card placement; then destroys
-     * the card (which also takes it out of the background group), the indicator and the client. Each step runs under
-     * its own guard (lib/teardown.js runEveryStep): one that throws is logged, rate-limited, and the rest still run.
+     * enable (a getter's read, before anything is destroyed, guarded as each step is: on a failure the label already
+     * held stays); clears every field; then disconnects from the overview, the layout manager, the display, the window
+     * manager, the workspace manager, the card, the dropdown menu and the windows covering the card, removes the
+     * covered check's client listener, its pending check and its fallback timeout, and a pending card placement; then
+     * destroys the card (which also takes it out of the background group), the indicator and the client. Each step runs
+     * under its own guard (lib/teardown.js runEveryStep): one that throws is logged, rate-limited, and the rest still
+     * run.
      *
      * @returns {void}
      */
@@ -507,7 +659,12 @@ export default class ResourcePulseExtension extends Extension {
         const client = this._client;
         const cardCoverListenerId = this._cardCoverListenerId;
         const dropdownMenu = this._dropdownMenu;
-        this._lastGoodClockLabel = client?.lastGoodClockLabel ?? this._lastGoodClockLabel;
+        // The getter parses a Sample still unread, so it can throw: the label already held is kept then.
+        try {
+            this._lastGoodClockLabel = client?.lastGoodClockLabel ?? this._lastGoodClockLabel;
+        } catch (error) {
+            this._logTearDownFailure('read the client\'s last good clock label', error);
+        }
         // Cleared first: whatever a step below throws, no later enable() or disable() finds a half-destroyed part.
         this._card = null;
         this._indicator = null;
@@ -517,6 +674,7 @@ export default class ResourcePulseExtension extends Extension {
         this._isDropdownOpen = false;
         this._isOverviewVisible = false;
         this._isCardVisible = IS_CARD_VISIBLE_BEFORE_COVER_CHECK;
+        this._ticksSinceCoverCheck = 0;
         runEveryStep([
             {name: 'disconnect from the overview', run: () => Main.overview.disconnectObject(this)},
             {name: 'disconnect from the layout manager', run: () => Main.layoutManager.disconnectObject(this)},
@@ -525,12 +683,13 @@ export default class ResourcePulseExtension extends Extension {
             {name: 'disconnect from the workspace manager', run: () => global.workspace_manager.disconnectObject(this)},
             {name: 'disconnect from the card', run: () => card?.disconnectObject(this)},
             {name: 'disconnect from the dropdown menu', run: () => dropdownMenu?.disconnectObject(this)},
+            {name: 'disconnect from the covering windows', run: () => this._disconnectCoveringWindows()},
             {name: 'remove the covered check\'s client listener', run: () => {
                 if (cardCoverListenerId !== null)
-                    client?.removeListener(cardCoverListenerId);
+                    client?.removeHistoryListener(cardCoverListenerId);
             }},
             {name: 'cancel the pending cover check', run: () => this._cancelCardCoverCheck()},
-            {name: 'remove the cover re-check timer', run: () => this._removeCoverRecheckTimer()},
+            {name: 'remove the cover fallback timeout', run: () => this._removeCoverFallbackTimer()},
             {name: 'cancel the pending card placement', run: () => this._cancelCardPlacement()},
             // The card first: it is the most visible part, and one left behind would show frozen numbers as live.
             {name: 'destroy the card', run: () => card?.destroy()},

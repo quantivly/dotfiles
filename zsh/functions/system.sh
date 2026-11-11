@@ -2512,15 +2512,36 @@ gnome-status() {
       print -r -- "${${changed_paths%%$'\n'*}#"$rp_extension_dir"/}"
     }
 
+    # rp_warn_when_unit_file_is_newer <unit> <start epoch seconds>: adds a ⚠ when
+    # the unit's file changed after the unit started: systemd keeps the old
+    # definition until daemon-reload and a restart. The file is the one systemd
+    # loaded (FragmentPath, a link into the checkout's systemd/), and its time
+    # is the link's TARGET's (find -H follows it), the same strictly-after
+    # comparison the modules get. Silent when the path or its time cannot be
+    # read: a unit that is not linked is reported by the lines above.
+    rp_warn_when_unit_file_is_newer() {
+      local unit_name="$1" fragment_path changed_unit_file unit_file_remedy
+      fragment_path="$("${rp_call_limit[@]}" systemctl --user show -p FragmentPath --value "$unit_name" 2>/dev/null)" \
+        || return 0
+      [ -n "$fragment_path" ] || return 0
+      changed_unit_file="$(find -H "$fragment_path" -maxdepth 0 -type f -newermt "@$2" -print 2>/dev/null)" || return 0
+      [ -n "$changed_unit_file" ] || return 0
+      unit_file_remedy="systemctl --user daemon-reload && systemctl --user try-restart $unit_name"
+      rp_warnings+=("$unit_name runs an older unit file: it changed after the unit started — $unit_file_remedy")
+    }
+
     # rp_warn_when_unit_runs_older_code <unit> <entry module> <restart note>:
     # adds a ⚠ when a module of the entry's import closure changed after the
     # active unit started (it runs older code than the checkout), or when the
-    # closure cannot be worked out. The note follows the try-restart remedy.
+    # closure cannot be worked out, and one when the unit's own file changed
+    # after the start (rp_warn_when_unit_file_is_newer). Neither without a start
+    # time. The note follows the try-restart remedy of the code ⚠ only.
     rp_warn_when_unit_runs_older_code() {
       local unit_name="$1" entry_module="$2" restart_note="$3" started_at changed_file
       started_at="$("${rp_call_limit[@]}" systemctl --user show -p ActiveEnterTimestamp --value \
         --timestamp=unix "$unit_name" 2>/dev/null)"
       [[ "$started_at" == @<-> ]] || return 0
+      rp_warn_when_unit_file_is_newer "$unit_name" "${started_at#@}"
       if ! changed_file="$(rp_first_module_changed_since "$entry_module" "${started_at#@}")"; then
         rp_warnings+=("cannot tell whether $unit_name runs older code: what $entry_module imports could not be worked out or searched — bash $rp_module_closure_script $rp_extension_dir $entry_module")
       elif [ -n "$changed_file" ]; then
