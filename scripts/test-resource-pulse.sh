@@ -899,6 +899,38 @@ check "closure: follows multi-line, side-effect, re-exported and literal dynamic
   "$(sorted_closure "$CLOSURE_FIXTURE_DIR" entry.js)" \
   "entry.js lazy.js lib/multi-line.js re-exported.js shared.js side-effect.js exit=0"
 
+# An import written after block comments that close on the same line is a real
+# import, and the closure must name its file (a change to it restarts the
+# service that loads it); a line that is all comment, closed or not, hides what
+# it says, and so does a block comment left open on its line.
+CLOSURE_BLOCK_FIXTURE_DIR="$WIRING_TMP/closure-block-fixture"
+rm -rf "$CLOSURE_BLOCK_FIXTURE_DIR"
+mkdir -p "$CLOSURE_BLOCK_FIXTURE_DIR" || fatal "cannot create $CLOSURE_BLOCK_FIXTURE_DIR"
+printf '%s\n' \
+  "/* note */ import {after_one} from './after-one.js';" \
+  "/* first */ /* second */ import {after_two} from './after-two.js';" \
+  "/* import {all_comment} from './all-comment.js'; */" >"$CLOSURE_BLOCK_FIXTURE_DIR/entry.js"
+for closure_block_module in after-one.js after-two.js all-comment.js; do
+  : >"$CLOSURE_BLOCK_FIXTURE_DIR/$closure_block_module"
+done
+check "closure: an import after a block comment closed on its own line is followed" \
+  "$(sorted_closure "$CLOSURE_BLOCK_FIXTURE_DIR" entry.js)" \
+  "after-one.js after-two.js entry.js exit=0"
+CLOSURE_OPEN_COMMENT_FIXTURE_DIR="$WIRING_TMP/closure-open-comment-fixture"
+rm -rf "$CLOSURE_OPEN_COMMENT_FIXTURE_DIR"
+mkdir -p "$CLOSURE_OPEN_COMMENT_FIXTURE_DIR" || fatal "cannot create $CLOSURE_OPEN_COMMENT_FIXTURE_DIR"
+printf '%s\n' \
+  "/* import {hidden} from './hidden.js'; this comment closes on a later line" \
+  ' */' \
+  "/* closed */ /* import {also_hidden} from './also-hidden.js'; still open" \
+  ' */' >"$CLOSURE_OPEN_COMMENT_FIXTURE_DIR/entry.js"
+for closure_open_comment_module in hidden.js also-hidden.js; do
+  : >"$CLOSURE_OPEN_COMMENT_FIXTURE_DIR/$closure_open_comment_module"
+done
+check "closure: a block comment that does not close on its line still hides the line" \
+  "$(sorted_closure "$CLOSURE_OPEN_COMMENT_FIXTURE_DIR" entry.js)" \
+  "entry.js exit=0"
+
 # Each shape it cannot follow: exit 2, nothing on stdout, and a line on stderr
 # naming the module and its line.
 # closure_refusal <module source>: "<exit>/<stdout lines>/<stderr names entry.js:line>".
@@ -2601,13 +2633,13 @@ check "refresh: a unit not active (inactive, failed, activating) is reloaded for
   "$refresh_not_active_summary" \
   "inactive:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] failed:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] activating:exit=0 calls=[$CALLS_UP_TO_STATE] output=[] "
 reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
-check "refresh: an active unit with nothing under service/ or lib/ changed since it started is left alone, silently" \
+check "refresh: an active unit with nothing in its import closure changed since it started is left alone, silently" \
   "$(run_refresh 0 0 active "$STARTED_AT" 0)" "exit=0 calls=[$CALLS_UP_TO_START_TIME] output=[]"
 reset_refresh_extension "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH"
 service_changed_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
 reset_refresh_extension "$BEFORE_START_EPOCH" "$AFTER_START_EPOCH" "$BEFORE_START_EPOCH"
 lib_changed_summary="$(run_refresh 0 0 active "$STARTED_AT" 0)"
-check "refresh: a file under service/ or lib/ newer than the unit's start try-restarts it, after the reload, and says so" \
+check "refresh: a file in the unit's import closure newer than the unit's start try-restarts it, after the reload, and says so" \
   "service:${service_changed_summary%% output=*} $(grep -c -F 'restarted' <<<"$service_changed_summary") lib:${lib_changed_summary%% output=*} $(grep -c -F 'restarted' <<<"$lib_changed_summary")" \
   "service:exit=0 calls=[$CALLS_WITH_RESTART] 1 lib:exit=0 calls=[$CALLS_WITH_RESTART] 1"
 reset_refresh_extension "$BEFORE_START_EPOCH" "$BEFORE_START_EPOCH" "$AFTER_START_EPOCH"
@@ -4470,7 +4502,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=788
+EXPECTED_ROWS=790
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
