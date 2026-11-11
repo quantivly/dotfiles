@@ -46,9 +46,9 @@
 //   thrown.
 // - a synchronous failure tears down whatever was built and rethrows, so the shell logs it once and reports the
 //   extension as ERROR (which `gnome-extensions info` shows). Except the cockpit's layer (ruling D25): it is optional
-//   and drawn from what the cockpit service sends, so a layer that cannot be built, at enable() or on an event, or
-//   rebuilt, is logged and the v2 card drawn top right instead, as with no cockpit; that layout is not tried again in
-//   this enable while the cockpit client holds it, nor kept for the next.
+//   and drawn from what the cockpit service sends, so a layer that cannot be built, at enable() or on an event,
+//   rebuilt or placed is logged and the v2 card drawn top right instead, as with no cockpit; that layout is not drawn
+//   again in this enable while the cockpit client holds it, nor kept for the next.
 // - disable() works at any point, and twice in a row. It disconnects every signal (the covered check's and the
 //   covering windows' too), removes its client listeners, its pending check and placement, the fallback timeout and
 //   the DisplayConfig read before destroying anything, so no handler runs against a half-destroyed card.
@@ -101,7 +101,7 @@ const VISIBLE_CARD_IDS_BEFORE_COVER_CHECK = Object.freeze([COCKPIT_SYSTEM_CARD_I
 const COVERING_WINDOW_TYPES = new Set([Meta.WindowType.NORMAL, Meta.WindowType.DIALOG]);
 /** The windows read on no monitor: none, so every card counts as visible and no DESKTOP window shows. */
 const NO_WINDOWS_ON_MONITOR = Object.freeze({metaWindows: [], frameRects: [], desktopWindows: []});
-/** The template key of the journal line for a layer that could not be built or rebuilt (lib/errorLog.js). */
+/** The template key of the journal line for a layer that could not be built, rebuilt or placed (lib/errorLog.js). */
 const COCKPIT_LAYER_FAILURE_LOG_KEY = 'could not draw the cockpit layer';
 
 /**
@@ -155,9 +155,9 @@ export default class ResourcePulseExtension extends Extension {
         this._displayConfigReader = null;
         // DisplayConfig's last GetCurrentState answer (unpacked), or null: none yet, or the monitors changed since.
         this._displayConfigState = null;
-        // The cockpit's layout the layer could not be built or rebuilt from in this enable, or null (ruling D25): not
-        // tried again while the cockpit client holds it (lib/cockpitWiring.js cockpitLayerChange), nor kept for the
-        // next enable (cockpitLayoutToKeep).
+        // The cockpit's layout the layer could not be built, rebuilt or placed with in this enable, or null (ruling
+        // D25): not drawn again while the cockpit client holds it (lib/cockpitWiring.js cockpitLayerChange), nor kept
+        // for the next enable (cockpitLayoutToKeep).
         this._failedCockpitLayout = null;
         this._cardPlacementLaterId = null;
         this._cardCoverListenerId = null;
@@ -207,7 +207,7 @@ export default class ResourcePulseExtension extends Extension {
      *
      * @returns {void}
      * @throws {Error} Whatever a synchronous step threw, after tearing down everything built so far; never what the
-     *     cockpit's layer threw while building (ruling D25: the v2 card is drawn top right instead).
+     *     cockpit's layer threw while being built or placed (ruling D25: the v2 card is drawn top right instead).
      */
     enable() {
         // GNOME never enables twice without disabling in between; if it ever did, replace rather than duplicate.
@@ -914,7 +914,7 @@ export default class ResourcePulseExtension extends Extension {
      * Follows the cockpit: makes the DisplayConfig reader the cockpit monitor's rule needs (asked when a layer is
      * shown and on each monitors change), follows the cockpit client's events, and draws the layer at once when the
      * cached layout says so (a login's first enable has none, so the v2 card sits top right until the service's
-     * layout comes; a layer that cannot be built from it leaves the v2 card top right too, ruling D25).
+     * layout comes; a layer that cannot be built from it or placed leaves the v2 card top right too, ruling D25).
      *
      * @returns {void}
      */
@@ -939,10 +939,10 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Adds, removes or rebuilds the layer as lib/cockpitWiring.js cockpitLayerChange says (ruling D19; never from the
-     * layout that failed to build in this enable, ruling D25), then holds the v2 card frozen if the layer now draws it
-     * nowhere (ruling D21), and places what is drawn again, which checks the cover: on every path that changed
-     * anything, a layer that could not be built or rebuilt included (_buildCockpitLayer then put the v2 card back top
-     * right). Nothing else changes nothing.
+     * layout that failed to draw in this enable, and away from a layer when that layout comes back, ruling D25).
+     * After a removal the v2 card is held frozen if nothing draws it and the cards are placed again, unguarded, as
+     * with no cockpit; an add or a rebuild does the same inside its own guard (_drawCockpitLayer). Nothing else
+     * changes nothing.
      *
      * @param {boolean} isLayoutEvent - The event is a layout event (a shown layer is rebuilt from it).
      * @returns {void}
@@ -957,41 +957,58 @@ export default class ResourcePulseExtension extends Extension {
         });
         if (layerChange === CockpitLayerChange.NONE)
             return;
-        if (layerChange === CockpitLayerChange.REMOVE)
+        if (layerChange === CockpitLayerChange.REMOVE) {
             this._removeCockpitLayer();
-        else
-            this._buildCockpitLayer(layerChange);
-        this._holdHiddenPulseCardFrozen();
-        this._placeCard();
+            this._placeAfterLayerChange();
+        } else {
+            this._drawCockpitLayer(layerChange);
+        }
     }
 
     /**
-     * Adds the layer, or rebuilds the shown one from the client's layout. A layer that cannot be built or rebuilt never
-     * takes the extension down, at enable() or on an event (ruling D25): the v2 card goes back top right instead
-     * (_fallBackToTopRightCard).
+     * Adds the layer, or rebuilds the shown one from the client's layout, then, with the layer shown, holds the v2 card
+     * frozen if the layer draws it nowhere and places the layer, which checks the cover over its cards. A layer that
+     * cannot be built, rebuilt or placed never takes the extension down, at enable() or on an event (ruling D25): any
+     * of those steps failing is a failed build, so the v2 card goes back top right (_fallBackToTopRightCard), and then
+     * the hold and the placement run once more for it, outside this guard, as with no cockpit: a failure of the core
+     * there (the v2 card, the cover, the watches) is still thrown.
      *
      * @param {string} layerChange - CockpitLayerChange.ADD or CockpitLayerChange.REBUILD.
      * @returns {void}
      */
-    _buildCockpitLayer(layerChange) {
+    _drawCockpitLayer(layerChange) {
         try {
             if (layerChange === CockpitLayerChange.ADD)
                 this._addCockpitLayer();
             else
                 this._layer.setLayout(this._cockpitClient.layout);
+            this._placeAfterLayerChange();
         } catch (error) {
             this._fallBackToTopRightCard(error);
+            this._placeAfterLayerChange();
         }
     }
 
     /**
-     * The layer could not be built or rebuilt: remembers the client's layout as the one that failed in this enable
-     * (lib/cockpitWiring.js: not tried again while the client holds it, nor kept for the next enable), logs the failure
-     * (an error of the extension's own, rate-limited by its template key), destroys a half-rebuilt layer (which gives
-     * the v2 card back; a layer that failed to build has destroyed itself already) and puts the v2 card back top right,
-     * as with no cockpit. The layer's destroy runs each of its steps under its own guard, so it throws nothing here.
+     * After the layer changed: holds the v2 card frozen if the layer now draws it nowhere (ruling D21), then places
+     * what is drawn, which checks the cover.
      *
-     * @param {*} error - What the build or the rebuild threw.
+     * @returns {void}
+     */
+    _placeAfterLayerChange() {
+        this._holdHiddenPulseCardFrozen();
+        this._placeCard();
+    }
+
+    /**
+     * The layer could not be built, rebuilt or placed: remembers the client's layout as the one that failed in this
+     * enable (lib/cockpitWiring.js: not drawn again while the client holds it, nor kept for the next enable), logs the
+     * failure (an error of the extension's own, rate-limited by its template key), destroys a layer that was built or
+     * half-rebuilt (which gives the v2 card back; a layer that failed to build has destroyed itself already) and puts
+     * the v2 card back top right, as with no cockpit; the caller places it there. The layer's destroy runs each of its
+     * steps under its own guard, so it throws nothing here.
+     *
+     * @param {*} error - What the build, the rebuild or the placement threw.
      * @returns {void}
      */
     _fallBackToTopRightCard(error) {
@@ -1025,7 +1042,7 @@ export default class ResourcePulseExtension extends Extension {
      *
      * @returns {void}
      * @throws {Error} What the layer threw while building, having destroyed what it built and given the v2 card back
-     *     (_buildCockpitLayer puts the card back top right).
+     *     (_drawCockpitLayer puts the card back top right).
      */
     _addCockpitLayer() {
         this._card.disconnectObject(this);
@@ -1074,7 +1091,7 @@ export default class ResourcePulseExtension extends Extension {
     /**
      * Undoes enable(), whatever it got to, and never throws: keeps the client's last good clock label and the
      * cockpit's layout for the next enable (getter reads, before anything is destroyed, guarded as each step is: on a
-     * failure what is already kept stays; never a layout that failed to build); clears every field (the failed layout
+     * failure what is already kept stays; never a layout that failed to draw); clears every field (the failed layout
      * too, so each enable tries the layout it is sent); then disconnects from the overview, the layout manager,
      * the display, the window manager, the workspace manager, the card, the dropdown menu and the covering windows,
      * removes both client listeners, the pending cover check, the fallback timeout and a pending placement, and
@@ -1100,7 +1117,7 @@ export default class ResourcePulseExtension extends Extension {
         } catch (error) {
             this._logTearDownFailure('read the client\'s last good clock label', error);
         }
-        // The layout the layer was drawn from (none once SKIPPED, nor one that failed to build in this enable); with no
+        // The layout the layer was drawn from (none once SKIPPED, nor one that failed to draw in this enable); with no
         // client the layout already kept stays.
         try {
             this._lastCockpitLayout = cockpitClient === null

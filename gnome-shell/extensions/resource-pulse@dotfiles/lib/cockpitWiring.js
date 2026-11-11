@@ -5,10 +5,11 @@
 // clients into the plain inputs below, calls these, and assigns. Pure: no Gio, GLib, Shell, St, Clutter or Meta
 // import, so it runs under plain gjs.
 //
-// A layout the layer could not be built from, or rebuilt from, never takes the extension down (ruling D25): the
-// extension remembers it for that enable, and it is neither tried again while the client holds it nor kept for the
-// next enable. "Holds it" is the client's own notion of the same layout, the same JSON (lib/jsonFields.js
-// isSameAsJson): the client holds a new object after every answer, and tells a layout event only when the JSON differs.
+// A layout the layer could not be built from, rebuilt from or placed with never takes the extension down (ruling D25):
+// the extension remembers it for that enable, and it is neither drawn again while the client holds it (a layer drawn
+// since from another layout is removed when it comes back) nor kept for the next enable. "Holds it" is the client's
+// own notion of the same layout, the same JSON (lib/jsonFields.js isSameAsJson): the client holds a new object after
+// every answer, and tells a layout event only when the JSON differs.
 import {
     COCKPIT_SNAPSHOT_CARD_IDS, COCKPIT_SOURCE_NAMES_BY_CARD_ID, COCKPIT_SYSTEM_CARD_ID, CockpitClientEventType,
     CockpitClientState, CockpitSourcesCause,
@@ -68,8 +69,8 @@ export function isCockpitLayerWanted({clientState, layout}) {
  * @param {object} cockpit - What the cockpit client knows, and the extension.
  * @param {string} cockpit.clientState - The client's CockpitClientState.
  * @param {object|null} cockpit.layout - The client's layout, or null.
- * @param {object|null} cockpit.failedLayout - The layout the layer failed to be built or rebuilt from in this enable,
- *     or null.
+ * @param {object|null} cockpit.failedLayout - The layout the layer could not be built, rebuilt or placed with in this
+ *     enable, or null.
  * @returns {object|null} The layout to seed the next client with, or null.
  */
 export function cockpitLayoutToKeep({clientState, layout, failedLayout}) {
@@ -78,26 +79,25 @@ export function cockpitLayoutToKeep({clientState, layout, failedLayout}) {
 }
 
 /**
- * What a cockpit client event does to the layer: removes it once it is not wanted; while it is, nothing for the layout
- * that failed to build in this enable (ruling D25: it is not tried again until the client holds another), else adds
- * it if it is not shown, rebuilds a shown layer's grid on a layout event (its cards kept, re-placed), and otherwise
- * nothing.
+ * What a cockpit client event does to the layer: removes it once it is not wanted, or while the client holds the layout
+ * that failed to draw in this enable (ruling D25: that one is not tried again until the client holds another, and a
+ * layer drawn since from another layout goes when it comes back, so the v2 card is drawn top right, as when it first
+ * failed, never the grid of a layout the client no longer holds); otherwise adds it if it is not shown, rebuilds a
+ * shown layer's grid on a layout event (its cards kept, re-placed), and otherwise nothing.
  *
  * @param {object} situation - The layer, the client and the extension.
  * @param {boolean} situation.isLayerShown - The layer exists now.
  * @param {string} situation.clientState - The client's CockpitClientState.
  * @param {object|null} situation.layout - The client's layout, or null.
  * @param {boolean} situation.isLayoutEvent - The event is a layout event.
- * @param {object|null} situation.failedLayout - The layout the layer failed to be built or rebuilt from in this
- *     enable, or null.
+ * @param {object|null} situation.failedLayout - The layout the layer could not be built, rebuilt or placed with in
+ *     this enable, or null.
  * @returns {string} One of CockpitLayerChange's values.
  */
 export function cockpitLayerChange({isLayerShown, clientState, layout, isLayoutEvent, failedLayout}) {
-    const isLayerWanted = isCockpitLayerWanted({clientState, layout});
+    const isLayerWanted = isCockpitLayerWanted({clientState, layout}) && !isSameAsJson(layout, failedLayout);
     if (!isLayerWanted)
         return isLayerShown ? CockpitLayerChange.REMOVE : CockpitLayerChange.NONE;
-    if (isSameAsJson(layout, failedLayout))
-        return CockpitLayerChange.NONE;
     if (!isLayerShown)
         return CockpitLayerChange.ADD;
     return isLayoutEvent ? CockpitLayerChange.REBUILD : CockpitLayerChange.NONE;

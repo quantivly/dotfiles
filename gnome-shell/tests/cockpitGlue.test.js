@@ -1204,9 +1204,9 @@ test('extension.js: enable() makes the cockpit client right after the pulse clie
 });
 
 test('extension.js: a cockpit client event adds, removes or rebuilds the layer as cockpitLayerChange says (never the ' +
-    'layout that failed in this enable), then holds a hidden v2 card frozen (ruling D21) and places the cards again, ' +
-    'whatever the add or the rebuild did; the v2 card stops following its width while the layer holds it, and is put ' +
-    'back top right, following it again, when the layer goes', () =>
+    'layout that failed in this enable): a removal, then the hold of a hidden v2 card (ruling D21) and the ' +
+    'placement, unguarded, with no layer left; else the guarded draw; the v2 card stops following its width while ' +
+    'the layer holds it, and is put back top right, following it again, when the layer goes', () =>
     assertEqual({
         onEvent: extensionMethodStatements('_onCockpitClientEvent(event) {'),
         sync: extensionMethodStatements('_syncCockpitLayer(isLayoutEvent) {'),
@@ -1229,12 +1229,12 @@ test('extension.js: a cockpit client event adds, removes or rebuilds the layer a
             '});',
             'if (layerChange === CockpitLayerChange.NONE)',
             'return;',
-            'if (layerChange === CockpitLayerChange.REMOVE)',
+            'if (layerChange === CockpitLayerChange.REMOVE) {',
             'this._removeCockpitLayer();',
-            'else',
-            'this._buildCockpitLayer(layerChange);',
-            'this._holdHiddenPulseCardFrozen();',
-            'this._placeCard();',
+            'this._placeAfterLayerChange();',
+            '} else {',
+            'this._drawCockpitLayer(layerChange);',
+            '}',
         ],
         holdHidden: [
             'const isHeldHidden = isPulseCardHeldHidden({',
@@ -1258,26 +1258,27 @@ test('extension.js: a cockpit client event adds, removes or rebuilds the layer a
     }));
 
 test('extension.js: a layer that cannot be built or rebuilt never takes the extension down (ruling D25): the add and ' +
-    'the rebuild run in a try whose catch remembers the client\'s layout for this enable, logs on the error log ' +
-    'under a template key, destroys a half-rebuilt layer and puts the v2 card back top right; the add itself lets ' +
-    'the layer\'s failure out to that catch', () =>
+    'the rebuild run in a try whose catch first remembers the client\'s layout for this enable, logs on the error ' +
+    'log under a template key, destroys a half-rebuilt layer and puts the v2 card back top right; the add itself ' +
+    'lets the layer\'s failure out to that catch', () => {
+    const drawStatements = extensionMethodStatements('_drawCockpitLayer(layerChange) {');
+    const catchIndex = drawStatements.indexOf('} catch (error) {');
     assertEqual({
-        build: extensionMethodStatements('_buildCockpitLayer(layerChange) {'),
+        buildInTheTry: drawStatements.slice(0, 5),
+        catchFallsBackFirst: catchIndex < 0 ? null : drawStatements[catchIndex + 1],
         fallBack: extensionMethodStatements('_fallBackToTopRightCard(error) {'),
         failureLogKey: occurrenceCount(codeOf(EXTENSION_SOURCE_FILE),
             "const COCKPIT_LAYER_FAILURE_LOG_KEY = 'could not draw the cockpit layer';"),
         add: extensionMethodStatements('_addCockpitLayer() {'),
     }, {
-        build: [
+        buildInTheTry: [
             'try {',
             'if (layerChange === CockpitLayerChange.ADD)',
             'this._addCockpitLayer();',
             'else',
             'this._layer.setLayout(this._cockpitClient.layout);',
-            '} catch (error) {',
-            'this._fallBackToTopRightCard(error);',
-            '}',
         ],
+        catchFallsBackFirst: 'this._fallBackToTopRightCard(error);',
         fallBack: [
             'this._failedCockpitLayout = this._cockpitClient.layout;',
             'const errorText = describeErrorWithStack(error);',
@@ -1297,7 +1298,26 @@ test('extension.js: a layer that cannot be built or rebuilt never takes the exte
             '});',
             'this._displayConfigReader.requestState();',
         ],
-    }));
+    });
+});
+
+test('extension.js: while a layer is shown its hold and its placement, so the cover check over its cards, run inside ' +
+    'the build\'s guard: a failure there is a failed build (the fallback), after which they run once more for the v2 ' +
+    'card top right, unguarded, so the core\'s own failures are still rethrown (ruling D25)', () => {
+    const drawStatements = extensionMethodStatements('_drawCockpitLayer(layerChange) {');
+    const rebuildIndex = drawStatements.indexOf('this._layer.setLayout(this._cockpitClient.layout);');
+    const catchIndex = drawStatements.indexOf('} catch (error) {');
+    const isTryFound = rebuildIndex >= 0 && catchIndex > rebuildIndex;
+    assertEqual({
+        guardedAfterTheBuild: isTryFound ? drawStatements.slice(rebuildIndex + 1, catchIndex) : null,
+        catchAfterTheFallback: isTryFound ? drawStatements.slice(catchIndex + 2) : null,
+        placeAfterLayerChange: extensionMethodStatements('_placeAfterLayerChange() {'),
+    }, {
+        guardedAfterTheBuild: ['this._placeAfterLayerChange();'],
+        catchAfterTheFallback: ['this._placeAfterLayerChange();', '}'],
+        placeAfterLayerChange: ['this._holdHiddenPulseCardFrozen();', 'this._placeCard();'],
+    });
+});
 
 test('extension.js: the layer goes on the monitor cockpitMonitorIndexFor chooses from the shell\'s monitors, ' +
     'DisplayConfig\'s last answer and the layout\'s rule, at its work area (getWorkAreaForMonitor); a monitors ' +

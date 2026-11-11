@@ -113,15 +113,24 @@ test('cockpitWiring: the layout that failed to build in this enable is not tried
     assertEqual({
         failedOneOnAState: change(false, LIVE, layoutFromALaterAnswer(), false),
         failedOneOnALayoutEvent: change(false, LIVE, layoutFromALaterAnswer(), true),
-        failedOneWhileAnotherIsShown: change(true, LIVE, layoutFromALaterAnswer(), true),
         anotherArrives: change(false, LIVE, EDITED_LAYOUT, true),
         anotherWhileShown: change(true, LIVE, EDITED_LAYOUT, true),
         skippedWhileShown: change(true, SKIPPED, layoutFromALaterAnswer(), false),
         goneWhileShown: change(true, LIVE, null, true),
     }, {
-        failedOneOnAState: 'none', failedOneOnALayoutEvent: 'none', failedOneWhileAnotherIsShown: 'none',
+        failedOneOnAState: 'none', failedOneOnALayoutEvent: 'none',
         anotherArrives: 'add', anotherWhileShown: 'rebuild', skippedWhileShown: 'remove', goneWhileShown: 'remove',
     });
+});
+
+test('cockpitWiring: the layout that failed comes back while a layer drawn from another is shown: the layer is ' +
+    'removed, so the v2 card is drawn top right as when it first failed, never the grid of a layout the client no ' +
+    'longer holds (ruling D25)', () => {
+    const change = isLayoutEvent => wiring.cockpitLayerChange({
+        isLayerShown: true, clientState: LIVE, layout: layoutFromALaterAnswer(), isLayoutEvent, failedLayout: LAYOUT,
+    });
+    assertEqual({onItsLayoutEvent: change(true), onALaterEvent: change(false)},
+        {onItsLayoutEvent: 'remove', onALaterEvent: 'remove'});
 });
 
 test('cockpitWiring: the layout that failed to build in this enable is not kept for the next (the same JSON in a new ' +
