@@ -377,8 +377,10 @@ private bus:
 
 ```bash
 scripts/resource-pulse-nested.sh start        # prints the nested shell's private bus address
+scripts/resource-pulse-nested.sh start --gc-log --replay   # or: collections logged to log/shell.log, fixed input
 scripts/resource-pulse-nested.sh eval 'Main.extensionManager.lookup("resource-pulse@dotfiles").state'
 scripts/resource-pulse-nested.sh screenshot card.png 2600 40 470 200   # x y width height, optional
+scripts/resource-pulse-nested.sh scenario idle   # with --replay: idle, light or busy (busy until asked)
 scripts/resource-pulse-nested.sh stop         # logs and screenshots stay in the run directory
 ```
 
@@ -450,7 +452,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (754 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (767 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it

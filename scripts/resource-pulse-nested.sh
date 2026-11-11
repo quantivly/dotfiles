@@ -33,7 +33,14 @@
 #   service      the run's copy of the sampler service (service/main.js under gjs), started
 #                on the private session bus before the shell, with the same allowlist and
 #                nothing more; the extension's StartUnit finds no systemd there, and it
-#                draws from the service's Samples whatever StartUnit answered
+#                draws from the service's Samples whatever StartUnit answered. With --replay
+#                the run's copy of tests/nested/replay-service.js starts in its place, given
+#                the run's copy of the extension: the same bus name and protocol, synthetic
+#                Samples from a fixed seed, and it refuses any bus but the run's private one
+#   gc log       with --gc-log, gnome-shell alone gets JS_GC_PROFILE=0 and
+#                JS_GC_PROFILE_NURSERY=0 on top of the allowlist (set after both services
+#                start), so SpiderMonkey logs every collection (MajorGC: and MinorGC:
+#                lines) to its stderr, log/shell.log
 #   cockpit      the run's copy of the cockpit service (service/cockpit.js under gjs), started
 #                the same way after the sampler, reading the config template copied into the
 #                run's XDG_CONFIG_HOME; it finds no herdr (whose socket it looks for under that
@@ -41,8 +48,10 @@
 #   identity     a run's launcher, supervisor, services and gnome-shell are recorded by pid AND start
 #                time (stat field 22), and count only while both match: a pid alone can be
 #                reused once its process ends
-#   requests     eval and screenshot go only to a live run: its supervisor running, and its
-#                recorded gnome-shell running, as gnome-shell, in the run's own session
+#   requests     eval, screenshot and scenario go only to a live run: its supervisor running,
+#                and its recorded gnome-shell running, as gnome-shell, in the run's own
+#                session; scenario also needs the run started with --replay, and its
+#                replay service running
 #   lifetime     setsid + timeout --kill-after. stop signals only the run's own session, and
 #                only while that session is still led by the run's recorded launcher
 #                (timeout, same pid and start time); a run whose session is gone is only
@@ -56,20 +65,28 @@
 # scripts/test-resource-pulse.sh.
 #
 # Usage:
-#   scripts/resource-pulse-nested.sh start
+#   scripts/resource-pulse-nested.sh start [--gc-log] [--replay]
 #       start a nested shell with the checkout's Resource Pulse enabled, and its
 #       sampler and cockpit services on the same private bus; print that bus's
-#       address on stdout and the run directory on stderr
+#       address on stdout and the run directory on stderr. Each option at most
+#       once, in either order, recorded in state/run.values (gc-log=1, replay=1):
+#         --gc-log  SpiderMonkey logs every collection to log/shell.log
+#         --replay  the replay service publishes fixed, synthetic input in place of
+#                   the sampler's (busy until a scenario is asked for)
 #   scripts/resource-pulse-nested.sh eval <javascript>|-
 #       run JavaScript in the nested shell (org.gnome.Shell.Eval) and print the
 #       JSON result; '-' reads the code from stdin
 #   scripts/resource-pulse-nested.sh screenshot <name.png> [x y width height]
 #       save the nested stage (or an area of it, in logical pixels) as
 #       <run dir>/shots/<name.png>, and print that path
+#   scripts/resource-pulse-nested.sh scenario <idle|light|busy>
+#       write the word to <run dir>/run/rp-scenario of a live --replay run; the
+#       replay service plays it from its next tick: idle CPU 1-4%, light 2-14%,
+#       busy a walk between 15% and 90%
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services and everything else it started;
-#       logs (log/service.log is the sampler's, log/cockpit.log the cockpit's) and
-#       shots stay
+#       logs (log/service.log is the sampler's, or with --replay the replay
+#       service's; log/cockpit.log the cockpit's) and shots stay
 #
 # Environment:
 #   RESOURCE_PULSE_NESTED_DIR     the run directory eval, screenshot and stop act on
@@ -97,12 +114,33 @@ readonly DCONF_SERVICE_FILE='ca.desrt.dconf.service'
 readonly DCONF_SERVICE_NAME='ca.desrt.dconf'
 readonly DCONF_SERVICE_EXECUTABLE='/usr/libexec/dconf-service'
 readonly FAKE_DISPLAY_MANAGER_NAME='org.gnome.DisplayManager'
+# The run's own copy of the extension, relative to the run directory.
+readonly RUN_EXTENSION_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID"
 # The sampler service: the run's own copy of it, and the name it owns on the private session bus.
-readonly SERVICE_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/main.js"
+readonly SERVICE_MAIN_RELATIVE_PATH="$RUN_EXTENSION_RELATIVE_PATH/service/main.js"
 readonly SERVICE_BUS_NAME='io.github.quantivly.dotfiles.ResourcePulse1'
 # The cockpit service: the run's own copy of it, and the name it owns on the private session bus.
-readonly COCKPIT_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/cockpit.js"
+readonly COCKPIT_MAIN_RELATIVE_PATH="$RUN_EXTENSION_RELATIVE_PATH/service/cockpit.js"
 readonly COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
+# The replay service (--replay): the checkout's files copied into this directory of the run, and its entry module,
+# which owns the sampler's bus name in the sampler's place.
+readonly REPLAY_RELATIVE_DIR='replay'
+readonly -a REPLAY_FILE_NAMES=(replay-service.js replayGenerator.js)
+readonly REPLAY_MAIN_RELATIVE_PATH="$REPLAY_RELATIVE_DIR/replay-service.js"
+# The replay service's scenario words, and the file it reads the current one from: in the run's runtime dir.
+readonly -a REPLAY_SCENARIO_NAMES=(idle light busy)
+readonly REPLAY_SCENARIO_RELATIVE_PATH='run/rp-scenario'
+
+# start's options, and the run value each records as requested (name=1) in state/run.values.
+readonly GC_LOG_OPTION='--gc-log'
+readonly REPLAY_OPTION='--replay'
+readonly GC_LOG_RUN_VALUE_NAME='gc-log'
+readonly REPLAY_RUN_VALUE_NAME='replay'
+readonly REQUESTED_RUN_VALUE='1'
+# With --gc-log, the nested gnome-shell's environment gains these and nothing else. Each is a threshold (in ms for
+# major collections, in µs for nursery ones) past which SpiderMonkey logs a collection to stderr, as MajorGC: and
+# MinorGC: lines: 0 logs every one.
+readonly -a GC_LOG_ENVIRONMENT_ASSIGNMENTS=(JS_GC_PROFILE=0 JS_GC_PROFILE_NURSERY=0)
 # The cockpit's layout config: the checkout's template, copied to this path under the run's XDG_CONFIG_HOME.
 readonly COCKPIT_CONFIG_TEMPLATE="$REPO_ROOT/examples/resource-pulse-cockpit.json.template"
 readonly COCKPIT_CONFIG_RELATIVE_PATH='resource-pulse/cockpit.json'
@@ -177,6 +215,8 @@ STAT_FIELDS_AFTER_COMM=()
 # The pids collect_session_pids found, and how many of them count_remaining_session_pids left in.
 SESSION_PIDS=()
 REMAINING_SESSION_PID_COUNT=0
+# The run values start's options ask for (gc-log, replay), in the order given, filled by parse_start_options.
+REQUESTED_START_RUN_VALUE_NAMES=()
 
 #######################################
 # Print a message to stderr.
@@ -202,9 +242,10 @@ die() {
 #######################################
 print_usage() {
     cat <<'USAGE'
-usage: scripts/resource-pulse-nested.sh start
+usage: scripts/resource-pulse-nested.sh start [--gc-log] [--replay]
        scripts/resource-pulse-nested.sh eval <javascript>|-
        scripts/resource-pulse-nested.sh screenshot <name.png> [x y width height]
+       scripts/resource-pulse-nested.sh scenario <idle|light|busy>
        scripts/resource-pulse-nested.sh stop
 USAGE
 }
@@ -218,6 +259,65 @@ usage_error() {
     note "$1"
     print_usage >&2
     exit "$EXIT_REFUSED"
+}
+
+#######################################
+# Fill REQUESTED_START_RUN_VALUE_NAMES from start's options: --gc-log and
+# --replay, in either order, each at most once. Anything else is a usage error
+# (exit 2), before anything is looked at or made.
+# Arguments:
+#   $@ - the arguments after `start`
+#######################################
+parse_start_options() {
+    local start_option
+    REQUESTED_START_RUN_VALUE_NAMES=()
+    for start_option in "$@"; do
+        case "$start_option" in
+            "$GC_LOG_OPTION") add_requested_start_run_value "$GC_LOG_RUN_VALUE_NAME" "$start_option" ;;
+            "$REPLAY_OPTION") add_requested_start_run_value "$REPLAY_RUN_VALUE_NAME" "$start_option" ;;
+            *) usage_error "start takes only $GC_LOG_OPTION and $REPLAY_OPTION, got: '$start_option'" ;;
+        esac
+    done
+}
+
+#######################################
+# Add one run value to REQUESTED_START_RUN_VALUE_NAMES; a usage error (exit 2)
+# when its option was already given.
+# Arguments:
+#   $1 - run value name
+#   $2 - the option that asks for it
+#######################################
+add_requested_start_run_value() {
+    local run_value_name="$1" start_option="$2" requested_name
+    for requested_name in "${REQUESTED_START_RUN_VALUE_NAMES[@]}"; do
+        [[ "$requested_name" == "$run_value_name" ]] && usage_error "start takes $start_option at most once"
+    done
+    REQUESTED_START_RUN_VALUE_NAMES+=("$run_value_name")
+}
+
+#######################################
+# Record each run value start's options asked for as name=1 in the run's
+# state/run.values, where the in-bus stage and `scenario` read them: an option
+# crosses the `env -i` launch only through the run directory, so the isolated
+# environment never grows for it.
+# Arguments:
+#   $1 - run directory
+#######################################
+record_requested_start_options() {
+    local run_value_name
+    for run_value_name in "${REQUESTED_START_RUN_VALUE_NAMES[@]}"; do
+        record_run_value "$1" "$run_value_name" "$REQUESTED_RUN_VALUE" || return 1
+    done
+}
+
+#######################################
+# Succeed when the run recorded a run value as requested (name=1).
+# Arguments:
+#   $1 - run directory
+#   $2 - run value name (gc-log, replay)
+#######################################
+is_requested_in_run() {
+    [[ "$(recorded_run_value "$1" "$2")" == "$REQUESTED_RUN_VALUE" ]]
 }
 
 #######################################
@@ -493,19 +593,24 @@ render_bus_config() {
 #######################################
 # Lay out a fresh run directory: the private homes and runtime dir, the bus
 # configs, the one dconf service, the session mode, the app masks, the
-# unsafe-mode helper, a copy of the checkout's extension, and the cockpit's
-# config template in the run's config home.
+# unsafe-mode helper, a copy of the checkout's extension, a copy of the replay
+# service (which only --replay starts), and the cockpit's config template in
+# the run's config home.
 # Arguments:
 #   $1 - run directory (exists, empty, 0700)
 #   $2 - run suffix
 #######################################
 prepare_run_directory() {
-    local run_dir="$1" run_suffix="$2"
+    local run_dir="$1" run_suffix="$2" replay_file_name
     local cockpit_config_dir="config/${COCKPIT_CONFIG_RELATIVE_PATH%/*}"
     local -a subdirectories=(run config "$cockpit_config_dir" cache home tmp data/applications
-        data/gnome-shell/extensions sysdata/gnome-shell/modes bus/session-services state log shots)
+        data/gnome-shell/extensions sysdata/gnome-shell/modes bus/session-services state log shots
+        "$REPLAY_RELATIVE_DIR")
     # Every directory private to the user, intermediate ones included (the runtime dir must be 0700).
     (umask "$PRIVATE_UMASK" && mkdir -p "${subdirectories[@]/#/$run_dir/}") || return 1
+    for replay_file_name in "${REPLAY_FILE_NAMES[@]}"; do
+        cp -- "$NESTED_FILES_DIR/$replay_file_name" "$run_dir/$REPLAY_RELATIVE_DIR/" || return 1
+    done
     printf '%s\n' "$run_suffix" >"$run_dir/$RUN_DIR_MARKER_FILE" || return 1
     render_bus_config "$NESTED_FILES_DIR/session-bus.conf.in" "$run_dir" >"$run_dir/bus/session-bus.conf" || return 1
     render_bus_config "$NESTED_FILES_DIR/system-bus.conf.in" "$run_dir" >"$run_dir/bus/system-bus.conf" || return 1
@@ -1007,20 +1112,53 @@ wait_for_nested_service() {
 #   $2 - the name to record it under (service, cockpit)
 #   $3 - its entry module, relative to the run directory
 #   $4 - the bus name it owns
+#   $@ - the entry module's own arguments, if any
 #######################################
 start_nested_service() {
     local run_dir="$1" process_name="$2" main_relative_path="$3" bus_name="$4"
     local log_relative_path="log/$process_name.log"
-    gjs -m "$run_dir/$main_relative_path" >"$run_dir/$log_relative_path" 2>&1 &
+    shift 4
+    gjs -m "$run_dir/$main_relative_path" "$@" >"$run_dir/$log_relative_path" 2>&1 &
     record_running_process "$run_dir" "$process_name" "$!"
     wait_for_nested_service "$run_dir" "$process_name" "$bus_name" \
         || refuse_run "$run_dir" "the service at $main_relative_path did not take $bus_name ($log_relative_path)"
 }
 
 #######################################
+# Start what publishes the Samples, recorded as the run's `service`: the run's
+# copy of the sampler service, or with --replay (replay=1 recorded) the run's
+# copy of the replay service in its place, given the run's copy of the
+# extension, whose protocol it speaks.
+# Arguments:
+#   $1 - run directory
+#######################################
+start_nested_sampler() {
+    local run_dir="$1"
+    if is_requested_in_run "$run_dir" "$REPLAY_RUN_VALUE_NAME"; then
+        start_nested_service "$run_dir" service "$REPLAY_MAIN_RELATIVE_PATH" "$SERVICE_BUS_NAME" \
+            "$run_dir/$RUN_EXTENSION_RELATIVE_PATH"
+    else
+        start_nested_service "$run_dir" service "$SERVICE_MAIN_RELATIVE_PATH" "$SERVICE_BUS_NAME"
+    fi
+}
+
+#######################################
+# With --gc-log (gc-log=1 recorded), export the two collection-log variables
+# and nothing else. Called last before `exec gnome-shell`, after both services
+# started, so the shell alone gets them.
+# Arguments:
+#   $1 - run directory
+#######################################
+export_gc_log_variables_when_requested() {
+    is_requested_in_run "$1" "$GC_LOG_RUN_VALUE_NAME" || return 0
+    export "${GC_LOG_ENVIRONMENT_ASSIGNMENTS[@]}"
+}
+
+#######################################
 # Stage 3, inside the private session bus: refuse unless isolated, write the
-# nested settings, start the sampler service and then the cockpit service,
-# record the bus, then become gnome-shell (same pid).
+# nested settings, start the sampler service (or the replay service) and then
+# the cockpit service, record the bus, then become gnome-shell (same pid), with
+# the collection log's two variables when asked for.
 # Arguments:
 #   $1 - run directory
 #######################################
@@ -1032,10 +1170,11 @@ run_inside_private_session_bus() {
         || refuse_run "$run_dir" "the session bus is not this run's private one: '${DBUS_SESSION_BUS_ADDRESS:-}'"
     write_nested_settings || refuse_run "$run_dir" "a nested setting could not be written"
     [[ -s "$XDG_CONFIG_HOME/dconf/user" ]] || refuse_run "$run_dir" "the settings did not land in the nested dconf"
-    start_nested_service "$run_dir" service "$SERVICE_MAIN_RELATIVE_PATH" "$SERVICE_BUS_NAME"
+    start_nested_sampler "$run_dir"
     start_nested_service "$run_dir" cockpit "$COCKPIT_MAIN_RELATIVE_PATH" "$COCKPIT_BUS_NAME"
     record_running_process "$run_dir" gnome-shell "$$"
     printf '%s\n' "$DBUS_SESSION_BUS_ADDRESS" >"$run_dir/state/session.addr"
+    export_gc_log_variables_when_requested "$run_dir"
     exec gnome-shell --headless --wayland --no-x11 --virtual-monitor "$NESTED_MONITOR_SIZE" \
         --wayland-display "$NESTED_WAYLAND_DISPLAY" --mode "$NESTED_SESSION_MODE"
 }
@@ -1145,10 +1284,11 @@ confirm_nested_shell_isolation() {
 }
 
 #######################################
-# `start`: make and lay out a run directory under a private base, check the
-# bus configs, launch the supervisor under setsid + timeout with the isolated
-# environment, wait for the shell, confirm its isolation, and print its private
-# bus address.
+# `start [--gc-log] [--replay]` (the options already parsed into
+# REQUESTED_START_RUN_VALUE_NAMES): make and lay out a run directory under a
+# private base, check the bus configs, record the options, launch the
+# supervisor under setsid + timeout with the isolated environment, wait for the
+# shell, confirm its isolation, and print its private bus address.
 #######################################
 start_subcommand() {
     local base_dir run_dir run_suffix lifetime_seconds address
@@ -1177,6 +1317,10 @@ start_subcommand() {
         ! system_bus_config_activates_nothing "$run_dir/bus/system-bus.conf"; then
         rm -rf -- "$run_dir"
         die "refusing: a rendered bus config could activate more than dconf"
+    fi
+    if ! record_requested_start_options "$run_dir"; then
+        rm -rf -- "$run_dir"
+        die "could not record start's options in $run_dir/state/run.values"
     fi
     build_isolated_env_command "$run_dir" || die "cannot build the isolated environment"
 
@@ -1330,6 +1474,64 @@ screenshot_subcommand() {
 }
 
 #######################################
+# Succeed when a word is one of the replay service's scenarios.
+# Arguments:
+#   $1 - word
+#######################################
+is_replay_scenario_name() {
+    local scenario_name
+    for scenario_name in "${REPLAY_SCENARIO_NAMES[@]}"; do
+        [[ "$1" == "$scenario_name" ]] && return 0
+    done
+    return 1
+}
+
+#######################################
+# Replace a run's scenario file with one word, in one rename, so the replay
+# service never reads it half written. The run directory is the user's own and
+# 0700 (verified_run_suffix), so nothing else can have placed a link there.
+# Arguments:
+#   $1 - run directory
+#   $2 - scenario word
+#######################################
+write_scenario_word() {
+    local run_dir="$1" scenario_name="$2" scenario_path staging_path
+    scenario_path="$run_dir/$REPLAY_SCENARIO_RELATIVE_PATH"
+    [[ -d "${scenario_path%/*}" && ! -L "${scenario_path%/*}" ]] || return 1
+    staging_path="$(mktemp "$scenario_path.XXXXXX")" || return 1
+    if ! printf '%s\n' "$scenario_name" >"$staging_path" || ! mv -f -- "$staging_path" "$scenario_path"; then
+        rm -f -- "$staging_path"
+        return 1
+    fi
+}
+
+#######################################
+# `scenario <idle|light|busy>`: write the word to <run dir>/run/rp-scenario of
+# a live run started with --replay, whose replay service plays it from its next
+# tick. Any other word is a usage error, refused before a run is looked for; a
+# run not started with --replay, not live, or whose replay service is not
+# running is refused (exit 2), and nothing is written.
+# Arguments:
+#   $1 - scenario word
+#######################################
+scenario_subcommand() {
+    local scenario_name="$1" run_dir
+    is_replay_scenario_name "$scenario_name" \
+        || usage_error "not a scenario: '$scenario_name' (one of: ${REPLAY_SCENARIO_NAMES[*]})"
+    require_tools stat mktemp mv
+    run_dir="$(resolve_run_directory)" || exit "$EXIT_REFUSED"
+    verified_run_suffix "$run_dir" >/dev/null || die "not a run directory of this script: $run_dir"
+    is_requested_in_run "$run_dir" "$REPLAY_RUN_VALUE_NAME" \
+        || die "refusing: the run in $run_dir was not started with $REPLAY_OPTION"
+    is_nested_shell_live "$run_dir" || die "refusing: the run in $run_dir is not live"
+    is_recorded_process_running "$run_dir" service \
+        || die "refusing: the run's replay service is not running (see $run_dir/log/service.log)"
+    write_scenario_word "$run_dir" "$scenario_name" \
+        || die "could not write $run_dir/$REPLAY_SCENARIO_RELATIVE_PATH"
+    note "scenario $scenario_name: the replay service takes it at its next tick"
+}
+
+#######################################
 # `stop`
 #######################################
 stop_subcommand() {
@@ -1344,7 +1546,8 @@ main() {
     local subcommand="${1:-}"
     case "$subcommand" in
         start)
-            (( $# == 1 )) || usage_error "start takes no arguments"
+            shift
+            parse_start_options "$@"
             start_subcommand ;;
         eval)
             (( $# == 2 )) || usage_error "eval takes one argument: the JavaScript, or -"
@@ -1352,6 +1555,9 @@ main() {
         screenshot)
             shift
             screenshot_subcommand "$@" ;;
+        scenario)
+            (( $# == 2 )) || usage_error "scenario takes one word: ${REPLAY_SCENARIO_NAMES[*]}"
+            scenario_subcommand "$2" ;;
         stop)
             (( $# == 1 )) || usage_error "stop takes no arguments"
             stop_subcommand ;;

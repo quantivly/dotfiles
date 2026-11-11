@@ -3053,6 +3053,13 @@ check "nested: no subcommand and an unknown one both exit 2, say why, and create
   "$no_subcommand_exit:$NESTED_EXIT:$(grep -c -F "unknown subcommand: 'launch'" <<<"$NESTED_OUTPUT"):$(find "$NESTED_BASE" -mindepth 1 | wc -l)" \
   "2:2:1:0"
 
+# The usage block, as a usage error prints it: whole lines, so a line that merely mentions an option is not enough.
+nested_run
+usage_summary="start=$(grep -c -x -F 'usage: scripts/resource-pulse-nested.sh start [--gc-log] [--replay]' <<<"$NESTED_OUTPUT")"
+usage_summary+=" scenario=$(grep -c -x -F '       scripts/resource-pulse-nested.sh scenario <idle|light|busy>' <<<"$NESTED_OUTPUT")"
+check "nested: the usage lists start's --gc-log and --replay, and the scenario request" "$usage_summary" \
+  "start=1 scenario=1"
+
 nested_run eval '1 + 1'
 check "nested: eval with no run refuses (exit 2) and never calls busctl" \
   "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'no live run' <<<"$NESTED_OUTPUT")" "2:0:1"
@@ -3175,6 +3182,62 @@ reused_pid_summary+=" discovery=$(grep -c -F 'no live run' <<<"$NESTED_OUTPUT")"
 check "nested: a recorded pid with another start time (a reused pid) passes nowhere: stop, eval, or looking for a run" \
   "$reused_pid_summary" "stop=left-running eval=refused discovery=1"
 rm -rf "$REUSED_PID_RUN" "$SUPERVISOR_REUSED_RUN"
+
+# `scenario` takes exactly one of three words, and refuses any other before it
+# looks for a run. Each case prints exit/its own message/whether it looked.
+# scenario_word_verdict <needle> <args...>
+scenario_word_verdict() {
+  local scenario_needle="$1"
+  shift
+  nested_run scenario "$@"
+  printf '%s/%s/%s' "$NESTED_EXIT" "$(grep -c -F "$scenario_needle" <<<"$NESTED_OUTPUT")" \
+    "$(grep -c -F 'no live run' <<<"$NESTED_OUTPUT")"
+}
+scenario_word_summary="heavy=$(scenario_word_verdict "not a scenario: 'heavy'" heavy)"
+scenario_word_summary+=" upper-case=$(scenario_word_verdict "not a scenario: 'IDLE'" IDLE)"
+scenario_word_summary+=" empty=$(scenario_word_verdict "not a scenario: ''" '')"
+scenario_word_summary+=" two-words=$(scenario_word_verdict 'scenario takes one word' idle light)"
+scenario_word_summary+=" no-word=$(scenario_word_verdict 'scenario takes one word')"
+# The list the request accepts, read by sourcing the script: a fourth word added there fails this row.
+# shellcheck disable=SC2016  # Expanded by the child bash.
+scenario_word_summary+=" words=[$(bash -c 'source "$1" || exit 99; printf "%s " "${REPLAY_SCENARIO_NAMES[@]}"' \
+  scenario-words "$NESTED_SCRIPT")]"
+check "nested: scenario takes exactly idle, light or busy, and refuses any other word (exit 2) before looking for a run" \
+  "$scenario_word_summary" \
+  "heavy=2/1/0 upper-case=2/1/0 empty=2/1/0 two-words=2/1/0 no-word=2/1/0 words=[idle light busy ]"
+
+# `scenario idle` on a run recorded with the given values; each case defeats
+# one requirement: replay=1 recorded, the run live (its supervisor, and its
+# gnome-shell in its session), and its replay service running. The last meets
+# them all and so writes the word, which proves the fixture otherwise good.
+SCENARIO_RUN="$NESTED_BASE/rpn.Scenari1"
+SCENARIO_FILE="$SCENARIO_RUN/run/rp-scenario"
+# scenario_run_verdict <needle> <run values...> prints exit/needle count/the word written, or none.
+scenario_run_verdict() {
+  local scenario_needle="$1" written_word="none"
+  shift
+  rm -rf "$SCENARIO_RUN"
+  make_run_dir "$SCENARIO_RUN" "$@"
+  mkdir -p "$SCENARIO_RUN/run"
+  NESTED_RUN_DIR="$SCENARIO_RUN" nested_run scenario idle
+  [[ -e "$SCENARIO_FILE" ]] && written_word="$(<"$SCENARIO_FILE")"
+  printf '%s/%s/%s' "$NESTED_EXIT" "$(grep -c -F "$scenario_needle" <<<"$NESTED_OUTPUT")" "$written_word"
+}
+live_supervisor_values=("supervisor=$$" "supervisor-starttime=$(starttime_of "$$")")
+live_shell_values=("session=$test_session_id" "gnome-shell=$fake_shell_pid"
+  "gnome-shell-starttime=$(starttime_of "$fake_shell_pid")")
+live_service_values=("service=$$" "service-starttime=$(starttime_of "$$")")
+scenario_run_summary="no-replay=$(scenario_run_verdict 'was not started with --replay' \
+  "${live_supervisor_values[@]}" "${live_shell_values[@]}" "${live_service_values[@]}")"
+scenario_run_summary+=" not-live=$(scenario_run_verdict 'is not live' "supervisor=$NEVER_RUNNING_PID" \
+  "${live_shell_values[@]}" "${live_service_values[@]}" replay=1)"
+scenario_run_summary+=" service-gone=$(scenario_run_verdict 'replay service is not running' \
+  "${live_supervisor_values[@]}" "${live_shell_values[@]}" "service=$NEVER_RUNNING_PID" replay=1)"
+scenario_run_summary+=" live=$(scenario_run_verdict 'replay service takes' \
+  "${live_supervisor_values[@]}" "${live_shell_values[@]}" "${live_service_values[@]}" replay=1)"
+check "nested: scenario refuses a run without replay=1, one not live and one whose replay service is gone (exit 2); a live replay run gets the word in run/rp-scenario" \
+  "$scenario_run_summary" "no-replay=2/1/none not-live=2/1/none service-gone=2/1/none live=0/1/idle"
+rm -rf "$SCENARIO_RUN"
 kill "$fake_shell_pid" 2>/dev/null
 wait "$fake_shell_pid" 2>/dev/null
 
@@ -3296,6 +3359,51 @@ check "nested: start refuses a base directory others can read, before making any
   "$public_base_exit:$(grep -c -F 'is not private' <<<"$public_base_output"):$(find "$PUBLIC_BASE" -mindepth 1 | wc -l):$(nested_stub_call_count)" \
   "2:1:0:0"
 
+# `start` against that public base: options it accepts reach its first refusal
+# (the base is not private), and options it does not are a usage error before
+# it. Each case prints exit/its own message/whether it reached that refusal.
+# start_options_verdict <needle> <options...>
+start_options_verdict() {
+  local start_needle="$1" start_options_output start_options_exit
+  shift
+  start_options_output="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" PATH="$NESTED_STUB_BIN:$PATH" \
+    NESTED_STUB_CALLS="$NESTED_STUB_CALLS" RESOURCE_PULSE_NESTED_BASE="$PUBLIC_BASE" \
+    bash "$NESTED_SCRIPT" start "$@" 2>&1)"
+  start_options_exit=$?
+  printf '%s/%s/%s' "$start_options_exit" "$(grep -c -F "$start_needle" <<<"$start_options_output")" \
+    "$(grep -c -F 'is not private' <<<"$start_options_output")"
+}
+: >"$NESTED_STUB_CALLS"
+start_options_summary="both=$(start_options_verdict 'usage:' --gc-log --replay)"
+start_options_summary+=" reversed=$(start_options_verdict 'usage:' --replay --gc-log)"
+start_options_summary+=" gc-log=$(start_options_verdict 'usage:' --gc-log)"
+start_options_summary+=" replay=$(start_options_verdict 'usage:' --replay)"
+start_options_summary+=" twice=$(start_options_verdict 'start takes --gc-log at most once' --gc-log --replay --gc-log)"
+start_options_summary+=" unknown=$(start_options_verdict "start takes only --gc-log and --replay, got: '--verbose'" --verbose)"
+start_options_summary+=" extra=$(start_options_verdict "start takes only --gc-log and --replay, got: 'now'" --replay now)"
+start_options_summary+=" created=$(find "$PUBLIC_BASE" -mindepth 1 | wc -l) stub-calls=$(nested_stub_call_count)"
+check "nested: start takes --gc-log and --replay in either order, each once; anything else is a usage error (exit 2) before anything runs" \
+  "$start_options_summary" \
+  "both=2/0/1 reversed=2/0/1 gc-log=2/0/1 replay=2/0/1 twice=2/1/0 unknown=2/1/0 extra=2/1/0 created=0 stub-calls=0"
+
+# What `start` records for its options, where the in-bus stage and `scenario`
+# read them: the run's state/run.values. (Run here on a scratch run directory:
+# `start` itself never gets as far as recording them in this suite.)
+START_VALUES_RUN="$WIRING_TMP/start-values"
+# recorded_start_values <options...> prints the values recorded for these options, space-separated.
+recorded_start_values() {
+  rm -rf "$START_VALUES_RUN"
+  mkdir -p "$START_VALUES_RUN/state" && : >"$START_VALUES_RUN/state/run.values"
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  bash -c 'source "$1" || exit 99; run_dir="$2"; shift 2
+    parse_start_options "$@" && record_requested_start_options "$run_dir"' \
+    start-values "$NESTED_SCRIPT" "$START_VALUES_RUN" "$@" || printf 'exit-%s ' "$?"
+  tr '\n' ' ' <"$START_VALUES_RUN/state/run.values"
+}
+check "nested: start records gc-log=1 and replay=1 in state/run.values for the options given, and nothing for the others" \
+  "both=[$(recorded_start_values --replay --gc-log)] gc-log=[$(recorded_start_values --gc-log)] replay=[$(recorded_start_values --replay)] none=[$(recorded_start_values)]" \
+  "both=[replay=1 gc-log=1 ] gc-log=[gc-log=1 ] replay=[replay=1 ] none=[]"
+
 nested_run screenshot ../escape.png
 check "nested: a screenshot name with a / in it is refused before anything runs" \
   "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'a screenshot name is a plain file name' <<<"$NESTED_OUTPUT")" "2:0:1"
@@ -3387,6 +3495,35 @@ fake_gdm_summary+=" real-bus=$(fake_gdm_verdict "$PREPARED_RUN" 'unix:path=/run/
 fake_gdm_summary+=" own-bus=$(fake_gdm_verdict "$PREPARED_RUN" "unix:path=$PREPARED_RUN/bus/system.sock")"
 check "nested: fake-gdm.js refuses any bus but its run's fake one, before connecting" \
   "$fake_gdm_summary" "no-run=refused real-bus=refused own-bus=tried-to-connect"
+
+# The replay service owns the real service's bus name, so it must never serve on
+# any bus but its run's private one. Every address below that is not the run's
+# is the barrier's dead bus, so even a broken guard reaches nothing live. A D-Bus
+# address can be a list, tried in order: the run's bus followed by another one
+# is not the run's bus.
+REPLAY_SERVICE_REFUSAL='refusing to serve on anything but the private session bus'
+REPLAY_SERVICE_CONNECT_FAILURE='cannot connect to'
+REPLAY_EXTENSION_DIR="$PREPARED_RUN/data/gnome-shell/extensions/$EXTENSION_UUID"
+# replay_service_verdict <run dir or ''> <session bus address> prints refused, tried-to-connect, or other.
+replay_service_verdict() {
+  local replay_service_output
+  replay_service_output="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" \
+    ${1:+RESOURCE_PULSE_NESTED_DIR="$1"} DBUS_SESSION_BUS_ADDRESS="$2" \
+    timeout "$GLUE_PARSE_TIMEOUT_SECONDS" gjs -m "$NESTED_FILES/replay-service.js" "$REPLAY_EXTENSION_DIR" 2>&1)"
+  if [[ "$replay_service_output" == *"$REPLAY_SERVICE_REFUSAL"* ]]; then printf refused
+  elif [[ "$replay_service_output" == *"$REPLAY_SERVICE_CONNECT_FAILURE"* ]]; then printf tried-to-connect
+  else printf other; fi
+}
+REPLAY_RUN_BUS="unix:path=$PREPARED_RUN/bus/session.sock"
+replay_guard_summary="no-run=$(replay_service_verdict '' "$REPLAY_RUN_BUS")"
+replay_guard_summary+=" other-bus=$(replay_service_verdict "$PREPARED_RUN" "$LIVE_SETTINGS_BARRIER_BUS")"
+replay_guard_summary+=" address-list=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS;$LIVE_SETTINGS_BARRIER_BUS")"
+replay_guard_summary+=" bad-guid=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS,guid=0123456789abcdef,x=1")"
+# The run's own (absent) socket, as dbus-run-session names it: accepted, so it tries to connect and fails there.
+replay_guard_summary+=" own-bus=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS,guid=0123456789abcdef")"
+check "nested: replay-service.js refuses any bus but its run's private session bus, before connecting" \
+  "$replay_guard_summary" \
+  "no-run=refused other-bus=refused address-list=refused bad-guid=refused own-bus=tried-to-connect"
 
 # The two apps whose presence makes GNOME 50 check extensions.gnome.org for
 # updates (extensionSystem.js updatesSupported): masked, and copied into the run.
@@ -3500,14 +3637,16 @@ check "nested: the in-bus stage refuses a live environment and a missing private
 # in its environment and the bus it was given, under its entry module's file
 # name, then waits, or exits at once; like gjs, it exits at once when its module
 # is not there); busctl says a name is owned once the stand-in for the module
-# that owns it has started; gnome-shell records whether each service was
+# that owns it has started; gnome-shell records the names in its environment,
+# the two collection-log variables' values, and whether each service was
 # recorded before it, then exits. The stage runs in its isolated environment
 # with the run's private bus address (a socket nobody listens on), inside
 # `setsid timeout`, from a caller whose own environment carries a display, the
 # live bus and a token.
 NESTED_SERVICE_STUB_BIN="$WIRING_TMP/nested-service-bin"
 NESTED_SERVICE_CALLS="$WIRING_TMP/nested-service-calls"
-# Each of the next three is a prefix: a stand-in writes <prefix>.<its entry module's file name>.
+# Each of the next three is a prefix: a stand-in writes <prefix>.<its entry module's file name>, and the
+# gnome-shell stand-in writes <env names prefix>.gnome-shell.
 NESTED_SERVICE_ENV_NAMES="$WIRING_TMP/nested-service-env-names"
 NESTED_SERVICE_BUS_SEEN="$WIRING_TMP/nested-service-bus-seen"
 NESTED_SERVICE_STARTED="$WIRING_TMP/nested-service-started"
@@ -3515,11 +3654,17 @@ NESTED_SERVICE_RUN_LIMIT_SECONDS=30
 NESTED_SERVICE_STAND_IN_TEXT='stand-in service started'
 SAMPLER_ENTRY_FILE_NAME='main.js'
 COCKPIT_ENTRY_FILE_NAME='cockpit.js'
+REPLAY_ENTRY_FILE_NAME='replay-service.js'
+NESTED_SHELL_ENV_NAMES_SUFFIX='gnome-shell'
 # Which bus name the stand-in for each entry module owns once started (file name=bus name, space-separated).
 NESTED_SERVICE_BUS_NAME_BY_ENTRY="$SAMPLER_ENTRY_FILE_NAME=$RESOURCE_PULSE_BUS_NAME $COCKPIT_ENTRY_FILE_NAME=$COCKPIT_BUS_NAME"
-# Pinned here, not read from the script: the run's own copies of the two services.
+NESTED_SERVICE_BUS_NAME_BY_ENTRY+=" $REPLAY_ENTRY_FILE_NAME=$RESOURCE_PULSE_BUS_NAME"
+# Pinned here, not read from the script: the run's own copies of the two services, of the replay service, and of
+# the extension the replay service is given.
 NESTED_SERVICE_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/$SAMPLER_ENTRY_FILE_NAME"
 NESTED_COCKPIT_MAIN_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID/service/$COCKPIT_ENTRY_FILE_NAME"
+NESTED_REPLAY_MAIN_RELATIVE_PATH="replay/$REPLAY_ENTRY_FILE_NAME"
+NESTED_EXTENSION_RELATIVE_PATH="data/gnome-shell/extensions/$EXTENSION_UUID"
 # nested_constant_text <name>: one of the script's readonly values, read by sourcing it; empty when it has none.
 nested_constant_text() {
   # shellcheck disable=SC2016  # Expanded by the child bash.
@@ -3560,6 +3705,9 @@ if [[ -e "$NESTED_SERVICE_STARTED.${!#}" ]]; then echo "b true"; else echo "b fa
 # shellcheck disable=SC2016
 install_stub "$NESTED_SERVICE_STUB_BIN" gnome-shell '#!/usr/bin/env bash
 printf "gnome-shell %s\n" "$*" >>"$NESTED_SERVICE_CALLS"
+compgen -e >"$NESTED_SERVICE_ENV_NAMES.gnome-shell"
+printf "shell-gc-variables=JS_GC_PROFILE=%s,JS_GC_PROFILE_NURSERY=%s\n" "${JS_GC_PROFILE-unset}" \
+  "${JS_GC_PROFILE_NURSERY-unset}" >>"$NESTED_SERVICE_CALLS"
 for process_name in service cockpit; do
   printf "%s-recorded-before-the-shell=%s\n" "$process_name" \
     "$(grep -c "^$process_name=" "$RESOURCE_PULSE_NESTED_DIR/state/run.values")" >>"$NESTED_SERVICE_CALLS"
@@ -3583,9 +3731,10 @@ run_in_bus_stage_with_service() {
   local run_dir="$1" started_seconds=$SECONDS entry_file_name
   rm -f "$NESTED_SERVICE_STARTED".*
   : >"$NESTED_SERVICE_CALLS"
-  for entry_file_name in "$SAMPLER_ENTRY_FILE_NAME" "$COCKPIT_ENTRY_FILE_NAME"; do
+  for entry_file_name in "$SAMPLER_ENTRY_FILE_NAME" "$COCKPIT_ENTRY_FILE_NAME" "$REPLAY_ENTRY_FILE_NAME"; do
     : >"$NESTED_SERVICE_ENV_NAMES.$entry_file_name"; : >"$NESTED_SERVICE_BUS_SEEN.$entry_file_name"
   done
+  : >"$NESTED_SERVICE_ENV_NAMES.$NESTED_SHELL_ENV_NAMES_SUFFIX"
   # shellcheck disable=SC2016  # Expanded by the child bash.
   WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 GH_TOKEN=poison-not-a-token DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
     setsid --wait timeout "$NESTED_SERVICE_RUN_LIMIT_SECONDS" \
@@ -3672,6 +3821,53 @@ SERVICE_RUN_CONFIG_HOME="$(nested_call nested_environment_assignments "$SERVICE_
 check "nested: the run's XDG_CONFIG_HOME holds the cockpit config template as resource-pulse/cockpit.json" \
   "$(cmp -s "$COCKPIT_CONFIG_TEMPLATE" "$SERVICE_RUN_CONFIG_HOME/$COCKPIT_CONFIG_RELATIVE_PATH" && printf same || printf differs-or-missing)" \
   same
+
+# The collection log: the nested gnome-shell's environment, as its stand-in
+# recorded it, beyond the allowlist and what this row passes the stubs. The run
+# above was started with neither option; the next records gc-log=1, as
+# `start --gc-log` does. The two variables are the shell's alone: both services
+# start before they are set.
+NESTED_SHELL_ENV_NAMES_SEEN="$NESTED_SERVICE_ENV_NAMES.$NESTED_SHELL_ENV_NAMES_SUFFIX"
+# shell_environment_summary prints the shell's unexpected names, how many allowlist names it held, and the two
+# variables' values.
+shell_environment_summary() {
+  printf 'unexpected=[%s] allowlist=%s %s' "$(unexpected_env_names "$NESTED_SHELL_ENV_NAMES_SEEN")" \
+    "$(allowlist_names_seen_in "$NESTED_SHELL_ENV_NAMES_SEEN")" "$(grep '^shell-gc-variables=' "$NESTED_SERVICE_CALLS")"
+}
+gc_log_summary="without: exit=$NESTED_SERVICE_EXIT $(shell_environment_summary)"
+GC_LOG_RUN="$(make_service_run GcLog001)"
+printf 'gc-log=1\n' >>"$GC_LOG_RUN/state/run.values" || fatal "cannot record gc-log=1 in $GC_LOG_RUN"
+run_in_bus_stage_with_service "$GC_LOG_RUN" waits
+gc_log_summary+=" with: exit=$NESTED_SERVICE_EXIT $(shell_environment_summary)"
+gc_log_summary+=" sampler=[$(unexpected_env_names "$SAMPLER_ENV_NAMES_SEEN")]"
+gc_log_summary+=" cockpit=[$(unexpected_env_names "$COCKPIT_ENV_NAMES_SEEN")]"
+end_recorded_stand_ins "$GC_LOG_RUN"
+check "nested: with gc-log=1 the nested gnome-shell gets exactly JS_GC_PROFILE=0 and JS_GC_PROFILE_NURSERY=0 beyond the allowlist, without it neither, and the services never" \
+  "$gc_log_summary" \
+  "without: exit=0 unexpected=[] allowlist=22 shell-gc-variables=JS_GC_PROFILE=unset,JS_GC_PROFILE_NURSERY=unset with: exit=0 unexpected=[JS_GC_PROFILE JS_GC_PROFILE_NURSERY ] allowlist=22 shell-gc-variables=JS_GC_PROFILE=0,JS_GC_PROFILE_NURSERY=0 sampler=[] cockpit=[]"
+
+# Fixed input: with replay=1 recorded, as `start --replay` does, the run's copy
+# of the replay service starts in place of service/main.js, given the run's copy
+# of the extension, on the private bus with only the allowlist, recorded and
+# logged as the service (so `stop` ends it), before the cockpit and the shell.
+REPLAY_SERVICE_RUN="$(make_service_run Replay01)"
+printf 'replay=1\n' >>"$REPLAY_SERVICE_RUN/state/run.values" || fatal "cannot record replay=1 in $REPLAY_SERVICE_RUN"
+run_in_bus_stage_with_service "$REPLAY_SERVICE_RUN" waits
+REPLAY_ENV_NAMES_SEEN="$NESTED_SERVICE_ENV_NAMES.$REPLAY_ENTRY_FILE_NAME"
+replay_start_summary="exit=$NESTED_SERVICE_EXIT"
+replay_start_summary+=" starts=[$(grep '^gjs ' "$NESTED_SERVICE_CALLS" | sed "s|$REPLAY_SERVICE_RUN/||g" | tr '\n' ';')]"
+replay_start_summary+=" copies=$(cmp -s "$NESTED_FILES/$REPLAY_ENTRY_FILE_NAME" "$REPLAY_SERVICE_RUN/$NESTED_REPLAY_MAIN_RELATIVE_PATH" &&
+  cmp -s "$NESTED_FILES/replayGenerator.js" "$REPLAY_SERVICE_RUN/replay/replayGenerator.js" && printf same || printf differ)"
+replay_start_summary+=" bus=$([[ "$(<"$NESTED_SERVICE_BUS_SEEN.$REPLAY_ENTRY_FILE_NAME")" == "unix:path=$REPLAY_SERVICE_RUN/bus/session.sock" ]] && printf private || printf other)"
+replay_start_summary+=" allowlist-seen=$(allowlist_names_seen_in "$REPLAY_ENV_NAMES_SEEN") unexpected=[$(unexpected_env_names "$REPLAY_ENV_NAMES_SEEN")]"
+replay_start_summary+=" recorded=$(grep -c -E '^service(-starttime)?=[0-9]+$' "$REPLAY_SERVICE_RUN/state/run.values")"
+replay_start_summary+=" $(grep '^service-recorded-before-the-shell=' "$NESTED_SERVICE_CALLS")"
+replay_start_summary+=" asked-the-private-bus=$(grep -c -x -F "busctl --address=unix:path=$REPLAY_SERVICE_RUN/bus/session.sock call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s $RESOURCE_PULSE_BUS_NAME" "$NESTED_SERVICE_CALLS" | sed 's/^[1-9][0-9]*$/yes/')"
+replay_start_summary+=" logged=$(grep -c -x -F "$NESTED_SERVICE_STAND_IN_TEXT" "$REPLAY_SERVICE_RUN/log/service.log" 2>/dev/null)"
+end_recorded_stand_ins "$REPLAY_SERVICE_RUN"
+check "nested: with replay=1 the in-bus stage starts the run's copy of replay-service.js in place of service/main.js, given the run's extension, on the private bus, as the service" \
+  "$replay_start_summary" \
+  "exit=0 starts=[gjs -m $NESTED_REPLAY_MAIN_RELATIVE_PATH $NESTED_EXTENSION_RELATIVE_PATH;gjs -m $NESTED_COCKPIT_MAIN_RELATIVE_PATH;] copies=same bus=private allowlist-seen=22 unexpected=[] recorded=2 service-recorded-before-the-shell=1 asked-the-private-bus=yes logged=1"
 
 # A run whose copy of the extension has no service/cockpit.js: the cockpit's
 # stand-in exits at once, as gjs does, and the run must refuse, naming it.
@@ -3775,7 +3971,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=754
+EXPECTED_ROWS=767
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
