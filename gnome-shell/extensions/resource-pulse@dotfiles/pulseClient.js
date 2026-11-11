@@ -391,9 +391,12 @@ export class PulseClient {
         return this._lastGoodClockLabel;
     }
 
-    /** @returns {boolean} True while drawing Samples: from a fresh state until no data. */
+    /**
+     * @returns {boolean} True while drawing Samples: from a fresh state until no data, and never once destroyed (a
+     *     destroyed client keeps the data state it had, but draws nothing more).
+     */
     get isLive() {
-        return this._dataState === DataState.LIVE;
+        return !this._isDestroyed && this._dataState === DataState.LIVE;
     }
 
     /** @returns {RingBuffer} CPU busy fractions 0–1, null for no data, oldest first: the service's, as received. */

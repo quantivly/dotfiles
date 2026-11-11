@@ -35,7 +35,7 @@ const NO_PARAMETERS = null;
 const ANY_REPLY_TYPE = null;
 
 /**
- * The service on the bus, as the client follows it: the owner of its name, its Samples while subscribed, and its
+ * The service on the bus, as the client follows it: the owner of its name, its Samples from creation until destroy(), and its
  * methods, called on that owner. Made by createResourcePulseLink; destroy() ends the watch and the subscription.
  */
 class ResourcePulseLink {
@@ -56,33 +56,21 @@ class ResourcePulseLink {
         // The unique name owning the service's bus name, as the watch last reported it; null while nobody does, and
         // once destroyed.
         this._nameOwner = null;
-        // The subscription's id while subscribed, else null.
-        this._sampleSubscriptionId = null;
-        this._subscribeToSamples();
+        // The Sample subscription's id from creation until destroy(), then null. The sender is the well-known name:
+        // GDBus and the bus then deliver only what its current owner sends, at the service's object.
+        this._sampleSubscriptionId = this._connection.signal_subscribe(RESOURCE_PULSE_BUS_NAME,
+            RESOURCE_PULSE_INTERFACE_NAME, SAMPLE_SIGNAL_NAME, RESOURCE_PULSE_OBJECT_PATH, ANY_FIRST_ARGUMENT,
+            Gio.DBusSignalFlags.NONE,
+            (_connection, _senderName, _objectPath, _interfaceName, _signalName, parameters) =>
+                this._deliverSample(parameters));
         this._nameWatcherId = Gio.bus_watch_name_on_connection(connection, RESOURCE_PULSE_BUS_NAME, NAME_WATCHER_FLAGS,
             (_connection, _busName, nameOwner) => this._reportNameOwner(nameOwner),
             () => this._reportNameOwner(null));
     }
 
-    /** @returns {boolean} True while Samples are delivered: from creation until unsubscribed or destroyed. */
+    /** @returns {boolean} True while Samples are delivered: from creation until destroy(). */
     get isSampleSubscribed() {
         return this._sampleSubscriptionId !== null;
-    }
-
-    /**
-     * Subscribes to Samples or drops the subscription; asking for what already holds, or anything once destroyed,
-     * does nothing.
-     *
-     * @param {boolean} isSubscribed - True to have Samples delivered.
-     * @returns {void}
-     */
-    setSampleSubscribed(isSubscribed) {
-        if (this._isDestroyed || isSubscribed === this.isSampleSubscribed)
-            return;
-        if (isSubscribed)
-            this._subscribeToSamples();
-        else
-            this._unsubscribeFromSamples();
     }
 
     /**
@@ -130,7 +118,9 @@ class ResourcePulseLink {
         try {
             Gio.bus_unwatch_name(this._nameWatcherId);
         } finally {
-            this._unsubscribeFromSamples();
+            const sampleSubscriptionId = this._sampleSubscriptionId;
+            this._sampleSubscriptionId = null;
+            this._connection.signal_unsubscribe(sampleSubscriptionId);
         }
     }
 
@@ -157,44 +147,17 @@ class ResourcePulseLink {
         if (!this._isDestroyed)
             this._onSample(parameters);
     }
-
-    /**
-     * Subscribes, on the connection, to the Sample signal from the owner of the service's name at its object. The
-     * sender is the well-known name: GDBus and the bus then deliver only what its current owner sends.
-     *
-     * @returns {void}
-     */
-    _subscribeToSamples() {
-        this._sampleSubscriptionId = this._connection.signal_subscribe(RESOURCE_PULSE_BUS_NAME,
-            RESOURCE_PULSE_INTERFACE_NAME, SAMPLE_SIGNAL_NAME, RESOURCE_PULSE_OBJECT_PATH, ANY_FIRST_ARGUMENT,
-            Gio.DBusSignalFlags.NONE,
-            (_connection, _senderName, _objectPath, _interfaceName, _signalName, parameters) =>
-                this._deliverSample(parameters));
-    }
-
-    /**
-     * Drops the subscription, if there is one.
-     *
-     * @returns {void}
-     */
-    _unsubscribeFromSamples() {
-        if (this._sampleSubscriptionId === null)
-            return;
-        const sampleSubscriptionId = this._sampleSubscriptionId;
-        this._sampleSubscriptionId = null;
-        this._connection.signal_unsubscribe(sampleSubscriptionId);
-    }
 }
 
 /**
- * Starts following the service on a connection: subscribed to Samples from the start, and watching its name.
+ * Starts following the service on a connection: subscribed to Samples from the start until destroy(), and watching its name.
  *
  * @param {Gio.DBusConnection} connection - The session bus connection.
  * @param {object} callbacks - Where the link delivers.
  * @param {(nameOwner: string|null) => void} callbacks.onOwnerChanged - The unique name owning the service's bus name
  *     when it appears, null when it vanishes. The watch reports once soon after creation, null when nobody owns the
  *     name (from Gio.bus_watch_name_on_connection).
- * @param {(parameters: GLib.Variant) => void} callbacks.onSample - Each Sample's parameters, while subscribed.
+ * @param {(parameters: GLib.Variant) => void} callbacks.onSample - Each Sample's parameters, from creation until destroy().
  * @returns {ResourcePulseLink} The link.
  */
 export function createResourcePulseLink(connection, {onOwnerChanged, onSample}) {

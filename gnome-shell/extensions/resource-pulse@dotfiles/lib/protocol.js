@@ -178,7 +178,7 @@ export function parseEnvelopeSnapshot(rawSnapshot) {
 }
 
 /**
- * Reads a Sample's JSON, skew-tolerantly (see the file header): both steps at once.
+ * Reads a Sample's JSON, skew-tolerantly (see the file header): parseSampleEnvelope, then parseEnvelopeSnapshot on the envelope's snapshot.
  *
  * @param {*} text - The JSON text.
  * @returns {{snapshot: object|null, appendedHistory: AppendedHistory|null, sequence: number|null,

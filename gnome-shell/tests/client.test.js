@@ -262,7 +262,7 @@ class FakeLink {
         this.calls = [];
     }
 
-    /** @returns {boolean} True while Samples are delivered: from creation until unsubscribed or destroyed. */
+    /** @returns {boolean} True while Samples are delivered: from creation until destroy(). */
     get isSampleSubscribed() {
         return this._isSampleSubscribed;
     }
@@ -270,15 +270,6 @@ class FakeLink {
     /** @returns {boolean} True once the client has destroyed the link. */
     get isDestroyed() {
         return this._isDestroyed;
-    }
-
-    /**
-     * @param {boolean} isSubscribed - Whether Samples are delivered; nothing changes once destroyed.
-     * @returns {void}
-     */
-    setSampleSubscribed(isSubscribed) {
-        if (!this._isDestroyed)
-            this._isSampleSubscribed = isSubscribed;
     }
 
     /**
@@ -502,6 +493,16 @@ function makeLiveClientFixture({isDetailWatchWanted = false} = {}) {
  * @param {object} fixture - A fixture.
  * @returns {{cpu: Array<number|null>, memory: Array<number|null>}} The client's histories now.
  */
+/**
+ * The timeouts a client fixture has pending, by unit.
+ *
+ * @param {{timeouts: FakeTimeouts}} fixture - A client fixture.
+ * @returns {{seconds: number[], ms: number[]}} The intervals of its pending seconds timeouts and millisecond ones.
+ */
+function pendingTimeoutsOf({timeouts}) {
+    return {seconds: timeouts.pendingIntervalsSeconds(), ms: timeouts.pendingIntervalsMs()};
+}
+
 function historiesOf({client}) {
     return {cpu: client.cpuHistory.values(), memory: client.memoryHistory.values()};
 }
@@ -1192,17 +1193,17 @@ test('client: a Sample without numbers leaves "no data since" at the last Sample
 // and nothing in the client wakes the shell while Samples flow.
 
 test('client: while Samples flow the watchdog is the only pending timeout, at 6000 ms', () => {
-    const {clock, timeouts, link} = makeLiveClientFixture();
-    const pendingTimeouts = () => ({seconds: timeouts.pendingIntervalsSeconds(), ms: timeouts.pendingIntervalsMs()});
-    const pendingAfterState = pendingTimeouts();
+    const fixture = makeLiveClientFixture();
+    const {clock, timeouts, link} = fixture;
+    const pendingAfterState = pendingTimeoutsOf(fixture);
     clock.nowUsec += SAMPLE_INTERVAL_USEC;
     emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
-    const pendingAfterFirstSample = pendingTimeouts();
+    const pendingAfterFirstSample = pendingTimeoutsOf(fixture);
     clock.nowUsec += SAMPLE_INTERVAL_USEC;
     emitSample(link, {snapshot: NEXT_TICK_SNAPSHOT, appendedHistory: NEXT_TICK_APPENDED_HISTORY,
         sequence: STATE_SEQUENCE + 2});
     assertEqual({
-        pendingAfterState, pendingAfterFirstSample, pendingAfterSecondSample: pendingTimeouts(),
+        pendingAfterState, pendingAfterFirstSample, pendingAfterSecondSample: pendingTimeoutsOf(fixture),
         addedIntervalsMs: timeouts.addedIntervalsMs(),
     }, {
         pendingAfterState: {seconds: [], ms: [STALL_MS]},
@@ -1249,7 +1250,7 @@ test('client: a state already older than the stall shows no data at once and arm
     }, {notifications: [NO_DATA_SNAPSHOT], pendingSeconds: [], pendingMs: [], addedIntervalsMs: []});
 });
 
-test('client: destroy() unsubscribes, destroys the link, and leaves no pending timeout', () => {
+test('client: destroy() unsubscribes, destroys the link, and leaves no pending timeout, also when a listener calls it', () => {
     const {client, timeouts, link, notifications} = makeLiveClientFixture({isDetailWatchWanted: true});
     emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     const pendingBeforeDestroy = timeouts.pendingIntervalsMs();
@@ -1294,6 +1295,15 @@ test('client: destroy() twice is harmless', () => {
     });
 });
 
+test('client: a destroyed client is not live', () => {
+    const {client, link} = makeLiveClientFixture();
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    const isLiveBeforeDestroy = client.isLive;
+    client.destroy();
+    assertEqual({isLiveBeforeDestroy, isLiveAfterDestroy: client.isLive},
+        {isLiveBeforeDestroy: true, isLiveAfterDestroy: false});
+});
+
 test('client: after a state the watchdog is armed for what is left of the stall', () => {
     const {timeouts, link, notifications} = makeClientFixture();
     // Taken 4 s before it arrived, so 2 s of the 6 s stall are left: its numbers are live until 6 s after they were
@@ -1316,23 +1326,21 @@ test('client: after a state the watchdog is armed for what is left of the stall'
 });
 
 test('client: no watchdog stays pending once the data is not live', () => {
-    const pendingTimeouts = ({timeouts}) =>
-        ({seconds: timeouts.pendingIntervalsSeconds(), ms: timeouts.pendingIntervalsMs()});
     const ownerLeft = makeLiveClientFixture();
     emitSample(ownerLeft.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
         sequence: STATE_SEQUENCE + 1});
-    const pendingBeforeOwnerLeft = pendingTimeouts(ownerLeft);
+    const pendingBeforeOwnerLeft = pendingTimeoutsOf(ownerLeft);
     ownerLeft.link.setNameOwner(null);
     const restarted = makeLiveClientFixture();
     emitSample(restarted.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
         sequence: STATE_SEQUENCE + 1});
-    const pendingBeforeRestart = pendingTimeouts(restarted);
+    const pendingBeforeRestart = pendingTimeoutsOf(restarted);
     emitSample(restarted.link, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4}, sequence: 1});
     const isLiveAfterOwnerLeft = ownerLeft.client.isLive;
     const isLiveAfterRestart = restarted.client.isLive;
     assertEqual({
-        pendingBeforeOwnerLeft, pendingAfterOwnerLeft: pendingTimeouts(ownerLeft), isLiveAfterOwnerLeft,
-        pendingBeforeRestart, pendingAfterRestart: pendingTimeouts(restarted), isLiveAfterRestart,
+        pendingBeforeOwnerLeft, pendingAfterOwnerLeft: pendingTimeoutsOf(ownerLeft), isLiveAfterOwnerLeft,
+        pendingBeforeRestart, pendingAfterRestart: pendingTimeoutsOf(restarted), isLiveAfterRestart,
     }, {
         pendingBeforeOwnerLeft: {seconds: [], ms: [STALL_MS]}, pendingAfterOwnerLeft: {seconds: [], ms: []},
         isLiveAfterOwnerLeft: false,
