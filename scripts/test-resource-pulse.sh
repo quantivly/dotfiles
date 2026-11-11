@@ -281,28 +281,60 @@ check "the service/ import scan finds a static and a dynamic import of service/,
 # serviceLink.js's name watch and subscription. The service, a process of its
 # own, may.
 DBUS_PROXY_LITERAL='Gio.DBusProxy'
-# dbus_proxy_mentions_in <extension dir>: one line per .js file outside the
-# top-level service/ that contains DBUS_PROXY_LITERAL, and one per such file
-# that cannot be read (an unread file is not a clean one). A tree with no
-# JavaScript is a line too.
-dbus_proxy_mentions_in() {
-  local extension_dir="$1" extension_file_path relative_path extension_file_text
-  local -a extension_file_paths
-  mapfile -d '' extension_file_paths < <(find "$extension_dir" -type f -name '*.js' -print0 2>/dev/null)
+# list_shell_side_javascript <extension dir> <array name>: fills the named
+# array with every .js file under the extension directory outside the top-level
+# service/, and returns non-zero when find does. find exits non-zero when it
+# cannot read a directory, and a file it never listed is a file no scan read,
+# so a scan fails then rather than passing over it; find's own message is left
+# on stderr, naming the directory.
+list_shell_side_javascript() {
+  local extension_dir="$1" listing_path javascript_path
+  local -n shell_side_paths="$2"
+  local -a javascript_paths=()
+  shell_side_paths=()
+  listing_path="$(mktemp -p "$WIRING_TMP" shell-side-listing.XXXXXX)" || return 2
+  if ! find "$extension_dir" -type f -name '*.js' -print0 >"$listing_path"; then
+    rm -f "$listing_path"
+    return 1
+  fi
+  mapfile -d '' javascript_paths <"$listing_path"
+  rm -f "$listing_path"
+  for javascript_path in "${javascript_paths[@]}"; do
+    [[ "$javascript_path" == "$extension_dir/service/"* ]] || shell_side_paths+=("$javascript_path")
+  done
+  return 0
+}
+# shell_side_files_matching <extension dir> <how>: one line per shell-side .js
+# file (list_shell_side_javascript) whose text matches: with "literal:<text>"
+# when it contains the text, with "pattern:<ERE>" when the regular expression
+# matches it (newlines included, so a call may span lines). One line per such
+# file that cannot be read (an unread file is not a clean one), and a line when
+# the tree cannot be listed or holds no shell-side JavaScript.
+shell_side_files_matching() {
+  local extension_dir="$1" match_rule="$2" extension_file_path relative_path extension_file_text
+  local -a extension_file_paths=()
+  if ! list_shell_side_javascript "$extension_dir" extension_file_paths; then
+    printf 'cannot list the JavaScript under %s\n' "$extension_dir"
+    return
+  fi
   if (( ${#extension_file_paths[@]} == 0 )); then
-    printf 'found no JavaScript under %s\n' "$extension_dir"
+    printf 'found no shell-side JavaScript under %s\n' "$extension_dir"
     return
   fi
   for extension_file_path in "${extension_file_paths[@]}"; do
-    [[ "$extension_file_path" == "$extension_dir/service/"* ]] && continue
     relative_path="${extension_file_path#"$extension_dir"/}"
     if [[ ! -r "$extension_file_path" ]] || ! extension_file_text="$(<"$extension_file_path")"; then
       printf 'cannot read %s\n' "$relative_path"
-    elif [[ "$extension_file_text" == *"$DBUS_PROXY_LITERAL"* ]]; then
+    elif [[ "$match_rule" == literal:* && "$extension_file_text" == *"${match_rule#literal:}"* ]]; then
+      printf '%s\n' "$relative_path"
+    elif [[ "$match_rule" == pattern:* && "$extension_file_text" =~ ${match_rule#pattern:} ]]; then
       printf '%s\n' "$relative_path"
     fi
   done
 }
+# dbus_proxy_mentions_in <extension dir>: one line per shell-side .js file that
+# contains DBUS_PROXY_LITERAL, comments included (shell_side_files_matching).
+dbus_proxy_mentions_in() { shell_side_files_matching "$1" "literal:$DBUS_PROXY_LITERAL"; }
 row_name="no shell-side file names Gio.DBusProxy"
 dbus_proxy_mentions="$(dbus_proxy_mentions_in "$EXT_DIR")"
 if [[ -z "$dbus_proxy_mentions" ]]; then
@@ -319,6 +351,42 @@ printf '%s\n' 'Gio.DBusProxy.new(connection, flags, null, busName, objectPath, i
 printf '%s\n' '// Built with Gio.DBusProxy.new(connection, ...), once.' >>"$DBUS_PROXY_FIXTURE_DIR/lib/wiring.js"
 check "a planted Gio.DBusProxy.new( in a shell-side copy is found" \
   "$(dbus_proxy_mentions_in "$DBUS_PROXY_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" "lib/wiring.js pulseClient.js "
+
+# While Samples flow they are the shell's tick, and a timer at the same rate
+# costs about as much as handling one (the card's old cover re-check timer did,
+# measured), so nothing shell-side may wake on the sampler's interval: no
+# shell-side file adds a timeout whose arguments name SAMPLE_INTERVAL_SECONDS,
+# whether a GLib timeout of any kind, the client's injectable addSeconds or
+# addMilliseconds, or setTimeout or setInterval. The call is matched up to the
+# end of its statement, across lines, comments included. service/, the sampler,
+# ticks at that interval by design.
+SAMPLE_INTERVAL_TIMEOUT_PATTERN='(timeout_add[a-z_]*|addSeconds|addMilliseconds|setTimeout|setInterval)\([^;]*'
+SAMPLE_INTERVAL_TIMEOUT_PATTERN+='SAMPLE_INTERVAL_SECONDS'
+# sample_interval_timeouts_in <extension dir>: one line per shell-side .js file
+# that adds such a timeout (shell_side_files_matching).
+sample_interval_timeouts_in() { shell_side_files_matching "$1" "pattern:$SAMPLE_INTERVAL_TIMEOUT_PATTERN"; }
+row_name="no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS"
+sample_interval_timeouts="$(sample_interval_timeouts_in "$EXT_DIR")"
+if [[ -z "$sample_interval_timeouts" ]]; then
+  ok "$row_name"
+else
+  bad "$row_name — $(tr '\n' ' ' <<<"$sample_interval_timeouts")"
+fi
+# The planted twin, on a copy of the extension: the cover re-check timer this
+# row replaced, put back in extension.js with its interval on the next line, and
+# a watchdog-style addMilliseconds in lib/, are found; the same timeout in
+# service/ is not.
+SAMPLE_TIMEOUT_FIXTURE_DIR="$WIRING_TMP/sample-timeout-fixture"
+cp -R "$EXT_DIR" "$SAMPLE_TIMEOUT_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $SAMPLE_TIMEOUT_FIXTURE_DIR"
+printf '%s\n' 'this._coverRecheckSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,' \
+  '    SAMPLE_INTERVAL_SECONDS, () => this._onCoverRecheckTimeout());' >>"$SAMPLE_TIMEOUT_FIXTURE_DIR/extension.js"
+printf '%s\n' 'this._timeouts.addMilliseconds(SAMPLE_INTERVAL_SECONDS * 1000, () => this._onTick());' \
+  >>"$SAMPLE_TIMEOUT_FIXTURE_DIR/lib/wiring.js"
+printf '%s\n' 'GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAMPLE_INTERVAL_SECONDS, () => this._onTimeout());' \
+  >>"$SAMPLE_TIMEOUT_FIXTURE_DIR/service/sampler.js"
+check "no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS: a planted one is found" \
+  "$(sample_interval_timeouts_in "$SAMPLE_TIMEOUT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" \
+  "extension.js lib/wiring.js "
 
 # extension.js imports the Shell, so its teardown cannot run here. lib/teardown.js
 # (runEveryStep, whose rows are in lifecycle.test.js) guards each step; these
@@ -504,6 +572,40 @@ awk '{ print } $0 == "    _isRepaintNeeded(topbarGraph) {" {
 check "a planted get_surface_size( outside the repaint handler in a copy of indicator.js is found" \
   "$(surface_reads_summary "$TOPBAR_SURFACE_FIXTURE_DIR/indicator.js")" \
   "get_surface_size( file=2 repaint=1; get_context( file=1 repaint=1"
+
+# The desktop card's cover check runs on the Samples and the window signals,
+# with no timer while Samples flow. extension.js's one timer is the fallback
+# that checks a covered card while the service is silent (when it runs is
+# lib/visibility.js coverFallbackTimerChange, its wiring pinned in
+# gnome-shell/tests/visibility.test.js): every timeout the file adds, of any
+# kind, is counted in the text, and the one there is must be of
+# COVER_FALLBACK_INTERVAL_SECONDS.
+FALLBACK_TIMEOUT_CALL='GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, COVER_FALLBACK_INTERVAL_SECONDS,'
+# extension_timeouts_summary <extension.js path>: how many times the file says
+# timeout_add (any kind), setTimeout( or setInterval(, and how many times it
+# adds the fallback timeout. An unreadable file is a line of its own.
+extension_timeouts_summary() {
+  local extension_path="$1" extension_text timeout_count
+  if [[ ! -r "$extension_path" ]] || ! extension_text="$(<"$extension_path")"; then
+    printf 'cannot read %s' "$extension_path"
+    return
+  fi
+  timeout_count=$(( $(count_occurrences "$extension_text" 'timeout_add') \
+    + $(count_occurrences "$extension_text" 'setTimeout(') + $(count_occurrences "$extension_text" 'setInterval(') ))
+  printf 'timeouts=%s fallback=%s' "$timeout_count" "$(count_occurrences "$extension_text" "$FALLBACK_TIMEOUT_CALL")"
+}
+check "extension.js's one timeout_add_seconds uses COVER_FALLBACK_INTERVAL_SECONDS" \
+  "$(extension_timeouts_summary "$EXTENSION_JS")" "timeouts=1 fallback=1"
+# Teardown removes what the covered check adds while the card is covered, each
+# in a guarded step of its own (runEveryStep): the fallback timeout, and every
+# covering window's position-changed, size-changed and unmanaged.
+FALLBACK_TEARDOWN_STEP="{name: 'remove the cover fallback timeout', run: () => this._removeCoverFallbackTimer()},"
+COVERING_WINDOWS_TEARDOWN_STEP="{name: 'disconnect from the covering windows', run: () => "
+COVERING_WINDOWS_TEARDOWN_STEP+="this._disconnectCoveringWindows()},"
+fallback_teardown_steps="$(grep -c -x -F "$FALLBACK_TEARDOWN_STEP" <<<"$teardown_lines")"
+covering_windows_teardown_steps="$(grep -c -x -F "$COVERING_WINDOWS_TEARDOWN_STEP" <<<"$teardown_lines")"
+check "_tearDown removes the fallback timeout and disconnects the covering windows" \
+  "fallback=$fallback_teardown_steps covering-windows=$covering_windows_teardown_steps" "fallback=1 covering-windows=1"
 
 # metadata.json, parsed as JSON by gjs (never grepped). Each field is printed
 # on its own prefixed line, so an unreadable or malformed file prints none and
@@ -3610,7 +3712,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=736
+EXPECTED_ROWS=747
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
