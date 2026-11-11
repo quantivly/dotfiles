@@ -2,8 +2,10 @@
 // anchor to any actor. One label in the layout manager's top chrome; showFor() brings it up under an anchor after
 // HOVER_LABEL_DELAY_MS, hide() fades it out. Shell glue only: the placement is lib/layout.js's tooltipPosition.
 //
-// destroy() removes everything the tooltip added outside itself (the pending show, the pending re-placement and
-// the label, which also takes it out of the chrome), so nothing it schedules can outlive it.
+// destroy() removes everything the tooltip added outside itself (the pending show, the pending re-placement, the
+// label, which also takes it out of the chrome, and the destroy handler on its anchor), so nothing it schedules or
+// connects can outlive it. A card owned by someone else can be destroyed while the tooltip lives: while the tooltip
+// holds an anchor it holds exactly one 'destroy' handler on it, which hides the tooltip.
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
@@ -34,6 +36,7 @@ export class CockpitTooltip {
             style_class: TOOLTIP_STYLE_CLASS, visible: false, opacity: TRANSPARENT_OPACITY, reactive: false,
         });
         this._anchor = null;
+        this._anchorDestroyId = null;
         this._text = '';
         this._isShown = false;
         this._showTimeoutId = null;
@@ -44,8 +47,9 @@ export class CockpitTooltip {
     }
 
     /**
-     * Shows the tooltip under an anchor after the delay. While it is already up for the same anchor, only the text
-     * is updated and the label placed again; for another anchor, or while a show is pending, the pending show
+     * Shows the tooltip under an anchor after the delay. For the anchor it already serves, only the text is
+     * updated: the label is placed again while it is up, and a pending show keeps its timer (a caller that calls
+     * this on every pointer motion must still see the tooltip appear). For another anchor, the pending show
      * restarts for the new anchor.
      *
      * @param {Clutter.Actor} anchorActor - The actor the tooltip hangs off (a row of a card).
@@ -56,14 +60,16 @@ export class CockpitTooltip {
         if (this._label === null)
             return;
         const text = lines.join(LINE_SEPARATOR);
-        if (this._isShown && anchorActor === this._anchor) {
+        if (anchorActor === this._anchor && (this._isShown || this._showTimeoutId !== null)) {
             this._text = text;
-            this._label.text = text;
-            this._placeLabel();
+            if (this._isShown) {
+                this._label.text = text;
+                this._placeLabel();
+            }
             return;
         }
         this._cancelPendingShow();
-        this._anchor = anchorActor;
+        this._setAnchor(anchorActor);
         this._text = text;
         this._showTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HOVER_LABEL_DELAY_MS, () => {
             this._showTimeoutId = null;
@@ -82,7 +88,7 @@ export class CockpitTooltip {
         if (this._label === null)
             return;
         this._cancelPendingShow();
-        this._anchor = null;
+        this._releaseAnchor();
         if (!this._isShown)
             return;
         this._isShown = false;
@@ -106,14 +112,40 @@ export class CockpitTooltip {
         if (this._label === null)
             return;
         this._cancelPendingShow();
+        this._releaseAnchor();
         if (this._placeLaterId !== null) {
             global.compositor.get_laters().remove(this._placeLaterId);
             this._placeLaterId = null;
         }
         this._label.destroy();
         this._label = null;
-        this._anchor = null;
         this._isShown = false;
+    }
+
+    /**
+     * Makes an actor the anchor, holding one 'destroy' handler on it that hides the tooltip; the previous anchor's
+     * handler is released first.
+     *
+     * @param {Clutter.Actor} anchorActor - The new anchor.
+     * @returns {void}
+     */
+    _setAnchor(anchorActor) {
+        this._releaseAnchor();
+        this._anchor = anchorActor;
+        this._anchorDestroyId = anchorActor.connect('destroy', () => this.hide());
+    }
+
+    /**
+     * Drops the anchor and the destroy handler held on it, if any.
+     *
+     * @returns {void}
+     */
+    _releaseAnchor() {
+        if (this._anchor === null)
+            return;
+        this._anchor.disconnect(this._anchorDestroyId);
+        this._anchor = null;
+        this._anchorDestroyId = null;
     }
 
     /**

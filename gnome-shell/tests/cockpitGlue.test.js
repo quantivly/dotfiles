@@ -3,7 +3,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
-import {COCKPIT_ICON_NAMES} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
+import {COCKPIT_ICON_NAMES, COCKPIT_LONG_IDLE_ROW_OPACITY} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const EXTENSION_DIRECTORY_URI =
     GLib.uri_resolve_relative(import.meta.url, '../extensions/resource-pulse@dotfiles/', GLib.UriFlags.NONE);
@@ -21,6 +21,12 @@ const COCKPIT_CLASS_NAMES = [
     'rp-cockpit-state-unknown', 'rp-cockpit-name-waiting', 'rp-cockpit-row-long-idle', 'rp-cockpit-tooltip',
     'rp-cockpit-no-data',
 ];
+const OPACITY_PROPERTY_PATTERN = /(?:^|[\s{;])opacity\s*:/;
+const CSS_COMMENT_PATTERN = /\/\*[\s\S]*?\*\//g;
+const JS_COMMENT_PATTERN = /\/\*[\s\S]*?\*\/|\/\/[^\n]*/g;
+const COCKPIT_BLOCK_MARKER = 'Added in the cockpit drawing release.';
+const LONG_IDLE_OPACITY_FRACTION = 0.55;
+const OPAQUE_OPACITY = 255;
 const ROW_HOVER_SELECTOR = '.rp-cockpit-row:hover';
 /**
  * The stylesheet as it was before the cockpit block: its character count and SHA-256. The new block is only ever
@@ -52,6 +58,26 @@ function occurrenceCount(haystack, needle) {
     return haystack.split(needle).length - 1;
 }
 
+/**
+ * The body of a class method: from its declaration line to the first line that closes it at the declaration's own
+ * indent, comments removed so that a comment can never satisfy a needle.
+ *
+ * @param {string} sourceText - The file's text.
+ * @param {string} declarationLine - The declaration as it starts its line, for example 'destroy() {'.
+ * @returns {string} The body without comments, or '' when there is no such declaration.
+ */
+function methodBody(sourceText, declarationLine) {
+    const lines = sourceText.split('\n');
+    const startIndex = lines.findIndex(line => line.trimStart().startsWith(declarationLine));
+    if (startIndex < 0)
+        return '';
+    const indent = lines[startIndex].length - lines[startIndex].trimStart().length;
+    const closingLine = `${' '.repeat(indent)}}`;
+    const endIndex = lines.findIndex((line, lineIndex) => lineIndex > startIndex && line === closingLine);
+    return lines.slice(startIndex, endIndex < 0 ? undefined : endIndex + 1).join('\n')
+        .replace(JS_COMMENT_PATTERN, '');
+}
+
 test('COCKPIT_ICON_NAMES: every session state and every connection kind has a -symbolic icon name', () => {
     const names = [...SESSION_STATES, ...CONNECTION_KINDS].map(key => COCKPIT_ICON_NAMES[key]);
     assertEqual(names.map(name => typeof name === 'string' && name.endsWith(SYMBOLIC_SUFFIX)),
@@ -67,27 +93,69 @@ test('cockpitTooltip.js: takes the shell\'s Main, adds its label through addTopC
     assertEqual({
         importsMain: occurrenceCount(source, "import * as Main from 'resource:///org/gnome/shell/ui/main.js';"),
         addsToChrome: occurrenceCount(source, 'Main.layoutManager.addTopChrome('),
-        usesPlacementRule: source.includes('tooltipPosition('),
-        styleClass: occurrenceCount(source, "'rp-cockpit-tooltip'"),
-    }, {importsMain: 1, addsToChrome: 1, usesPlacementRule: true, styleClass: 1});
+        usesPlacementRule: occurrenceCount(methodBody(source, '_placeLabel() {'), 'tooltipPosition({'),
+        styleClassUsedByTheLabel: occurrenceCount(source, 'style_class: TOOLTIP_STYLE_CLASS'),
+        styleClassDefined: occurrenceCount(source, "TOOLTIP_STYLE_CLASS = 'rp-cockpit-tooltip'"),
+    }, {importsMain: 1, addsToChrome: 1, usesPlacementRule: 1, styleClassUsedByTheLabel: 1, styleClassDefined: 1});
 });
 
-test('cockpitTooltip.js: one GLib.timeout_add, named, and removed again in destroy()', () => {
+test('cockpitTooltip.js: one GLib.timeout_add, named at its use, and removed again in destroy()', () => {
     const source = readExtensionFile(TOOLTIP_SOURCE_FILE);
-    const destroyBody = source.slice(source.indexOf('    destroy() {'));
+    const destroyBody = methodBody(source, 'destroy() {');
     assertEqual({
         timeouts: occurrenceCount(source, 'GLib.timeout_add('),
-        named: occurrenceCount(source, `'${TOOLTIP_TIMEOUT_NAME}'`),
+        namedAtItsUse: occurrenceCount(source,
+            'GLib.Source.set_name_by_id(this._showTimeoutId, SHOW_TIMEOUT_NAME)'),
+        nameDefined: occurrenceCount(source, `SHOW_TIMEOUT_NAME = '${TOOLTIP_TIMEOUT_NAME}'`),
         destroyCancelsIt: destroyBody.includes('this._cancelPendingShow();'),
         destroyRemovesLater: destroyBody.includes('get_laters().remove('),
         destroyDestroysLabel: destroyBody.includes('this._label.destroy();'),
-    }, {timeouts: 1, named: 1, destroyCancelsIt: true, destroyRemovesLater: true, destroyDestroysLabel: true});
+    }, {
+        timeouts: 1, namedAtItsUse: 1, nameDefined: 1,
+        destroyCancelsIt: true, destroyRemovesLater: true, destroyDestroysLabel: true,
+    });
 });
 
-test('cockpitTooltip.js: reuses the top bar\'s delay and fade constants rather than its own numbers', () => {
+test('cockpitTooltip.js: arms its timer with the top bar\'s delay and eases with its fades, not its own numbers', () => {
     const source = readExtensionFile(TOOLTIP_SOURCE_FILE);
-    assertEqual(['HOVER_LABEL_DELAY_MS', 'HOVER_LABEL_FADE_IN_MS', 'HOVER_LABEL_FADE_OUT_MS']
-        .map(name => source.includes(name)), [true, true, true]);
+    assertEqual({
+        delayAtTheTimer: occurrenceCount(source, 'GLib.timeout_add(GLib.PRIORITY_DEFAULT, HOVER_LABEL_DELAY_MS,'),
+        fadeIn: occurrenceCount(methodBody(source, '_show() {'), 'duration: HOVER_LABEL_FADE_IN_MS'),
+        fadeOut: occurrenceCount(methodBody(source, 'hide() {'), 'duration: HOVER_LABEL_FADE_OUT_MS'),
+    }, {delayAtTheTimer: 1, fadeIn: 1, fadeOut: 1});
+});
+
+test('cockpitTooltip.js: holds one destroy handler on its anchor, which hides the tooltip', () => {
+    const source = readExtensionFile(TOOLTIP_SOURCE_FILE);
+    assertEqual({
+        connects: occurrenceCount(source, ".connect('destroy'"),
+        connectedInSetAnchor: occurrenceCount(methodBody(source, '_setAnchor('), "anchorActor.connect('destroy', () => this.hide())"),
+        storesTheHandlerId: methodBody(source, '_setAnchor(').includes('this._anchorDestroyId = anchorActor.connect('),
+    }, {connects: 1, connectedInSetAnchor: 1, storesTheHandlerId: true});
+});
+
+test('cockpitTooltip.js: releases the anchor\'s destroy handler when the anchor is dropped, replaced or on destroy()', () => {
+    const source = readExtensionFile(TOOLTIP_SOURCE_FILE);
+    const callsRelease = declaration => occurrenceCount(methodBody(source, declaration), 'this._releaseAnchor();');
+    assertEqual({
+        disconnects: occurrenceCount(source, '.disconnect('),
+        releaseDisconnectsTheStoredId: occurrenceCount(methodBody(source, '_releaseAnchor('),
+            'this._anchor.disconnect(this._anchorDestroyId);'),
+        hide: callsRelease('hide() {'),
+        destroy: callsRelease('destroy() {'),
+        replace: callsRelease('_setAnchor('),
+    }, {disconnects: 1, releaseDisconnectsTheStoredId: 1, hide: 1, destroy: 1, replace: 1});
+});
+
+test('cockpitTooltip.js: showFor() for the anchor it already serves keeps a pending timer and only updates the text', () => {
+    const source = readExtensionFile(TOOLTIP_SOURCE_FILE);
+    const showForBody = methodBody(source, 'showFor(');
+    assertEqual({
+        sameAnchorGuard: occurrenceCount(showForBody,
+            'anchorActor === this._anchor && (this._isShown || this._showTimeoutId !== null)'),
+        cancelsOnlyForAnotherAnchor: showForBody.indexOf('this._cancelPendingShow();') >
+            showForBody.indexOf('this._showTimeoutId !== null)'),
+    }, {sameAnchorGuard: 1, cancelsOnlyForAnotherAnchor: true});
 });
 
 test('stylesheet.css: every cockpit class is selected, once each as a rule of its own', () => {
@@ -107,3 +175,23 @@ test('stylesheet.css: the cockpit block opens with a comment naming its release'
     const stylesheet = readExtensionFile(STYLESHEET_FILE);
     assertEqual(stylesheet.slice(RELEASE_STYLESHEET_LENGTH).includes('Added in the cockpit drawing release.'), true);
 });
+
+/**
+ * The cockpit block's rules (everything after its opening comment), comments removed.
+ *
+ * @returns {string} The block's text.
+ */
+function cockpitStylesheetBlockText() {
+    const stylesheet = readExtensionFile(STYLESHEET_FILE);
+    return stylesheet.slice(stylesheet.indexOf(COCKPIT_BLOCK_MARKER)).replace(CSS_COMMENT_PATTERN, '');
+}
+
+test('stylesheet.css: no rule of the cockpit block declares opacity (St reads none; the card sets the actor\'s)', () =>
+    assertEqual(OPACITY_PROPERTY_PATTERN.test(cockpitStylesheetBlockText()), false));
+
+test('stylesheet.css: the opacity guard sees a bare opacity but not -rp-graph-opacity', () =>
+    assertEqual([' opacity: 140;', '{opacity:140', ' -rp-graph-opacity: 0.4;'].map(text => OPACITY_PROPERTY_PATTERN.test(text)),
+        [true, true, false]));
+
+test('COCKPIT_LONG_IDLE_ROW_OPACITY: the design\'s 0.55 of the 0-255 scale', () =>
+    assertEqual(COCKPIT_LONG_IDLE_ROW_OPACITY, Math.round(LONG_IDLE_OPACITY_FRACTION * OPAQUE_OPACITY)));

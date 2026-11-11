@@ -269,8 +269,23 @@ test('tooltipPosition: clamped at the right edge so the label stays inside the m
 test('tooltipPosition: clamped at the monitor\'s left edge, on a monitor that starts right of another', () =>
     assertEqual(tooltipPlacement({x: 1930, y: 100, width: 20, height: 20},
         {x: 1920, y: 0, width: MONITOR_WIDTH_PX, height: 864}), {x: 1920, y: 126}));
-test('tooltipPosition: a fractional anchor lands on whole pixels', () =>
-    assertEqual(tooltipPlacement({x: 500.5, y: 100.4, width: 99, height: 20}), {x: 450, y: 126}));
+test('tooltipPosition: a fractional anchor lands on whole pixels, rounded down on both axes', () =>
+    // y = 100.9 + 20 + 6 = 126.9: floor gives 126, round 127 (x is pinned by the next row).
+    assertEqual(tooltipPlacement({x: 500.9, y: 100.9, width: 99, height: 20}), {x: 450, y: 126}));
+test('tooltipPosition: x rounds down where round would go up', () =>
+    // 501.4 + (99 - 200) / 2 = 450.9: floor 450, round 451.
+    assertEqual(tooltipPlacement({x: 501.4, y: 100, width: 99, height: 20}), {x: 450, y: 126}));
+test('tooltipPosition: a label wider than its monitor starts at the monitor\'s left edge', () =>
+    assertEqual(tooltipPlacement({x: 1930, y: 100, width: 20, height: 20},
+        {x: 1920, y: 0, width: 150, height: 864}), {x: 1920, y: 126}));
+test('tooltipPosition: a monitor that starts below the stage\'s top bounds the label by its own y', () =>
+    // Monitor y 1000..1864: the label below the anchor at 1826 would end at 1874, so it goes above, at 1746.
+    assertEqual(tooltipPlacement({x: 500, y: 1800, width: 100, height: 20},
+        {x: 0, y: 1000, width: MONITOR_WIDTH_PX, height: 864}), {x: 450, y: 1746}));
+test('tooltipPosition: a label that exactly touches the monitor\'s bottom edge stays below', () =>
+    // Below ends at 100 + 20 + 6 + 48 = 174 = the monitor's bottom: touching is not crossing.
+    assertEqual(tooltipPlacement({x: 500, y: 100, width: 100, height: 20},
+        {x: 0, y: 0, width: MONITOR_WIDTH_PX, height: 174}), {x: 450, y: 126}));
 test('tooltipPosition: a label that fits neither below nor above stays below, never above the monitor\'s top', () =>
     assertEqual(tooltipPlacement({x: 500, y: 20, width: 100, height: 20},
         {x: 0, y: 0, width: MONITOR_WIDTH_PX, height: 60}), {x: 450, y: 46}));

@@ -184,9 +184,9 @@
   color: #e5a50a;
 }
 
-/* A session idle for a long time recedes (.55 of opaque, on the 0-255 scale Clutter uses). */
+/* The class hook of a session idle for a long time. St reads no CSS opacity, so the dim itself is the row actor's
+   opacity, which the sessions card sets (COCKPIT_LONG_IDLE_ROW_OPACITY); nothing here dims it. */
 .rp-cockpit-row-long-idle {
-  opacity: 140;
 }
 
 /* The tooltip every cockpit card shares: the top bar's hover label, left-aligned for several lines. */
