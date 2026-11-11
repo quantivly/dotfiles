@@ -394,27 +394,36 @@ check "no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS: a planted o
 # counted inside _init's body only: a call elsewhere in the file does not redirect a card at construction.
 OFFSCREEN_REDIRECT_CALL='this.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);'
 # offscreen_redirect_calls_in_init <card.js>: how many times _init's body (from its signature to the closing brace
-# at the method's indentation) contains OFFSCREEN_REDIRECT_CALL; a non-number when the file cannot be read.
+# at the method's indentation) holds a line that IS OFFSCREEN_REDIRECT_CALL: nothing but whitespace before it and
+# nothing after it, so a call in a // or /* */ comment is not counted. awk does it all, so a zero is an answer and
+# an unreadable file is awk's failure status (returned), not an empty count; "no _init body" when there is none.
 offscreen_redirect_calls_in_init() {
-  local init_body
-  init_body="$(awk '/^    _init\(client\) \{$/ {in_init = 1} in_init {print} in_init && /^    \}$/ {exit}' \
-    "$1")" || return
-  [[ -n "$init_body" ]] || { printf 'no _init body in %s\n' "$1"; return; }
-  grep -c -F "$OFFSCREEN_REDIRECT_CALL" <<<"$init_body" || true
+  awk -v call="$OFFSCREEN_REDIRECT_CALL" '
+    /^    _init\(client\) \{$/ { in_init = 1 }
+    in_init { line = $0; sub(/^[ \t]+/, "", line); if (line == call) found++ }
+    in_init && /^    \}$/ { exit }
+    END { if (in_init) print found + 0; else print "no _init body" }' "$1"
 }
 real_card_redirect_calls="$(offscreen_redirect_calls_in_init "$EXT_DIR/card.js")"
 check "card.js sets the offscreen redirect to ALWAYS in _init" "$real_card_redirect_calls" 1
-# The planted twin, on copies of card.js: the call deleted, and the call moved out of _init to the end of the file,
-# each count 0 (a call outside _init must not satisfy the row).
+# The planted twin, on copies of card.js: the call deleted, the call moved out of _init to the end of the file, and
+# the call commented out with // in place, each count 0 (neither a call outside _init nor a commented one may satisfy
+# the row).
 OFFSCREEN_FIXTURE_DIR="$WIRING_TMP/offscreen-fixture"
 mkdir "$OFFSCREEN_FIXTURE_DIR" || fatal "cannot create $OFFSCREEN_FIXTURE_DIR"
-grep -v -F "$OFFSCREEN_REDIRECT_CALL" "$EXT_DIR/card.js" >"$OFFSCREEN_FIXTURE_DIR/deleted.js" || true
+awk -v call="$OFFSCREEN_REDIRECT_CALL" 'index($0, call) == 0' "$EXT_DIR/card.js" \
+  >"$OFFSCREEN_FIXTURE_DIR/deleted.js" || fatal "cannot write $OFFSCREEN_FIXTURE_DIR/deleted.js"
+awk -v call="$OFFSCREEN_REDIRECT_CALL" 'index($0, call) { print "        // " call; next } { print }' \
+  "$EXT_DIR/card.js" >"$OFFSCREEN_FIXTURE_DIR/commented.js" || fatal "cannot write $OFFSCREEN_FIXTURE_DIR/commented.js"
 { cat "$OFFSCREEN_FIXTURE_DIR/deleted.js"; printf '    %s\n' "$OFFSCREEN_REDIRECT_CALL"; } \
   >"$OFFSCREEN_FIXTURE_DIR/moved.js"
 deleted_card_redirect_calls="$(offscreen_redirect_calls_in_init "$OFFSCREEN_FIXTURE_DIR/deleted.js")"
 moved_card_redirect_calls="$(offscreen_redirect_calls_in_init "$OFFSCREEN_FIXTURE_DIR/moved.js")"
 check "card.js sets the offscreen redirect to ALWAYS in _init: a deleted call and a moved one are not counted" \
   "$deleted_card_redirect_calls|$moved_card_redirect_calls" "0|0"
+commented_card_redirect_calls="$(offscreen_redirect_calls_in_init "$OFFSCREEN_FIXTURE_DIR/commented.js")"
+check "card.js sets the offscreen redirect to ALWAYS in _init: a commented-out call is not counted" \
+  "$commented_card_redirect_calls" 0
 
 # A JavaScript paint override runs in the compositor's paint path on every frame the actor draws, and GJS cannot
 # do that cheaply: no shell-side file overrides the paint vfunc or its node variant. The scan matches the text
@@ -3766,7 +3775,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=753
+EXPECTED_ROWS=754
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
