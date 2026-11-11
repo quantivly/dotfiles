@@ -80,16 +80,17 @@
 #       save the nested stage (or an area of it, in logical pixels) as
 #       <run dir>/shots/<name.png>, and print that path
 #   scripts/resource-pulse-nested.sh scenario <idle|light|busy>
-#       write the word to <run dir>/run/rp-scenario of a live --replay run; the
-#       replay service plays it from its next tick: idle CPU 1-4%, light 2-14%,
-#       busy a walk between 15% and 90%
+#       write the word, and a token new to this request, to <run dir>/run/rp-scenario
+#       of a live --replay run; from its next tick the replay service plays that
+#       scenario from the start of its sequence, even when it is the one playing:
+#       idle CPU 1-4%, light 2-14%, busy a walk between 15% and 90%
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services and everything else it started;
 #       logs (log/service.log is the sampler's, or with --replay the replay
 #       service's; log/cockpit.log the cockpit's) and shots stay
 #
 # Environment:
-#   RESOURCE_PULSE_NESTED_DIR     the run directory eval, screenshot and stop act on
+#   RESOURCE_PULSE_NESTED_DIR     the run directory eval, screenshot, scenario and stop act on
 #                                 (needed only while more than one run is live)
 #   RESOURCE_PULSE_NESTED_BASE    where run directories are made: yours, with no group or
 #                                 other access (default $XDG_RUNTIME_DIR, else $TMPDIR)
@@ -125,8 +126,9 @@ readonly COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
 # The replay service (--replay): the checkout's files copied into this directory of the run, and its entry module,
 # which owns the sampler's bus name in the sampler's place.
 readonly REPLAY_RELATIVE_DIR='replay'
-readonly -a REPLAY_FILE_NAMES=(replay-service.js replayGenerator.js)
-readonly REPLAY_MAIN_RELATIVE_PATH="$REPLAY_RELATIVE_DIR/replay-service.js"
+readonly REPLAY_MAIN_FILE_NAME='replay-service.js'
+readonly -a REPLAY_FILE_NAMES=("$REPLAY_MAIN_FILE_NAME" replayGenerator.js)
+readonly REPLAY_MAIN_RELATIVE_PATH="$REPLAY_RELATIVE_DIR/$REPLAY_MAIN_FILE_NAME"
 # The replay service's scenario words, and the file it reads the current one from: in the run's runtime dir.
 readonly -a REPLAY_SCENARIO_NAMES=(idle light busy)
 readonly REPLAY_SCENARIO_RELATIVE_PATH='run/rp-scenario'
@@ -787,7 +789,7 @@ is_nested_shell_live() {
 }
 
 #######################################
-# Print the run directory eval, screenshot and stop act on:
+# Print the run directory eval, screenshot, scenario and stop act on:
 # RESOURCE_PULSE_NESTED_DIR, else the one run under the base that is live: not
 # stopped, not ended, and with its supervisor or launcher still running (a run
 # whose lifetime ran out, or that crashed, is skipped). Exit 2 when there is
@@ -1487,30 +1489,38 @@ is_replay_scenario_name() {
 }
 
 #######################################
-# Replace a run's scenario file with one word, in one rename, so the replay
-# service never reads it half written. The run directory is the user's own and
-# 0700 (verified_run_suffix), so nothing else can have placed a link there.
+# Replace a run's scenario file with one request, in one rename, so the replay
+# service never reads it half written: the word, then a token new to this
+# request (request_id: the random suffix of the staging file's mktemp name).
+# The replay service restarts whenever the request it reads is not the one it
+# read last, so asking again for the word already playing restarts it too. The
+# run directory is the user's own and 0700 (verified_run_suffix), so nothing
+# else can have placed a link there.
 # Arguments:
 #   $1 - run directory
 #   $2 - scenario word
 #######################################
 write_scenario_word() {
-    local run_dir="$1" scenario_name="$2" scenario_path staging_path
+    local run_dir="$1" scenario_name="$2" scenario_path staging_path request_id
     scenario_path="$run_dir/$REPLAY_SCENARIO_RELATIVE_PATH"
     [[ -d "${scenario_path%/*}" && ! -L "${scenario_path%/*}" ]] || return 1
     staging_path="$(mktemp "$scenario_path.XXXXXX")" || return 1
-    if ! printf '%s\n' "$scenario_name" >"$staging_path" || ! mv -f -- "$staging_path" "$scenario_path"; then
+    request_id="${staging_path##*.}"
+    if ! printf '%s %s\n' "$scenario_name" "$request_id" >"$staging_path" ||
+        ! mv -f -- "$staging_path" "$scenario_path"; then
         rm -f -- "$staging_path"
         return 1
     fi
 }
 
 #######################################
-# `scenario <idle|light|busy>`: write the word to <run dir>/run/rp-scenario of
-# a live run started with --replay, whose replay service plays it from its next
-# tick. Any other word is a usage error, refused before a run is looked for; a
-# run not started with --replay, not live, or whose replay service is not
-# running is refused (exit 2), and nothing is written.
+# `scenario <idle|light|busy>`: write the word and a new request token to
+# <run dir>/run/rp-scenario of a live run started with --replay. From its next
+# tick the replay service plays that scenario from the start of its sequence,
+# even when it is the one playing. Any other word is a usage error, refused
+# before a run is looked for; a run not started with --replay, not live, or
+# whose replay service is not running is refused (exit 2), and nothing is
+# written.
 # Arguments:
 #   $1 - scenario word
 #######################################
@@ -1528,7 +1538,7 @@ scenario_subcommand() {
         || die "refusing: the run's replay service is not running (see $run_dir/log/service.log)"
     write_scenario_word "$run_dir" "$scenario_name" \
         || die "could not write $run_dir/$REPLAY_SCENARIO_RELATIVE_PATH"
-    note "scenario $scenario_name: the replay service takes it at its next tick"
+    note "scenario $scenario_name: the replay service takes it at its next tick, from the start of its sequence"
 }
 
 #######################################

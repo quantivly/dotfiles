@@ -4,11 +4,24 @@
 // version of the extension is measured against the same sequence.
 //   idle   CPU 1–4 %: inside one pixel of a 16-pixel graph
 //   light  CPU 2–14 %: crosses a pixel boundary on some ticks
-//   busy   CPU a walk between 15 % and 90 %: changes on every tick
+//   busy   CPU a walk between 15 % and 90 % that reflects off both bounds, so it changes on every tick. The spike
+//          clamped it instead, and so sat at a bound, repeating itself; the first values, well inside the bounds,
+//          are the spike's.
+// It also reads the scenario file the harness's `scenario` request writes, and says when a read must restart the
+// replay (parseScenarioRequest, isNewScenarioRequest).
 // Pure: no gi import, no clock, no file, so it runs under plain gjs (gnome-shell/tests/nestedHarness.test.js).
 
+const IDLE_SCENARIO_NAME = 'idle';
+const LIGHT_SCENARIO_NAME = 'light';
+const BUSY_SCENARIO_NAME = 'busy';
 /** The scenario words, in the order scripts/resource-pulse-nested.sh's `scenario` request lists them. */
-export const REPLAY_SCENARIO_NAMES = Object.freeze(['idle', 'light', 'busy']);
+export const REPLAY_SCENARIO_NAMES = Object.freeze([IDLE_SCENARIO_NAME, LIGHT_SCENARIO_NAME, BUSY_SCENARIO_NAME]);
+/** What plays until a scenario is asked for, and while the scenario file names none. */
+export const DEFAULT_REPLAY_SCENARIO_NAME = BUSY_SCENARIO_NAME;
+/** Separates the scenario file's fields: the word, then the token the harness writes with each request. */
+const SCENARIO_FILE_FIELD_SEPARATOR_PATTERN = /\s+/;
+/** How a request's fields are joined back into its text, whatever spacing the file had. */
+const SCENARIO_REQUEST_FIELD_JOINER = ' ';
 /** The seed of every generator: the spike's, so the port publishes the sequence the session measured. */
 export const REPLAY_RANDOM_SEED = 20261110;
 
@@ -32,7 +45,7 @@ const IDLE_CPU_MIN_PERCENT = 1;
 const IDLE_CPU_MAX_PERCENT = 4;
 const LIGHT_CPU_MIN_PERCENT = 2;
 const LIGHT_CPU_MAX_PERCENT = 14;
-/** busy walks from its start by up to half the step span either way per tick, held between min and max. */
+/** busy walks from its start by up to half the step span either way per tick, reflected off min and max. */
 const BUSY_CPU_MIN_PERCENT = 15;
 const BUSY_CPU_MAX_PERCENT = 90;
 const BUSY_CPU_START_PERCENT = 50;
@@ -75,6 +88,65 @@ function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
 }
 
+/**
+ * A value folded back into a range from the bound it crossed, as a walk bounces off a wall: a value past max by d
+ * becomes max - d. One fold is enough while a step is narrower than the range, as busy's is.
+ *
+ * @param {number} value - The walk's position after a step.
+ * @param {number} min - The lower bound.
+ * @param {number} max - The upper bound.
+ * @returns {number} The position inside [min, max].
+ */
+function reflectIntoRange(value, min, max) {
+    if (value > max)
+        return max - (value - max);
+    if (value < min)
+        return min + (min - value);
+    return value;
+}
+
+/**
+ * @typedef {object} ScenarioRequest
+ * @property {string} scenarioName - The scenario to play: the file's word, or the default when it names none.
+ * @property {string|null} requestText - The file's fields, single-spaced, when its word is a scenario: two requests
+ *     for the same word differ here by their tokens. Null when the default plays because the file names none.
+ * @property {string|null} rejectedText - The file's text when its word is not a scenario, for the log; else null.
+ */
+
+/**
+ * Reads the scenario file's text: its first whitespace-separated field is the word, and what follows (the token the
+ * harness writes with each request) only tells one request from the next.
+ *
+ * @param {string|null} fileText - The file's text; null when there is no readable file.
+ * @returns {ScenarioRequest} What it asks for.
+ */
+export function parseScenarioRequest(fileText) {
+    if (fileText === null)
+        return {scenarioName: DEFAULT_REPLAY_SCENARIO_NAME, requestText: null, rejectedText: null};
+    const trimmedText = fileText.trim();
+    const requestFields = trimmedText.split(SCENARIO_FILE_FIELD_SEPARATOR_PATTERN);
+    const [scenarioWord] = requestFields;
+    if (!REPLAY_SCENARIO_NAMES.includes(scenarioWord))
+        return {scenarioName: DEFAULT_REPLAY_SCENARIO_NAME, requestText: null, rejectedText: trimmedText};
+    const requestText = requestFields.join(SCENARIO_REQUEST_FIELD_JOINER);
+    return {scenarioName: scenarioWord, requestText, rejectedText: null};
+}
+
+/**
+ * Whether a read of the scenario file must restart the replay: a request not read before restarts it, the word
+ * already playing included (each `scenario` request carries a new token), and so does falling back to the default
+ * from another scenario. Reading the same request again does not, nor does falling back to the scenario playing.
+ *
+ * @param {ScenarioRequest} lastRequest - What the previous read asked for.
+ * @param {ScenarioRequest} readRequest - What this read asks for.
+ * @returns {boolean} True when the replay must start the read scenario again from its seed.
+ */
+export function isNewScenarioRequest(lastRequest, readRequest) {
+    if (readRequest.requestText !== null)
+        return readRequest.requestText !== lastRequest.requestText;
+    return readRequest.scenarioName !== lastRequest.scenarioName;
+}
+
 /** One scenario's sequence of synthetic samples, from the fixed seed. */
 export class ReplayGenerator {
     /**
@@ -114,12 +186,12 @@ export class ReplayGenerator {
      * @returns {number} The percent.
      */
     _nextCpuPercent() {
-        if (this._scenarioName === 'idle')
+        if (this._scenarioName === IDLE_SCENARIO_NAME)
             return this._nextUniform(IDLE_CPU_MIN_PERCENT, IDLE_CPU_MAX_PERCENT);
-        if (this._scenarioName === 'light')
+        if (this._scenarioName === LIGHT_SCENARIO_NAME)
             return this._nextUniform(LIGHT_CPU_MIN_PERCENT, LIGHT_CPU_MAX_PERCENT);
         const busyStepPercent = this._nextCentredStep(BUSY_CPU_STEP_SPAN_PERCENT);
-        this._busyCpuPercent = clamp(this._busyCpuPercent + busyStepPercent, BUSY_CPU_MIN_PERCENT,
+        this._busyCpuPercent = reflectIntoRange(this._busyCpuPercent + busyStepPercent, BUSY_CPU_MIN_PERCENT,
             BUSY_CPU_MAX_PERCENT);
         return this._busyCpuPercent;
     }
@@ -130,7 +202,7 @@ export class ReplayGenerator {
      * @returns {number} Used memory, in whole bytes.
      */
     _nextUsedMemoryBytes() {
-        const stepSpanBytes = this._scenarioName === 'busy' ? BUSY_MEMORY_STEP_SPAN_BYTES
+        const stepSpanBytes = this._scenarioName === BUSY_SCENARIO_NAME ? BUSY_MEMORY_STEP_SPAN_BYTES
             : QUIET_MEMORY_STEP_SPAN_BYTES;
         const memoryStepBytes = this._nextCentredStep(stepSpanBytes);
         const minUsedBytes = TOTAL_MEMORY_BYTES * MIN_USED_MEMORY_FRACTION;

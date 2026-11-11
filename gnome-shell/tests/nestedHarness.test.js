@@ -2,15 +2,20 @@
 // - the unsafe-mode helper's check that keeps it from turning on unsafe mode in any shell but the nested one that
 //   script started. nestedRun.js has no Shell import, so it runs here; the helper's extension.js imports the Shell
 //   and only calls it.
-// - the replay service's generator (replayGenerator.js), which has no gi import: the input every `start --replay`
-//   run publishes, the same in every run of every version of the extension.
+// - the replay service's generator and scenario requests (replayGenerator.js), which has no gi import: the input
+//   every `start --replay` run publishes, the same in every run of every version of the extension, and when a
+//   `scenario` request restarts it.
 import {test, assertEqual} from './harness.js';
 import {isNestedRunRuntimeDir} from './nested/resource-pulse-nested-unsafe-mode@local/nestedRun.js';
-import {REPLAY_SCENARIO_NAMES, ReplayGenerator} from './nested/replayGenerator.js';
+import {
+    REPLAY_SCENARIO_NAMES, ReplayGenerator, isNewScenarioRequest, parseScenarioRequest,
+} from './nested/replayGenerator.js';
 
 const RUN_DIR = '/run/user/1000/rpn.Abc12345';
 /** How many of a scenario's first values the range rows read. */
 const REPLAY_VALUES_CHECKED = 10;
+/** How many of busy's first values its walk row reads: far enough for the walk to meet both bounds many times. */
+const BUSY_WALK_VALUES_CHECKED = 630;
 /** Decimal places a pinned value is compared to: well inside a double, and far finer than any pixel. */
 const PINNED_VALUE_DECIMALS = 6;
 /**
@@ -42,13 +47,27 @@ function firstReplayValues(scenarioName, valueCount) {
  * @param {string} scenarioName - One of REPLAY_SCENARIO_NAMES.
  * @param {number} minPercent - The lowest allowed value.
  * @param {number} maxPercent - The highest allowed value.
+ * @param {number} [valueCount] - How many values to read.
  * @returns {{readCount: number, outside: number[]}} How many values were read (an empty read has nothing outside
  *     the range either, so a row asserts the count too), and those outside the range.
  */
-function cpuPercentsOutsideRange(scenarioName, minPercent, maxPercent) {
-    const cpuPercents = firstReplayValues(scenarioName, REPLAY_VALUES_CHECKED).map(values => values.cpuBusyPercent);
+function cpuPercentsOutsideRange(scenarioName, minPercent, maxPercent, valueCount = REPLAY_VALUES_CHECKED) {
+    const cpuPercents = firstReplayValues(scenarioName, valueCount).map(values => values.cpuBusyPercent);
     const outside = cpuPercents.filter(cpuPercent => !(cpuPercent >= minPercent && cpuPercent <= maxPercent));
     return {readCount: cpuPercents.length, outside};
+}
+
+/**
+ * The positions of a scenario's first CPU percents that repeat the value before them.
+ *
+ * @param {string} scenarioName - One of REPLAY_SCENARIO_NAMES.
+ * @param {number} valueCount - How many values to read.
+ * @returns {number[]} Each index whose value equals the previous one.
+ */
+function repeatedCpuPercentIndexes(scenarioName, valueCount) {
+    const cpuPercents = firstReplayValues(scenarioName, valueCount).map(values => values.cpuBusyPercent);
+    const isRepeatAt = index => index > 0 && cpuPercents[index] === cpuPercents[index - 1];
+    return cpuPercents.flatMap((_cpuPercent, index) => (isRepeatAt(index) ? [index] : []));
 }
 
 /**
@@ -81,8 +100,11 @@ test('replay generator: the first ten light CPU values lie in 2–14 %', () => {
     assertEqual(cpuPercentsOutsideRange('light', 2, 14), {readCount: REPLAY_VALUES_CHECKED, outside: []});
 });
 
-test('replay generator: the first ten busy CPU values lie in 15–90 %', () => {
-    assertEqual(cpuPercentsOutsideRange('busy', 15, 90), {readCount: REPLAY_VALUES_CHECKED, outside: []});
+test('replay generator: the first 630 busy CPU values lie in 15–90 % and each differs from the one before', () => {
+    assertEqual({
+        range: cpuPercentsOutsideRange('busy', 15, 90, BUSY_WALK_VALUES_CHECKED),
+        repeatedIndexes: repeatedCpuPercentIndexes('busy', BUSY_WALK_VALUES_CHECKED),
+    }, {range: {readCount: BUSY_WALK_VALUES_CHECKED, outside: []}, repeatedIndexes: []});
 });
 
 test('replay generator: two runs give the same sequence, the fixed seed\'s (the spike\'s first values)', () => {
@@ -107,4 +129,36 @@ test('replay generator: exactly the scenarios idle, light and busy; any other na
         }
     });
     assertEqual([REPLAY_SCENARIO_NAMES, refusedNames], [['idle', 'light', 'busy'], ['silent', 'IDLE', '', 'idle ']]);
+});
+
+test('replay request: each scenario request restarts the replay, the word playing included; a re-read does not', () => {
+    const nothingAsked = parseScenarioRequest(null);
+    const busyAsked = parseScenarioRequest('busy Ab12Cd\n');
+    const idleAsked = parseScenarioRequest('idle Ef34Gh\n');
+    const restartsByCase = {
+        'busy asked on a fresh run': isNewScenarioRequest(nothingAsked, busyAsked),
+        'the same request read again': isNewScenarioRequest(busyAsked, parseScenarioRequest('busy Ab12Cd')),
+        'busy asked again': isNewScenarioRequest(busyAsked, parseScenarioRequest('busy Ij56Kl\n')),
+        'idle asked while busy plays': isNewScenarioRequest(busyAsked, idleAsked),
+        'the file gone while idle plays': isNewScenarioRequest(idleAsked, parseScenarioRequest(null)),
+        'a bad word while busy plays': isNewScenarioRequest(busyAsked, parseScenarioRequest('turbo Mn78Op')),
+        'an empty file while busy plays': isNewScenarioRequest(busyAsked, parseScenarioRequest('')),
+        'nothing asked, read again': isNewScenarioRequest(nothingAsked, parseScenarioRequest(null)),
+    };
+    const playedByFileText = ['busy Ab12Cd\n', 'idle Ef34Gh', ' light  Qr90St \n', 'turbo Mn78Op', 'IDLE x', '']
+        .map(fileText => parseScenarioRequest(fileText).scenarioName);
+    assertEqual({restartsByCase, playedByFileText, nothingAskedPlays: nothingAsked.scenarioName}, {
+        restartsByCase: {
+            'busy asked on a fresh run': true,
+            'the same request read again': false,
+            'busy asked again': true,
+            'idle asked while busy plays': true,
+            'the file gone while idle plays': true,
+            'a bad word while busy plays': false,
+            'an empty file while busy plays': false,
+            'nothing asked, read again': false,
+        },
+        playedByFileText: ['busy', 'idle', 'light', 'busy', 'busy', 'busy'],
+        nothingAskedPlays: 'busy',
+    });
 });

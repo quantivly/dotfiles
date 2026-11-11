@@ -3210,18 +3210,27 @@ check "nested: scenario takes exactly idle, light or busy, and refuses any other
 # one requirement: replay=1 recorded, the run live (its supervisor, and its
 # gnome-shell in its session), and its replay service running. The last meets
 # them all and so writes the word, which proves the fixture otherwise good.
+# The file holds the word, then a token new to each request, so the replay
+# service restarts even for the word already playing: asked again, the same
+# word must come with a new token, and no staging file may be left behind.
 SCENARIO_RUN="$NESTED_BASE/rpn.Scenari1"
 SCENARIO_FILE="$SCENARIO_RUN/run/rp-scenario"
-# scenario_run_verdict <needle> <run values...> prints exit/needle count/the word written, or none.
+# scenario_file_summary prints the scenario file's first field and whether a request token follows it, or none.
+scenario_file_summary() {
+  local scenario_word="" request_id=""
+  [[ -e "$SCENARIO_FILE" ]] || { printf none; return 0; }
+  read -r scenario_word request_id _ <"$SCENARIO_FILE"
+  printf '%s+%s' "$scenario_word" "$([[ -n "$request_id" ]] && printf token || printf no-token)"
+}
+# scenario_run_verdict <needle> <run values...> prints exit/needle count/what the file holds.
 scenario_run_verdict() {
-  local scenario_needle="$1" written_word="none"
+  local scenario_needle="$1"
   shift
   rm -rf "$SCENARIO_RUN"
   make_run_dir "$SCENARIO_RUN" "$@"
   mkdir -p "$SCENARIO_RUN/run"
   NESTED_RUN_DIR="$SCENARIO_RUN" nested_run scenario idle
-  [[ -e "$SCENARIO_FILE" ]] && written_word="$(<"$SCENARIO_FILE")"
-  printf '%s/%s/%s' "$NESTED_EXIT" "$(grep -c -F "$scenario_needle" <<<"$NESTED_OUTPUT")" "$written_word"
+  printf '%s/%s/%s' "$NESTED_EXIT" "$(grep -c -F "$scenario_needle" <<<"$NESTED_OUTPUT")" "$(scenario_file_summary)"
 }
 live_supervisor_values=("supervisor=$$" "supervisor-starttime=$(starttime_of "$$")")
 live_shell_values=("session=$test_session_id" "gnome-shell=$fake_shell_pid"
@@ -3235,8 +3244,14 @@ scenario_run_summary+=" service-gone=$(scenario_run_verdict 'replay service is n
   "${live_supervisor_values[@]}" "${live_shell_values[@]}" "service=$NEVER_RUNNING_PID" replay=1)"
 scenario_run_summary+=" live=$(scenario_run_verdict 'replay service takes' \
   "${live_supervisor_values[@]}" "${live_shell_values[@]}" "${live_service_values[@]}" replay=1)"
-check "nested: scenario refuses a run without replay=1, one not live and one whose replay service is gone (exit 2); a live replay run gets the word in run/rp-scenario" \
-  "$scenario_run_summary" "no-replay=2/1/none not-live=2/1/none service-gone=2/1/none live=0/1/idle"
+first_scenario_request="$(cat "$SCENARIO_FILE" 2>/dev/null)"
+NESTED_RUN_DIR="$SCENARIO_RUN" nested_run scenario idle
+scenario_run_summary+=" again=$NESTED_EXIT/$(scenario_file_summary)"
+scenario_run_summary+="/$([[ -n "$first_scenario_request" && "$(cat "$SCENARIO_FILE" 2>/dev/null)" != "$first_scenario_request" ]] && printf new-request || printf same-request)"
+scenario_run_summary+=" staging-left=$(find "$SCENARIO_RUN/run" -mindepth 1 -name 'rp-scenario.*' | wc -l)"
+check "nested: scenario refuses a run without replay=1, one not live and one whose replay service is gone (exit 2); a live replay run gets the word and a new request token in run/rp-scenario" \
+  "$scenario_run_summary" \
+  "no-replay=2/1/none not-live=2/1/none service-gone=2/1/none live=0/1/idle+token again=0/idle+token/new-request staging-left=0"
 rm -rf "$SCENARIO_RUN"
 kill "$fake_shell_pid" 2>/dev/null
 wait "$fake_shell_pid" 2>/dev/null
@@ -3519,11 +3534,18 @@ replay_guard_summary="no-run=$(replay_service_verdict '' "$REPLAY_RUN_BUS")"
 replay_guard_summary+=" other-bus=$(replay_service_verdict "$PREPARED_RUN" "$LIVE_SETTINGS_BARRIER_BUS")"
 replay_guard_summary+=" address-list=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS;$LIVE_SETTINGS_BARRIER_BUS")"
 replay_guard_summary+=" bad-guid=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS,guid=0123456789abcdef,x=1")"
+# A run directory the harness could never make, with the address built from it as the bus: one that is itself an
+# address list (the run's socket, then another dead one), and one outside the shell's safe-path rule (a space).
+# Either would otherwise match its own address exactly.
+CRAFTED_REPLAY_RUN_DIR="$PREPARED_RUN/bus/session.sock;unix:path=$WIRING_TMP/crafted-replay-run"
+replay_guard_summary+=" crafted-dir=$(replay_service_verdict "$CRAFTED_REPLAY_RUN_DIR" "unix:path=$CRAFTED_REPLAY_RUN_DIR/bus/session.sock")"
+UNSAFE_REPLAY_RUN_DIR="$WIRING_TMP/unsafe replay run"
+replay_guard_summary+=" unsafe-dir=$(replay_service_verdict "$UNSAFE_REPLAY_RUN_DIR" "unix:path=$UNSAFE_REPLAY_RUN_DIR/bus/session.sock")"
 # The run's own (absent) socket, as dbus-run-session names it: accepted, so it tries to connect and fails there.
 replay_guard_summary+=" own-bus=$(replay_service_verdict "$PREPARED_RUN" "$REPLAY_RUN_BUS,guid=0123456789abcdef")"
-check "nested: replay-service.js refuses any bus but its run's private session bus, before connecting" \
+check "nested: replay-service.js refuses any bus but its run's private session bus, and any run directory the harness could not make, before connecting" \
   "$replay_guard_summary" \
-  "no-run=refused other-bus=refused address-list=refused bad-guid=refused own-bus=tried-to-connect"
+  "no-run=refused other-bus=refused address-list=refused bad-guid=refused crafted-dir=refused unsafe-dir=refused own-bus=tried-to-connect"
 
 # The two apps whose presence makes GNOME 50 check extensions.gnome.org for
 # updates (extensionSystem.js updatesSupported): masked, and copied into the run.
@@ -3971,7 +3993,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=767
+EXPECTED_ROWS=768
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

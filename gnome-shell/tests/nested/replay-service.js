@@ -8,13 +8,15 @@
 //   come from the given extension's own lib/protocol.js, and the tick and the history length from its
 //   lib/constants.js, so it cannot drift from ResourcePulse1. It answers GetState, accepts WatchDetail and
 //   UnwatchDetail, and publishes one Sample every SAMPLE_INTERVAL_SECONDS once it owns the name, watched or not.
-// - The scenario is the one word in $XDG_RUNTIME_DIR/rp-scenario (the run's run/rp-scenario, which the harness's
-//   `scenario` request writes), read on every tick; with no such file, or a word that is not a scenario, busy plays.
-//   A changed word starts that scenario's sequence again from the fixed seed, refills both histories from it and
-//   numbers the Samples from 1 again, which makes the client re-read GetState, as after a real service restart.
+// - The scenario is the first word of $XDG_RUNTIME_DIR/rp-scenario (the run's run/rp-scenario, which the harness's
+//   `scenario` request writes with a token new to each request), read on every tick; with no such file, or a word
+//   that is not a scenario, busy plays. Each new request, the word already playing included, starts that scenario's
+//   sequence again from the fixed seed, refills both histories from it and numbers the Samples from 1 again, which
+//   makes the client re-read GetState, as after a real service restart. Reading the same request again does not.
 // - It reads that word and nothing else: no /proc and no cgroup file.
 // - It serves only on the private session bus of the run named by RESOURCE_PULSE_NESTED_DIR, and refuses any other
-//   before connecting: it owns the real service's bus name, so it must never answer on the live session bus.
+//   before connecting: it owns the real service's bus name, so it must never answer on the live session bus. That
+//   directory must be one the harness could have made, and the address never a list.
 //
 // Usage (inside a run's environment): gjs -m replay-service.js <extension dir>
 // Exit status: 0 when the bus connection closes after the name was owned; 1 when it cannot connect, cannot export
@@ -24,7 +26,10 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import System from 'system';
 
-import {REPLAY_SCENARIO_NAMES, REPLAY_TOTAL_MEMORY_BYTES, ReplayGenerator} from './replayGenerator.js';
+import {
+    DEFAULT_REPLAY_SCENARIO_NAME, REPLAY_TOTAL_MEMORY_BYTES, ReplayGenerator, isNewScenarioRequest,
+    parseScenarioRequest,
+} from './replayGenerator.js';
 
 const LOG_PREFIX = 'replay-service:';
 const EXIT_STATUS_SUCCESS = 0;
@@ -37,13 +42,15 @@ const SESSION_BUS_ADDRESS_VARIABLE = 'DBUS_SESSION_BUS_ADDRESS';
 const PRIVATE_SESSION_BUS_SOCKET_RELATIVE_PATH = 'bus/session.sock';
 /** All dbus-daemon adds after the address it prints: its guid. */
 const DBUS_GUID_SUFFIX_PATTERN = /^,guid=[0-9a-f]+$/;
+/** A run directory the harness could have made: scripts/resource-pulse-nested.sh's RUN_DIR_SAFE_PATH_PATTERN. */
+const RUN_DIR_SAFE_PATH_PATTERN = /^\/[A-Za-z0-9/._-]+$/;
+/** What separates the addresses of a D-Bus address list, which GLib would try in turn. */
+const DBUS_ADDRESS_LIST_SEPARATOR = ';';
 /** The extension's two modules the service speaks through, relative to the extension directory. */
 const EXTENSION_CONSTANTS_RELATIVE_PATH = 'lib/constants.js';
 const EXTENSION_PROTOCOL_RELATIVE_PATH = 'lib/protocol.js';
 /** The scenario word's file, in the runtime dir. */
 const SCENARIO_FILE_NAME = 'rp-scenario';
-/** What plays until a scenario is asked for. */
-const DEFAULT_SCENARIO_NAME = 'busy';
 /** wrapJSObject calls <Method><suffix>(parameters, invocation) for a method it finds no plain handler for. */
 const INVOCATION_HANDLER_SUFFIX = 'Async';
 /** GetState's reply as a GLib.Variant type: one string, the state JSON. */
@@ -71,8 +78,9 @@ const TOP_MEMORY_APP_GIBIBYTES = 15.7;
 
 /**
  * Succeeds only for the address of the run's own private session bus, as dbus-run-session hands it over: exactly
- * the run's socket, with at most dbus-daemon's guid after it. Anything else is refused, a list of addresses (which
- * GLib would try in turn) included.
+ * the run's socket, with at most dbus-daemon's guid after it. The run directory must pass the harness's own rule
+ * first: one that does not (holding a ';' or a space, say) could build an address list that matches itself.
+ * Anything else is refused, a list of addresses (which GLib would try in turn) included.
  *
  * @param {string|null} address - The session bus address in the environment.
  * @param {string|null} nestedRunDir - The run directory in the environment.
@@ -80,6 +88,12 @@ const TOP_MEMORY_APP_GIBIBYTES = 15.7;
  */
 function isRunPrivateSessionBusAddress(address, nestedRunDir) {
     if (!address || !nestedRunDir)
+        return false;
+    if (!RUN_DIR_SAFE_PATH_PATTERN.test(nestedRunDir))
+        return false;
+    // Never a list. The rule above already keeps ';' out of the directory, and so out of the run's address; this
+    // stays so that a wider rule could not let a list through.
+    if (address.includes(DBUS_ADDRESS_LIST_SEPARATOR))
         return false;
     const runBusAddress = `unix:path=${nestedRunDir}/${PRIVATE_SESSION_BUS_SOCKET_RELATIVE_PATH}`;
     if (!address.startsWith(runBusAddress))
@@ -156,6 +170,7 @@ class ReplayService {
         this._memoryHistory = [];
         this._latestSnapshot = null;
         this._latestSampledAtUsec = null;
+        this._lastScenarioRequest = null;
         this._lastScenarioProblem = null;
         this._exportedObject = Gio.DBusExportedObject.wrapJSObject(protocol.RESOURCE_PULSE_INTERFACE_XML, {
             [`${protocol.GET_STATE_METHOD_NAME}${INVOCATION_HANDLER_SUFFIX}`]: (_parameters, invocation) =>
@@ -173,7 +188,8 @@ class ReplayService {
      * @throws {GLib.Error} When the object cannot be exported.
      */
     start() {
-        this._restartWithScenario(this._readScenarioName());
+        this._lastScenarioRequest = this._readScenarioRequest();
+        this._restartWithScenario(this._lastScenarioRequest.scenarioName);
         this._exportedObject.export(this._connection, this._protocol.RESOURCE_PULSE_OBJECT_PATH);
         this._connection.connect('closed', () => runWithoutThrowing('the connection-closed handler',
             () => this._quit('the bus connection closed', EXIT_STATUS_SUCCESS)));
@@ -252,14 +268,16 @@ class ReplayService {
     }
 
     /**
-     * Restarts on a changed scenario word, then appends the next snapshot and sends it as one Sample.
+     * Restarts on a new scenario request (isNewScenarioRequest), then appends the next snapshot and sends it as one
+     * Sample.
      *
      * @returns {void}
      */
     _publishNextSample() {
-        const scenarioName = this._readScenarioName();
-        if (scenarioName !== this._generator.scenarioName)
-            this._restartWithScenario(scenarioName);
+        const scenarioRequest = this._readScenarioRequest();
+        if (isNewScenarioRequest(this._lastScenarioRequest, scenarioRequest))
+            this._restartWithScenario(scenarioRequest.scenarioName);
+        this._lastScenarioRequest = scenarioRequest;
         const snapshot = this._nextSnapshot();
         const appendedHistory = this._appendSnapshot(snapshot);
         this._sequence += 1;
@@ -272,12 +290,12 @@ class ReplayService {
     }
 
     /**
-     * The scenario named in the run's scenario file; the default while there is none, or it names none. A problem
-     * with the file is logged once, until the file names a scenario again.
+     * What the run's scenario file asks for (parseScenarioRequest): the default while there is none, or it names
+     * none. A problem with the file is logged once, until the file names a scenario again.
      *
-     * @returns {string} One of REPLAY_SCENARIO_NAMES.
+     * @returns {import('./replayGenerator.js').ScenarioRequest} The request read.
      */
-    _readScenarioName() {
+    _readScenarioRequest() {
         const scenarioPath = GLib.build_filenamev([GLib.get_user_runtime_dir(), SCENARIO_FILE_NAME]);
         let scenarioBytes;
         try {
@@ -286,15 +304,14 @@ class ReplayService {
             // No file is the state before the first `scenario` request; anything else is worth a line.
             if (!error.matches?.(GLib.FileError, GLib.FileError.NOENT))
                 this._reportScenarioProblem(`cannot read ${scenarioPath}: ${error.message}`);
-            return DEFAULT_SCENARIO_NAME;
+            return parseScenarioRequest(null);
         }
-        const scenarioText = new TextDecoder().decode(scenarioBytes).trim();
-        if (!REPLAY_SCENARIO_NAMES.includes(scenarioText)) {
-            this._reportScenarioProblem(`'${scenarioText}' in ${scenarioPath} is not a scenario`);
-            return DEFAULT_SCENARIO_NAME;
-        }
-        this._lastScenarioProblem = null;
-        return scenarioText;
+        const scenarioRequest = parseScenarioRequest(new TextDecoder().decode(scenarioBytes));
+        if (scenarioRequest.rejectedText !== null)
+            this._reportScenarioProblem(`'${scenarioRequest.rejectedText}' in ${scenarioPath} names no scenario`);
+        else
+            this._lastScenarioProblem = null;
+        return scenarioRequest;
     }
 
     /**
@@ -307,7 +324,7 @@ class ReplayService {
         if (problem === this._lastScenarioProblem)
             return;
         this._lastScenarioProblem = problem;
-        console.warn(`${LOG_PREFIX} ${problem}; playing ${DEFAULT_SCENARIO_NAME}`);
+        console.warn(`${LOG_PREFIX} ${problem}; playing ${DEFAULT_REPLAY_SCENARIO_NAME}`);
     }
 
     /**
