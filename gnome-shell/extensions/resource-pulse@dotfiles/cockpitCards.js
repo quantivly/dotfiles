@@ -415,14 +415,28 @@ class CockpitCardBase extends St.BoxLayout {
     }
 
     /**
-     * Shows the card's data or its no-data line, never both.
+     * Shows the card's data or its no-data line, never both. No leave-event reaches a row hidden under the pointer
+     * with the box that holds it, so hiding the data while one of this card's rows is hovered hides the tooltip. The
+     * tooltip is shared and a no-data line is redrawn on every update, so it is hidden only as the box goes from shown
+     * to hidden, and only for a row of this card.
      *
      * @param {boolean} isDataShown - True to show the data.
      * @returns {void}
      */
     _setDataShown(isDataShown) {
+        if (!isDataShown && this._contentBox.visible && this._hasHoveredRow())
+            this._tooltip.hide();
         this._contentBox.visible = isDataShown;
         this._noDataLabel.visible = !isDataShown;
+    }
+
+    /**
+     * Whether one of the card's shown rows is under the pointer (a row hidden already may keep a stale hover).
+     *
+     * @returns {boolean} True when a visible row is hovered.
+     */
+    _hasHoveredRow() {
+        return this._rows.some(row => row.actor.visible && row.actor.hover);
     }
 
     /**

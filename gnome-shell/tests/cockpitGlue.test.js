@@ -348,7 +348,7 @@ test('cockpitCards.js: each card builds the rows it can show (APPS_CARD_ROW_LIMI
         cardMethodBody('SessionsCockpitCard', '_renderSessions('),
         cardMethodBody('SessionsCockpitCard', '_showHeader('),
         ...['_showRow(', '_showRowIcon(', '_showRowState(', '_showRowBar(', '_hideRowsFrom(', '_renderNoData(',
-            '_setDataShown('].map(declaration => cardMethodBody('CockpitCardBase', declaration)),
+            '_setDataShown(', '_hasHoveredRow('].map(declaration => cardMethodBody('CockpitCardBase', declaration)),
         cardMethodBody('SessionsCockpitCard', '_setDataShown('),
         ...['setLabelText(', 'setOptionalLabelText(', 'setStyleClass(', 'appRowContent(', 'connectionRowContent(',
             'sessionRowContent('].map(functionName => methodBody(source, `function ${functionName}`)),
@@ -748,6 +748,29 @@ test('cockpitCards.js: hiding a row under the pointer hides the tooltip (no leav
         '}',
         '}',
     ]));
+
+test('cockpitCards.js: hiding a card\'s data (its no-data or herdr line) while one of its rows is under the pointer ' +
+    'hides the tooltip; a box hidden already, or no row of this card hovered, leaves the shared tooltip alone', () =>
+    assertEqual({
+        setDataShown: statementsOf(cardMethodBody('CockpitCardBase', '_setDataShown(')),
+        hasHoveredRow: statementsOf(cardMethodBody('CockpitCardBase', '_hasHoveredRow(')),
+        noDataGoesThroughIt: occurrenceCount(cardMethodBody('CockpitCardBase', '_renderNoData('),
+            'this._setDataShown(false);'),
+        sessionsOverrideGoesThroughIt: statementsOf(cardMethodBody('SessionsCockpitCard', '_setDataShown('))[1],
+    }, {
+        setDataShown: [
+            '_setDataShown(isDataShown) {',
+            'if (!isDataShown && this._contentBox.visible && this._hasHoveredRow())',
+            'this._tooltip.hide();',
+            'this._contentBox.visible = isDataShown;',
+            'this._noDataLabel.visible = !isDataShown;',
+            '}',
+        ],
+        hasHoveredRow: ['_hasHoveredRow() {', 'return this._rows.some(row => row.actor.visible && row.actor.hover);',
+            '}'],
+        noDataGoesThroughIt: 1,
+        sessionsOverrideGoesThroughIt: 'super._setDataShown(isDataShown);',
+    }));
 
 test('cockpitCards.js: no card paints itself (no vfunc_paint or vfunc_paint_node in the code: ruling D12), so each ' +
     'is drawn only through the offscreen texture the base asks for', () => {
