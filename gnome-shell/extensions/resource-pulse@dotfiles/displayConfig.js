@@ -1,6 +1,7 @@
 // The cockpit's read of Mutter's display configuration: org.gnome.Mutter.DisplayConfig's GetCurrentState, whose
 // monitors carry the vendor and product the cockpit's monitor rule names (lib/cockpitMonitor.js reads the reply). Gio
-// and GLib only (no Shell, St, Clutter or Meta), so it runs under plain gjs, with its connection injectable.
+// and GLib only (no Shell, St, Clutter or Meta), so it runs under plain gjs, with its connection injectable, or, as the
+// shell makes it (with none), the fetch of the session bus's connection (Gio.bus_get and Gio.bus_get_finish).
 //
 // It runs inside gnome-shell, which is itself the process that answers (Mutter owns the name), so:
 // - the call is asynchronous, with DBUS_CALL_TIMEOUT_MS, never synchronous: a synchronous call would block the very
@@ -39,16 +40,25 @@ const CALLBACK_FAILURE_LOG_KEY = 'display config callback failed';
 /** Reads DisplayConfig's state when asked, handing on the latest answer. */
 export class DisplayConfigReader {
     /**
-     * @param {object} options - Everything injectable, so the rows can run it on a fake connection.
+     * @param {object} options - Everything injectable, so the rows can run it on a fake connection or a fake fetch.
      * @param {Gio.BusType} [options.busType] - The bus whose connection is fetched when none is given: the session bus.
      * @param {Gio.DBusConnection|null} [options.connection] - A connection to use instead of fetching busType's.
+     * @param {Function} [options.busGet] - Starts the connection's fetch, as Gio.bus_get(busType, cancellable,
+     *     callback) does: Gio.bus_get unless a row passes a fake.
+     * @param {Function} [options.busGetFinish] - Ends it, as Gio.bus_get_finish(result) does, giving the connection or
+     *     throwing: Gio.bus_get_finish unless a row passes a fake.
      * @param {import('./lib/errorLog.js').RateLimitedLogger} options.errorLog - Where failures go.
      * @param {(state: *) => void} options.onStateRead - Called with the latest request's answer: the unpacked reply,
      *     or null when the call failed.
      */
-    constructor({busType = Gio.BusType.SESSION, connection = null, errorLog, onStateRead}) {
+    constructor({
+        busType = Gio.BusType.SESSION, connection = null, busGet = Gio.bus_get, busGetFinish = Gio.bus_get_finish,
+        errorLog, onStateRead,
+    }) {
         this._busType = busType;
         this._connection = connection;
+        this._busGet = busGet;
+        this._busGetFinish = busGetFinish;
         this._errorLog = errorLog;
         this._onStateRead = onStateRead;
         // Cancels the call in flight and the connection's fetch, at destroy().
@@ -76,7 +86,7 @@ export class DisplayConfigReader {
         if (this._isConnecting)
             return;
         this._isConnecting = true;
-        Gio.bus_get(this._busType, this._cancellable, (_source, result) => this._onConnected(result));
+        this._busGet(this._busType, this._cancellable, (_source, result) => this._onConnected(result));
     }
 
     /**
@@ -92,7 +102,8 @@ export class DisplayConfigReader {
     }
 
     /**
-     * Takes the fetched connection and makes the latest request on it; a failed fetch hands on null.
+     * Takes the fetched connection and makes the latest request on it; a failed fetch hands on null, logged, and the
+     * next request fetches again. After destroy() it does nothing, whatever the fetch gave.
      *
      * @param {Gio.AsyncResult} result - The fetch's result.
      * @returns {void}
@@ -102,7 +113,7 @@ export class DisplayConfigReader {
         if (this._isDestroyed)
             return;
         try {
-            this._connection = Gio.bus_get_finish(result);
+            this._connection = this._busGetFinish(result);
         } catch (error) {
             this._logFailure(`cannot reach DisplayConfig on the bus: ${describeError(error)}`, CONNECT_FAILURE_LOG_KEY);
             this._handOn(this._latestRequestNumber, null);

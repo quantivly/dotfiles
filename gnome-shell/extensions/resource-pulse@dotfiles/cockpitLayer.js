@@ -35,7 +35,7 @@ import {AppsCockpitCard, ConnectionsCockpitCard, SessionsCockpitCard, SystemCock
 import {CockpitTooltip} from './cockpitTooltip.js';
 import {
     COCKPIT_APPS_CARD_ID, COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS, COCKPIT_CLOCK_LABEL_FORMAT,
-    COCKPIT_SOURCE_NAMES_BY_CARD_ID,
+    COCKPIT_SOURCE_NAMES_BY_CARD_ID, MICROSECONDS_PER_SECOND,
 } from './lib/constants.js';
 import {noDataText} from './lib/cockpitFormat.js';
 import {cockpitGridGeometry, drawnCockpitCardIds, drawnCockpitCells} from './lib/cockpitGrid.js';
@@ -48,7 +48,6 @@ import {runEveryStep} from './lib/teardown.js';
 const LAYER_STYLE_CLASS = 'rp-cockpit-layer';
 const CAPTION_STYLE_CLASS = 'rp-cockpit-caption';
 const APPLY_FALLBACK_TIMEOUT_NAME = '[resource-pulse] draw the pending cockpit sources';
-const USEC_PER_SECOND = 1_000_000;
 /** What "no data since" names for a stamp GLib cannot place as a local time (out of GLib.DateTime's range). */
 const UNPLACEABLE_CLOCK_LABEL = '';
 
@@ -79,7 +78,7 @@ const DATA_CARD_UPDATERS_BY_ID = Object.freeze({
  * @returns {string} 'HH:MM', or UNPLACEABLE_CLOCK_LABEL for a stamp GLib cannot place.
  */
 function formatClockLabel(realUsec) {
-    const unixSeconds = Math.floor(realUsec / USEC_PER_SECOND);
+    const unixSeconds = Math.floor(realUsec / MICROSECONDS_PER_SECOND);
     const localTime = GLib.DateTime.new_from_unix_local(unixSeconds);
     return localTime?.format(COCKPIT_CLOCK_LABEL_FORMAT) ?? UNPLACEABLE_CLOCK_LABEL;
 }
@@ -537,15 +536,16 @@ class CockpitLayer extends St.Widget {
     }
 
     /**
-     * Logs a failure of the layer's own, rate-limited.
+     * Logs a failure of the layer's own, rate-limited by its context (the template key), so one failure repeating with
+     * another error text or stack is still written once per interval.
      *
-     * @param {string} context - What failed.
+     * @param {string} context - What failed, without the error.
      * @param {*} error - What it threw.
      * @returns {void}
      */
     _logFailure(context, error) {
         const errorText = describeErrorWithStack(error);
-        this._errorLog.log(`${context}: ${errorText}`);
+        this._errorLog.log(`${context}: ${errorText}`, context);
     }
 
     /**

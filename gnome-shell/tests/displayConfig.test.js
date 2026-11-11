@@ -70,21 +70,26 @@ class FakeConnection {
     }
 
     /**
+     * Answers a call; a call never made answers nothing, so the row's assertion (each asserts the calls made or what
+     * their answers did) names it.
+     *
      * @param {number} callIndex - Which call.
      * @param {GLib.Variant} reply - Its reply.
      * @returns {void}
      */
     answer(callIndex, reply) {
-        this.calls[callIndex].callback(this, {reply, error: null});
+        this.calls[callIndex]?.callback(this, {reply, error: null});
     }
 
     /**
+     * Fails a call; a call never made fails nothing, as answer() does.
+     *
      * @param {number} callIndex - Which call.
      * @param {Error} error - Its failure.
      * @returns {void}
      */
     fail(callIndex, error) {
-        this.calls[callIndex].callback(this, {reply: null, error});
+        this.calls[callIndex]?.callback(this, {reply: null, error});
     }
 }
 
@@ -105,6 +110,83 @@ function makeReaderFixture({onStateRead = null} = {}) {
         onStateRead: onStateRead ?? (state => statesRead.push(state)),
     });
     return {reader, connection, statesRead, logged};
+}
+
+/**
+ * A fake bus fetch, for a reader made with no connection (as extension.js makes it): records each fetch as
+ * Gio.bus_get takes it; a row completes or fails it by index, and busGetFinish gives what that completion carried.
+ */
+class FakeBusFetch {
+    constructor() {
+        /** @type {Array<{busType: Gio.BusType, cancellable: Gio.Cancellable, callback: Function}>} Every fetch. */
+        this.fetches = [];
+    }
+
+    /**
+     * Records a fetch, as Gio.bus_get takes it.
+     *
+     * @param {Gio.BusType} busType - The bus.
+     * @param {Gio.Cancellable} cancellable - Its cancellable.
+     * @param {(source: null, result: object) => void} callback - Called when the fetch completes.
+     * @returns {void}
+     */
+    busGet(busType, cancellable, callback) {
+        this.fetches.push({busType, cancellable, callback});
+    }
+
+    /**
+     * What Gio.bus_get_finish gives for a fake result: the connection, or the error thrown.
+     *
+     * @param {{connection: FakeConnection|null, error: Error|null}} result - What connect() or fail() passed.
+     * @returns {FakeConnection} The connection.
+     * @throws {Error} The failure.
+     */
+    busGetFinish(result) {
+        if (result.error !== null)
+            throw result.error;
+        return result.connection;
+    }
+
+    /**
+     * Completes a fetch with a connection; a fetch never made completes nothing, so the row's assertion names it.
+     *
+     * @param {number} fetchIndex - Which fetch.
+     * @param {FakeConnection} connection - The connection it gives.
+     * @returns {void}
+     */
+    connect(fetchIndex, connection) {
+        this.fetches[fetchIndex]?.callback(null, {connection, error: null});
+    }
+
+    /**
+     * Fails a fetch; a fetch never made fails nothing, so the row's assertion names it.
+     *
+     * @param {number} fetchIndex - Which fetch.
+     * @param {Error} error - Its failure.
+     * @returns {void}
+     */
+    fail(fetchIndex, error) {
+        this.fetches[fetchIndex]?.callback(null, {connection: null, error});
+    }
+}
+
+/**
+ * A reader with no connection, which fetches its own through a fake bus fetch, recording what it hands on and logs.
+ *
+ * @returns {{reader: object, busFetch: FakeBusFetch, connection: FakeConnection, statesRead: Array<*>,
+ *     logged: string[]}} The fixture; connection is what the fetch gives when a row completes it.
+ */
+function makeFetchingReaderFixture() {
+    const busFetch = new FakeBusFetch();
+    const statesRead = [];
+    const logged = [];
+    const reader = new displayConfigModule.DisplayConfigReader({
+        busGet: (busType, cancellable, callback) => busFetch.busGet(busType, cancellable, callback),
+        busGetFinish: result => busFetch.busGetFinish(result),
+        errorLog: new RateLimitedLogger({nowUsec: () => START_USEC, write: line => logged.push(line)}),
+        onStateRead: state => statesRead.push(state),
+    });
+    return {reader, busFetch, connection: new FakeConnection(), statesRead, logged};
 }
 
 /** @returns {GLib.Variant} GetCurrentState's reply holding the fixture's state. */
@@ -192,4 +274,60 @@ test('displayConfig: a callback that throws is logged, never thrown out of the D
     }
     assertEqual({escapedError, logLines: logged.length, namesTheFailure: logged[0]?.includes('placement failed')},
         {escapedError: null, logLines: 1, namesTheFailure: true});
+});
+
+test('displayConfig: with no connection (the shell\'s path) requests made while the session bus is being fetched ' +
+    'wait for it: one fetch with the reader\'s cancellable, then one call for the latest request once connected; a ' +
+    'request after that calls at once, fetching nothing', () => {
+    const {reader, busFetch, connection, statesRead} = makeFetchingReaderFixture();
+    reader.requestState();
+    reader.requestState();
+    const callsWhileConnecting = connection.calls.length;
+    busFetch.connect(0, connection);
+    connection.answer(0, currentStateReply());
+    reader.requestState();
+    const [fetch] = busFetch.fetches;
+    assertEqual({
+        fetchCount: busFetch.fetches.length,
+        fetchedBus: fetch?.busType,
+        isCancellable: fetch?.cancellable instanceof Gio.Cancellable,
+        callsWhileConnecting,
+        callCount: connection.calls.length,
+        statesRead,
+    }, {
+        fetchCount: 1, fetchedBus: Gio.BusType.SESSION, isCancellable: true, callsWhileConnecting: 0, callCount: 2,
+        statesRead: [DISPLAY_CONFIG_STATE],
+    });
+});
+
+test('displayConfig: destroy() while the session bus is being fetched cancels the fetch; a fetch that completes ' +
+    'anyway then calls nothing, hands on nothing and logs nothing', () => {
+    const {reader, busFetch, connection, statesRead, logged} = makeFetchingReaderFixture();
+    reader.requestState();
+    reader.destroy();
+    const isCancelled = busFetch.fetches[0]?.cancellable.is_cancelled();
+    busFetch.connect(0, connection);
+    assertEqual({isCancelled, callCount: connection.calls.length, statesRead, logged},
+        {isCancelled: true, callCount: 0, statesRead: [], logged: []});
+});
+
+test('displayConfig: a failed fetch of the session bus hands on null once (so the monitor rule falls back) and is ' +
+    'logged; a later request fetches the bus again', () => {
+    const {reader, busFetch, connection, statesRead, logged} = makeFetchingReaderFixture();
+    reader.requestState();
+    busFetch.fail(0, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.FAILED, 'Cannot autolaunch D-Bus'));
+    const statesReadAfterTheFailure = [...statesRead];
+    reader.requestState();
+    busFetch.connect(1, connection);
+    connection.answer(0, currentStateReply());
+    assertEqual({
+        statesReadAfterTheFailure,
+        logLines: logged.length,
+        namesTheFetch: logged[0]?.includes('cannot reach DisplayConfig on the bus'),
+        fetchCount: busFetch.fetches.length,
+        statesRead,
+    }, {
+        statesReadAfterTheFailure: [null], logLines: 1, namesTheFetch: true, fetchCount: 2,
+        statesRead: [null, DISPLAY_CONFIG_STATE],
+    });
 });

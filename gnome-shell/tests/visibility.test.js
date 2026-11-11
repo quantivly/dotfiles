@@ -156,8 +156,11 @@ const COVER_SIGNAL_RECEIVERS = new Set([
 // The client's two kinds of listener, counted apart: a history listener added must be removed as one, since
 // removeListener on its id is a silent no-op on the other kind's map. A snapshot listener is the pulse client's
 // (extension.js's this._client, or client in teardown); the cockpit client's listeners (this._cockpitClient, or
-// cockpitClient in teardown) are its one kind, counted apart too.
+// cockpitClient in teardown) are its one kind, counted apart too. Both are also counted on any receiver, so a listener
+// added through another name (an alias, a new client) cannot go unseen.
 const ADD_HISTORY_LISTENER_PATTERN = /\.addHistoryListener\(/g;
+const ADD_ANY_LISTENER_PATTERN = /\.addListener\(/g;
+const REMOVE_ANY_LISTENER_PATTERN = /\.removeListener\(/g;
 const REMOVE_HISTORY_LISTENER_PATTERN = /\.removeHistoryListener\(/g;
 const ADD_SNAPSHOT_LISTENER_PATTERN = /(?<![\w.])(?:this\._)?client\??\.addListener\(/g;
 const REMOVE_SNAPSHOT_LISTENER_PATTERN = /(?<![\w.])(?:this\._)?client\??\.removeListener\(/g;
@@ -889,6 +892,8 @@ test('extension.js: while a card is frozen every tick, whether or not the backst
             .filter(line => line === `${METHOD_STATEMENT_INDENT}this._repaintFrozenCardsIfDue();`).length,
         afterTheFallbackCheck: lineAfter(timeoutLines, 'this._syncCardCover();'),
         decides: repaintBody.includes('const dueCardIds = frozenCardsDueRepaint({'),
+        // Only the due cards: iterating every stamp would repaint every frozen card on every tick.
+        iteratesTheDueCards: statementCount(repaintBody, 'for (const cardId of dueCardIds) {'),
         readsTheFrozenStamps: statementCount(repaintBody,
             'frozenPaintedAtUsecByCardId: this._frozenCardPaintedAtUsecByCardId,'),
         recordsEachRepaint: statementCount(repaintBody, 'this._frozenCardPaintedAtUsecByCardId[cardId] = nowUsec;'),
@@ -901,6 +906,7 @@ test('extension.js: while a card is frozen every tick, whether or not the backst
         everyTickAsksOutsideTheBackstop: 1,
         afterTheFallbackCheck: 'this._repaintFrozenCardsIfDue();',
         decides: true,
+        iteratesTheDueCards: 1,
         readsTheFrozenStamps: 1,
         recordsEachRepaint: 1,
         repaintsEachDueCard: 1,
@@ -943,6 +949,8 @@ test('extension.js checks the cover on a restack, a window created or leaving a 
         historyListenersRemovedOnTeardown: countMatches(tearDownBody, REMOVE_HISTORY_LISTENER_PATTERN),
         snapshotListenersRemovedOnTeardown: countMatches(tearDownBody, REMOVE_SNAPSHOT_LISTENER_PATTERN),
         cockpitListenersRemovedOnTeardown: countMatches(tearDownBody, REMOVE_COCKPIT_LISTENER_PATTERN),
+        listenersAddedOnAnyReceiver: countMatches(extensionSource, ADD_ANY_LISTENER_PATTERN),
+        listenersRemovedOnTeardownFromAnyReceiver: countMatches(tearDownBody, REMOVE_ANY_LISTENER_PATTERN),
     }, {
         connectedSignals: [
             'Main.layoutManager monitors-changed',
@@ -973,6 +981,8 @@ test('extension.js checks the cover on a restack, a window created or leaving a 
         historyListenersRemovedOnTeardown: 1,
         snapshotListenersRemovedOnTeardown: 0,
         cockpitListenersRemovedOnTeardown: 1,
+        listenersAddedOnAnyReceiver: 1,
+        listenersRemovedOnTeardownFromAnyReceiver: 1,
     });
 });
 
@@ -997,8 +1007,11 @@ test('extension.js: _placeCard() places the v2 card top right only while no cock
 
 test('extension.js: _syncCardCover() freezes each covered card and unfreezes each visible one, records whether any ' +
     'can be seen and which, restarts the backstop\'s count, sets the layer\'s interactivity, follows the covering ' +
-    'windows, and updates the fallback timeout, the detail watch and the cockpit\'s watch', () => {
+    'windows, and updates the fallback timeout, the detail watch and the cockpit\'s watch; each loop freezes the ' +
+    'cards it names as its pair says (the covered frozen, the visible unfrozen)', () => {
     const syncBody = declarationBody(readExtensionFile('extension.js'), '_syncCardCover() {');
+    const syncLines = trimmedLines(syncBody);
+    const lineAfter = (lines, line) => (lines.includes(line) ? lines[lines.indexOf(line) + 1] : null);
     const statements = [
         'const {isCovered, coveredCardIds, visibleCardIds, coveringWindows, isCockpitInteractive} =',
         'this._readCardCover();',
@@ -1015,7 +1028,15 @@ test('extension.js: _syncCardCover() freezes each covered card and unfreezes eac
         'this._syncDetailWatch();',
         'this._syncCockpitWatch();',
     ];
-    assertEqual(statements.map(statement => statementCount(syncBody, statement)), statements.map(() => 1));
+    assertEqual({
+        counts: statements.map(statement => statementCount(syncBody, statement)),
+        coveredLoopFreezes: lineAfter(syncLines, 'for (const cardId of coveredCardIds)'),
+        visibleLoopUnfreezes: lineAfter(syncLines, 'for (const cardId of visibleCardIds)'),
+    }, {
+        counts: statements.map(() => 1),
+        coveredLoopFreezes: 'this._setCardFrozen(cardId, true);',
+        visibleLoopUnfreezes: 'this._setCardFrozen(cardId, false);',
+    });
 });
 
 test('extension.js: the bursty window-manager, display and covering-window triggers queue the one coalesced cover ' +

@@ -791,9 +791,14 @@ test('cockpitCards.js: no card paints itself (no vfunc_paint or vfunc_paint_node
         paintVfuncs: occurrenceCount(source, 'vfunc_paint'),
         offscreenRedirectUses: occurrenceCount(source, 'offscreen_redirect'),
         offscreenRedirectPropertyUses: occurrenceCount(source, 'offscreenRedirect'),
+        // A kebab-case 'offscreen-redirect' constructor property matches neither needle above, but takes the enum.
+        offscreenRedirectEnumUses: occurrenceCount(source, 'OffscreenRedirect'),
         baseRedirects: occurrenceCount(classBody(source, 'CockpitCardBase'),
             'this.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);'),
-    }, {paintVfuncs: 0, offscreenRedirectUses: 1, offscreenRedirectPropertyUses: 0, baseRedirects: 1});
+    }, {
+        paintVfuncs: 0, offscreenRedirectUses: 1, offscreenRedirectPropertyUses: 0, offscreenRedirectEnumUses: 1,
+        baseRedirects: 1,
+    });
 });
 
 test('cockpitCards.js: a primary-button release on the system card opens Resources; the system card draws no ' +
@@ -931,12 +936,9 @@ test('cockpitLayer.js: a layout change keeps the cards it still names (never rem
     'those it no longer names and makes only the missing ones, each taking the layer\'s interactivity, which ' +
     'setInteractive forwards to every card on a change; cards are made for exactly COCKPIT_DRAWN_CARD_IDS', () => {
     const source = codeOf(LAYER_SOURCE_FILE);
-    const syncStatements = layerMethodStatements('_syncCards(');
     const makersBlock = source.split('const CARD_MAKERS_BY_ID = Object.freeze({')[1]?.split('\n});')[0] ?? '';
     assertEqual({
-        keeps: syncStatements.slice(1, 3),
-        destroysTheRest: syncStatements.includes('card.destroy();'),
-        makesTheMissing: syncStatements.slice(-3),
+        sync: layerMethodStatements('_syncCards('),
         added: layerMethodStatements('_addCard(').slice(-2),
         setInteractive: layerMethodStatements('setInteractive('),
         makerIds: [...makersBlock.matchAll(/^ {4}(\w+): /gm)].map(([, cardId]) => cardId),
@@ -944,9 +946,20 @@ test('cockpitLayer.js: a layout change keeps the cards it still names (never rem
             'new SessionsCockpitCard({tooltip, onRowActivated: onSessionActivated})'),
         systemAdopts: occurrenceCount(makersBlock, 'new SystemCockpitCard({pulseCard, tooltip})'),
     }, {
-        keeps: ['if (cardIds.includes(cardId))', 'continue;'],
-        destroysTheRest: true,
-        makesTheMissing: ['if (!this._cardsById.has(cardId))', 'this._addCard(cardId);', '}'],
+        // A card destroyed is forgotten (so drawnCardIds never names it, ruling D21) before it is destroyed.
+        sync: [
+            'for (const [cardId, card] of [...this._cardsById]) {',
+            'if (cardIds.includes(cardId))',
+            'continue;',
+            'this._cardsById.delete(cardId);',
+            'this._frozenCardIds.delete(cardId);',
+            'card.destroy();',
+            '}',
+            'for (const cardId of cardIds) {',
+            'if (!this._cardsById.has(cardId))',
+            'this._addCard(cardId);',
+            '}',
+        ],
         added: ['this.add_child(card);', 'card.setInteractive(this._isInteractive);'],
         setInteractive: [
             'if (isInteractive === this._isInteractive)', 'return;', 'this._isInteractive = isInteractive;',
@@ -958,15 +971,20 @@ test('cockpitLayer.js: a layout change keeps the cards it still names (never rem
 });
 
 test('cockpitLayer.js: the layer draws through no offscreen texture of its own (one texture per card, never one for ' +
-    'the layer), overrides no paint vfunc and has no drawing area', () => {
+    'the layer: no offscreen redirect in snake or camel case, nor the enum a kebab-case \'offscreen-redirect\' ' +
+    'property would take), overrides no paint vfunc and has no drawing area', () => {
     const source = codeOf(LAYER_SOURCE_FILE);
     assertEqual({
         offscreenRedirect: occurrenceCount(source, 'offscreen_redirect'),
         offscreenRedirectProperty: occurrenceCount(source, 'offscreenRedirect'),
+        offscreenRedirectEnum: occurrenceCount(source, 'OffscreenRedirect'),
         paintVfuncs: occurrenceCount(source, 'vfunc_paint'),
         drawingAreas: occurrenceCount(source, 'DrawingArea'),
         isRead: source.length > 0,
-    }, {offscreenRedirect: 0, offscreenRedirectProperty: 0, paintVfuncs: 0, drawingAreas: 0, isRead: true});
+    }, {
+        offscreenRedirect: 0, offscreenRedirectProperty: 0, offscreenRedirectEnum: 0, paintVfuncs: 0, drawingAreas: 0,
+        isRead: true,
+    });
 });
 
 test('cockpitLayer.js: a cockpit client event goes through cockpitEventEffect (ruling D20): drawn at once, or its ' +
@@ -1045,16 +1063,26 @@ test('cockpitLayer.js: a card revealed is first drawn from what the clients hold
     'since" when cockpitDataCardDrawing says so, else its sources', () => {
     const dataStatements = layerMethodStatements('_drawDataCard(');
     assertEqual({
-        revealedOnlyFromFrozen: occurrenceCount(layerMethodBody('setCardFrozen('),
-            'const isRevealed = !isFrozen && this._frozenCardIds.has(cardId);'),
-        revealDrawsBeforeUnfreezing: layerMethodStatements('setCardFrozen(').slice(-3),
+        freeze: layerMethodStatements('setCardFrozen('),
         repaint: layerMethodStatements('repaintFrozenCard(').slice(-2),
         decides: dataStatements.includes(
             'const drawing = cockpitDataCardDrawing({clientState: client.state, sources});'),
         draws: dataStatements.slice(-4),
     }, {
-        revealedOnlyFromFrozen: 1,
-        revealDrawsBeforeUnfreezing: ['if (isRevealed)', 'this._drawCard(cardId);', 'card.setFrozen(isFrozen);'],
+        // A frozen card is recorded, so its reveal (only from frozen) first draws it from the clients (ruling D20).
+        freeze: [
+            'const card = this._cardsById.get(cardId);',
+            'if (card === undefined)',
+            'return;',
+            'const isRevealed = !isFrozen && this._frozenCardIds.has(cardId);',
+            'if (isFrozen)',
+            'this._frozenCardIds.add(cardId);',
+            'else',
+            'this._frozenCardIds.delete(cardId);',
+            'if (isRevealed)',
+            'this._drawCard(cardId);',
+            'card.setFrozen(isFrozen);',
+        ],
         repaint: ['this._drawCard(cardId);', 'card.repaintFrozen();'],
         decides: true,
         draws: [
@@ -1065,9 +1093,12 @@ test('cockpitLayer.js: a card revealed is first drawn from what the clients hold
 });
 
 test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snapshot listener), the system card the ' +
-    'pulse client\'s latest, and each data card its sources, each through its own update (ruling D9)', () => {
+    'pulse client\'s latest, and each data card its sources, each through its own update (ruling D9), dispatched by ' +
+    '_drawCard (a card of the snapshot through its drawer, else _drawDataCard, which ends in its updater)', () => {
     const source = codeOf(LAYER_SOURCE_FILE);
     assertEqual({
+        drawCard: layerMethodStatements('_drawCard('),
+        dataCardUpdates: layerMethodStatements('_drawDataCard(').at(-1),
         onSnapshot: layerMethodStatements('_onSnapshot('),
         snapshotDrawers: [
             'system: (card, pulseClient) => card.update(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel),',
@@ -1078,6 +1109,15 @@ test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snap
             'sessions: (card, sourcesByName) => card.update(sourcesByName.sessions),',
         ].map(needle => occurrenceCount(source, needle)),
     }, {
+        drawCard: [
+            'const card = this._cardsById.get(cardId);',
+            'const drawSnapshotCard = SNAPSHOT_CARD_DRAWERS_BY_ID[cardId];',
+            'if (drawSnapshotCard)',
+            'drawSnapshotCard(card, this._pulseClient);',
+            'else',
+            'this._drawDataCard(cardId, card);',
+        ],
+        dataCardUpdates: 'DATA_CARD_UPDATERS_BY_ID[cardId](card, sourcesByName);',
         onSnapshot: ['this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null);'],
         snapshotDrawers: [1, 1], dataUpdaters: [1, 1],
     });
@@ -1085,13 +1125,17 @@ test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snap
 
 test('cockpitLayer.js: destroy removes both client listeners and the fallback timeout before destroying anything, ' +
     'then destroys the cards (the system card giving the v2 card back), the captions and last the tooltip, each ' +
-    'step guarded (runEveryStep); every listener it adds it removes', () => {
+    'step guarded (runEveryStep); its handler is connected before the build\'s try, so a failed build undoes it all; ' +
+    'every listener it adds it removes', () => {
     const source = codeOf(LAYER_SOURCE_FILE);
     const destroyBody = layerMethodBody('_onDestroy(');
+    const initStatements = layerMethodStatements('_init(');
+    const destroyHandlerIndex = initStatements.indexOf("this.connect('destroy', () => this._onDestroy());");
     assertEqual({
         destroyHandler: occurrenceCount(layerMethodBody('_init('), "this.connect('destroy', () => this._onDestroy());"),
+        destroyHandlerBeforeTheBuild: destroyHandlerIndex >= 0 && destroyHandlerIndex < initStatements.indexOf('try {'),
         guarded: occurrenceCount(destroyBody, 'runEveryStep(['),
-        stepNames: [...destroyBody.matchAll(/\{name: '([^']+)', run: /g)].map(([, stepName]) => stepName),
+        steps: statementsOf(destroyBody).filter(statement => statement.startsWith('{name: ')),
         listenersAdded: occurrenceCount(source, '.addListener('),
         listenersRemoved: [
             layerMethodStatements('_removeCockpitListener(')
@@ -1100,14 +1144,25 @@ test('cockpitLayer.js: destroy removes both client listeners and the fallback ti
         ],
         everyCardDestroyed: occurrenceCount(layerMethodBody('_destroyCards('), 'run: () => card.destroy()'),
     }, {
-        destroyHandler: 1, guarded: 1,
-        stepNames: [
-            'remove the cockpit client listener', 'remove the snapshot listener', 'remove the fallback timeout',
-            'destroy the cards', 'destroy the captions', 'destroy the tooltip',
+        destroyHandler: 1, destroyHandlerBeforeTheBuild: true, guarded: 1,
+        steps: [
+            "{name: 'remove the cockpit client listener', run: () => this._removeCockpitListener()},",
+            "{name: 'remove the snapshot listener', run: () => this._removeSnapshotListener()},",
+            "{name: 'remove the fallback timeout', run: () => this._removeApplyFallback()},",
+            "{name: 'destroy the cards', run: () => this._destroyCards()},",
+            "{name: 'destroy the captions', run: () => this._destroyCaptions()},",
+            "{name: 'destroy the tooltip', run: () => this._tooltip?.destroy()},",
         ],
         listenersAdded: 2, listenersRemoved: [true, true], everyCardDestroyed: 1,
     });
 });
+
+test('cockpitLayer.js: the layer\'s own failures are logged rate-limited by their context (the template key), not by ' +
+    'the whole message, whose error text and stack vary', () =>
+    assertEqual(layerMethodStatements('_logFailure('), [
+        'const errorText = describeErrorWithStack(error);',
+        'this._errorLog.log(`${context}: ${errorText}`, context);',
+    ]));
 
 // extension.js: the cockpit client, the layer, the cockpit monitor, the cover per card, the watch and the subscription.
 const EXTENSION_SOURCE_FILE = 'extension.js';
@@ -1259,7 +1314,7 @@ test('extension.js: the layer goes on the monitor cockpitMonitorIndexFor chooses
             "Main.layoutManager.connectObject('monitors-changed', () => this._onMonitorsChanged(), this);",
             "global.display.connectObject('workareas-changed', () => this._queueCardPlacement(), this);",
         ].map(needle => occurrenceCount(extensionCode, needle)),
-        laterGuarded: placeIndex < 1 ? [] : queueStatements.slice(placeIndex - 1, placeIndex + 3),
+        laterGuarded: placeIndex < 1 ? [] : queueStatements.slice(placeIndex - 1, placeIndex + 4),
     }, {
         place: [
             'const monitorIndex = cockpitMonitorIndexFor({',
@@ -1281,8 +1336,10 @@ test('extension.js: the layer goes on the monitor cockpitMonitorIndexFor chooses
             'this._queueCardPlacement();',
         ],
         connects: [1, 1],
+        // Logged, never swallowed in silence.
         laterGuarded: [
             'try {', 'this._placeCard();', '} catch (error) {', 'const errorText = describeErrorWithStack(error);',
+            'this._errorLog.log(`could not place the cards: ${errorText}`);',
         ],
     });
 });
