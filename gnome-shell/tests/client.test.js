@@ -16,6 +16,8 @@ const SAMPLE_INTERVAL_SECONDS = 2;
 const SAMPLE_INTERVAL_USEC = SAMPLE_INTERVAL_SECONDS * USEC_PER_SECOND;
 /** SAMPLE_STALL_TICKS (3) × SAMPLE_INTERVAL_SECONDS: the design's 6 s, written out. */
 const STALL_USEC = 6 * USEC_PER_SECOND;
+/** SAMPLE_STALL_MS: the same 6 s in the milliseconds the stall watchdog is armed for, written out. */
+const STALL_MS = 6000;
 const ONE_MICROSECOND = 1;
 /** START_CONFIRMATION_TIMEOUT_SECONDS (15), written out: how long an accepted StartUnit waits for the service. */
 const START_CONFIRMATION_SECONDS = 15;
@@ -111,11 +113,20 @@ const NO_DATA_SNAPSHOT = {
     isComplete: false,
 };
 
-/** Fake GLib timeouts: a row fires one by its interval, and sees which are still pending. */
+/** The unit of a fake timeout added with addSeconds (the StartUnit chain). */
+const SECONDS_UNIT = 's';
+/** The unit of a fake timeout added with addMilliseconds (the stall watchdog). */
+const MILLISECONDS_UNIT = 'ms';
+
+/**
+ * Fake GLib timeouts: a row fires one by its interval, and sees which are still pending. Whole-second timeouts and
+ * millisecond ones are kept apart by unit, so a row asks about one kind at a time.
+ */
 class FakeTimeouts {
     constructor() {
         this._sourcesById = new Map();
         this._nextSourceId = 1;
+        this._addedIntervalsMs = [];
     }
 
     /**
@@ -124,13 +135,21 @@ class FakeTimeouts {
      * @returns {number} The source id.
      */
     addSeconds(intervalSeconds, callback) {
-        const sourceId = this._nextSourceId++;
-        this._sourcesById.set(sourceId, {intervalSeconds, callback});
-        return sourceId;
+        return this._addSource(SECONDS_UNIT, intervalSeconds, callback);
     }
 
     /**
-     * @param {number} sourceId - An id addSeconds returned.
+     * @param {number} intervalMs - Milliseconds until the callback, and between calls while it continues.
+     * @param {() => boolean} callback - Returns GLib.SOURCE_CONTINUE or GLib.SOURCE_REMOVE.
+     * @returns {number} The source id.
+     */
+    addMilliseconds(intervalMs, callback) {
+        this._addedIntervalsMs.push(intervalMs);
+        return this._addSource(MILLISECONDS_UNIT, intervalMs, callback);
+    }
+
+    /**
+     * @param {number} sourceId - An id addSeconds or addMilliseconds returned.
      * @returns {void}
      * @throws {Error} For an id that is not pending, as GLib.source_remove warns of one.
      */
@@ -139,22 +158,81 @@ class FakeTimeouts {
             throw new Error(`removed source ${sourceId}, which is not pending`);
     }
 
-    /** @returns {number[]} The intervals of the pending sources, smallest first. */
+    /** @returns {number[]} The intervals of the pending whole-second sources, smallest first. */
     pendingIntervalsSeconds() {
-        return [...this._sourcesById.values()].map(source => source.intervalSeconds).sort((a, b) => a - b);
+        return this._pendingIntervals(SECONDS_UNIT);
+    }
+
+    /** @returns {number[]} The intervals of the pending millisecond sources, smallest first. */
+    pendingIntervalsMs() {
+        return this._pendingIntervals(MILLISECONDS_UNIT);
     }
 
     /**
-     * Runs the one pending source with this interval, as GLib would when it is due.
+     * @returns {number[]} Every interval addMilliseconds was given, in order, pending or not: one per watchdog armed,
+     *     so a row sees a watchdog armed anew where pendingIntervalsMs alone shows the same interval still pending.
+     */
+    addedIntervalsMs() {
+        return [...this._addedIntervalsMs];
+    }
+
+    /**
+     * Runs the one pending whole-second source with this interval, as GLib would when it is due.
      *
      * @param {number} intervalSeconds - Its interval.
      * @returns {boolean} What the callback returned.
-     * @throws {Error} Unless exactly one pending source has that interval.
+     * @throws {Error} Unless exactly one pending whole-second source has that interval.
      */
     fire(intervalSeconds) {
-        const matchingEntries = [...this._sourcesById].filter(([, source]) => source.intervalSeconds === intervalSeconds);
+        return this._fireOnlySource(SECONDS_UNIT, intervalSeconds);
+    }
+
+    /**
+     * Runs the one pending millisecond source with this interval, as GLib would when it is due.
+     *
+     * @param {number} intervalMs - Its interval.
+     * @returns {boolean} What the callback returned.
+     * @throws {Error} Unless exactly one pending millisecond source has that interval.
+     */
+    fireMs(intervalMs) {
+        return this._fireOnlySource(MILLISECONDS_UNIT, intervalMs);
+    }
+
+    /**
+     * @param {string} unit - SECONDS_UNIT or MILLISECONDS_UNIT.
+     * @param {number} interval - In that unit.
+     * @param {() => boolean} callback - The source's callback.
+     * @returns {number} The source id.
+     */
+    _addSource(unit, interval, callback) {
+        const sourceId = this._nextSourceId++;
+        this._sourcesById.set(sourceId, {unit, interval, callback});
+        return sourceId;
+    }
+
+    /**
+     * @param {string} unit - SECONDS_UNIT or MILLISECONDS_UNIT.
+     * @returns {number[]} The intervals of the pending sources of that unit, smallest first.
+     */
+    _pendingIntervals(unit) {
+        const pendingSources = [...this._sourcesById.values()].filter(source => source.unit === unit);
+        return pendingSources.map(source => source.interval).sort((a, b) => a - b);
+    }
+
+    /**
+     * Runs the one pending source of a unit and interval; one that returns anything but GLib.SOURCE_CONTINUE has
+     * ended, so a later remove() of its id throws.
+     *
+     * @param {string} unit - SECONDS_UNIT or MILLISECONDS_UNIT.
+     * @param {number} interval - In that unit.
+     * @returns {boolean} What the callback returned.
+     * @throws {Error} Unless exactly one pending source of that unit has that interval.
+     */
+    _fireOnlySource(unit, interval) {
+        const matchingEntries = [...this._sourcesById]
+            .filter(([, source]) => source.unit === unit && source.interval === interval);
         if (matchingEntries.length !== 1)
-            throw new Error(`${matchingEntries.length} pending sources of ${intervalSeconds} s, not one`);
+            throw new Error(`${matchingEntries.length} pending sources of ${interval} ${unit}, not one`);
         const [[sourceId, source]] = matchingEntries;
         const shouldContinue = source.callback();
         if (shouldContinue !== GLib.SOURCE_CONTINUE)
@@ -421,16 +499,6 @@ function makeLiveClientFixture({isDetailWatchWanted = false} = {}) {
 }
 
 /**
- * The pending step of the StartUnit chain: every pending timeout but the staleness check.
- *
- * @param {FakeTimeouts} timeouts - The fixture's timeouts.
- * @returns {number[]} Their intervals, in seconds.
- */
-function pendingStartChainSeconds(timeouts) {
-    return timeouts.pendingIntervalsSeconds().filter(intervalSeconds => intervalSeconds !== SAMPLE_INTERVAL_SECONDS);
-}
-
-/**
  * @param {object} fixture - A fixture.
  * @returns {{cpu: Array<number|null>, memory: Array<number|null>}} The client's histories now.
  */
@@ -477,20 +545,18 @@ function countReadsOfMissingField(fieldName, body) {
 
 test('client: before the first state it draws nothing, not even a Sample: no snapshot, no history, no listener call',
     () => {
-        const {client, clock, timeouts, link, notifications} = makeClientFixture();
+        const {client, timeouts, link, notifications} = makeClientFixture();
         emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
             sequence: STATE_SEQUENCE + 1});
-        clock.nowUsec += LONG_WAIT_USEC;
-        timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-        // A staleness check while no state is held must not let later Samples through either.
         emitSample(link, {snapshot: REVEAL_SNAPSHOT, appendedHistory: null, sequence: STATE_SEQUENCE + 2});
         assertEqual({
             latestSnapshot: client.latestSnapshot, histories: historiesOf({client}),
             lastGoodClockLabel: client.lastGoodClockLabel, notificationCount: notifications.length,
-            stateCallCount: link.callsOf(GET_STATE).length,
+            stateCallCount: link.callsOf(GET_STATE).length, pendingMs: timeouts.pendingIntervalsMs(),
         }, {
+            // A Sample that waits for a state arms no watchdog either.
             latestSnapshot: null, histories: {cpu: [], memory: []}, lastGoodClockLabel: null, notificationCount: 0,
-            stateCallCount: 1,
+            stateCallCount: 1, pendingMs: [],
         });
     });
 
@@ -529,33 +595,6 @@ test('client: a Sample that appends nothing (a watch start\'s reveal: appendedHi
         {histories: STATE_HISTORIES, notifications: [STATE_SNAPSHOT, REVEAL_SNAPSHOT]});
 });
 
-test('client: no Sample for more than 6 s publishes one no-data snapshot (and a gap in both histories), keeps the ' +
-    'last good time, and the next Sample of the same run draws again', () => {
-    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
-    const {clock, timeouts, notifications} = fixture;
-    clock.nowUsec = START_USEC + STALL_USEC;
-    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-    const notificationsAtExactlyStall = notifications.length;
-    clock.nowUsec += ONE_MICROSECOND;
-    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-    clock.nowUsec += SAMPLE_INTERVAL_USEC;
-    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-    const lastGoodClockLabelWhileStale = fixture.client.lastGoodClockLabel;
-    const historiesWhileStale = historiesOf(fixture);
-    emitSample(fixture.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
-        sequence: STATE_SEQUENCE + 1});
-    assertEqual({
-        notificationsAtExactlyStall, notifications, lastGoodClockLabelWhileStale, historiesWhileStale,
-        stateCallCount: fixture.link.callsOf(GET_STATE).length,
-    }, {
-        notificationsAtExactlyStall: 1,
-        notifications: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT, TICK_SNAPSHOT],
-        lastGoodClockLabelWhileStale: '14:02',
-        historiesWhileStale: {cpu: [...STATE_HISTORIES.cpu, null], memory: [...STATE_HISTORIES.memory, null]},
-        stateCallCount: 1,
-    });
-});
-
 test('client: a sequence that restarts publishes no data once, and draws nothing until a fresh GetState', () => {
     const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
     const {link, notifications} = fixture;
@@ -584,8 +623,7 @@ test('client: a failed StartUnit is retried after 5, 30, 300, then 300 s and log
         const retryDelaysSeconds = [];
         for (const _failedAttempt of [1, 2, 3, 4]) {
             serviceStarter.fail();
-            const pendingRetryDelaysSeconds = timeouts.pendingIntervalsSeconds()
-                .filter(intervalSeconds => intervalSeconds !== SAMPLE_INTERVAL_SECONDS);
+            const pendingRetryDelaysSeconds = timeouts.pendingIntervalsSeconds();
             retryDelaysSeconds.push(...pendingRetryDelaysSeconds);
             timeouts.fire(pendingRetryDelaysSeconds[0]);
         }
@@ -596,7 +634,7 @@ test('client: a failed StartUnit is retried after 5, 30, 300, then 300 s and log
             startUnitLogLines: logged.filter(line => line.includes('StartUnit')).length,
         }, {
             retryDelaysSeconds: [5, 30, 300, 300], attemptCount: 5,
-            pendingAfterSuccess: [SAMPLE_INTERVAL_SECONDS, START_CONFIRMATION_SECONDS], startUnitLogLines: 1,
+            pendingAfterSuccess: [START_CONFIRMATION_SECONDS], startUnitLogLines: 1,
         });
     });
 
@@ -609,8 +647,7 @@ test('client: the service appearing ends the StartUnit retries, since it runs: n
         pendingAfterFailure, pendingAfterOwner: timeouts.pendingIntervalsSeconds(),
         attemptCount: serviceStarter.attempts.length, calledMethodNames: link.calledMethodNames,
     }, {
-        pendingAfterFailure: [SAMPLE_INTERVAL_SECONDS, 5], pendingAfterOwner: [SAMPLE_INTERVAL_SECONDS],
-        attemptCount: 1, calledMethodNames: [GET_STATE],
+        pendingAfterFailure: [5], pendingAfterOwner: [], attemptCount: 1, calledMethodNames: [GET_STATE],
     });
 });
 
@@ -621,7 +658,6 @@ test('client: the name losing its owner publishes no data once and never calls S
     emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     link.setNameOwner(null);
     clock.nowUsec += LONG_WAIT_USEC;
-    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
     const notificationsWhileGone = [...notifications];
     const pendingWhileGone = timeouts.pendingIntervalsSeconds();
     link.setNameOwner(NEXT_OWNER);
@@ -631,8 +667,7 @@ test('client: the name losing its owner publishes no data once and never calls S
         notificationsWhileGone, pendingWhileGone, attemptCount: serviceStarter.attempts.length,
         notificationsAfterReturn: notifications.slice(notificationsWhileGone.length), histories: historiesOf(fixture),
     }, {
-        notificationsWhileGone: [STATE_SNAPSHOT, TICK_SNAPSHOT, NO_DATA_SNAPSHOT],
-        pendingWhileGone: [SAMPLE_INTERVAL_SECONDS], attemptCount: 1,
+        notificationsWhileGone: [STATE_SNAPSHOT, TICK_SNAPSHOT, NO_DATA_SNAPSHOT], pendingWhileGone: [], attemptCount: 1,
         notificationsAfterReturn: [returnedSnapshot], histories: RESTARTED_HISTORIES,
     });
 });
@@ -655,8 +690,7 @@ test('client: Samples are drawn although StartUnit failed (no systemd, as in the
     }, {
         notifications: [STATE_SNAPSHOT, TICK_SNAPSHOT],
         histories: {cpu: [...STATE_HISTORIES.cpu, 0.5], memory: [...STATE_HISTORIES.memory, 0.25]},
-        pendingAfterFailureWhileRunning: [SAMPLE_INTERVAL_SECONDS],
-        pendingAfterAcceptedWhileRunning: [SAMPLE_INTERVAL_SECONDS],
+        pendingAfterFailureWhileRunning: [], pendingAfterAcceptedWhileRunning: [],
     });
 });
 
@@ -667,9 +701,9 @@ test('client: an accepted StartUnit with no owner within 15 s is no success: the
     const retryDelaysSeconds = [];
     for (const _unconfirmedAttempt of [1, 2, 3, 4]) {
         serviceStarter.succeed();
-        confirmationWaitsSeconds.push(...pendingStartChainSeconds(timeouts));
+        confirmationWaitsSeconds.push(...timeouts.pendingIntervalsSeconds());
         timeouts.fire(START_CONFIRMATION_SECONDS);
-        const pendingRetryDelaysSeconds = pendingStartChainSeconds(timeouts);
+        const pendingRetryDelaysSeconds = timeouts.pendingIntervalsSeconds();
         retryDelaysSeconds.push(...pendingRetryDelaysSeconds);
         timeouts.fire(pendingRetryDelaysSeconds[0]);
     }
@@ -695,8 +729,8 @@ test('client: an owner within 15 s of an accepted StartUnit confirms it and ends
         pendingWhileWaiting, pendingAfterOwner, pendingAfterLeaving: timeouts.pendingIntervalsSeconds(),
         attemptCount: serviceStarter.attempts.length,
     }, {
-        pendingWhileWaiting: [SAMPLE_INTERVAL_SECONDS, START_CONFIRMATION_SECONDS],
-        pendingAfterOwner: [SAMPLE_INTERVAL_SECONDS], pendingAfterLeaving: [SAMPLE_INTERVAL_SECONDS], attemptCount: 1,
+        pendingWhileWaiting: [START_CONFIRMATION_SECONDS], pendingAfterOwner: [], pendingAfterLeaving: [],
+        attemptCount: 1,
     });
 });
 
@@ -706,7 +740,7 @@ test('client: destroy() while an accepted StartUnit waits for the service leaves
     const pendingWhileWaiting = timeouts.pendingIntervalsSeconds();
     client.destroy();
     assertEqual({pendingWhileWaiting, pending: timeouts.pendingIntervalsSeconds()},
-        {pendingWhileWaiting: [SAMPLE_INTERVAL_SECONDS, START_CONFIRMATION_SECONDS], pending: []});
+        {pendingWhileWaiting: [START_CONFIRMATION_SECONDS], pending: []});
 });
 
 test('client: a StartUnit still on its way when the service appears is superseded: its failure, after the owner ' +
@@ -717,7 +751,7 @@ test('client: a StartUnit still on its way when the service appears is supersede
     serviceStarter.fail();
     assertEqual({pending: timeouts.pendingIntervalsSeconds(), attemptCount: serviceStarter.attempts.length,
         startUnitLogLines: logged.filter(line => line.includes('StartUnit')).length},
-    {pending: [SAMPLE_INTERVAL_SECONDS], attemptCount: 1, startUnitLogLines: 0});
+    {pending: [], attemptCount: 1, startUnitLogLines: 0});
 });
 
 test('client: a state whose snapshot was taken more than 6 s before it arrived (a service that answers while its ' +
@@ -738,16 +772,18 @@ test('client: a state whose snapshot was taken more than 6 s before it arrived (
 });
 
 test('client: freshness counts from the state snapshot\'s own time: taken exactly 6 s before it arrived, it is drawn, ' +
-    'and stale 1 µs later', () => {
-    const {clock, timeouts, link, notifications} = makeClientFixture();
+    'and the watchdog shows no data 1 ms later', () => {
+    const {timeouts, link, notifications} = makeClientFixture();
     const oldSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC - STALL_USEC};
     answerState(link, {snapshot: oldSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
-    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
     const notificationsAtExactlyStall = [...notifications];
-    clock.nowUsec += ONE_MICROSECOND;
-    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-    assertEqual({notificationsAtExactlyStall, notifications},
-        {notificationsAtExactlyStall: [oldSnapshot], notifications: [oldSnapshot, NO_DATA_SNAPSHOT]});
+    const pendingAtExactlyStall = timeouts.pendingIntervalsMs();
+    // Nothing of the stall is left: the shortest watchdog, 1 ms.
+    timeouts.fireMs(1);
+    assertEqual({notificationsAtExactlyStall, pendingAtExactlyStall, notifications}, {
+        notificationsAtExactlyStall: [oldSnapshot], pendingAtExactlyStall: [1],
+        notifications: [oldSnapshot, NO_DATA_SNAPSHOT],
+    });
 });
 
 test('client: a state snapshot with no time counts from its arrival, and one stamped in the future counts from now',
@@ -755,19 +791,19 @@ test('client: a state snapshot with no time counts from its arrival, and one sta
         const untimed = makeClientFixture();
         const untimedSnapshot = {...STATE_SNAPSHOT, takenAtUsec: null};
         answerState(untimed.link, {snapshot: untimedSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
-        untimed.clock.nowUsec += STALL_USEC;
-        untimed.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-        const untimedAtExactlyStall = untimed.notifications.length;
-        untimed.clock.nowUsec += ONE_MICROSECOND;
-        untimed.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+        const untimedPending = untimed.timeouts.pendingIntervalsMs();
+        untimed.timeouts.fireMs(STALL_MS);
         const future = makeClientFixture();
         const futureSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC + LONG_WAIT_USEC};
         answerState(future.link, {snapshot: futureSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
-        future.clock.nowUsec += STALL_USEC + ONE_MICROSECOND;
-        future.timeouts.fire(SAMPLE_INTERVAL_SECONDS);
-        assertEqual({untimedAtExactlyStall, untimed: untimed.notifications, future: future.notifications}, {
-            untimedAtExactlyStall: 1, untimed: [untimedSnapshot, NO_DATA_SNAPSHOT],
-            future: [futureSnapshot, NO_DATA_SNAPSHOT],
+        const futurePending = future.timeouts.pendingIntervalsMs();
+        future.timeouts.fireMs(STALL_MS);
+        assertEqual({
+            untimedPending, untimed: untimed.notifications, futurePending, future: future.notifications,
+        }, {
+            // Both are as old as their arrival: the whole stall is left.
+            untimedPending: [STALL_MS], untimed: [untimedSnapshot, NO_DATA_SNAPSHOT],
+            futurePending: [STALL_MS], future: [futureSnapshot, NO_DATA_SNAPSHOT],
         });
     });
 
@@ -862,7 +898,7 @@ test('client: destroy() before the name watch first reports destroys the link an
         pendingBeforeDestroy, isLinkDestroyed: link.isDestroyed, calledMethodNames: link.calledMethodNames,
         pending: timeouts.pendingIntervalsSeconds(),
     }, {
-        pendingBeforeDestroy: [SAMPLE_INTERVAL_SECONDS, 5], isLinkDestroyed: true, calledMethodNames: [], pending: [],
+        pendingBeforeDestroy: [5], isLinkDestroyed: true, calledMethodNames: [], pending: [],
     });
 });
 
@@ -908,17 +944,15 @@ test('client: every start() asks systemd to start the service again, from a firs
         pendingAfterSupersededFailure, loggedAfterSupersededFailure, pending: timeouts.pendingIntervalsSeconds(),
     }, {
         attemptConnections: [FAKE_CONNECTION, FAKE_CONNECTION], linkCount: 1, linkConnection: FAKE_CONNECTION,
-        pendingAfterSupersededFailure: [SAMPLE_INTERVAL_SECONDS], loggedAfterSupersededFailure: 0,
-        pending: [SAMPLE_INTERVAL_SECONDS, 5],
+        pendingAfterSupersededFailure: [], loggedAfterSupersededFailure: 0, pending: [5],
     });
 });
 
 test('client: no data is published once however many reasons follow: a stall, then a sequence that does not move on ' +
     '(a new run that counted back up to the last one drawn), then the owner leaving', () => {
     const fixture = makeLiveClientFixture();
-    const {clock, timeouts, link, notifications} = fixture;
-    clock.nowUsec += LONG_WAIT_USEC;
-    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+    const {timeouts, link, notifications} = fixture;
+    timeouts.fireMs(STALL_MS);
     emitSample(link, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4},
         sequence: STATE_SEQUENCE});
     link.setNameOwner(null);
@@ -1109,14 +1143,13 @@ test('client: no data is told to both kinds of listener, and names the last unre
 });
 
 test('client: isLive is true while Samples are drawn and false with no data', () => {
-    const {client, clock, timeouts, link} = makeClientFixture();
+    const {client, timeouts, link} = makeClientFixture();
     const isLiveBeforeState = client.isLive;
     answerState(link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
     const isLiveAfterState = client.isLive;
     emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     const isLiveAfterSample = client.isLive;
-    clock.nowUsec += LONG_WAIT_USEC;
-    timeouts.fire(SAMPLE_INTERVAL_SECONDS);
+    timeouts.fireMs(STALL_MS);
     const isLiveWhenStalled = client.isLive;
     emitSample(link, {snapshot: NEXT_TICK_SNAPSHOT, appendedHistory: NEXT_TICK_APPENDED_HISTORY,
         sequence: STATE_SEQUENCE + 2});
@@ -1152,5 +1185,158 @@ test('client: a Sample without numbers leaves "no data since" at the last Sample
         unread: {lastGoodClockLabel: '14:03', cpuBusyPercent: null},
         readBetween: {lastGoodClockLabel: '14:03', cpuBusyPercent: null},
         labelReadBetween: '14:03',
+    });
+});
+
+// The stall watchdog: one timeout, which each Sample drawn and each fresh state arm anew, so it fires only on silence
+// and nothing in the client wakes the shell while Samples flow.
+
+test('client: while Samples flow the watchdog is the only pending timeout, at 6000 ms', () => {
+    const {clock, timeouts, link} = makeLiveClientFixture();
+    const pendingTimeouts = () => ({seconds: timeouts.pendingIntervalsSeconds(), ms: timeouts.pendingIntervalsMs()});
+    const pendingAfterState = pendingTimeouts();
+    clock.nowUsec += SAMPLE_INTERVAL_USEC;
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    const pendingAfterFirstSample = pendingTimeouts();
+    clock.nowUsec += SAMPLE_INTERVAL_USEC;
+    emitSample(link, {snapshot: NEXT_TICK_SNAPSHOT, appendedHistory: NEXT_TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 2});
+    assertEqual({
+        pendingAfterState, pendingAfterFirstSample, pendingAfterSecondSample: pendingTimeouts(),
+        addedIntervalsMs: timeouts.addedIntervalsMs(),
+    }, {
+        pendingAfterState: {seconds: [], ms: [STALL_MS]},
+        pendingAfterFirstSample: {seconds: [], ms: [STALL_MS]},
+        pendingAfterSecondSample: {seconds: [], ms: [STALL_MS]},
+        // Armed anew by the state and by each Sample, the one before removed: each Sample pushes the stall back.
+        addedIntervalsMs: [STALL_MS, STALL_MS, STALL_MS],
+    });
+});
+
+test('client: 6000 ms of silence publishes no data once; the next Sample draws again and re-arms the watchdog', () => {
+    const fixture = makeLiveClientFixture({isDetailWatchWanted: true});
+    const {client, timeouts, link, notifications} = fixture;
+    const historyListenerCalls = recordHistoryListenerCalls(client);
+    const watchdogReturnValue = timeouts.fireMs(STALL_MS);
+    const pendingAfterFiring = timeouts.pendingIntervalsMs();
+    const notificationsWhileStalled = [...notifications];
+    const historyCallCountWhileStalled = historyListenerCalls.length;
+    const lastGoodClockLabelWhileStalled = client.lastGoodClockLabel;
+    const historiesWhileStalled = historiesOf(fixture);
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    assertEqual({
+        watchdogReturnValue, pendingAfterFiring, notificationsWhileStalled, historyCallCountWhileStalled,
+        lastGoodClockLabelWhileStalled, historiesWhileStalled, notifications,
+        pendingAfterNextSample: timeouts.pendingIntervalsMs(), stateCallCount: link.callsOf(GET_STATE).length,
+    }, {
+        // Its source ended, and nothing is left to fire again until a Sample comes: no data is published once.
+        watchdogReturnValue: GLib.SOURCE_REMOVE, pendingAfterFiring: [],
+        notificationsWhileStalled: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT], historyCallCountWhileStalled: 1,
+        lastGoodClockLabelWhileStalled: '14:02',
+        historiesWhileStalled: {cpu: [...STATE_HISTORIES.cpu, null], memory: [...STATE_HISTORIES.memory, null]},
+        notifications: [STATE_SNAPSHOT, NO_DATA_SNAPSHOT, TICK_SNAPSHOT],
+        pendingAfterNextSample: [STALL_MS], stateCallCount: 1,
+    });
+});
+
+test('client: a state already older than the stall shows no data at once and arms no watchdog', () => {
+    const {timeouts, link, notifications} = makeClientFixture();
+    const staleSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC - STALL_USEC - ONE_MICROSECOND};
+    answerState(link, {snapshot: staleSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    assertEqual({
+        notifications, pendingSeconds: timeouts.pendingIntervalsSeconds(), pendingMs: timeouts.pendingIntervalsMs(),
+        addedIntervalsMs: timeouts.addedIntervalsMs(),
+    }, {notifications: [NO_DATA_SNAPSHOT], pendingSeconds: [], pendingMs: [], addedIntervalsMs: []});
+});
+
+test('client: destroy() unsubscribes, destroys the link, and leaves no pending timeout', () => {
+    const {client, timeouts, link, notifications} = makeLiveClientFixture({isDetailWatchWanted: true});
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    const pendingBeforeDestroy = timeouts.pendingIntervalsMs();
+    client.destroy();
+    // A Sample sent after destroy() reaches nothing, and arms nothing.
+    emitSample(link, {snapshot: NEXT_TICK_SNAPSHOT, appendedHistory: NEXT_TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 2});
+    // destroy() from a listener told of a state, or of a Sample, leaves no watchdog either: it is armed before they
+    // are told.
+    const destroyedOnState = makeClientFixture();
+    destroyedOnState.client.addListener(() => destroyedOnState.client.destroy());
+    answerState(destroyedOnState.link, {snapshot: STATE_SNAPSHOT, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    const destroyedOnSample = makeLiveClientFixture();
+    destroyedOnSample.client.addHistoryListener(() => destroyedOnSample.client.destroy());
+    emitSample(destroyedOnSample.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 1});
+    assertEqual({
+        pendingBeforeDestroy, isSampleSubscribed: link.isSampleSubscribed, isLinkDestroyed: link.isDestroyed,
+        pendingSeconds: timeouts.pendingIntervalsSeconds(), pendingMs: timeouts.pendingIntervalsMs(), notifications,
+        pendingAfterDestroyOnState: destroyedOnState.timeouts.pendingIntervalsMs(),
+        pendingAfterDestroyOnSample: destroyedOnSample.timeouts.pendingIntervalsMs(),
+    }, {
+        pendingBeforeDestroy: [STALL_MS], isSampleSubscribed: false, isLinkDestroyed: true, pendingSeconds: [],
+        pendingMs: [], notifications: [STATE_SNAPSHOT, TICK_SNAPSHOT], pendingAfterDestroyOnState: [],
+        pendingAfterDestroyOnSample: [],
+    });
+});
+
+test('client: destroy() twice is harmless', () => {
+    // Review Focus 1: a lock or a blank lands while the watchdog and a detail watch are live, and disable() runs twice.
+    const {client, timeouts, link, logged} = makeLiveClientFixture({isDetailWatchWanted: true});
+    const pendingBeforeDestroy = timeouts.pendingIntervalsMs();
+    client.destroy();
+    client.destroy();
+    assertEqual({
+        pendingBeforeDestroy, logged, calledMethodNames: link.calledMethodNames, isLinkDestroyed: link.isDestroyed,
+        pendingSeconds: timeouts.pendingIntervalsSeconds(), pendingMs: timeouts.pendingIntervalsMs(),
+    }, {
+        // Nothing removed twice (the fake throws, and teardown logs it) and the watch released once.
+        pendingBeforeDestroy: [STALL_MS], logged: [], calledMethodNames: [GET_STATE, WATCH_DETAIL, UNWATCH_DETAIL],
+        isLinkDestroyed: true, pendingSeconds: [], pendingMs: [],
+    });
+});
+
+test('client: after a state the watchdog is armed for what is left of the stall', () => {
+    const {timeouts, link, notifications} = makeClientFixture();
+    // Taken 4 s before it arrived, so 2 s of the 6 s stall are left: its numbers are live until 6 s after they were
+    // taken, not for 6 s more.
+    const agedSnapshot = {...STATE_SNAPSHOT, takenAtUsec: START_USEC - 4 * USEC_PER_SECOND};
+    answerState(link, {snapshot: agedSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    const pendingAfterState = timeouts.pendingIntervalsMs();
+    timeouts.fireMs(2000);
+    // 1 µs older leaves 1999.999 ms, rounded up, so the watchdog never fires before the stall.
+    const justOlder = makeClientFixture();
+    const justOlderSnapshot = {...agedSnapshot, takenAtUsec: agedSnapshot.takenAtUsec - ONE_MICROSECOND};
+    answerState(justOlder.link, {snapshot: justOlderSnapshot, histories: STATE_HISTORIES, sequence: STATE_SEQUENCE});
+    assertEqual({
+        pendingAfterState, notifications, pendingAfterFiring: timeouts.pendingIntervalsMs(),
+        justOlderPending: justOlder.timeouts.pendingIntervalsMs(),
+    }, {
+        pendingAfterState: [2000], notifications: [agedSnapshot, NO_DATA_SNAPSHOT], pendingAfterFiring: [],
+        justOlderPending: [2000],
+    });
+});
+
+test('client: no watchdog stays pending once the data is not live', () => {
+    const pendingTimeouts = ({timeouts}) =>
+        ({seconds: timeouts.pendingIntervalsSeconds(), ms: timeouts.pendingIntervalsMs()});
+    const ownerLeft = makeLiveClientFixture();
+    emitSample(ownerLeft.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 1});
+    const pendingBeforeOwnerLeft = pendingTimeouts(ownerLeft);
+    ownerLeft.link.setNameOwner(null);
+    const restarted = makeLiveClientFixture();
+    emitSample(restarted.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 1});
+    const pendingBeforeRestart = pendingTimeouts(restarted);
+    emitSample(restarted.link, {snapshot: RESTARTED_SNAPSHOT, appendedHistory: {cpu: 0.09, memory: 0.4}, sequence: 1});
+    const isLiveAfterOwnerLeft = ownerLeft.client.isLive;
+    const isLiveAfterRestart = restarted.client.isLive;
+    assertEqual({
+        pendingBeforeOwnerLeft, pendingAfterOwnerLeft: pendingTimeouts(ownerLeft), isLiveAfterOwnerLeft,
+        pendingBeforeRestart, pendingAfterRestart: pendingTimeouts(restarted), isLiveAfterRestart,
+    }, {
+        pendingBeforeOwnerLeft: {seconds: [], ms: [STALL_MS]}, pendingAfterOwnerLeft: {seconds: [], ms: []},
+        isLiveAfterOwnerLeft: false,
+        pendingBeforeRestart: {seconds: [], ms: [STALL_MS]}, pendingAfterRestart: {seconds: [], ms: []},
+        isLiveAfterRestart: false,
     });
 });

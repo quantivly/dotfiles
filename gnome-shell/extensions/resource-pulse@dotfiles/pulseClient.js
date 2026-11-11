@@ -32,11 +32,15 @@
 //   kinds are told of one Sample, history listeners go first.
 // - A Sample's snapshot is parsed late, never skipped: the Sample keeps it unread, and it is parsed when first read
 //   (latestSnapshot, lastGoodClockLabel, or snapshot listeners being told). Whatever replaces an unread snapshot
-//   parses it first (a numberless Sample, a reveal, a state, no data), except a Sample that appended a number, so
-//   "no data since" names the last Sample with numbers whether anything read it or not.
-// - No data, once: when no Sample has come for longer than SAMPLE_STALL_TICKS intervals, or the service's sequence
-//   restarts, it publishes one all-null snapshot and a gap in both histories. After a stall the next Sample of the
-//   same run draws again; after a restart nothing is drawn until a fresh GetState answers.
+//   parses it first (a numberless Sample, a reveal, no data), except a Sample that appended a number, so "no data
+//   since" names the last Sample with numbers whether anything read it or not.
+// - No data, once: when no Sample has come for SAMPLE_STALL_MS, or the service's sequence restarts, it publishes one
+//   all-null snapshot and a gap in both histories. After a stall the next Sample of the same run draws again; after a
+//   restart nothing is drawn until a fresh GetState answers.
+// - The stall is one watchdog, not a periodic check: each Sample drawn removes the pending timeout and adds one of
+//   SAMPLE_STALL_MS, so it fires only on silence, exactly the stall after the last Sample, and nothing in the client
+//   wakes the shell while Samples flow. A fresh state arms it for what is left of the stall after its snapshot was
+//   taken. It is pending only while the data is live: no data, however it comes, removes it.
 // - The detail watch: WatchDetail and UnwatchDetail go out only when the wanted flag changes, and only to an owner.
 //   destroy() sends UnwatchDetail, uncancellable and best-effort, while a watch is held: the shell's bus connection
 //   outlives the extension, and the service drops a caller's watches only when its connection closes.
@@ -44,7 +48,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {
-    CARD_HISTORY_SAMPLES, DBUS_CALL_TIMEOUT_MS, SAMPLE_INTERVAL_SECONDS, START_CONFIRMATION_TIMEOUT_SECONDS,
+    CARD_HISTORY_SAMPLES, DBUS_CALL_TIMEOUT_MS, SAMPLE_STALL_MS, START_CONFIRMATION_TIMEOUT_SECONDS,
 } from './lib/constants.js';
 import {RateLimitedLogger, describeError} from './lib/errorLog.js';
 import {RingBuffer} from './lib/history.js';
@@ -87,6 +91,14 @@ const LISTENER_FAILURE_LOG_KEY = 'listener failed';
 const TIMEOUT_STEP_FAILURE_LOG_KEY = 'client timeout failed';
 const TEARDOWN_FAILURE_LOG_KEY = 'client teardown step failed';
 
+/** Microseconds in a millisecond: a state's age is in microseconds, the watchdog's interval in milliseconds. */
+const USEC_PER_MILLISECOND = 1000;
+/**
+ * The shortest the stall watchdog is armed for: a state exactly as old as the stall is still drawn (it is not stale
+ * yet), and nothing of the stall is left, so its watchdog fires at once.
+ */
+const MIN_STALL_WATCHDOG_MS = 1;
+
 /** What the client knows of the service's data. */
 const DataState = Object.freeze({
     /** No state since the start, since the owner last appeared, or since the sequence restarted: Samples wait. */
@@ -116,10 +128,14 @@ const DataState = Object.freeze({
  * @property {boolean|null} isComplete - True when every read of the sample succeeded.
  */
 
-/** GLib's timeouts at the default priority: the client's staleness check and its StartUnit retries. */
+/**
+ * GLib's timeouts at the default priority: whole seconds for the StartUnit chain, milliseconds for the stall watchdog
+ * (a whole-second timeout may fire up to a second late, as GLib groups them on the second).
+ */
 const GLIB_TIMEOUTS = Object.freeze({
     addSeconds: (intervalSeconds, callback) =>
         GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, intervalSeconds, callback),
+    addMilliseconds: (intervalMs, callback) => GLib.timeout_add(GLib.PRIORITY_DEFAULT, intervalMs, callback),
     remove: sourceId => GLib.source_remove(sourceId),
 });
 
@@ -187,6 +203,20 @@ function isSequenceRestart(lastAppliedSequence, sampleSequence) {
 function freshnessOfStateSnapshot(snapshot, nowUsec) {
     const takenAtUsec = snapshot?.takenAtUsec ?? null;
     return takenAtUsec === null ? nowUsec : Math.min(takenAtUsec, nowUsec);
+}
+
+/**
+ * What is left of the stall for data of a given age, for the watchdog a state arms: SAMPLE_STALL_MS less the age,
+ * rounded up to a whole millisecond so the watchdog never fires before the stall, and at least MIN_STALL_WATCHDOG_MS.
+ *
+ * @param {number} dataAgeUsec - How old the data is, in microseconds: from 0 to the stall (older data is stale, and
+ *     arms no watchdog).
+ * @returns {number} Whole milliseconds, from MIN_STALL_WATCHDOG_MS to SAMPLE_STALL_MS.
+ */
+function stallRemainderMs(dataAgeUsec) {
+    const stallRemainderUsec = SAMPLE_STALL_MS * USEC_PER_MILLISECOND - dataAgeUsec;
+    const roundedUpRemainderMs = Math.ceil(stallRemainderUsec / USEC_PER_MILLISECOND);
+    return Math.max(MIN_STALL_WATCHDOG_MS, roundedUpRemainderMs);
 }
 
 /**
@@ -266,9 +296,11 @@ export class PulseClient {
      *     onSample: (parameters: GLib.Variant) => void}) => object} [options.createLink] - Starts following the
      *     service: serviceLink.js's createResourcePulseLink, whose link reports the owner, delivers each Sample and
      *     makes the calls.
-     * @param {() => number} [options.nowUsec] - Monotonic microseconds, for staleness.
+     * @param {() => number} [options.nowUsec] - Monotonic microseconds, for a state's age.
      * @param {{addSeconds: (intervalSeconds: number, callback: () => boolean) => number,
-     *     remove: (sourceId: number) => void}} [options.timeouts] - Adds and removes timeouts.
+     *     addMilliseconds: (intervalMs: number, callback: () => boolean) => number,
+     *     remove: (sourceId: number) => void}} [options.timeouts] - Adds and removes timeouts: whole seconds for the
+     *     StartUnit chain, milliseconds for the stall watchdog.
      * @param {RateLimitedLogger} [options.errorLog] - Where failures go. The extension passes one that outlives every
      *     client (it makes one per enable: every blank and every lock), so a lasting failure is logged once per
      *     10 minutes, not once per enable.
@@ -303,7 +335,9 @@ export class PulseClient {
         this._link = null;
         // The unique name owning the service's bus name, as last seen; null while nobody does.
         this._nameOwner = null;
-        this._staleCheckSourceId = null;
+        // The stall watchdog's pending timeout: armed anew by each Sample drawn and each fresh state, so pending exactly
+        // while the data is live; null otherwise, and from the moment it fires.
+        this._stallWatchdogSourceId = null;
         // The StartUnit chain's pending step, at most one: a retry after a failure, or the wait for the service to
         // appear after an accepted StartUnit. Every way the chain ends or restarts removes it.
         this._startChainSourceId = null;
@@ -317,7 +351,6 @@ export class PulseClient {
         this._stateRequestNumber = 0;
         this._isStateRequestInFlight = false;
         this._lastAppliedSequence = null;
-        this._lastFreshDataAtUsec = null;
         this._isDetailWatchWanted = false;
         // True from a WatchDetail sent to the current owner until an UnwatchDetail follows or that owner leaves (its
         // watches leave with it).
@@ -374,9 +407,9 @@ export class PulseClient {
     }
 
     /**
-     * Asks systemd to start the service, and the first time also starts following it: the bus connection, the link
-     * and the staleness check. Every call asks systemd again (each enable makes one), restarting the retries; nothing
-     * is connected twice. Does nothing once destroyed.
+     * Asks systemd to start the service, and the first time also starts following it: the bus connection and the
+     * link. Every call asks systemd again (each enable makes one), restarting the retries; nothing is connected twice.
+     * Does nothing once destroyed.
      *
      * @returns {void}
      */
@@ -387,8 +420,6 @@ export class PulseClient {
         if (this._isStarted)
             return;
         this._isStarted = true;
-        this._staleCheckSourceId = this._timeouts.addSeconds(SAMPLE_INTERVAL_SECONDS,
-            () => this._onStaleCheckTimeout());
         this._connect();
     }
 
@@ -406,7 +437,8 @@ export class PulseClient {
         runEveryStep([
             {name: 'release the detail watch', run: () => this._sendUnwatchDetail(null)},
             {name: 'cancel the calls in flight', run: () => this._cancellable.cancel()},
-            {name: 'remove the timeouts', run: () => this._removeTimeouts()},
+            {name: 'remove the StartUnit chain step', run: () => this._cancelStartChainStep()},
+            {name: 'remove the stall watchdog', run: () => this._disarmStallWatchdog()},
             {name: 'destroy the link', run: () => this._destroyLink()},
             {name: 'forget the history listeners', run: () => this._historyListeners.clear()},
             {name: 'forget the snapshot listeners', run: () => this._snapshotListeners.clear()},
@@ -773,24 +805,27 @@ export class PulseClient {
      * Takes a state whole: both histories and the snapshot replace the client's, and Samples are drawn from here on.
      * Its freshness is its snapshot's own time (freshnessOfStateSnapshot), so a state whose snapshot is already stale
      * (a service that answers while its sampler has stopped) shows no data at once, since that snapshot's time, rather
-     * than its old numbers as live; the next Sample of the same run draws again. A Sample still unread is parsed first,
-     * so "no data since" counts it before the state's snapshot.
+     * than its old numbers as live, and arms no watchdog; the next Sample of the same run draws again. A fresh state
+     * arms the watchdog for what is left of the stall (stallRemainderMs), so its numbers show as live for no longer
+     * than the stall after they were taken.
      *
      * @param {object} state - lib/protocol.js parseStatePayload's result.
      * @returns {void}
      */
     _applyState(state) {
-        this._parseUnreadSnapshot();
         replaceHistory(this._cpuHistory, state.histories.cpu);
         replaceHistory(this._memoryHistory, state.histories.memory);
         this._lastAppliedSequence = state.sequence;
-        this._lastFreshDataAtUsec = freshnessOfStateSnapshot(state.snapshot, this._nowUsec());
         this._dataState = DataState.LIVE;
-        if (this._isLiveDataStale()) {
+        const nowUsec = this._nowUsec();
+        const freshAtUsec = freshnessOfStateSnapshot(state.snapshot, nowUsec);
+        if (isSampleStale({lastSampleReceivedAtUsec: freshAtUsec, nowUsec})) {
             this._recordLastGoodClockLabel(state.snapshot);
             this._stopDrawing(DataState.STALLED);
             return;
         }
+        // Armed before listeners are told, so one that destroys the client leaves no watchdog behind.
+        this._armStallWatchdog(stallRemainderMs(nowUsec - freshAtUsec));
         this._publish(state.snapshot);
     }
 
@@ -841,7 +876,7 @@ export class PulseClient {
 
     /**
      * Appends what a Sample appended (nothing for a null appendedHistory), makes it the newest Sample with its snapshot
-     * unread, and tells listeners. A stall ends here.
+     * unread, re-arms the watchdog for the whole stall, and tells listeners. A stall ends here.
      *
      * @param {object} sampleEnvelope - lib/protocol.js parseSampleEnvelope's result.
      * @returns {void}
@@ -853,8 +888,9 @@ export class PulseClient {
             this._memoryHistory.push(appendedHistory.memory);
         }
         this._lastAppliedSequence = sampleEnvelope.sequence;
-        this._lastFreshDataAtUsec = this._nowUsec();
         this._dataState = DataState.LIVE;
+        // Armed before listeners are told, so one that destroys the client leaves no watchdog behind.
+        this._armStallWatchdog(SAMPLE_STALL_MS);
         this._keepSampleUnread(sampleEnvelope);
         this._notifyOfSample(appendedHistory !== null);
     }
@@ -888,13 +924,15 @@ export class PulseClient {
     }
 
     /**
-     * Stops drawing the service's data: moves to the given state, and publishes no data if the data was live, so it
-     * happens once however many reasons follow.
+     * Stops drawing the service's data: removes the stall watchdog, since nothing waits for a Sample while the data is
+     * not live (the owner left, the sequence restarted, a state was already stale, or the watchdog itself fired), moves
+     * to the given state, and publishes no data if the data was live, so it happens once however many reasons follow.
      *
      * @param {string} nextDataState - DataState.AWAITING_STATE or DataState.STALLED.
      * @returns {void}
      */
     _stopDrawing(nextDataState) {
+        this._disarmStallWatchdog();
         const wasLive = this._dataState === DataState.LIVE;
         this._dataState = nextDataState;
         if (wasLive)
@@ -1000,32 +1038,42 @@ export class PulseClient {
     }
 
     /**
-     * The staleness check, every SAMPLE_INTERVAL_SECONDS. Runs as a GLib timeout, so it never throws.
+     * Arms the stall watchdog anew: removes the pending one, if any, and adds one that shows no data after intervalMs
+     * with no Sample. Each Sample drawn calls it, so while Samples flow it never fires.
      *
-     * @returns {boolean} GLib.SOURCE_CONTINUE, always.
+     * @param {number} intervalMs - Milliseconds until no data: SAMPLE_STALL_MS after a Sample, what is left of it
+     *     after a state.
+     * @returns {void}
      */
-    _onStaleCheckTimeout() {
-        this._runWithoutThrowing('check for a stale Sample', () => this._stopDrawingIfStale());
-        return GLib.SOURCE_CONTINUE;
+    _armStallWatchdog(intervalMs) {
+        this._disarmStallWatchdog();
+        this._stallWatchdogSourceId = this._timeouts.addMilliseconds(intervalMs,
+            () => this._onStallWatchdogTimeout());
     }
 
     /**
-     * Shows no data once live data has had no Sample for longer than the stall (lib/wiring.js isSampleStale).
+     * Removes the stall watchdog's pending timeout, if any.
      *
      * @returns {void}
      */
-    _stopDrawingIfStale() {
-        if (this._dataState === DataState.LIVE && this._isLiveDataStale())
-            this._stopDrawing(DataState.STALLED);
+    _disarmStallWatchdog() {
+        if (this._stallWatchdogSourceId === null)
+            return;
+        const stallWatchdogSourceId = this._stallWatchdogSourceId;
+        this._stallWatchdogSourceId = null;
+        this._timeouts.remove(stallWatchdogSourceId);
     }
 
     /**
-     * Says whether the data last received is older than the stall (lib/wiring.js isSampleStale).
+     * The stall watchdog fired: no Sample came for as long as it was armed. Shows no data, once. Runs as a GLib
+     * timeout, so it never throws, and forgets its id first: its source ends as it returns.
      *
-     * @returns {boolean} True when stale.
+     * @returns {boolean} GLib.SOURCE_REMOVE: the next Sample, or the next fresh state, arms a new one.
      */
-    _isLiveDataStale() {
-        return isSampleStale({lastSampleReceivedAtUsec: this._lastFreshDataAtUsec, nowUsec: this._nowUsec()});
+    _onStallWatchdogTimeout() {
+        this._stallWatchdogSourceId = null;
+        this._runWithoutThrowing('show no data after a stall', () => this._stopDrawing(DataState.STALLED));
+        return GLib.SOURCE_REMOVE;
     }
 
     /**
@@ -1095,20 +1143,6 @@ export class PulseClient {
      */
     _callService(methodName, cancellable, onAnswered) {
         this._link.call(methodName, cancellable, onAnswered);
-    }
-
-    /**
-     * Removes the staleness check and the StartUnit chain's pending step.
-     *
-     * @returns {void}
-     */
-    _removeTimeouts() {
-        this._cancelStartChainStep();
-        if (this._staleCheckSourceId === null)
-            return;
-        const staleCheckSourceId = this._staleCheckSourceId;
-        this._staleCheckSourceId = null;
-        this._timeouts.remove(staleCheckSourceId);
     }
 
     /**

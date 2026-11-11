@@ -3,10 +3,15 @@
 /** Seconds between CPU, memory and pressure samples. */
 export const SAMPLE_INTERVAL_SECONDS = 2;
 /**
- * Sample intervals the extension's client waits for a Sample. A Sample older than that is stale (lib/wiring.js
+ * Sample intervals the extension's client waits for a Sample. Data older than that is stale (lib/wiring.js
  * isSampleStale): both surfaces go to no data, once, rather than show its numbers as live.
  */
 export const SAMPLE_STALL_TICKS = 3;
+/**
+ * The same stall in milliseconds: what the client's stall watchdog, which each Sample re-arms, waits before it shows
+ * no data. Milliseconds, so the watchdog fires exactly the stall after the last Sample, not on a whole second.
+ */
+export const SAMPLE_STALL_MS = SAMPLE_STALL_TICKS * SAMPLE_INTERVAL_SECONDS * 1000;
 /**
  * Seconds the client waits after a failed StartUnit before asking systemd again: the first delay after the first
  * failure, the second after the second, and the last one for every failure after that. A success, or the service
