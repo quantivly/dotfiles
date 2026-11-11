@@ -27,6 +27,21 @@ const MOUNTS = {
     ],
 };
 
+/** The memory caveat every session tooltip ends with. */
+const MEMORY_NOTE = 'memory: process only; MCP servers and tool shells not counted';
+
+/**
+ * A mounts source with `count` removable mounts labelled m0, m1, …, sizes unknown.
+ *
+ * @param {number} count - Number of mounts.
+ * @returns {object} A mounts source.
+ */
+function mountsWithRowCount(count) {
+    const rows = Array.from({length: count}, (_, index) => ({...MOUNTS.rows[0], label: `m${index}`,
+        mountPoint: `/media/user/m${index}`, freeBytes: null, totalBytes: null}));
+    return {...MOUNTS, rows};
+}
+
 /**
  * Sessions with `count` rows copied from BASE_ROW, each with a distinct id.
  *
@@ -48,11 +63,12 @@ function idleTextOf(overrides) {
     return cockpitFormat.sessionRows({...SESSIONS, rows: [{...BASE_ROW, ...overrides}]}).rows[0].idleText;
 }
 
-test('cockpitFormat: header counts in SESSION_STATES order, zeros included; memory and row count', () => {
+test('cockpitFormat: header counts in SESSION_STATES order, zeros included, each written as text; memory and row ' +
+    'count', () => {
     assertEqual(cockpitFormat.sessionsHeader(SESSIONS), {
         title: 'SESSIONS', count: '2',
-        counts: [{state: 'working', count: 1}, {state: 'blocked', count: 1}, {state: 'idle', count: 0},
-            {state: 'done', count: 0}, {state: 'unknown', count: 0}],
+        counts: [{state: 'working', count: '1'}, {state: 'blocked', count: '1'}, {state: 'idle', count: '0'},
+            {state: 'done', count: '0'}, {state: 'unknown', count: '0'}],
         totalMemory: '3.7G',
     });
     assertEqual(cockpitFormat.sessionsHeader({...SESSIONS, rows: [], totalMemoryBytes: null}).count, '0');
@@ -114,13 +130,38 @@ test('cockpitFormat: a redacted name passes through unchanged', () => {
 });
 
 test('cockpitFormat: tooltip lines with and without account and context', () => {
-    const note = 'memory: process only; MCP servers and tool shells not counted';
     assertEqual(cockpitFormat.sessionTooltip(BASE_ROW, {account: 'quantivly-1', contextPercent: 42, paneId: 'p1'}),
-        ['working', 'pane p1', 'account quantivly-1', 'context 42%', note]);
+        ['working', 'pane p1', 'account quantivly-1', 'context 42%', MEMORY_NOTE]);
     assertEqual(cockpitFormat.sessionTooltip(BASE_ROW, {account: null, contextPercent: null, paneId: 'p1'}),
-        ['working', 'pane p1', note]);
+        ['working', 'pane p1', MEMORY_NOTE]);
     assertEqual(cockpitFormat.sessionTooltip(BASE_ROW, {account: 'toysim-1', contextPercent: null, paneId: 'p3'}),
-        ['working', 'pane p3', 'account toysim-1', note]);
+        ['working', 'pane p3', 'account toysim-1', MEMORY_NOTE]);
+});
+
+test('cockpitFormat: a session whose pane is unknown (an id too long, or none) gets no pane line, never "pane null"',
+    () => assertEqual([null, undefined].map(paneId =>
+        cockpitFormat.sessionTooltip(BASE_ROW, {account: 'quantivly-1', contextPercent: 42, paneId})), [
+        ['working', 'account quantivly-1', 'context 42%', MEMORY_NOTE],
+        ['working', 'account quantivly-1', 'context 42%', MEMORY_NOTE],
+    ]));
+
+test('cockpitFormat: each session row carries its state\'s icon and class and the tooltip of its own source row, ' +
+    'whatever the order, so no row can show another session\'s details', () => {
+    const ownDetailsOf = sessions => cockpitFormat.sessionRows(sessions).rows
+        .map(row => [row.id, row.iconName, row.iconStyleClass, row.tooltip]);
+    const first = ['w1:p1', 'media-playback-start-symbolic', 'rp-cockpit-state-working',
+        ['working', 'pane p1', 'account quantivly-1', 'context 42%', MEMORY_NOTE]];
+    const second = ['w2:p3', 'dialog-warning-symbolic', 'rp-cockpit-state-blocked',
+        ['blocked', 'pane p3', 'account toysim-1', 'context 8%', MEMORY_NOTE]];
+    assertEqual({
+        asPublished: ownDetailsOf(SESSIONS),
+        reversed: ownDetailsOf({...SESSIONS, rows: [...SESSIONS.rows].reverse()}),
+        paneUnknown: ownDetailsOf({...SESSIONS, rows: [{...BASE_ROW, paneId: null}]})[0][3],
+    }, {
+        asPublished: [first, second],
+        reversed: [second, first],
+        paneUnknown: ['working', 'account quantivly-1', 'context 42%', MEMORY_NOTE],
+    });
 });
 
 test('cockpitFormat: apps rows cap at the limit, scale to the first memory entry, and null lists are empty', () => {
@@ -129,44 +170,87 @@ test('cockpitFormat: apps rows cap at the limit, scale to the first memory entry
         memoryBytes: 512 * 1024 ** 2}];
     const rows = cockpitFormat.appsRows({cpuRanking, memoryRanking});
     assertEqual(rows.cpu.length, 6);
-    assertEqual(rows.cpu[0], {name: 'app0', cpuText: '150%', cpuFraction: 1});
-    assertEqual(rows.cpu[2], {name: 'app2', cpuText: '110%', cpuFraction: 1});
-    assertEqual(rows.cpu[5], {name: 'app5', cpuText: '50%', cpuFraction: 0.5});
-    assertEqual(rows.memory, [{name: 'big', memoryText: '2.0G', memoryFraction: 1},
-        {name: 'small', memoryText: '512M', memoryFraction: 0.25}]);
+    assertEqual(rows.cpu[0], {name: 'app0', cpuText: '150%', cpuFraction: 1, tooltip: ['g0']});
+    assertEqual(rows.cpu[2], {name: 'app2', cpuText: '110%', cpuFraction: 1, tooltip: ['g2']});
+    assertEqual(rows.cpu[5], {name: 'app5', cpuText: '50%', cpuFraction: 0.5, tooltip: ['g5']});
+    assertEqual(rows.memory, [{name: 'big', memoryText: '2.0G', memoryFraction: 1, tooltip: ['a']},
+        {name: 'small', memoryText: '512M', memoryFraction: 0.25, tooltip: ['b']}]);
     assertEqual(cockpitFormat.appsRows({cpuRanking, memoryRanking}, {limit: 2}).cpu.length, 2);
     assertEqual(cockpitFormat.appsRows({cpuRanking: null, memoryRanking: null}), {cpu: [], memory: []});
 });
 
-test('cockpitFormat: connections rows for the fixture, in order uplink, vpn, ssh, mounts', () => {
-    const rows = cockpitFormat.connectionsRows(NETWORK, MOUNTS);
-    assertEqual(rows, [
+test('cockpitFormat: each apps row carries its own ranking entry\'s group key as its tooltip, in both rankings and ' +
+    'under a limit', () => {
+    const cpuRanking = [{groupKey: 'unit-b.scope', name: 'Firefox', cpuPercent: 40},
+        {groupKey: 'org.gnome.Ptyxis', name: 'Ptyxis', cpuPercent: 10}];
+    const memoryRanking = [{groupKey: 'org.gnome.Ptyxis', name: 'Ptyxis', memoryBytes: 2048},
+        {groupKey: 'unit-b.scope', name: 'Firefox', memoryBytes: 1024}];
+    const keysOf = rows => rows.map(row => [row.name, row.tooltip]);
+    const rows = cockpitFormat.appsRows({cpuRanking, memoryRanking});
+    assertEqual({
+        cpu: keysOf(rows.cpu),
+        memory: keysOf(rows.memory),
+        limited: keysOf(cockpitFormat.appsRows({cpuRanking, memoryRanking}, {limit: 1}).memory),
+    }, {
+        cpu: [['Firefox', ['unit-b.scope']], ['Ptyxis', ['org.gnome.Ptyxis']]],
+        memory: [['Ptyxis', ['org.gnome.Ptyxis']], ['Firefox', ['unit-b.scope']]],
+        limited: [['Ptyxis', ['org.gnome.Ptyxis']]],
+    });
+});
+
+test('cockpitFormat: connections rows for the fixture, in order uplink, vpn, ssh, mounts, with nothing cut', () => {
+    assertEqual(cockpitFormat.connectionsRows(NETWORK, MOUNTS), {rows: [
         {kind: 'uplink', icon: 'network-wired-symbolic', text: 'wired · wifi off', tooltip: ['internet: full'], fraction: null},
         {kind: 'vpn', icon: 'network-vpn-symbolic', text: 'VPN up (tun0)', tooltip: ['VPN up (tun0)'], fraction: null},
         {kind: 'ssh', icon: 'utilities-terminal-symbolic', text: '2 live ssh masters', tooltip: ['2 live ssh masters'], fraction: null},
         {kind: 'mount', icon: 'drive-removable-media-symbolic', text: 'BACKUP · 465.7G free',
             tooltip: ['/media/user/BACKUP', 'ext4', '465.7G free of 1862.6G'], fraction: 0.75},
         {kind: 'mount', icon: 'folder-remote-symbolic', text: 'share', tooltip: ['/mnt/share', 'cifs'], fraction: null},
-    ]);
+    ], overflowText: null});
+});
+
+test('cockpitFormat: connections rows stop at CONNECTIONS_CARD_ROW_LIMIT (8): at the limit nothing is cut; past it ' +
+    'only mounts are, the first ones kept in order, and "+N more" says how many', () => {
+    const shapeOf = ({rows, overflowText}) => ({texts: rows.map(row => row.text), overflowText});
+    const fixedTexts = ['wired · wifi off', 'VPN up (tun0)', '2 live ssh masters'];
+    const mountTexts = count => Array.from({length: count}, (_, index) => `m${index}`);
+    assertEqual({
+        atTheLimit: shapeOf(cockpitFormat.connectionsRows(NETWORK, mountsWithRowCount(5))),
+        onePast: shapeOf(cockpitFormat.connectionsRows(NETWORK, mountsWithRowCount(6))),
+        fourPastAGivenLimit: shapeOf(cockpitFormat.connectionsRows(NETWORK, mountsWithRowCount(5), {limit: 4})),
+    }, {
+        atTheLimit: {texts: [...fixedTexts, ...mountTexts(5)], overflowText: null},
+        onePast: {texts: [...fixedTexts, ...mountTexts(5)], overflowText: '+1 more'},
+        fourPastAGivenLimit: {texts: [...fixedTexts, ...mountTexts(1)], overflowText: '+4 more'},
+    });
+});
+
+test('cockpitFormat: a row bar is its fraction of the track in whole pixels, clamped to the track; no fraction (or ' +
+    'not a number) is an empty bar', () => {
+    const trackWidthPx = 63;
+    assertEqual([0.5, 1, 0.25, 1.4, -0.2, 0, null, undefined, NaN]
+        .map(fraction => cockpitFormat.rowBarWidthPx(fraction, trackWidthPx)), [32, 63, 16, 63, 0, 0, 0, 0, 0]);
+    assertEqual(cockpitFormat.rowBarWidthPx(0.5, 0), 0);
 });
 
 test('cockpitFormat: uplink kinds, vpn states and ssh counts', () => {
-    const uplinkOf = (uplink) => cockpitFormat.connectionsRows({...NETWORK, uplink}, MOUNTS)[0];
+    const uplinkOf = (uplink) => cockpitFormat.connectionsRows({...NETWORK, uplink}, MOUNTS).rows[0];
     assertEqual(uplinkOf({kind: 'wired', connectivity: 'full', wifiEnabled: true}).text, 'wired');
     assertEqual(uplinkOf({kind: 'wired', connectivity: 'full', wifiEnabled: null}).text, 'wired');
     const wifi = uplinkOf({kind: 'wifi', connectivity: 'portal', wifiEnabled: true});
     assertEqual([wifi.icon, wifi.text, wifi.tooltip], ['network-wireless-symbolic', 'wifi', ['internet: portal']]);
     const none = uplinkOf({kind: 'none', connectivity: null, wifiEnabled: null});
     assertEqual([none.icon, none.text, none.tooltip], ['network-offline-symbolic', 'offline', ['internet: unknown']]);
-    const vpnOf = (vpn) => cockpitFormat.connectionsRows({...NETWORK, vpn}, MOUNTS)[1].text;
+    const vpnOf = (vpn) => cockpitFormat.connectionsRows({...NETWORK, vpn}, MOUNTS).rows[1].text;
     assertEqual(vpnOf({isUp: true, interfaceName: null}), 'VPN up');
     assertEqual(vpnOf({isUp: false, interfaceName: null}), 'VPN down');
     assertEqual(vpnOf({isUp: null, interfaceName: null}), 'VPN unknown');
-    const sshTextOf = (sshMasterCount) => cockpitFormat.connectionsRows({...NETWORK, sshMasterCount}, MOUNTS)[2].text;
+    const sshTextOf = (sshMasterCount) =>
+        cockpitFormat.connectionsRows({...NETWORK, sshMasterCount}, MOUNTS).rows[2].text;
     assertEqual(sshTextOf(0), 'no ssh masters');
     assertEqual(sshTextOf(1), '1 live ssh master');
     assertEqual(sshTextOf(null), 'ssh masters unknown');
-    assertEqual(cockpitFormat.connectionsRows(NETWORK, {...MOUNTS, rows: []}).length, 3);
+    assertEqual(cockpitFormat.connectionsRows(NETWORK, {...MOUNTS, rows: []}).rows.length, 3);
 });
 
 test('cockpitFormat: noDataText goes through the stub clock; the herdr line is fixed', () => {

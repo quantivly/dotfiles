@@ -347,7 +347,18 @@ test('cockpitCards.js: each card builds the rows it can show (APPS_CARD_ROW_LIMI
         cardMethodBody('ConnectionsCockpitCard', '_renderConnections('),
         cardMethodBody('SessionsCockpitCard', '_renderSessions('),
         cardMethodBody('SessionsCockpitCard', '_showHeader('),
-        cardMethodBody('CockpitCardBase', '_showRow('), cardMethodBody('CockpitCardBase', '_renderNoData('),
+        ...['_showRow(', '_showRowIcon(', '_showRowState(', '_showRowBar(', '_hideRowsFrom(', '_renderNoData(',
+            '_setDataShown('].map(declaration => cardMethodBody('CockpitCardBase', declaration)),
+        cardMethodBody('SessionsCockpitCard', '_setDataShown('),
+        ...['setLabelText(', 'setOptionalLabelText(', 'setStyleClass(', 'appRowContent(', 'connectionRowContent(',
+            'sessionRowContent('].map(functionName => methodBody(source, `function ${functionName}`)),
+    ];
+    /** Each list's rows, hidden past its data in the method that draws that list. */
+    const listsHidingTheirRest = [
+        ['AppsCockpitCard', '_renderApps(', 'this._cpuRows, cpu.length'],
+        ['AppsCockpitCard', '_renderApps(', 'this._memoryRows, memory.length'],
+        ['ConnectionsCockpitCard', '_renderConnections(', 'this._connectionRows, rows.length'],
+        ['SessionsCockpitCard', '_renderSessions(', 'this._sessionRows, rows.length'],
     ];
     assertEqual({
         apps: occurrenceCount(cardMethodBody('AppsCockpitCard', '_init('), rowLimitOf('APPS_CARD_ROW_LIMIT')),
@@ -358,10 +369,10 @@ test('cockpitCards.js: each card builds the rows it can show (APPS_CARD_ROW_LIMI
         updatePathsRead: updatePathBodies.map(body => body !== ''),
         updatePathsMakingActors: updatePathBodies.filter(body => body.includes('new ')).length,
         destroys: occurrenceCount(source, 'destroy('),
-        hidesTheRest: occurrenceCount(methodBody(source, 'function hideRowsFrom('), 'row.actor.visible = false;'),
-        eachListHidesItsRest: ['this._cpuRows, cpu.length', 'this._memoryRows, memory.length',
-            'this._connectionRows, shownRows.length', 'this._sessionRows, rows.length']
-            .map(rowsArguments => occurrenceCount(source, `hideRowsFrom(${rowsArguments});`)),
+        hidesTheRest: occurrenceCount(cardMethodBody('CockpitCardBase', '_hideRowsFrom('),
+            'row.actor.visible = false;'),
+        eachListHidesItsRest: listsHidingTheirRest.map(([className, declaration, rowsArguments]) =>
+            occurrenceCount(cardMethodBody(className, declaration), `this._hideRowsFrom(${rowsArguments});`)),
     }, {
         apps: 2, connections: 1, sessions: 1, updatePathsRead: updatePathBodies.map(() => true),
         updatePathsMakingActors: 0, destroys: 0, hidesTheRest: 1, eachListHidesItsRest: [1, 1, 1, 1],
@@ -384,7 +395,7 @@ test('cockpitCards.js: every icon name comes from COCKPIT_ICON_NAMES through lib
         iconSizePx: COCKPIT_ROW_ICON_SIZE_PX,
     }, {
         symbolicLiterals: 0, icons: 2, sizedIcons: 2, headerIconName: 1,
-        iconNameValues: ['null', 'connectionRow.icon', 'stateIconName(row.state)'],
+        iconNameValues: ['null', 'connectionRow.icon', 'row.iconName'],
         rowIconTakesTheName: 1, iconSizePx: ROW_ICON_SIZE_PX,
     });
 });
@@ -419,8 +430,7 @@ test('cockpitCards.js: no St.DrawingArea or cairo: the bar is a widget whose wid
         drawingAreas: 0, cairoContexts: 0, bar: 1,
         showRowBar: [
             '_showRowBar(row) {',
-            'const fraction = row.barFraction === null ? 0 : Math.min(1, Math.max(0, row.barFraction));',
-            'const barWidthPx = Math.round(fraction * this._barTrackWidthPx);',
+            'const barWidthPx = rowBarWidthPx(row.barFraction, this._barTrackWidthPx);',
             'if (barWidthPx === row.barWidthPx)',
             'return;',
             'row.bar.set_width(barWidthPx);',
@@ -442,12 +452,16 @@ test('cockpitCards.js: a handler is either on the card itself or tied to it by c
             "this.connect('destroy', () => this._onDestroy());"),
         connectObjects: occurrenceCount(source, '.connectObject('),
         rowHandlersTiedToTheCard: /row\.actor\.connectObject\([^;]*\bthis\);/.test(buildRowBody),
+        pulseCardHandlerTiedToTheCard: /pulseCard\.connectObject\([^;]*\bthis\);/
+            .test(cardMethodBody('SystemCockpitCard', '_adoptPulseCard(')),
         disconnects: occurrenceCount(source, 'disconnect'),
+        disconnectsTheAdoptedCard: occurrenceCount(cardMethodBody('SystemCockpitCard', '_releasePulseCard('),
+            'pulseCard.disconnectObject(this);'),
         destroyHidesTheTooltip: occurrenceCount(cardMethodBody('CockpitCardBase', '_onDestroy('),
             'this._tooltip?.hide();'),
     }, {
-        connects: 2, connectsOnTheCardItself: 2, destroyHandler: 1, connectObjects: 1, rowHandlersTiedToTheCard: true,
-        disconnects: 0, destroyHidesTheTooltip: 1,
+        connects: 2, connectsOnTheCardItself: 2, destroyHandler: 1, connectObjects: 2, rowHandlersTiedToTheCard: true,
+        pulseCardHandlerTiedToTheCard: true, disconnects: 1, disconnectsTheAdoptedCard: 1, destroyHidesTheTooltip: 1,
     });
 });
 
@@ -526,13 +540,14 @@ test('cockpitCards.js: a label\'s text, an icon\'s name and the hovered row\'s t
     assertEqual({
         setLabelText: statementsOf(methodBody(source, 'function setLabelText(')),
         textAssignments: occurrenceCount(source, '.text = '),
+        setTextCalls: occurrenceCount(source, 'set_text('),
         iconNameCompared: occurrenceCount(cardMethodBody('CockpitCardBase', '_showRowIcon('),
             'if (iconName !== null && row.icon.icon_name !== iconName)'),
         hoveredTooltipCompared: occurrenceCount(showRowBody,
             'if (row.actor.hover && !areSameLines(row.tooltipLines, content.tooltipLines))'),
     }, {
         setLabelText: ['function setLabelText(label, text) {', 'if (label.text !== text)', 'label.text = text;', '}'],
-        textAssignments: 1, iconNameCompared: 1, hoveredTooltipCompared: 1,
+        textAssignments: 1, setTextCalls: 0, iconNameCompared: 1, hoveredTooltipCompared: 1,
     });
 });
 
@@ -562,39 +577,46 @@ test('cockpitCards.js: frozen, a card only records its latest render; unfreezing
 });
 
 test('cockpitCards.js: each card\'s update takes exactly what it draws, with no clock (ruling D9); a source it ' +
-    'cannot draw is no data, and a sessions source with herdr down says so', () => {
+    'cannot draw is no data, and a sessions source with herdr down says so, each returning before any render', () => {
     const source = codeOf(CARDS_SOURCE_FILE);
     const updateDeclarations = CARD_CLASS_NAMES.map(className =>
         statementsOf(cardMethodBody(className, 'update('))[0]);
-    const sessionsUpdate = statementsOf(cardMethodBody('SessionsCockpitCard', 'update('));
+    const noDataBranch = guard => [guard, 'this.showNoData(NO_SOURCE_TEXT);', 'return;', '}'];
     assertEqual({
         updateDeclarations,
         clocks: occurrenceCount(source, 'nowRealUsec'),
-        guards: ['AppsCockpitCard', 'ConnectionsCockpitCard'].map(className =>
-            statementsOf(cardMethodBody(className, 'update('))[1]),
-        herdrDown: sessionsUpdate.slice(1, 3),
-        sessionsGuard: sessionsUpdate[5],
+        dataCardUpdates: DATA_CARD_CLASS_NAMES.map(className => statementsOf(cardMethodBody(className, 'update('))),
         herdrLine: statementsOf(cardMethodBody('CockpitCardBase', 'showHerdrNotRunning(')),
     }, {
         updateDeclarations: ['update(snapshot, lastGoodClockLabel) {', 'update(apps) {', 'update(network, mounts) {',
             'update(sessions) {'],
         clocks: 0,
-        guards: ['if (!canDrawApps(apps)) {', 'if (!canDrawConnections(network, mounts)) {'],
-        herdrDown: ['if (sessions?.herdrRunning === false) {', 'this.showHerdrNotRunning();'],
-        sessionsGuard: 'if (!canDrawSessions(sessions)) {',
+        dataCardUpdates: [
+            ['update(apps) {', ...noDataBranch('if (!canDrawApps(apps)) {'),
+                'this._renderUnlessFrozen(() => this._renderApps(apps));', '}'],
+            ['update(network, mounts) {', ...noDataBranch('if (!canDrawConnections(network, mounts)) {'),
+                'this._renderUnlessFrozen(() => this._renderConnections(network, mounts));', '}'],
+            ['update(sessions) {', 'if (sessions?.herdrRunning === false) {', 'this.showHerdrNotRunning();', 'return;',
+                '}', ...noDataBranch('if (!canDrawSessions(sessions)) {'),
+                'this._renderUnlessFrozen(() => this._renderSessions(sessions));', '}'],
+        ],
         herdrLine: ['showHerdrNotRunning() {', 'this.showNoData(herdrNotRunningText);', '}'],
     });
 });
 
 test('cockpitCards.js: the sessions card draws its header, rows and "+N more" from lib/cockpitFormat.js, each row ' +
-    'with its state\'s icon and class, its tooltip from the source row and its id', () => {
+    'with the icon, class, tooltip and id sessionRows gives it; no card reads a source row or a ranking entry by ' +
+    'index', () => {
     const source = codeOf(CARDS_SOURCE_FILE);
     const renderBody = cardMethodBody('SessionsCockpitCard', '_renderSessions(');
     assertEqual({
         header: occurrenceCount(renderBody, 'this._showHeader(sessionsHeader(sessions));'),
+        headerAssignsTexts: statementsOf(cardMethodBody('SessionsCockpitCard', '_showHeader(')),
         rows: occurrenceCount(renderBody, 'const {rows, overflowText} = sessionRows(sessions);'),
         rowContent: occurrenceCount(renderBody,
-            'this._showRow(this._sessionRows[rowIndex], sessionRowContent(row, sessions.rows[rowIndex])));'),
+            'this._showRow(this._sessionRows[rowIndex], sessionRowContent(row)));'),
+        sourceReadsByIndex: ['sessions.rows[', 'cpuRanking[', 'memoryRanking[']
+            .map(needle => occurrenceCount(source, needle)),
         overflow: occurrenceCount(renderBody, "setOptionalLabelText(this._overflowLabel, overflowText ?? '');"),
         sessionRowContent: statementsOf(methodBody(source, 'function sessionRowContent(')),
         headerTitle: occurrenceCount(cardMethodBody('SessionsCockpitCard', '_buildHeader('),
@@ -604,12 +626,16 @@ test('cockpitCards.js: the sessions card draws its header, rows and "+N more" fr
         stateIconClass: occurrenceCount(cardMethodBody('SessionsCockpitCard', '_addStateCount('),
             'style_class: stateStyleClass(state),'),
     }, {
-        header: 1, rows: 1, rowContent: 1, overflow: 1,
+        header: 1,
+        headerAssignsTexts: ['_showHeader(header) {', 'setLabelText(this._sessionCountLabel, header.count);',
+            'header.counts.forEach(({count}, stateIndex) => setLabelText(this._stateCountLabels[stateIndex], count));',
+            'setLabelText(this._totalMemoryLabel, header.totalMemory);', '}'],
+        rows: 1, rowContent: 1, sourceReadsByIndex: [0, 0, 0], overflow: 1,
         sessionRowContent: [
-            'function sessionRowContent(row, sourceRow) {', 'return {', 'iconName: stateIconName(row.state),',
-            'iconStyleClass: stateStyleClass(row.state),', 'name: row.name,', 'firstValue: row.idleText,',
+            'function sessionRowContent(row) {', 'return {', 'iconName: row.iconName,',
+            'iconStyleClass: row.iconStyleClass,', 'name: row.name,', 'firstValue: row.idleText,',
             'secondValue: row.memoryText,', 'fraction: row.memoryFraction,',
-            'tooltipLines: sessionTooltip(row, sourceRow),', 'isLongIdle: row.isLongIdle,',
+            'tooltipLines: row.tooltip,', 'isLongIdle: row.isLongIdle,',
             'isWaiting: row.isWaiting,', 'sessionId: row.id,', '};', '}',
         ],
         headerTitle: 1, stateCountsInOrder: 1, stateIconClass: 1,
@@ -617,29 +643,46 @@ test('cockpitCards.js: the sessions card draws its header, rows and "+N more" fr
 });
 
 test('cockpitCards.js: the apps card draws appsRows\' CPU rows, a divider, then its memory rows, each row\'s ' +
-    'tooltip its ranking entry\'s group key; the connections card draws connectionsRows up to its limit', () => {
+    'tooltip the one appsRows gives it (its own entry\'s group key)', () => {
     const source = codeOf(CARDS_SOURCE_FILE);
     const appsInitBody = cardMethodBody('AppsCockpitCard', '_init(');
     const renderAppsBody = cardMethodBody('AppsCockpitCard', '_renderApps(');
-    const renderConnectionsBody = cardMethodBody('ConnectionsCockpitCard', '_renderConnections(');
     assertEqual({
         title: occurrenceCount(appsInitBody, 'this.add_child(newMutedLabel(appsCardTitle));'),
         dividerBetween: appsInitBody.indexOf('this._cpuRows = ') < appsInitBody.indexOf(APPS_DIVIDER_STATEMENT) &&
             appsInitBody.indexOf(APPS_DIVIDER_STATEMENT) < appsInitBody.indexOf('this._memoryRows = '),
         rankings: occurrenceCount(renderAppsBody, 'const {cpu, memory} = appsRows(apps);'),
-        groupKeys: ['apps.cpuRanking[rowIndex].groupKey', 'apps.memoryRanking[rowIndex].groupKey']
-            .map(groupKey => occurrenceCount(renderAppsBody, groupKey)),
-        appTooltip: occurrenceCount(methodBody(source, 'function appRowContent('), 'tooltipLines: [groupKey]'),
-        connectionsTitle: occurrenceCount(cardMethodBody('ConnectionsCockpitCard', '_init('),
-            'this.add_child(newMutedLabel(connectionsCardTitle));'),
-        connectionsLimited: occurrenceCount(renderConnectionsBody,
-            'const shownRows = connectionsRows(network, mounts).slice(0, CONNECTIONS_CARD_ROW_LIMIT);'),
+        rowContents: ['appRowContent(entry.name, entry.cpuText, entry.cpuFraction, entry.tooltip)',
+            'appRowContent(entry.name, entry.memoryText, entry.memoryFraction, entry.tooltip)']
+            .map(rowContent => occurrenceCount(renderAppsBody, rowContent)),
+        appRowContent: statementsOf(methodBody(source, 'function appRowContent(')),
+    }, {
+        title: 1, dividerBetween: true, rankings: 1, rowContents: [1, 1],
+        appRowContent: ['function appRowContent(name, valueText, fraction, tooltipLines) {',
+            'return {...EMPTY_ROW_CONTENT, name, firstValue: valueText, fraction, tooltipLines};', '}'],
+    });
+});
+
+test('cockpitCards.js: the connections card draws connectionsRows and below them their "+N more" line, in a muted ' +
+    'label built once, so rows past CONNECTIONS_CARD_ROW_LIMIT never vanish silently', () => {
+    const source = codeOf(CARDS_SOURCE_FILE);
+    const initBody = cardMethodBody('ConnectionsCockpitCard', '_init(');
+    const renderBody = cardMethodBody('ConnectionsCockpitCard', '_renderConnections(');
+    const overflowLabelBuilt = 'this._overflowLabel = newMutedLabel();';
+    assertEqual({
+        title: occurrenceCount(initBody, 'this.add_child(newMutedLabel(connectionsCardTitle));'),
+        overflowLabelBelowTheRows: initBody.indexOf('this._connectionRows = ') < initBody.indexOf(overflowLabelBuilt),
+        overflowLabelAdded: [overflowLabelBuilt, 'rowsBox.add_child(this._overflowLabel);']
+            .map(statement => occurrenceCount(initBody, statement)),
+        rowsAndOverflow: occurrenceCount(renderBody, 'const {rows, overflowText} = connectionsRows(network, mounts);'),
+        overflowDrawn: occurrenceCount(renderBody, "setOptionalLabelText(this._overflowLabel, overflowText ?? '');"),
+        cutInTheCard: occurrenceCount(renderBody, '.slice('),
         connectionContent: ['iconName: connectionRow.icon,', 'name: connectionRow.text,',
             'fraction: connectionRow.fraction,', 'tooltipLines: connectionRow.tooltip,']
             .map(field => occurrenceCount(methodBody(source, 'function connectionRowContent('), field)),
     }, {
-        title: 1, dividerBetween: true, rankings: 1, groupKeys: [1, 1], appTooltip: 1, connectionsTitle: 1,
-        connectionsLimited: 1, connectionContent: [1, 1, 1, 1],
+        title: 1, overflowLabelBelowTheRows: true, overflowLabelAdded: [1, 1], rowsAndOverflow: 1, overflowDrawn: 1,
+        cutInTheCard: 0, connectionContent: [1, 1, 1, 1],
     });
 });
 
@@ -661,16 +704,58 @@ test('cockpitCards.js: the system card adopts the extension\'s v2 card (ruling D
             "this.connect('button-release-event', (_actor, event) => this._onCardReleased(event));", '}'],
         adopt: ['_adoptPulseCard() {', 'const pulseCard = this._pulseCard;',
             'pulseCard.get_parent()?.remove_child(pulseCard);', 'pulseCard.fixed_position_set = false;',
-            'this.add_child(pulseCard);', '}'],
+            'this.add_child(pulseCard);',
+            "pulseCard.connectObject('destroy', () => this._onPulseCardDestroyed(), this);", '}'],
         setCellSize: ['setCellSize(widthPx, heightPx) {', 'this.set_size(widthPx, heightPx);',
-            'this._pulseCard.setCellSize(widthPx, heightPx);', '}'],
-        update: ['update(snapshot, lastGoodClockLabel) {', 'this._pulseCard.update(snapshot, lastGoodClockLabel);',
+            'this._pulseCard?.setCellSize(widthPx, heightPx);', '}'],
+        update: ['update(snapshot, lastGoodClockLabel) {', 'this._pulseCard?.update(snapshot, lastGoodClockLabel);',
             '}'],
-        setFrozen: ['setFrozen(isFrozen) {', 'this._pulseCard.setFrozen(isFrozen);', '}'],
-        repaintFrozen: ['repaintFrozen() {', 'this._pulseCard.repaintFrozen();', '}'],
-        onDestroy: ['_onDestroy() {', 'if (this._pulseCard?.get_parent() === this)',
-            'this.remove_child(this._pulseCard);', 'this._pulseCard = null;', 'super._onDestroy();', '}'],
+        setFrozen: ['setFrozen(isFrozen) {', 'this._pulseCard?.setFrozen(isFrozen);', '}'],
+        repaintFrozen: ['repaintFrozen() {', 'this._pulseCard?.repaintFrozen();', '}'],
+        onDestroy: ['_onDestroy() {', 'this._releasePulseCard();', 'super._onDestroy();', '}'],
     });
+});
+
+test('cockpitCards.js: the system card survives a v2 card destroyed before it: a destroy handler tied to the ' +
+    'system card clears the v2 card, every use of it is guarded, and giving it back releases the handler', () => {
+    const systemCode = classBody(codeOf(CARDS_SOURCE_FILE), 'SystemCockpitCard');
+    assertEqual({
+        connected: occurrenceCount(methodBody(systemCode, '_adoptPulseCard('),
+            "pulseCard.connectObject('destroy', () => this._onPulseCardDestroyed(), this);"),
+        cleared: statementsOf(methodBody(systemCode, '_onPulseCardDestroyed(')),
+        released: statementsOf(methodBody(systemCode, '_releasePulseCard(')),
+        guardedUses: occurrenceCount(systemCode, 'this._pulseCard?.'),
+        unguardedUses: occurrenceCount(systemCode, 'this._pulseCard.'),
+    }, {
+        connected: 1,
+        cleared: ['_onPulseCardDestroyed() {', 'this._pulseCard = null;', '}'],
+        released: ['_releasePulseCard() {', 'const pulseCard = this._pulseCard ?? null;', 'if (pulseCard === null)',
+            'return;', 'this._pulseCard = null;', 'pulseCard.disconnectObject(this);',
+            'if (pulseCard.get_parent() === this)', 'this.remove_child(pulseCard);', '}'],
+        guardedUses: 4,
+        unguardedUses: 0,
+    });
+});
+
+test('cockpitCards.js: hiding a row under the pointer hides the tooltip (no leave-event reaches an actor hidden ' +
+    'under the pointer); a row hidden already is left alone, and a hidden row keeps its actors', () =>
+    assertEqual(statementsOf(cardMethodBody('CockpitCardBase', '_hideRowsFrom(')), [
+        '_hideRowsFrom(rows, firstHiddenIndex) {',
+        'for (const row of rows.slice(firstHiddenIndex)) {',
+        'if (row.actor.visible && row.actor.hover)',
+        'this._tooltip.hide();',
+        'row.actor.visible = false;',
+        '}',
+        '}',
+    ]));
+
+test('cockpitCards.js: no card paints itself (no vfunc_paint or vfunc_paint_node in the code: ruling D12), so each ' +
+    'is drawn only through the offscreen texture the base asks for', () => {
+    const source = codeOf(CARDS_SOURCE_FILE);
+    assertEqual({
+        paintVfuncs: occurrenceCount(source, 'vfunc_paint'),
+        offscreenRedirects: occurrenceCount(source, 'offscreen_redirect: Clutter.OffscreenRedirect.ALWAYS'),
+    }, {paintVfuncs: 0, offscreenRedirects: 1});
 });
 
 test('cockpitCards.js: a primary-button release on the system card opens Resources; the system card draws no ' +

@@ -1,9 +1,10 @@
-// Every word a cockpit card and its tooltip draw, decided here as pure functions so the St glue draws strings and
-// fractions only. Nothing here imports Gio, GLib or Shell. A source is assumed reader-valid (see cockpitProtocol.js);
-// a source never received is the glue's to draw as "no data".
+// Every word a cockpit card and its tooltip draw, every icon and state class, which tooltip goes with which row, and
+// how wide a row's bar is, decided here as pure functions so the St glue only assigns finished values. Nothing here
+// imports Gio, GLib or Shell. A source is assumed reader-valid (see cockpitProtocol.js); a source never received is
+// the glue's to draw as "no data".
 import {
-    APPS_CARD_ROW_LIMIT, COCKPIT_ICON_NAMES, COCKPIT_REDACTED_NAME, SECONDS_PER_DAY, SECONDS_PER_HOUR,
-    SECONDS_PER_MINUTE, SESSION_IDLE_DIM_SECONDS, SESSIONS_CARD_ROW_LIMIT,
+    APPS_CARD_ROW_LIMIT, COCKPIT_ICON_NAMES, COCKPIT_REDACTED_NAME, CONNECTIONS_CARD_ROW_LIMIT, SECONDS_PER_DAY,
+    SECONDS_PER_HOUR, SECONDS_PER_MINUTE, SESSION_IDLE_DIM_SECONDS, SESSIONS_CARD_ROW_LIMIT,
 } from './constants.js';
 import {SESSION_STATES} from './cockpitProtocol.js';
 import {noDataSinceLabel} from './cockpitStaleness.js';
@@ -86,6 +87,29 @@ function isPresent(value) {
 }
 
 /**
+ * The line under a card's rows that says how many rows did not fit.
+ *
+ * @param {number} hiddenCount - Rows left out.
+ * @returns {string|null} '+N more', or null when nothing was left out.
+ */
+function overflowLine(hiddenCount) {
+    return hiddenCount > 0 ? `+${hiddenCount} more` : null;
+}
+
+/**
+ * How wide a row's faint bar is drawn: its fraction of the bar's track, clamped to the track, in whole pixels.
+ *
+ * @param {number|null|undefined} fraction - The row's fraction, normally 0–1; null (or anything not a finite number)
+ *     for a row with no bar.
+ * @param {number} trackWidthPx - The track's width.
+ * @returns {number} The bar's width, 0 to trackWidthPx; 0 for no bar.
+ */
+export function rowBarWidthPx(fraction, trackWidthPx) {
+    const shownFraction = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0;
+    return Math.round(shownFraction * trackWidthPx);
+}
+
+/**
  * Whether the apps card can draw a snapshot's apps: a snapshot from a sampler before the rankings, or none yet, has
  * none. A null ranking inside is drawn as an empty list (appsRows).
  *
@@ -126,31 +150,35 @@ export function canDrawConnections(network, mounts) {
  * The header of the sessions card.
  *
  * @param {object} sessions - A sessions source.
- * @returns {{title: string, count: string, counts: Array<{state: string, count: number}>, totalMemory: string}}
- *   `counts` in SESSION_STATES order, zero counts included; `count` is the number of rows.
+ * @returns {{title: string, count: string, counts: Array<{state: string, count: string}>, totalMemory: string}}
+ *   `counts` in SESSION_STATES order, zero counts included, each written as text; `count` is the number of rows.
  */
 export function sessionsHeader(sessions) {
     return {
         title: sessionsCardTitle,
         count: String(sessions.rows.length),
-        counts: SESSION_STATES.map(state => ({state, count: sessions.counts[state]})),
+        counts: SESSION_STATES.map(state => ({state, count: String(sessions.counts[state])})),
         totalMemory: memoryText(sessions.totalMemoryBytes),
     };
 }
 
 /**
- * The visible rows of the sessions card, in the order the service published them.
+ * The visible rows of the sessions card, in the order the service published them. Each row carries its state's icon
+ * and class and the tooltip built from its own source row, so nothing has to pair a drawn row with a source row later.
  *
  * @param {object} sessions - A sessions source.
- * @returns {{rows: Array<{id: string, state: string, name: string, idleText: string, isLongIdle: boolean,
- *   memoryText: string, memoryFraction: number, isWaiting: boolean}>, overflowText: string|null}} At most
- *   SESSIONS_CARD_ROW_LIMIT rows; `overflowText` is '+N more' for the rows beyond, else null.
+ * @returns {{rows: Array<{id: string, state: string, iconName: string, iconStyleClass: string, name: string,
+ *   idleText: string, isLongIdle: boolean, memoryText: string, memoryFraction: number, isWaiting: boolean,
+ *   tooltip: string[]}>, overflowText: string|null}} At most SESSIONS_CARD_ROW_LIMIT rows; `overflowText` is
+ *   '+N more' for the rows beyond, else null.
  */
 export function sessionRows(sessions) {
     const largestMemoryBytes = Math.max(0, ...sessions.rows.map(row => row.memoryBytes ?? 0));
     const rows = sessions.rows.slice(0, SESSIONS_CARD_ROW_LIMIT).map(row => ({
         id: row.id,
         state: row.state,
+        iconName: stateIconName(row.state),
+        iconStyleClass: stateStyleClass(row.state),
         name: row.name,
         idleText: idleText(row.idleSeconds, row.idleFromProcessAge),
         isLongIdle: row.idleSeconds !== null && row.idleSeconds >= SESSION_IDLE_DIM_SECONDS &&
@@ -158,35 +186,40 @@ export function sessionRows(sessions) {
         memoryText: memoryText(row.memoryBytes),
         memoryFraction: shareOfLargest(row.memoryBytes, largestMemoryBytes),
         isWaiting: row.state === 'blocked',
+        tooltip: sessionTooltip(row, row),
     }));
-    const hiddenCount = sessions.rows.length - rows.length;
-    return {rows, overflowText: hiddenCount > 0 ? `+${hiddenCount} more` : null};
+    return {rows, overflowText: overflowLine(sessions.rows.length - rows.length)};
 }
 
 /**
- * The tooltip of one session row.
+ * The tooltip of one session row. A detail the source does not know (a pane id too long to publish, say) gets no
+ * line, never a "null".
  *
  * @param {{state: string}} row - A session row.
- * @param {{account: string|null, contextPercent: number|null, paneId: string}} details - What the source published.
+ * @param {{account: string|null, contextPercent: number|null, paneId: string|null}} details - What the source
+ *     published.
  * @returns {string[]} The state word, the pane, the account and context when known, and the memory caveat.
  */
 export function sessionTooltip(row, {account, contextPercent, paneId}) {
-    const lines = [row.state, `pane ${paneId}`];
-    if (account !== null && account !== undefined)
+    const lines = [row.state];
+    if (isPresent(paneId))
+        lines.push(`pane ${paneId}`);
+    if (isPresent(account))
         lines.push(`account ${account}`);
-    if (contextPercent !== null && contextPercent !== undefined)
+    if (isPresent(contextPercent))
         lines.push(`context ${formatWholePercent(contextPercent)}`);
     lines.push(MEMORY_TOOLTIP_NOTE);
     return lines;
 }
 
 /**
- * The rows of the apps card's two rankings.
+ * The rows of the apps card's two rankings. Each row carries its own entry's group key as its tooltip.
  *
  * @param {{cpuRanking: Array|null, memoryRanking: Array|null}} apps - The sampler's apps rankings.
  * @param {{limit: number}} [options] - The most rows per ranking.
- * @returns {{cpu: Array<{name: string, cpuText: string, cpuFraction: number}>,
- *   memory: Array<{name: string, memoryText: string, memoryFraction: number}>}} Empty lists for a null ranking.
+ * @returns {{cpu: Array<{name: string, cpuText: string, cpuFraction: number, tooltip: string[]}>,
+ *   memory: Array<{name: string, memoryText: string, memoryFraction: number, tooltip: string[]}>}} Empty lists for a
+ *   null ranking.
  */
 export function appsRows(apps, {limit = APPS_CARD_ROW_LIMIT} = {}) {
     const cpuRanking = (apps.cpuRanking ?? []).slice(0, limit);
@@ -197,11 +230,13 @@ export function appsRows(apps, {limit = APPS_CARD_ROW_LIMIT} = {}) {
             name: entry.name,
             cpuText: formatWholePercent(entry.cpuPercent),
             cpuFraction: Math.min(1, Math.max(0, entry.cpuPercent / 100)),
+            tooltip: [entry.groupKey],
         })),
         memory: memoryRanking.map(entry => ({
             name: entry.name,
             memoryText: memoryText(entry.memoryBytes),
             memoryFraction: shareOfLargest(entry.memoryBytes, largestMemoryBytes),
+            tooltip: [entry.groupKey],
         })),
     };
 }
@@ -281,19 +316,24 @@ function mountRow(mount) {
 }
 
 /**
- * The rows of the connections card: uplink, VPN, ssh masters, then every mount as published.
+ * The visible rows of the connections card: uplink, VPN, ssh masters, then the mounts as published, at most `limit`
+ * rows. The first three always come first, so only mounts are ever left out, and `overflowText` says how many.
  *
  * @param {object} network - A network source.
  * @param {object} mounts - A mounts source.
- * @returns {Array<{kind: string, icon: string, text: string, tooltip: string[], fraction: number|null}>} The rows.
+ * @param {{limit: number}} [options] - The most rows the card draws.
+ * @returns {{rows: Array<{kind: string, icon: string, text: string, tooltip: string[], fraction: number|null}>,
+ *   overflowText: string|null}} The rows; `overflowText` is '+N more' for the rows beyond, else null.
  */
-export function connectionsRows(network, mounts) {
-    return [
+export function connectionsRows(network, mounts, {limit = CONNECTIONS_CARD_ROW_LIMIT} = {}) {
+    const allRows = [
         uplinkRow(network.uplink),
         vpnRow(network.vpn),
         sshRow(network.sshMasterCount),
         ...mounts.rows.map(mountRow),
     ];
+    const rows = allRows.slice(0, limit);
+    return {rows, overflowText: overflowLine(allRows.length - rows.length)};
 }
 
 /**

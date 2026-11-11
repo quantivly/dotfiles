@@ -1,18 +1,22 @@
 // The cockpit's four cards, stage one: system, apps, connections and sessions, each filling one cell of the grid the
-// cockpit layer lays out. Shell glue only: every word, number and fraction comes from lib/cockpitFormat.js, every icon
-// name from lib/constants.js COCKPIT_ICON_NAMES (through lib/cockpitFormat.js), and the tooltip is the one
-// CockpitTooltip (cockpitTooltip.js) a card is given: a card never makes one.
+// cockpit layer lays out. Shell glue only: every word, number, fraction, bar width, icon name, state class and row
+// tooltip comes finished from lib/cockpitFormat.js (icon names from lib/constants.js COCKPIT_ICON_NAMES, through it),
+// and the card only assigns them; the tooltip is the one CockpitTooltip (cockpitTooltip.js) a card is given: a card
+// never makes one.
 //
 // - A card is a vertical box carrying the card surface (resource-pulse-card rp-cockpit-cell), built non-reactive and
-//   drawn through its own offscreen texture, so a window drawn over it paints one rectangle.
+//   drawn through its own offscreen texture, so a window drawn over it paints one rectangle. No card paints itself
+//   (no vfunc_paint or vfunc_paint_node: ruling D12).
 // - Its rows are built with it, one per row it can show, and reused: an update sets texts, icons, classes and bar
-//   widths, each only when it changed, and hides the rows beyond the data. No update makes or destroys an actor.
+//   widths, each only when it changed, and hides the rows beyond the data. No update makes or destroys an actor. A
+//   list with more than it can show ends in a '+N more' line (sessions, connections).
 // - Frozen (a window covers it), an update is only recorded and no widget is touched; unfreezing draws the latest at
 //   once, undimmed; repaintFrozen() draws it, still dimmed by the frozen pseudo-class (.resource-pulse-card:frozen).
 // - Interactive (setInteractive) only while nothing covers the desktop: its rows then take the pointer, show their
 //   tooltip on hover and, on the sessions card, take a click.
 // - The system card wraps the v2 card (card.js) the extension owns and forwards all of this to it; on destroy it gives
-//   that card back rather than destroy it.
+//   that card back rather than destroy it. If the v2 card is destroyed first, the system card lets go of it and stays
+//   an empty cell.
 //
 // Destroying a card hides the shared tooltip, which may point at one of its rows; its handlers go with it.
 import Clutter from 'gi://Clutter';
@@ -29,7 +33,7 @@ import {
 } from './lib/constants.js';
 import {
     appsCardTitle, appsRows, canDrawApps, canDrawConnections, canDrawSessions, connectionsCardTitle, connectionsRows,
-    herdrNotRunningText, noDataText, sessionRows, sessionsCardTitle, sessionsHeader, sessionTooltip, stateIconName,
+    herdrNotRunningText, noDataText, rowBarWidthPx, sessionRows, sessionsCardTitle, sessionsHeader, stateIconName,
     stateStyleClass,
 } from './lib/cockpitFormat.js';
 import {SESSION_STATES} from './lib/cockpitProtocol.js';
@@ -43,7 +47,7 @@ const ROW_BAR_STYLE_CLASS = 'rp-cockpit-row-bar';
 const LONG_IDLE_ROW_STYLE_CLASS = 'rp-cockpit-row-long-idle';
 const WAITING_NAME_STYLE_CLASS = 'rp-cockpit-name-waiting';
 const NO_DATA_STYLE_CLASS = 'rp-cockpit-no-data';
-/** A card's title, the sessions header's title and its "+N more": the v2 card's muted label colour. */
+/** A card's title, the sessions header's title and a list's "+N more": the v2 card's muted label colour. */
 const MUTED_LABEL_STYLE_CLASS = 'resource-pulse-card-label';
 /** The style pseudo-class a frozen card carries: .resource-pulse-card:frozen dims it. */
 const FROZEN_PSEUDO_CLASS = 'frozen';
@@ -64,7 +68,8 @@ const NO_SOURCE_TEXT = noDataText(null, null);
  * @property {string} name - The row's name; it ellipsizes when the row is short of room.
  * @property {string} firstValue - The first value; '' hides it.
  * @property {string} secondValue - The second value; '' hides it.
- * @property {number|null} fraction - The faint bar's share of its track, 0–1; null for no bar.
+ * @property {number|null} fraction - The faint bar's share of its track, 0–1 (rowBarWidthPx clamps it); null for no
+ *     bar.
  * @property {string[]} tooltipLines - What the tooltip says over the row.
  * @property {boolean} isLongIdle - A session idle long enough to dim.
  * @property {boolean} isWaiting - A session waiting on the user: its name is tinted.
@@ -133,7 +138,7 @@ function setStyleClass(actor, styleClass, isOn) {
 }
 
 /**
- * Makes a muted label: a card's title, the sessions header's title or its "+N more".
+ * Makes a muted label: a card's title, the sessions header's title or a list's "+N more".
  *
  * @param {string} [text] - Its text.
  * @returns {St.Label} The label.
@@ -168,18 +173,6 @@ function newValueLabel(extraProperties = {}) {
 }
 
 /**
- * Hides every row from an index on. A hidden row keeps its actors, for the next update to reuse.
- *
- * @param {CardRow[]} rows - A card's rows of one list.
- * @param {number} firstHiddenIndex - The first row with nothing to show.
- * @returns {void}
- */
-function hideRowsFrom(rows, firstHiddenIndex) {
-    for (const row of rows.slice(firstHiddenIndex))
-        row.actor.visible = false;
-}
-
-/**
  * Whether two lists of tooltip lines are the same.
  *
  * @param {string[]} lines - One list.
@@ -191,16 +184,17 @@ function areSameLines(lines, otherLines) {
 }
 
 /**
- * What a row of the apps card shows: a name, its one value and bar, and its group key in the tooltip.
+ * What a row of the apps card shows: a name, its one value and bar, and its tooltip (appsRows gives each row its own
+ * entry's group key).
  *
  * @param {string} name - The app's name.
  * @param {string} valueText - Its CPU share or memory.
  * @param {number} fraction - The bar's fraction.
- * @param {string} groupKey - The ranking entry's group key (its unit or app id).
+ * @param {string[]} tooltipLines - The row's tooltip, from appsRows.
  * @returns {RowContent} The row's content.
  */
-function appRowContent(name, valueText, fraction, groupKey) {
-    return {...EMPTY_ROW_CONTENT, name, firstValue: valueText, fraction, tooltipLines: [groupKey]};
+function appRowContent(name, valueText, fraction, tooltipLines) {
+    return {...EMPTY_ROW_CONTENT, name, firstValue: valueText, fraction, tooltipLines};
 }
 
 /**
@@ -221,23 +215,21 @@ function connectionRowContent(connectionRow) {
 }
 
 /**
- * What a row of the sessions card shows: lib/cockpitFormat.js's session row, its tooltip from the source row's
- * details, and its id for a click.
+ * What a row of the sessions card shows: lib/cockpitFormat.js's session row as it is (its icon, state class and
+ * tooltip come with it), and its id for a click.
  *
  * @param {object} row - One row of sessionRows.
- * @param {{account: string|null, contextPercent: number|null, paneId: string|null}} sourceRow - The sessions
- *     source's row at the same index.
  * @returns {RowContent} The row's content.
  */
-function sessionRowContent(row, sourceRow) {
+function sessionRowContent(row) {
     return {
-        iconName: stateIconName(row.state),
-        iconStyleClass: stateStyleClass(row.state),
+        iconName: row.iconName,
+        iconStyleClass: row.iconStyleClass,
         name: row.name,
         firstValue: row.idleText,
         secondValue: row.memoryText,
         fraction: row.memoryFraction,
-        tooltipLines: sessionTooltip(row, sourceRow),
+        tooltipLines: row.tooltip,
         isLongIdle: row.isLongIdle,
         isWaiting: row.isWaiting,
         sessionId: row.id,
@@ -547,19 +539,35 @@ class CockpitCardBase extends St.BoxLayout {
     }
 
     /**
-     * Sets a row's bar to its fraction of the track, in whole pixels, only when that width changed. A row with no
-     * fraction has an empty bar.
+     * Sets a row's bar to the width lib/cockpitFormat.js gives its fraction on this card's track, only when that width
+     * changed. A row with no fraction has an empty bar.
      *
      * @param {CardRow} row - The row.
      * @returns {void}
      */
     _showRowBar(row) {
-        const fraction = row.barFraction === null ? 0 : Math.min(1, Math.max(0, row.barFraction));
-        const barWidthPx = Math.round(fraction * this._barTrackWidthPx);
+        const barWidthPx = rowBarWidthPx(row.barFraction, this._barTrackWidthPx);
         if (barWidthPx === row.barWidthPx)
             return;
         row.bar.set_width(barWidthPx);
         row.barWidthPx = barWidthPx;
+    }
+
+    /**
+     * Hides every row from an index on; a hidden row keeps its actors, for the next update to reuse. No leave-event
+     * reaches a row hidden under the pointer, so hiding a hovered row hides the tooltip it may be showing; a row hidden
+     * already is left alone, so a stale hover on it never hides another row's tooltip.
+     *
+     * @param {CardRow[]} rows - A card's rows of one list.
+     * @param {number} firstHiddenIndex - The first row with nothing to show.
+     * @returns {void}
+     */
+    _hideRowsFrom(rows, firstHiddenIndex) {
+        for (const row of rows.slice(firstHiddenIndex)) {
+            if (row.actor.visible && row.actor.hover)
+                this._tooltip.hide();
+            row.actor.visible = false;
+        }
     }
 
     /**
@@ -634,7 +642,8 @@ class SystemCockpitCard extends CockpitCardBase {
 
     /**
      * Takes the v2 card out of wherever it is (the background group, top right) and into this cell, which lays it out
-     * from now on: a fixed position left from its top-right placement would override the cell's layout.
+     * from now on: a fixed position left from its top-right placement would override the cell's layout. A handler
+     * tied to this card lets go of the v2 card if the extension destroys it first.
      *
      * @returns {void}
      */
@@ -643,6 +652,33 @@ class SystemCockpitCard extends CockpitCardBase {
         pulseCard.get_parent()?.remove_child(pulseCard);
         pulseCard.fixed_position_set = false;
         this.add_child(pulseCard);
+        pulseCard.connectObject('destroy', () => this._onPulseCardDestroyed(), this);
+    }
+
+    /**
+     * Lets go of a v2 card destroyed before this card: from now on the cell is empty, every forward does nothing, and
+     * this card's destroy does not touch it. The v2 card's handlers go with it.
+     *
+     * @returns {void}
+     */
+    _onPulseCardDestroyed() {
+        this._pulseCard = null;
+    }
+
+    /**
+     * Gives the v2 card back: releases the destroy handler on it and takes it out of the cell, unparented, for the
+     * extension to destroy or put back top right. Does nothing once the v2 card is gone.
+     *
+     * @returns {void}
+     */
+    _releasePulseCard() {
+        const pulseCard = this._pulseCard ?? null;
+        if (pulseCard === null)
+            return;
+        this._pulseCard = null;
+        pulseCard.disconnectObject(this);
+        if (pulseCard.get_parent() === this)
+            this.remove_child(pulseCard);
     }
 
     /**
@@ -654,7 +690,7 @@ class SystemCockpitCard extends CockpitCardBase {
      */
     setCellSize(widthPx, heightPx) {
         this.set_size(widthPx, heightPx);
-        this._pulseCard.setCellSize(widthPx, heightPx);
+        this._pulseCard?.setCellSize(widthPx, heightPx);
     }
 
     /**
@@ -665,7 +701,7 @@ class SystemCockpitCard extends CockpitCardBase {
      * @returns {void}
      */
     update(snapshot, lastGoodClockLabel) {
-        this._pulseCard.update(snapshot, lastGoodClockLabel);
+        this._pulseCard?.update(snapshot, lastGoodClockLabel);
     }
 
     /**
@@ -675,7 +711,7 @@ class SystemCockpitCard extends CockpitCardBase {
      * @returns {void}
      */
     setFrozen(isFrozen) {
-        this._pulseCard.setFrozen(isFrozen);
+        this._pulseCard?.setFrozen(isFrozen);
     }
 
     /**
@@ -684,7 +720,7 @@ class SystemCockpitCard extends CockpitCardBase {
      * @returns {void}
      */
     repaintFrozen() {
-        this._pulseCard.repaintFrozen();
+        this._pulseCard?.repaintFrozen();
     }
 
     /**
@@ -719,9 +755,7 @@ class SystemCockpitCard extends CockpitCardBase {
      * @returns {void}
      */
     _onDestroy() {
-        if (this._pulseCard?.get_parent() === this)
-            this.remove_child(this._pulseCard);
-        this._pulseCard = null;
+        this._releasePulseCard();
         super._onDestroy();
     }
 });
@@ -771,19 +805,20 @@ class AppsCockpitCard extends CockpitCardBase {
         this._setDataShown(true);
         const {cpu, memory} = appsRows(apps);
         cpu.forEach((entry, rowIndex) => this._showRow(this._cpuRows[rowIndex],
-            appRowContent(entry.name, entry.cpuText, entry.cpuFraction, apps.cpuRanking[rowIndex].groupKey)));
-        hideRowsFrom(this._cpuRows, cpu.length);
+            appRowContent(entry.name, entry.cpuText, entry.cpuFraction, entry.tooltip)));
+        this._hideRowsFrom(this._cpuRows, cpu.length);
         memory.forEach((entry, rowIndex) => this._showRow(this._memoryRows[rowIndex],
-            appRowContent(entry.name, entry.memoryText, entry.memoryFraction, apps.memoryRanking[rowIndex].groupKey)));
-        hideRowsFrom(this._memoryRows, memory.length);
+            appRowContent(entry.name, entry.memoryText, entry.memoryFraction, entry.tooltip)));
+        this._hideRowsFrom(this._memoryRows, memory.length);
     }
 });
 
 export const ConnectionsCockpitCard = GObject.registerClass(
 class ConnectionsCockpitCard extends CockpitCardBase {
     /**
-     * Builds the title and CONNECTIONS_CARD_ROW_LIMIT rows: uplink, VPN, ssh masters, then the mounts. No row takes a
-     * click; each row's tooltip is its details. Shows no data until the first update.
+     * Builds the title, CONNECTIONS_CARD_ROW_LIMIT rows (uplink, VPN, ssh masters, then the mounts) and the "+N more"
+     * line for the mounts that do not fit. No row takes a click; each row's tooltip is its details. Shows no data
+     * until the first update.
      *
      * @param {object} options - The card's options.
      * @param {import('./cockpitTooltip.js').CockpitTooltip} options.tooltip - The shared tooltip.
@@ -794,6 +829,8 @@ class ConnectionsCockpitCard extends CockpitCardBase {
         this.add_child(newMutedLabel(connectionsCardTitle));
         const rowsBox = this._addContentBox();
         this._connectionRows = Array.from({length: CONNECTIONS_CARD_ROW_LIMIT}, () => this._buildRow(rowsBox));
+        this._overflowLabel = newMutedLabel();
+        rowsBox.add_child(this._overflowLabel);
         this.showNoData(NO_SOURCE_TEXT);
     }
 
@@ -813,7 +850,8 @@ class ConnectionsCockpitCard extends CockpitCardBase {
     }
 
     /**
-     * Draws the connections rows, at most CONNECTIONS_CARD_ROW_LIMIT, hiding the rest.
+     * Draws the connections rows (at most CONNECTIONS_CARD_ROW_LIMIT, as connectionsRows gives them), hides the rest,
+     * and says "+N more" for the mounts that did not fit.
      *
      * @param {object} network - The network source.
      * @param {object} mounts - The mounts source.
@@ -821,10 +859,11 @@ class ConnectionsCockpitCard extends CockpitCardBase {
      */
     _renderConnections(network, mounts) {
         this._setDataShown(true);
-        const shownRows = connectionsRows(network, mounts).slice(0, CONNECTIONS_CARD_ROW_LIMIT);
-        shownRows.forEach((connectionRow, rowIndex) =>
+        const {rows, overflowText} = connectionsRows(network, mounts);
+        rows.forEach((connectionRow, rowIndex) =>
             this._showRow(this._connectionRows[rowIndex], connectionRowContent(connectionRow)));
-        hideRowsFrom(this._connectionRows, shownRows.length);
+        this._hideRowsFrom(this._connectionRows, rows.length);
+        setOptionalLabelText(this._overflowLabel, overflowText ?? '');
     }
 });
 
@@ -926,22 +965,21 @@ class SessionsCockpitCard extends CockpitCardBase {
         this._setDataShown(true);
         this._showHeader(sessionsHeader(sessions));
         const {rows, overflowText} = sessionRows(sessions);
-        rows.forEach((row, rowIndex) =>
-            this._showRow(this._sessionRows[rowIndex], sessionRowContent(row, sessions.rows[rowIndex])));
-        hideRowsFrom(this._sessionRows, rows.length);
+        rows.forEach((row, rowIndex) => this._showRow(this._sessionRows[rowIndex], sessionRowContent(row)));
+        this._hideRowsFrom(this._sessionRows, rows.length);
         setOptionalLabelText(this._overflowLabel, overflowText ?? '');
     }
 
     /**
-     * Shows the header's count, each state's count and the bucket total.
+     * Shows the header's count, each state's count and the bucket total, as sessionsHeader writes them.
      *
-     * @param {{count: string, counts: Array<{state: string, count: number}>, totalMemory: string}} header - The
-     *     header's parts, the counts in SESSION_STATES order.
+     * @param {{count: string, counts: Array<{state: string, count: string}>, totalMemory: string}} header - The
+     *     header's parts, the counts in SESSION_STATES order (the order the state labels were built in).
      * @returns {void}
      */
     _showHeader(header) {
         setLabelText(this._sessionCountLabel, header.count);
-        header.counts.forEach(({count}, stateIndex) => setLabelText(this._stateCountLabels[stateIndex], String(count)));
+        header.counts.forEach(({count}, stateIndex) => setLabelText(this._stateCountLabels[stateIndex], count));
         setLabelText(this._totalMemoryLabel, header.totalMemory);
     }
 });

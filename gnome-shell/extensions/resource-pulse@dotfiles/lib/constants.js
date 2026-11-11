@@ -298,8 +298,8 @@ export const SESSIONS_CARD_ROW_LIMIT = 6;
 /** The most rows each ranking (CPU, memory) of the apps card draws. */
 export const APPS_CARD_ROW_LIMIT = 6;
 /**
- * The most rows the connections card draws: the uplink, the VPN and the ssh masters, then up to five mounts; mounts
- * past it are not drawn. Its rows are built with the card, so no update makes an actor.
+ * The most rows the connections card draws: the uplink, the VPN and the ssh masters, then up to five mounts; the
+ * mounts past it collapse into a '+N more' line. Its rows are built with the card, so no update makes an actor.
  */
 export const CONNECTIONS_CARD_ROW_LIMIT = 8;
 /** Size of a cockpit row's icon and of the sessions header's state icons, in logical pixels: a panel status icon's. */
