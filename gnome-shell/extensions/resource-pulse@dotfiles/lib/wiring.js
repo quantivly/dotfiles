@@ -30,8 +30,8 @@ export function isDetailWatchWanted({isCardVisible, isDropdownOpen, isOverviewVi
  * that old is not stale yet.
  *
  * @param {object} times - Monotonic times, in microseconds.
- * @param {number|null} times.lastSampleReceivedAtUsec - When the client last received fresh data (the time of the latest
- *     state's snapshot); null when it never has, which counts as stale.
+ * @param {number|null} times.lastSampleReceivedAtUsec - When the client last received fresh data (the time of
+ *     the latest state's snapshot); null when it never has, which counts as stale.
  * @param {number} times.nowUsec - Now.
  * @returns {boolean} True when stale.
  */

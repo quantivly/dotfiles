@@ -210,8 +210,8 @@ test('protocol: a Sample\'s envelope carries its sequence, time and appended his
 test('protocol: an envelope\'s appended history out of range is a gap, and a missing one is null', () => {
     const outOfRange = protocolModule.parseSampleEnvelope(JSON.stringify({appendedHistory: {cpu: 1.5}}));
     const missing = protocolModule.parseSampleEnvelope(JSON.stringify({sequence: 1}));
-    // Whole envelopes, so a null result is a mismatch that names what was expected, not a TypeError. Neither payload
-    // has a snapshot, so rawSnapshot is undefined and absent from the comparison.
+    // Whole envelopes, so a null result is a mismatch that names what was expected, not a TypeError. Neither
+    // payload has a snapshot, so rawSnapshot is undefined and absent from the comparison.
     assertEqual({outOfRange, missing}, {
         outOfRange: {sequence: null, sampledAtUsec: null, appendedHistory: {cpu: null, memory: null}},
         missing: {sequence: 1, sampledAtUsec: null, appendedHistory: null},

@@ -35,8 +35,9 @@ const NO_PARAMETERS = null;
 const ANY_REPLY_TYPE = null;
 
 /**
- * The service on the bus, as the client follows it: the owner of its name, its Samples from creation until destroy(), and its
- * methods, called on that owner. Made by createResourcePulseLink; destroy() ends the watch and the subscription.
+ * The service on the bus, as the client follows it: the owner of its name, its Samples from creation until destroy(),
+ * and its methods, called on that owner. Made by createResourcePulseLink; destroy() ends the watch and the
+ * subscription.
  */
 class ResourcePulseLink {
     /**
@@ -150,14 +151,16 @@ class ResourcePulseLink {
 }
 
 /**
- * Starts following the service on a connection: subscribed to Samples from the start until destroy(), and watching its name.
+ * Starts following the service on a connection: subscribed to Samples from the start until destroy(), and watching
+ * its name.
  *
  * @param {Gio.DBusConnection} connection - The session bus connection.
  * @param {object} callbacks - Where the link delivers.
  * @param {(nameOwner: string|null) => void} callbacks.onOwnerChanged - The unique name owning the service's bus name
  *     when it appears, null when it vanishes. The watch reports once soon after creation, null when nobody owns the
  *     name (from Gio.bus_watch_name_on_connection).
- * @param {(parameters: GLib.Variant) => void} callbacks.onSample - Each Sample's parameters, from creation until destroy().
+ * @param {(parameters: GLib.Variant) => void} callbacks.onSample - Each Sample's parameters, from creation
+ *     until destroy().
  * @returns {ResourcePulseLink} The link.
  */
 export function createResourcePulseLink(connection, {onOwnerChanged, onSample}) {

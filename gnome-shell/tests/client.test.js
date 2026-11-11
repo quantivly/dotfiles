@@ -342,7 +342,7 @@ class FakeLink {
     }
 
     /**
-     * Delivers a Sample's parameters, as the subscription does: only while subscribed.
+     * Delivers a Sample's parameters, as the subscription does: from creation until destroy().
      *
      * @param {GLib.Variant} parameters - The signal's parameters.
      * @returns {void}
@@ -490,10 +490,6 @@ function makeLiveClientFixture({isDetailWatchWanted = false} = {}) {
 }
 
 /**
- * @param {object} fixture - A fixture.
- * @returns {{cpu: Array<number|null>, memory: Array<number|null>}} The client's histories now.
- */
-/**
  * The timeouts a client fixture has pending, by unit.
  *
  * @param {{timeouts: FakeTimeouts}} fixture - A client fixture.
@@ -503,6 +499,10 @@ function pendingTimeoutsOf({timeouts}) {
     return {seconds: timeouts.pendingIntervalsSeconds(), ms: timeouts.pendingIntervalsMs()};
 }
 
+/**
+ * @param {object} fixture - A fixture.
+ * @returns {{cpu: Array<number|null>, memory: Array<number|null>}} The client's histories now.
+ */
 function historiesOf({client}) {
     return {cpu: client.cpuHistory.values(), memory: client.memoryHistory.values()};
 }
@@ -1250,7 +1250,8 @@ test('client: a state already older than the stall shows no data at once and arm
     }, {notifications: [NO_DATA_SNAPSHOT], pendingSeconds: [], pendingMs: [], addedIntervalsMs: []});
 });
 
-test('client: destroy() unsubscribes, destroys the link, and leaves no pending timeout, also when a listener calls it', () => {
+test('client: destroy() unsubscribes, destroys the link, and leaves no pending timeout, ' +
+    'also when a listener calls it', () => {
     const {client, timeouts, link, notifications} = makeLiveClientFixture({isDetailWatchWanted: true});
     emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
     const pendingBeforeDestroy = timeouts.pendingIntervalsMs();
@@ -1297,7 +1298,8 @@ test('client: destroy() twice is harmless', () => {
 
 test('client: a destroyed client is not live', () => {
     const {client, link} = makeLiveClientFixture();
-    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY, sequence: STATE_SEQUENCE + 1});
+    emitSample(link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
+        sequence: STATE_SEQUENCE + 1});
     const isLiveBeforeDestroy = client.isLive;
     client.destroy();
     assertEqual({isLiveBeforeDestroy, isLiveAfterDestroy: client.isLive},
