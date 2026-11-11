@@ -1,9 +1,10 @@
-// The pure decisions behind the cockpit's wiring (extension.js and cockpitLayer.js): whether the cockpit's layer is
-// drawn (ruling D19) and which layout is kept across enables, where the v2 card goes (ruling D21), which surfaces a
-// cover leaves seen, what a cockpit client event changes and when (ruling D20), what a data card draws, which sources a
-// tick pulls on suspicion, and which frozen cards a tick repaints (ruling D18). The glue reads the shell and the
-// clients into the plain inputs below, calls these, and assigns. Pure: no Gio, GLib, Shell, St, Clutter or Meta
-// import, so it runs under plain gjs.
+// The pure decisions behind the cockpit's wiring (extension.js, cockpitLayer.js, cockpitSourceDrawing.js and the
+// dropdown in indicator.js): whether the cockpit's layer is drawn (ruling D19) and which layout is kept across enables,
+// where the v2 card goes (ruling D21), which surfaces a cover leaves seen, what a cockpit client event changes and when
+// (ruling D20), what a data card draws, which sources a tick pulls on suspicion, which frozen cards a tick repaints
+// (ruling D18), and whether the dropdown shows its sessions card (ruling D23). The glue reads the shell and the clients
+// into the plain inputs below, calls these, and assigns. Pure: no Gio, GLib, Shell, St, Clutter or Meta import, so it
+// runs under plain gjs.
 //
 // A layout the layer could not be built from, rebuilt from or placed with never takes the extension down (ruling D25):
 // the extension remembers it for that enable, and it is neither drawn again while the client holds it (a layer drawn
@@ -243,4 +244,16 @@ export function frozenCardsDueRepaint({frozenPaintedAtUsecByCardId, nowUsec, isC
             return isRepaintable && isFrozenRepaintDue({lastFrozenPaintAtUsec, nowUsec});
         })
         .map(([cardId]) => cardId);
+}
+
+/**
+ * Says whether the top-bar dropdown shows its sessions card (ruling D23): once the cockpit has answered, LIVE or
+ * VANISHED (the service gone: the card then says when it last had data). Never while STARTING, before any answer, nor
+ * SKIPPED, with no cockpit configured, so a colleague without the cockpit sees v2's dropdown unchanged.
+ *
+ * @param {string} clientState - The cockpit client's CockpitClientState.
+ * @returns {boolean} True while the sessions item is shown.
+ */
+export function isDropdownSessionsItemShown(clientState) {
+    return clientState === CockpitClientState.LIVE || clientState === CockpitClientState.VANISHED;
 }

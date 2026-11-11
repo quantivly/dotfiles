@@ -21,7 +21,7 @@ const COCKPIT_CLASS_NAMES = [
     'rp-cockpit-layer', 'rp-cockpit-caption', 'rp-cockpit-cell', 'rp-cockpit-row', 'rp-cockpit-row-bar',
     'rp-cockpit-state-working', 'rp-cockpit-state-blocked', 'rp-cockpit-state-idle', 'rp-cockpit-state-done',
     'rp-cockpit-state-unknown', 'rp-cockpit-name-waiting', 'rp-cockpit-row-long-idle', 'rp-cockpit-tooltip',
-    'rp-cockpit-no-data',
+    'rp-cockpit-no-data', 'rp-cockpit-menu-sessions-item',
 ];
 const OPACITY_PROPERTY_PATTERN = /(?:^|[\s{;])opacity\s*:/;
 const CSS_COMMENT_PATTERN = /\/\*[\s\S]*?\*\//g;
@@ -821,7 +821,7 @@ test('cockpitCards.js imports nothing from indicator.js, extension.js or cockpit
     assertEqual({
         relativeSpecifiers,
         indicatorImportsThem: occurrenceCount(readExtensionFile(INDICATOR_SOURCE_FILE),
-            "\nimport {findResourcesApp, openResourcesApp} from './cockpitCards.js';\n"),
+            "\nimport {SessionsCockpitCard, findResourcesApp, openResourcesApp} from './cockpitCards.js';\n"),
         indicatorCopies: ['_findResourcesApp', '_openResources()', 'Shell.AppSystem', 'lookup_app(']
             .filter(needle => indicatorCode.includes(needle)),
     }, {
@@ -1395,12 +1395,26 @@ test('extension.js: each tick, after the cover and the frozen repaint, hands the
         'this._layer?.onSampleTick({isSubscriptionWanted: this._isCockpitSubscriptionWanted});',
     ]));
 
-test('extension.js: a session row\'s click reaches _activateSession, which does nothing yet and logs nothing', () =>
+test('extension.js: a session row\'s click, on the layer\'s card or the dropdown\'s, reaches _activateSession, which ' +
+    'does nothing yet and logs nothing; the indicator is made with the cockpit client and the shared error log', () => {
+    const enableStatements = extensionMethodStatements('enable() {');
+    const indicatorIndex = enableStatements.indexOf('this._indicator = new PulseIndicator(this._client, {');
     assertEqual({
         handedToTheLayer: extensionMethodStatements('_addCockpitLayer() {')
             .includes('errorLog: this._errorLog, onSessionActivated: sessionId => this._activateSession(sessionId),'),
+        handedToTheIndicator: indicatorIndex < 0 ? [] : enableStatements.slice(indicatorIndex, indicatorIndex + 4),
         activate: statementsOf(methodBody(readExtensionFile(EXTENSION_SOURCE_FILE), '_activateSession(_sessionId) {')),
-    }, {handedToTheLayer: true, activate: ['_activateSession(_sessionId) {', '}']}));
+    }, {
+        handedToTheLayer: true,
+        handedToTheIndicator: [
+            'this._indicator = new PulseIndicator(this._client, {',
+            'cockpitClient: this._cockpitClient, errorLog: this._errorLog,',
+            'onSessionActivated: sessionId => this._activateSession(sessionId),',
+            '});',
+        ],
+        activate: ['_activateSession(_sessionId) {', '}'],
+    });
+});
 
 test('extension.js: teardown keeps the layout to cache before anything is destroyed, clears the cockpit\'s fields ' +
     '(the layout that failed included, so each enable tries again), removes the cockpit client listener, cancels ' +
@@ -1426,5 +1440,226 @@ test('extension.js: teardown keeps the layout to cache before anything is destro
         listenerRemoved: true,
         firstDestroy: '{name: \'cancel the display config read\', run: () => displayConfigReader?.destroy()},',
         layerBeforeTheCard: true,
+    });
+});
+
+// indicator.js: the sessions card in the top-bar dropdown (a second copy, live while the menu is open).
+
+/**
+ * The statements of a method of indicator.js between its declaration and its closing brace, comments removed.
+ *
+ * @param {string} declarationLine - The method's declaration as it starts its line.
+ * @returns {string[]} Its statements, trimmed.
+ */
+function indicatorMethodStatements(declarationLine) {
+    return statementsOf(methodBody(readExtensionFile(INDICATOR_SOURCE_FILE), declarationLine)).slice(1, -1);
+}
+
+test('indicator.js: takes the pulse client, then one options object (the cockpit client, the shared error log and ' +
+    'the session activation), and sets every new field _onDestroy reads before anything can throw', () => {
+    const initStatements = indicatorMethodStatements('_init(client, {cockpitClient, errorLog, onSessionActivated}) {');
+    const firstThrowingIndex = initStatements.indexOf('const graphBox = new St.BoxLayout({style_class: ' +
+        'GRAPH_BOX_STYLE_CLASS});');
+    const earlyFields = [
+        'this._cockpitClient = cockpitClient;', 'this._errorLog = errorLog;',
+        'this._activateSession = onSessionActivated;', 'this._sessionsItem = null;', 'this._sessionsCard = null;',
+        'this._sessionsTooltip = null;', 'this._sessionsPacing = null;', 'this._cockpitListenerId = null;',
+    ];
+    assertEqual(earlyFields.map(field => {
+        const fieldIndex = initStatements.indexOf(field);
+        return fieldIndex >= 0 && fieldIndex < firstThrowingIndex;
+    }), earlyFields.map(() => true));
+});
+
+test('indicator.js: the sessions item is added last in _init, after every step that can throw (it adds its tooltip ' +
+    'to the chrome), and goes into the menu right under the system card\'s item, above "Open Resources"; it is built ' +
+    'under a guard (ruling D25): a failure is logged, whatever was half-built is destroyed and the item is left out, ' +
+    'so the dropdown is v2\'s', () => {
+    const buildStatements = indicatorMethodStatements('_buildDropdown() {');
+    const cardItemAddedIndex = buildStatements.indexOf('this.menu.addMenuItem(cardItem);');
+    assertEqual({
+        lastInInit: indicatorMethodStatements('_init(client, {cockpitClient, errorLog, onSessionActivated}) {').at(-1),
+        cardItemThenOpenResources: cardItemAddedIndex < 0 ? []
+            : buildStatements.slice(cardItemAddedIndex, cardItemAddedIndex + 2),
+        positionUnderTheCardItem: occurrenceCount(codeOf(INDICATOR_SOURCE_FILE),
+            'const SESSIONS_ITEM_MENU_POSITION = 1;'),
+        guard: indicatorMethodStatements('_addSessionsItem() {'),
+    }, {
+        lastInInit: 'this._addSessionsItem();',
+        cardItemThenOpenResources: [
+            'this.menu.addMenuItem(cardItem);',
+            'this._openResourcesItem = new PopupMenu.PopupMenuItem(OPEN_RESOURCES_LABEL);',
+        ],
+        positionUnderTheCardItem: 1,
+        guard: [
+            'try {',
+            'this._buildSessionsItem();',
+            '} catch (error) {',
+            "this._logCockpitFailure('be built, so the dropdown shows the system card alone', error);",
+            'this._destroySessionsItem();',
+            '}',
+        ],
+    });
+});
+
+test('indicator.js: the sessions item is a non-reactive, unfocusable PopupBaseMenuItem of class ' +
+    'rp-cockpit-menu-sessions-item holding a SessionsCockpitCard with its own CockpitTooltip, whose row click ' +
+    'reaches _onSessionActivated; the card is interactive (the menu is above every window) and frozen at build, ' +
+    'paced by its own CockpitSourcePacing of the one sessions card, the item\'s visibility synced, and the client ' +
+    'listener added last', () => {
+    const code = codeOf(INDICATOR_SOURCE_FILE);
+    assertEqual({
+        build: indicatorMethodStatements('_buildSessionsItem() {'),
+        constants: [
+            "const SESSIONS_ITEM_STYLE_CLASS = 'rp-cockpit-menu-sessions-item';",
+            'const SESSIONS_ITEM_PROPERTIES = {reactive: false, can_focus: false, style_class: ' +
+                'SESSIONS_ITEM_STYLE_CLASS};',
+            'const DROPDOWN_COCKPIT_CARD_IDS = Object.freeze([COCKPIT_SESSIONS_CARD_ID]);',
+            "const PACING_SURFACE_NAME = 'the dropdown';",
+        ].map(needle => occurrenceCount(code, needle)),
+    }, {
+        build: [
+            'this._sessionsTooltip = new CockpitTooltip();',
+            'this._sessionsCard = new SessionsCockpitCard({',
+            'tooltip: this._sessionsTooltip, onRowActivated: sessionId => this._onSessionActivated(sessionId),',
+            '});',
+            'this._sessionsCard.setInteractive(true);',
+            'this._sessionsCard.setFrozen(true);',
+            'this._sessionsItem = new PopupMenu.PopupBaseMenuItem(SESSIONS_ITEM_PROPERTIES);',
+            'this._sessionsItem.add_child(this._sessionsCard);',
+            'this.menu.addMenuItem(this._sessionsItem, SESSIONS_ITEM_MENU_POSITION);',
+            'this._sessionsPacing = new CockpitSourcePacing({',
+            'cockpitClient: this._cockpitClient, drawnCardIds: () => DROPDOWN_COCKPIT_CARD_IDS,',
+            'drawCard: () => this._drawSessionsCard(), errorLog: this._errorLog, surfaceName: PACING_SURFACE_NAME,',
+            '});',
+            'this._syncSessionsItemVisibility();',
+            'this._cockpitListenerId = this._cockpitClient.addListener(event => this._onCockpitEvent(event));',
+        ],
+        constants: [1, 1, 1, 1],
+    });
+});
+
+test('indicator.js: the item is shown only once the cockpit has answered (ruling D23: isDropdownSessionsItemShown of ' +
+    'the client\'s state), synced at build and on each state event; while the menu is open every event goes to the ' +
+    'pacing (a read drawn at once, a Changed on the next Sample), while it is closed none; never thrown into the ' +
+    'client\'s listener loop', () =>
+    assertEqual({
+        visibility: indicatorMethodStatements('_syncSessionsItemVisibility() {'),
+        onEvent: indicatorMethodStatements('_onCockpitEvent(event) {'),
+    }, {
+        visibility: ['this._sessionsItem.visible = isDropdownSessionsItemShown(this._cockpitClient.state);'],
+        onEvent: [
+            "this._runCockpitStep('follow a cockpit event', () => {",
+            'if (event.type === CockpitClientEventType.STATE)',
+            'this._syncSessionsItemVisibility();',
+            'if (this.menu.isOpen)',
+            'this._sessionsPacing.onCockpitEvent(event);',
+            '});',
+        ],
+    }));
+
+test('indicator.js: opening the menu draws the sessions card from what the cockpit client holds, then unfreezes it ' +
+    '(the latest at once, drawn once, waiting for no event); closing forgets what its pacing holds (the pending ' +
+    'sources, the fallback), freezes it and hides its tooltip; each guarded, and nothing without the card', () => {
+    const openStateStatements = indicatorMethodStatements('_onMenuOpenStateChanged(isOpen) {');
+    assertEqual({
+        followsTheSystemCard: openStateStatements.slice(0, 2),
+        follow: indicatorMethodStatements('_followMenuWithSessionsCard(isOpen) {'),
+        open: indicatorMethodStatements('_showLatestSessions() {'),
+        close: indicatorMethodStatements('_freezeSessionsCard() {'),
+        draw: indicatorMethodStatements('_drawSessionsCard() {'),
+    }, {
+        followsTheSystemCard: ['this._dropdownCard.setFrozen(!isOpen);', 'this._followMenuWithSessionsCard(isOpen);'],
+        follow: [
+            'if (this._sessionsCard === null)',
+            'return;',
+            'if (isOpen)',
+            "this._runCockpitStep('be drawn as the menu opens', () => this._showLatestSessions());",
+            'else',
+            "this._runCockpitStep('be frozen as the menu closes', () => this._freezeSessionsCard());",
+        ],
+        open: ['this._drawSessionsCard();', 'this._sessionsCard.setFrozen(false);'],
+        close: [
+            'this._sessionsPacing.reset();', 'this._sessionsCard.setFrozen(true);', 'this._sessionsTooltip.hide();',
+        ],
+        draw: [
+            'drawCockpitDataCard({',
+            'cardId: COCKPIT_SESSIONS_CARD_ID, card: this._sessionsCard, cockpitClient: this._cockpitClient,',
+            '});',
+        ],
+    });
+});
+
+test('indicator.js: each Sample (the indicator\'s history listener) ends, after the graphs and the hover label, with ' +
+    'the dropdown\'s share: while the menu is open, its pacing\'s onSample with the subscription wanted (what ' +
+    'waits drawn, the sessions source pulled on suspicion); nothing while it is closed; guarded', () =>
+    assertEqual({
+        lastOfTheTick: indicatorMethodStatements('_onHistoriesChanged() {').at(-1),
+        sample: indicatorMethodStatements('_onCockpitSample() {'),
+        wantedWhileOpen: occurrenceCount(codeOf(INDICATOR_SOURCE_FILE),
+            'const IS_COCKPIT_SUBSCRIPTION_WANTED_WHILE_OPEN = true;'),
+    }, {
+        lastOfTheTick: 'this._onCockpitSample();',
+        sample: [
+            'if (this._sessionsPacing === null || !this.menu.isOpen)',
+            'return;',
+            "this._runCockpitStep('take its Sample', () =>",
+            'this._sessionsPacing.onSample({isSubscriptionWanted: IS_COCKPIT_SUBSCRIPTION_WANTED_WHILE_OPEN}));',
+        ],
+        wantedWhileOpen: 1,
+    }));
+
+test('indicator.js: a session row\'s click closes the menu first, then asks the extension to activate the session ' +
+    '(Review Focus 3: the menu closes whatever the activation does); each step guarded, so neither throws into the ' +
+    'row\'s click handler and a failed close still activates; a failure is logged by its own context', () =>
+    assertEqual({
+        activated: indicatorMethodStatements('_onSessionActivated(sessionId) {'),
+        guard: indicatorMethodStatements('_runCockpitStep(stepName, step) {'),
+        log: indicatorMethodStatements('_logCockpitFailure(stepName, error) {'),
+    }, {
+        activated: [
+            "this._runCockpitStep('close the menu for a session', () => this.menu.close());",
+            "this._runCockpitStep('activate a session', () => this._activateSession(sessionId));",
+        ],
+        guard: ['try {', 'step();', '} catch (error) {', 'this._logCockpitFailure(stepName, error);', '}'],
+        log: [
+            "const context = `the dropdown's sessions card could not ${stepName}`;",
+            'const errorText = describeErrorWithStack(error);',
+            'this._errorLog.log(`${context}: ${errorText}`, context);',
+        ],
+    }));
+
+test('indicator.js: destroying the indicator removes the dropdown\'s cockpit part after the history listener and ' +
+    'before the system card, its fields cleared first, each step guarded, in an order that never calls into a ' +
+    'destroyed actor: the cockpit listener, the pacing (its fallback), the card, the item, last the tooltip', () => {
+    const destroyStatements = indicatorMethodStatements('_onDestroy() {');
+    const teardownStatements = indicatorMethodStatements('_destroySessionsItem() {');
+    const stepsIndex = teardownStatements.indexOf('runEveryStep([');
+    const clearedFields = [
+        'this._cockpitListenerId = null;', 'this._sessionsPacing = null;', 'this._sessionsCard = null;',
+        'this._sessionsItem = null;', 'this._sessionsTooltip = null;',
+    ];
+    const sessionsTeardownIndex = destroyStatements.indexOf('this._destroySessionsItem();');
+    assertEqual({
+        afterTheHistoryListener: sessionsTeardownIndex > destroyStatements.indexOf(
+            'this._client.removeHistoryListener(this._historyListenerId);'),
+        beforeTheSystemCard: sessionsTeardownIndex >= 0 &&
+            sessionsTeardownIndex < destroyStatements.indexOf('this._dropdownCard?.destroy();'),
+        clearedFirst: clearedFields.map(field => {
+            const fieldIndex = teardownStatements.indexOf(field);
+            return fieldIndex >= 0 && fieldIndex < stepsIndex;
+        }),
+        steps: teardownStatements.filter(statement => statement.startsWith('{name: ')),
+        reported: teardownStatements.at(-1),
+    }, {
+        afterTheHistoryListener: true, beforeTheSystemCard: true, clearedFirst: clearedFields.map(() => true),
+        steps: [
+            "{name: 'remove the cockpit listener', run: () => this._cockpitClient.removeListener(cockpitListenerId)},",
+            "{name: 'destroy the pacing', run: () => sessionsPacing?.destroy()},",
+            "{name: 'destroy the card', run: () => sessionsCard?.destroy()},",
+            "{name: 'destroy the item', run: () => sessionsItem?.destroy()},",
+            "{name: 'destroy the tooltip', run: () => sessionsTooltip?.destroy()},",
+        ],
+        reported: '], (stepName, error) => this._logCockpitFailure(stepName, error));',
     });
 });

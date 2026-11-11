@@ -204,3 +204,10 @@
 .rp-cockpit-no-data {
   color: rgba(255, 255, 255, 0.6);
 }
+
+/* The dropdown's sessions item, under its card item, shown once the cockpit has answered: the card inside has its own
+   surface, so the item only pads it, as the card item does. The menu's hover and focus colours stay off the item
+   (reactive: false, can_focus: false in indicator.js); the card's rows take the pointer themselves. */
+.rp-cockpit-menu-sessions-item {
+  padding: 4px 6px;
+}

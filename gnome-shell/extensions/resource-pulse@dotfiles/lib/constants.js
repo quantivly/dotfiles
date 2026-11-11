@@ -327,6 +327,8 @@ export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'session
 export const COCKPIT_SYSTEM_CARD_ID = 'system';
 /** The apps card's id: the card the pulse client's snapshots feed, besides the system card. */
 export const COCKPIT_APPS_CARD_ID = 'apps';
+/** The sessions card's id: the one cockpit card the top-bar dropdown draws too, under its system card. */
+export const COCKPIT_SESSIONS_CARD_ID = 'sessions';
 /** The cards that draw the sampler's snapshot (the system card, the apps card), which the detail watch feeds. */
 export const COCKPIT_SNAPSHOT_CARD_IDS = Object.freeze([COCKPIT_SYSTEM_CARD_ID, COCKPIT_APPS_CARD_ID]);
 /** The cockpit service's sources each card draws (lib/cockpitProtocol.js COCKPIT_SOURCE_NAMES): none for those two. */

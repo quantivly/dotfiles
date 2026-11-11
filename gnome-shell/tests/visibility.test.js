@@ -1242,13 +1242,15 @@ test('extension.js: when the overview has closed, the cover is checked again', (
 
 // The top-bar dropdown: indicator.js is a PanelMenu.Button whose menu holds a second card and "Open Resources".
 const INDICATOR_SOURCE_FILE = 'indicator.js';
+/** The indicator's constructor: the pulse client, then the cockpit's options (the dropdown's sessions card). */
+const INDICATOR_INIT_DECLARATION = '_init(client, {cockpitClient, errorLog, onSessionActivated}) {';
 
 test('indicator.js is a PanelMenu.Button with a menu of its own, and the click that launched Resources directly is ' +
     'gone', () => {
     const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
     assertEqual({
         extendsPanelMenuButton: indicatorSource.includes('class PulseIndicator extends PanelMenu.Button {'),
-        createsItsMenu: statementCount(declarationBody(indicatorSource, '_init(client) {'),
+        createsItsMenu: statementCount(declarationBody(indicatorSource, INDICATOR_INIT_DECLARATION),
             'super._init(MENU_ALIGNMENT, ACCESSIBLE_NAME);'),
         suppressesItsMenu: indicatorSource.includes('DONT_CREATE_MENU'),
         hasItsOwnClickGesture: indicatorSource.includes('ClickGesture'),
@@ -1295,7 +1297,7 @@ test('indicator.js: the dropdown card is never frozen while the menu is open: cl
     'it (a repaint at once), and opening re-checks whether Resources is installed', () => {
     const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
     const openStateBody = declarationBody(indicatorSource, '_onMenuOpenStateChanged(isOpen) {');
-    const initBody = declarationBody(indicatorSource, '_init(client) {');
+    const initBody = declarationBody(indicatorSource, INDICATOR_INIT_DECLARATION);
     assertEqual({
         freezesExactlyWhileClosed: statementCount(openStateBody, 'this._dropdownCard.setFrozen(!isOpen);'),
         recheckedOnEveryChange: statementCount(openStateBody, 'this._syncOpenResourcesVisibility();'),

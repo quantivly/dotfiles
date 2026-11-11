@@ -43,15 +43,18 @@ const LATER_SAMPLED_AT_USEC = 1_794_000_031_000_000;
 
 test('cockpitWiring: the card ids, the sampler\'s cards and each card\'s cockpit sources are constants: system and ' +
     'apps draw no cockpit source, connections draws network and mounts, sessions sessions', () => {
-    const {COCKPIT_SYSTEM_CARD_ID, COCKPIT_SNAPSHOT_CARD_IDS, COCKPIT_SOURCE_NAMES_BY_CARD_ID} = constantsModule;
+    const {
+        COCKPIT_SYSTEM_CARD_ID, COCKPIT_SESSIONS_CARD_ID, COCKPIT_SNAPSHOT_CARD_IDS, COCKPIT_SOURCE_NAMES_BY_CARD_ID,
+    } = constantsModule;
     assertEqual({
-        systemCardId: COCKPIT_SYSTEM_CARD_ID, snapshotCardIds: COCKPIT_SNAPSHOT_CARD_IDS,
+        systemCardId: COCKPIT_SYSTEM_CARD_ID, sessionsCardId: COCKPIT_SESSIONS_CARD_ID,
+        snapshotCardIds: COCKPIT_SNAPSHOT_CARD_IDS,
         sourceNamesByCardId: COCKPIT_SOURCE_NAMES_BY_CARD_ID,
         areFrozen: [COCKPIT_SNAPSHOT_CARD_IDS, COCKPIT_SOURCE_NAMES_BY_CARD_ID,
             ...Object.values(COCKPIT_SOURCE_NAMES_BY_CARD_ID ?? {})].map(value => Object.isFrozen(value)),
         fallbackSeconds: constantsModule.COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS,
     }, {
-        systemCardId: 'system', snapshotCardIds: ['system', 'apps'],
+        systemCardId: 'system', sessionsCardId: 'sessions', snapshotCardIds: ['system', 'apps'],
         sourceNamesByCardId: {system: [], apps: [], connections: ['network', 'mounts'], sessions: ['sessions']},
         areFrozen: [true, true, true, true, true, true], fallbackSeconds: 3,
     });
@@ -285,4 +288,11 @@ test('cockpitWiring: a frozen card is due its dimmed repaint 30 s after its last
         justBefore: [], atInterval: ['system', 'apps', 'sessions'], atIntervalWithoutSubscription: ['system', 'apps'],
         noneFrozen: [],
     });
+});
+
+test('cockpitWiring: the dropdown\'s sessions item is shown only once the cockpit has answered (ruling D23): LIVE ' +
+    'and VANISHED, never STARTING (no answer yet) or SKIPPED (no cockpit: the dropdown stays v2\'s)', () => {
+    const clientStates = [STARTING, SKIPPED, LIVE, VANISHED];
+    assertEqual(clientStates.map(clientState => wiring.isDropdownSessionsItemShown?.(clientState)),
+        [false, false, true, true]);
 });

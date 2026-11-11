@@ -216,7 +216,10 @@ export default class ResourcePulseExtension extends Extension {
             this._client = new PulseClient({errorLog: this._clientLog, lastGoodClockLabel: this._lastGoodClockLabel});
             this._cockpitClient = new CockpitClient({errorLog: this._clientLog, cachedLayout: this._lastCockpitLayout});
             this._followOverviewWithDetailWatch();
-            this._indicator = new PulseIndicator(this._client);
+            this._indicator = new PulseIndicator(this._client, {
+                cockpitClient: this._cockpitClient, errorLog: this._errorLog,
+                onSessionActivated: sessionId => this._activateSession(sessionId),
+            });
             Main.panel.addToStatusArea(this.uuid, this._indicator, systemMenuPanelIndex(), PANEL_BOX);
             this._followDropdown();
             this._addCard();
@@ -259,7 +262,8 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Follows the indicator's menu opening and closing: the dropdown shows the apps line like the desktop card, so
-     * it wants the detail watch while open, and the cockpit's watch. Disconnected in _tearDown.
+     * it wants the detail watch while open, and the cockpit's watch and subscription for its sessions card.
+     * Disconnected in _tearDown.
      *
      * @returns {void}
      */
@@ -1078,8 +1082,9 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * A click on a session row of the cockpit. It does nothing yet: taking the user to the session's herdr pane
-     * (FocusSession, then the window lib/cockpitInteraction.js pickWindowToActivate names) is the next change.
+     * A click on a session row of the cockpit, on the layer's sessions card or the dropdown's (which has closed the
+     * menu first). It does nothing yet: taking the user to the session's herdr pane (FocusSession, then the window
+     * lib/cockpitInteraction.js pickWindowToActivate names) is the next change.
      *
      * @param {string} _sessionId - The clicked session's id.
      * @returns {void}
