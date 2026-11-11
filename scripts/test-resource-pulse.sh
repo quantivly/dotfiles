@@ -396,14 +396,16 @@ check "no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS: a planted o
 
 # A repeating timer in the shell while Samples flow is a budget no measurement
 # here catches: perf's count budgets do not move for a timer that draws nothing,
-# and the row above knows a timer only by the sampler's interval. So every GLib
+# and the row above knows a timer only by the sampler's interval. So every
 # timeout the shell side adds is pinned, by file and count: extension.js's cover
 # fallback (1), indicator.js's hover label delay (1), and the two lines of
 # pulseClient.js's injectable GLIB_TIMEOUTS seam (2). One more anywhere, a new
-# file included, fails the row until it is counted here. The call text is counted
-# on code lines only: a line that starts as a comment (//, /* or a JSDoc *) is not
-# a call.
-SHELL_SIDE_GLIB_TIMEOUT_CALL_PATTERN='GLib[.]timeout_add(_seconds)?[(]'
+# file included, fails the row until it is counted here. GJS's own setTimeout( and
+# setInterval( are timeouts too and are counted with GLib's two calls (the shell
+# side uses neither today); a method whose name merely ends that way (a letter,
+# digit, _ or . before "set") is not one. The call text is counted on code lines
+# only: a line that starts as a comment (//, /* or a JSDoc *) is not a call.
+SHELL_SIDE_GLIB_TIMEOUT_CALL_PATTERN='GLib[.]timeout_add(_seconds)?[(]|(^|[^A-Za-z0-9_.])set(Timeout|Interval)[(]'
 EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS='extension.js:1 indicator.js:1 pulseClient.js:2 '
 # glib_timeout_calls_in <extension dir>: one line, "<file>:<count>", per
 # shell-side .js file (list_shell_side_javascript) whose code lines add GLib
@@ -434,15 +436,17 @@ glib_timeout_calls_in() {
 }
 check "the shell side adds a timeout in the places the table knows, and nowhere else" \
   "$(glib_timeout_calls_in "$EXT_DIR" | LC_ALL=C sort | tr '\n' ' ')" "$EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS"
-# The planted twin, on a copy of the extension: one GLib.timeout_add( in
-# card.js, which adds none today, is the one difference the row sees.
+# The planted twin, on a copy of the extension: one GLib.timeout_add( and one
+# setInterval( in card.js, which adds none today, are the one difference the row
+# sees; a row blind to either form would count 1 there, not 2. A method named
+# resetTimeout( planted beside them is not a timeout and is not counted.
 GLIB_TIMEOUT_FIXTURE_DIR="$WIRING_TMP/glib-timeout-fixture"
 cp -R "$EXT_DIR" "$GLIB_TIMEOUT_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $GLIB_TIMEOUT_FIXTURE_DIR"
 printf '%s\n' 'this._pollSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => GLib.SOURCE_CONTINUE);' \
-  >>"$GLIB_TIMEOUT_FIXTURE_DIR/card.js"
-check "the shell side adds a timeout in the places the table knows, and nowhere else: a planted one in card.js is found" \
+  '    setInterval(() => this._poll(), 2000);' 'this.resetTimeout(5);' >>"$GLIB_TIMEOUT_FIXTURE_DIR/card.js"
+check "the shell side adds a timeout in the places the table knows, and nowhere else: planted ones in card.js are found" \
   "$(glib_timeout_calls_in "$GLIB_TIMEOUT_FIXTURE_DIR" | LC_ALL=C sort | tr '\n' ' ')" \
-  "card.js:1 $EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS"
+  "card.js:2 $EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS"
 
 # The compositor repaints every actor of the card's layer on each frame a window draws over it, because actors there
 # are not culled, so the card draws through an offscreen texture (one cached rectangle for those frames): _init sets
