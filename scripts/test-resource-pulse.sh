@@ -434,6 +434,11 @@ STUB
 )"
 install_stub "$STUB_BIN" gsettings "$GENABLE_GSETTINGS_STUB"
 printf 'genable_extension %s\n' "$EXTENSION_UUID" >"$WIRING_TMP/local-overrides"
+DING_UUID="ding@rastersoft.com"
+# The local layer for the gdisable_extension rows: the helper called twice in one run,
+# so one run also proves the second call is a no-op.
+printf 'gdisable_extension %s\ngdisable_extension %s\n' "$DING_UUID" "$DING_UUID" >"$WIRING_TMP/local-overrides-disable"
+APPLY_OVERRIDES_FILE="$WIRING_TMP/local-overrides"
 
 STUB_CALLS_LOG="$WIRING_TMP/stub-calls"
 STUB_BUS_SEEN_LOG="$WIRING_TMP/stub-bus-seen"
@@ -443,6 +448,7 @@ STUB_BUS_SEEN_LOG="$WIRING_TMP/stub-bus-seen"
 #   $1 enabled-extensions  $2 disabled-extensions  $3 disable-user-extensions
 #   $4 schemas listed by the stub (newline separated)
 #   $5 allow-extension-installation (optional; unset, the stub answers true)
+# The local layer it runs is $APPLY_OVERRIDES_FILE (genable_extension unless a block switches it).
 run_apply_against_stub() {
   rm -rf "${STUB_STATE:?}"/*
   mkdir -p "$STUB_STATE/$SHELL_SCHEMA"
@@ -455,7 +461,7 @@ run_apply_against_stub() {
   : >"$STUB_BUS_SEEN_LOG"
   APPLY_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$STUB_BIN:$PATH" STUB_STATE="$STUB_STATE" \
     STUB_CALLS="$STUB_CALLS_LOG" STUB_BUS_SEEN="$STUB_BUS_SEEN_LOG" XDG_CURRENT_DESKTOP=GNOME \
-    GNOME_LOCAL_OVERRIDES="$WIRING_TMP/local-overrides" bash "$APPLY_SCRIPT" 2>&1)"
+    GNOME_LOCAL_OVERRIDES="$APPLY_OVERRIDES_FILE" bash "$APPLY_SCRIPT" 2>&1)"
   APPLY_EXIT=$?
 }
 stub_value() { cat "$STUB_STATE/$SHELL_SCHEMA/$1" 2>/dev/null; }
@@ -484,6 +490,34 @@ run_apply_against_stub '@as []' '@as []' false ""
 check "genable_extension: an absent org.gnome.shell schema warns" "$(grep -c -F "Schema '$SHELL_SCHEMA' not found" <<<"$APPLY_OUTPUT")" 1
 check "genable_extension: an absent schema writes nothing" "$(stub_value enabled-extensions)" "@as []"
 check "genable_extension: the apply script still exits 0 without the schema" "$APPLY_EXIT" 0
+
+printf '\ngdisable_extension (stateful gsettings stub)\n'
+APPLY_OVERRIDES_FILE="$WIRING_TMP/local-overrides-disable"
+run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
+check "gdisable_extension: an empty disabled list becomes just the uuid, once, though the helper ran twice" \
+  "$(stub_value disabled-extensions)" "['$DING_UUID']"
+check "gdisable_extension: the second call prints no second disabled-extensions line" \
+  "$(grep -c -F 'disabled-extensions →' <<<"$APPLY_OUTPUT")" 1
+run_apply_against_stub '@as []' "['$DING_UUID']" false "$SHELL_SCHEMA"
+check "gdisable_extension: an already-disabled uuid leaves the list unchanged" "$(stub_value disabled-extensions)" "['$DING_UUID']"
+check "gdisable_extension: no change prints no disabled-extensions line, and says so at INFO" \
+  "arrow=$(grep -c -F 'disabled-extensions →' <<<"$APPLY_OUTPUT") info=$(grep -c -F "$DING_UUID is already in disabled-extensions" <<<"$APPLY_OUTPUT")" "arrow=0 info=2"
+run_apply_against_stub '@as []' "['x@y']" false "$SHELL_SCHEMA"
+check "gdisable_extension: appends and keeps the existing disabled entry first" "$(stub_value disabled-extensions)" "['x@y', '$DING_UUID']"
+run_apply_against_stub "['a@b', '$DING_UUID', 'c@d']" '@as []' false "$SHELL_SCHEMA"
+check "gdisable_extension: removes the uuid from enabled-extensions and keeps the others in order" \
+  "$(stub_value enabled-extensions)" "['a@b', 'c@d']"
+check "gdisable_extension: an enabled uuid is also appended to disabled-extensions, which wins in GNOME 50" \
+  "$(stub_value disabled-extensions)" "['$DING_UUID']"
+run_apply_against_stub "['a@b']" '@as []' false "$SHELL_SCHEMA"
+check "gdisable_extension: an uuid absent from enabled-extensions leaves that list alone, with no write" \
+  "list=$(stub_value enabled-extensions) writes=$(grep -c -F 'enabled-extensions →' <<<"$APPLY_OUTPUT")" "list=['a@b'] writes=0"
+run_apply_against_stub "['$DING_UUID']" '@as []' false ""
+check "gdisable_extension: an absent org.gnome.shell schema warns" "$(grep -c -F "Schema '$SHELL_SCHEMA' not found" <<<"$APPLY_OUTPUT")" 2
+check "gdisable_extension: an absent schema writes nothing" \
+  "enabled=$(stub_value enabled-extensions) disabled=$(stub_value disabled-extensions)" "enabled=['$DING_UUID'] disabled=@as []"
+check "gdisable_extension: the apply script still exits 0 without the schema" "$APPLY_EXIT" 0
+APPLY_OVERRIDES_FILE="$WIRING_TMP/local-overrides"
 
 printf '\nresource-pulse-module-closure.sh (which modules each side runs: ruling R23)\n'
 # The two stale-code checks (gnome-status's ⚠ lines and the refresh step's
@@ -1263,6 +1297,9 @@ check "install.conf.yaml links the extension directory" \
   "$(grep -c -x -F "    ~/.local/share/gnome-shell/extensions/$EXTENSION_UUID: gnome-shell/extensions/$EXTENSION_UUID" "$DOTFILES/install.conf.yaml")" 1
 check "the template carries a commented genable_extension line" \
   "$(grep -c -x -F "# genable_extension $EXTENSION_UUID" "$DOTFILES/examples/gnome-settings.local.template")" 1
+TEMPLATE_FILE="$DOTFILES/examples/gnome-settings.local.template"
+check "the template carries a commented gdisable_extension line for ding, and never calls it uncommented" \
+  "commented=$(grep -c -x -F "# gdisable_extension $DING_UUID" "$TEMPLATE_FILE") live=$(grep -c -E '^[[:space:]]*gdisable_extension' "$TEMPLATE_FILE")" "commented=1 live=0"
 # The cockpit's background, for the desktop and the lock screen, in gset's own
 # value form (as `gsettings get` prints it, so a second gnome-apply is a no-op).
 COCKPIT_BACKGROUND_LINE_PATTERN="^# gset org\\.gnome\\.desktop\\.(background|screensaver) +(picture-options +\"'none'\"|primary-color +\"'#121a1a'\")\$"
@@ -3772,7 +3809,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=848
+EXPECTED_ROWS=860
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
