@@ -893,7 +893,7 @@ test('cockpitLayer.js: the layer is a non-reactive St.Widget of class rp-cockpit
             'this._tooltip = new CockpitTooltip();',
             'pulseCard.get_parent()?.remove_child(pulseCard);',
             'this.setLayout(cockpitClient.layout);',
-            'this._cockpitListenerId = cockpitClient.addListener(event => this._onCockpitEvent(event));',
+            'this._cockpitListenerId = cockpitClient.addListener(event => this._pacing.onCockpitEvent(event));',
             'this._snapshotListenerId = pulseClient.addListener(snapshot => this._onSnapshot(snapshot));',
             'Main.layoutManager._backgroundGroup.add_child(this);',
         ],
@@ -987,87 +987,43 @@ test('cockpitLayer.js: the layer draws through no offscreen texture of its own (
     });
 });
 
-test('cockpitLayer.js: a cockpit client event goes through cockpitEventEffect (ruling D20): drawn at once, or its ' +
-    'sources pending for the next Sample, arming the fallback only when it says so; drawing sources takes them out ' +
-    'of the pending ones and redraws the cards cockpitCardIdsDrawing names', () =>
+test('cockpitLayer.js: the layer paces its data cards through one CockpitSourcePacing (cockpitSourceDrawing.js, ' +
+    'shared with the dropdown: ruling D22), made before the build with the layer\'s client, its drawn card ids, ' +
+    '_drawCard, its error log and its name; each client event goes to it and each Sample (onSampleTick, from the ' +
+    'extension\'s tick) is its onSample; the layer keeps no pending set, timeout, event rule or pull of its ' +
+    'own', () => {
+    const source = codeOf(LAYER_SOURCE_FILE);
+    const initStatements = layerMethodStatements('_init(');
+    const pacingIndex = initStatements.indexOf('this._pacing = new CockpitSourcePacing({');
+    const ownPacingNeedles = [
+        'timeout_add', 'source_remove', '_pendingSourceNames', 'cockpitEventEffect', 'CockpitApplyTiming',
+        'cockpitCardIdsDrawing', 'cockpitSourceNamesToPull', 'pullIfSuspicious',
+    ];
     assertEqual({
-        onEvent: layerMethodStatements('_onCockpitEvent('),
-        drawSources: layerMethodStatements('_drawSources('),
+        pacing: pacingIndex < 0 ? [] : initStatements.slice(pacingIndex, pacingIndex + 4),
+        madeBeforeTheBuild: pacingIndex >= 0 && pacingIndex < initStatements.indexOf('try {'),
+        surfaceName: occurrenceCount(source, "const PACING_SURFACE_NAME = 'the cockpit layer';"),
+        eventsGoToIt: occurrenceCount(source, 'cockpitClient.addListener(event => this._pacing.onCockpitEvent(event))'),
+        sample: layerMethodStatements('onSampleTick('),
+        ownPacing: ownPacingNeedles.filter(needle => source.includes(needle)),
     }, {
-        onEvent: [
-            'const isFallbackArmed = this._applyFallbackSourceId !== null;',
-            'const {timing, sourceNames} = cockpitEventEffect({event, isFallbackArmed});',
-            'if (timing === CockpitApplyTiming.NEVER)',
-            'return;',
-            'if (timing === CockpitApplyTiming.NOW) {',
-            'this._drawSources(sourceNames);',
-            'return;',
-            '}',
-            'for (const sourceName of sourceNames)',
-            'this._pendingSourceNames.add(sourceName);',
-            'if (timing === CockpitApplyTiming.NEXT_TICK_WITH_FALLBACK)',
-            'this._armApplyFallback();',
+        pacing: [
+            'this._pacing = new CockpitSourcePacing({',
+            'cockpitClient, drawnCardIds: () => this.drawnCardIds, drawCard: cardId => this._drawCard(cardId),',
+            'errorLog, surfaceName: PACING_SURFACE_NAME,',
+            '});',
         ],
-        drawSources: [
-            'for (const sourceName of sourceNames)',
-            'this._pendingSourceNames.delete(sourceName);',
-            'const cardIds = cockpitCardIdsDrawing({drawnCardIds: this.drawnCardIds, sourceNames});',
-            'for (const cardId of cardIds)',
-            'this._drawCard(cardId);',
-        ],
-    }));
-
-test('cockpitLayer.js: the fallback is the file\'s one timeout, a named one-shot GLib.timeout_add_seconds of ' +
-    'COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS whose callback forgets its id, draws the pending sources in a try whose ' +
-    'catch logs, and returns SOURCE_REMOVE; drawing the pending sources (each Sample) removes it first', () =>
-    assertEqual({
-        timeouts: occurrenceCount(codeOf(LAYER_SOURCE_FILE), 'timeout_add'),
-        arm: layerMethodStatements('_armApplyFallback('),
-        callback: layerMethodStatements('_onApplyFallbackTimeout('),
-        drawPendingRemovesItFirst: layerMethodStatements('_drawPendingSources(')[0],
-        remove: layerMethodStatements('_removeApplyFallback(').slice(-3),
-    }, {
-        timeouts: 1,
-        arm: [
-            'this._applyFallbackSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,',
-            'COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS, () => this._onApplyFallbackTimeout());',
-            'GLib.Source.set_name_by_id(this._applyFallbackSourceId, APPLY_FALLBACK_TIMEOUT_NAME);',
-        ],
-        callback: [
-            'this._applyFallbackSourceId = null;',
-            'try {',
-            'this._drawPendingSources();',
-            '} catch (error) {',
-            "this._logFailure('could not draw the pending cockpit sources', error);",
-            '}',
-            'return GLib.SOURCE_REMOVE;',
-        ],
-        drawPendingRemovesItFirst: 'this._removeApplyFallback();',
-        remove: [
-            'const sourceId = this._applyFallbackSourceId;', 'this._applyFallbackSourceId = null;',
-            'GLib.source_remove(sourceId);',
-        ],
-    }));
-
-test('cockpitLayer.js: each Sample (onSampleTick, from the extension\'s tick) draws the pending sources, then pulls ' +
-    'on suspicion every source cockpitSourceNamesToPull names (none while the subscription is not wanted)', () =>
-    assertEqual(layerMethodStatements('onSampleTick('), [
-        'this._drawPendingSources();',
-        'const sourceNamesToPull = cockpitSourceNamesToPull({drawnCardIds: this.drawnCardIds, isSubscriptionWanted});',
-        'for (const sourceName of sourceNamesToPull)',
-        'this._cockpitClient.pullIfSuspicious(sourceName);',
-    ]));
+        madeBeforeTheBuild: true, surfaceName: 1, eventsGoToIt: 1,
+        sample: ['this._pacing.onSample({isSubscriptionWanted});'],
+        ownPacing: [],
+    });
+});
 
 test('cockpitLayer.js: a card revealed is first drawn from what the clients hold, then unfrozen, so the reveal draws ' +
-    'the latest at once (ruling D20); a frozen repaint draws it so too, still dimmed; a data card draws "no data ' +
-    'since" when cockpitDataCardDrawing says so, else its sources', () => {
-    const dataStatements = layerMethodStatements('_drawDataCard(');
+    'the latest at once (ruling D20); a frozen repaint draws it so too, still dimmed', () => {
     assertEqual({
         freeze: layerMethodStatements('setCardFrozen('),
         repaint: layerMethodStatements('repaintFrozenCard(').slice(-2),
-        decides: dataStatements.includes(
-            'const drawing = cockpitDataCardDrawing({clientState: client.state, sources});'),
-        draws: dataStatements.slice(-4),
     }, {
         // A frozen card is recorded, so its reveal (only from frozen) first draws it from the clients (ruling D20).
         freeze: [
@@ -1084,30 +1040,24 @@ test('cockpitLayer.js: a card revealed is first drawn from what the clients hold
             'card.setFrozen(isFrozen);',
         ],
         repaint: ['this._drawCard(cardId);', 'card.repaintFrozen();'],
-        decides: true,
-        draws: [
-            'if (drawing.isNoData)', 'card.showNoData(noDataText(drawing.noDataSinceUsec, formatClockLabel));', 'else',
-            'DATA_CARD_UPDATERS_BY_ID[cardId](card, sourcesByName);',
-        ],
     });
 });
 
 test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snapshot listener), the system card the ' +
-    'pulse client\'s latest, and each data card its sources, each through its own update (ruling D9), dispatched by ' +
-    '_drawCard (a card of the snapshot through its drawer, else _drawDataCard, which ends in its updater)', () => {
+    'pulse client\'s latest, each through its own update (ruling D9), dispatched by _drawCard: a card of the ' +
+    'snapshot through its drawer, else drawCockpitDataCard (cockpitSourceDrawing.js, shared with the dropdown: ' +
+    'ruling D22); the layer keeps no data-card drawing of its own', () => {
     const source = codeOf(LAYER_SOURCE_FILE);
+    const ownDataCardNeedles = ['_drawDataCard', 'DATA_CARD_UPDATERS_BY_ID', 'cockpitDataCardDrawing', 'noDataText',
+        'formatClockLabel', 'GLib.DateTime'];
     assertEqual({
         drawCard: layerMethodStatements('_drawCard('),
-        dataCardUpdates: layerMethodStatements('_drawDataCard(').at(-1),
         onSnapshot: layerMethodStatements('_onSnapshot('),
         snapshotDrawers: [
             'system: (card, pulseClient) => card.update(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel),',
             'apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null),',
         ].map(needle => occurrenceCount(source, needle)),
-        dataUpdaters: [
-            'connections: (card, sourcesByName) => card.update(sourcesByName.network, sourcesByName.mounts),',
-            'sessions: (card, sourcesByName) => card.update(sourcesByName.sessions),',
-        ].map(needle => occurrenceCount(source, needle)),
+        ownDataCardDrawing: ownDataCardNeedles.filter(needle => source.includes(needle)),
     }, {
         drawCard: [
             'const card = this._cardsById.get(cardId);',
@@ -1115,15 +1065,15 @@ test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snap
             'if (drawSnapshotCard)',
             'drawSnapshotCard(card, this._pulseClient);',
             'else',
-            'this._drawDataCard(cardId, card);',
+            'drawCockpitDataCard({cardId, card, cockpitClient: this._cockpitClient});',
         ],
-        dataCardUpdates: 'DATA_CARD_UPDATERS_BY_ID[cardId](card, sourcesByName);',
         onSnapshot: ['this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null);'],
-        snapshotDrawers: [1, 1], dataUpdaters: [1, 1],
+        snapshotDrawers: [1, 1], ownDataCardDrawing: [],
     });
 });
 
-test('cockpitLayer.js: destroy removes both client listeners and the fallback timeout before destroying anything, ' +
+test('cockpitLayer.js: destroy removes both client listeners and destroys the pacing (its fallback timeout) before ' +
+    'destroying anything, ' +
     'then destroys the cards (the system card giving the v2 card back), the captions and last the tooltip, each ' +
     'step guarded (runEveryStep); its handler is connected before the build\'s try, so a failed build undoes it all; ' +
     'every listener it adds it removes', () => {
@@ -1148,7 +1098,7 @@ test('cockpitLayer.js: destroy removes both client listeners and the fallback ti
         steps: [
             "{name: 'remove the cockpit client listener', run: () => this._removeCockpitListener()},",
             "{name: 'remove the snapshot listener', run: () => this._removeSnapshotListener()},",
-            "{name: 'remove the fallback timeout', run: () => this._removeApplyFallback()},",
+            "{name: 'destroy the pacing', run: () => this._pacing.destroy()},",
             "{name: 'destroy the cards', run: () => this._destroyCards()},",
             "{name: 'destroy the captions', run: () => this._destroyCaptions()},",
             "{name: 'destroy the tooltip', run: () => this._tooltip?.destroy()},",

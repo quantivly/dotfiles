@@ -835,6 +835,21 @@ test('cockpitClient: pullIfSuspicious(\'mounts\') (a 30 s interval) calls GetSta
     });
 });
 
+test('cockpitClient: two asks about one suspect source in the same Sample, before any answer (the dropdown\'s, then ' +
+    'the layer\'s), make one GetState: the request is stamped as it is asked, so the second answers pulled: ' +
+    'false', async () => {
+    const {client, clock, link} = makeLiveClientFixture();
+    clock.nowRealUsec = SAMPLED_AT_USEC + (MOUNTS_SUSPECT_AFTER_SECONDS + 1) * USEC_PER_SECOND;
+    const stateCallCountBefore = link.callsOf(GET_STATE).length;
+    const dropdownPull = client.pullIfSuspicious('mounts');
+    const layerPull = client.pullIfSuspicious('mounts');
+    const stateCallsMade = link.callsOf(GET_STATE).length - stateCallCountBefore;
+    answerState(link);
+    assertEqual({
+        stateCallsMade, pullResults: [await valueOnceSettled(dropdownPull), await valueOnceSettled(layerPull)],
+    }, {stateCallsMade: 1, pullResults: [{pulled: true}, {pulled: false}]});
+});
+
 test('cockpitClient: a source past three intervals is suspect but not stale; a pull answering its same old stamp ' +
     'makes it stale and tells a sources event naming it; a fresher stamp makes it fresh again', async () => {
     const {client, clock, link, events} = makeLiveClientFixture();

@@ -15,41 +15,34 @@
 //   follows ding's DESKTOP window, as the extension reads it.
 // - What the cards draw: the system card draws itself (the v2 card listens to the pulse client); the apps card the
 //   pulse client's snapshots (a snapshot listener); the connections and sessions cards the cockpit client's sources,
-//   each event when lib/cockpitWiring.js cockpitEventEffect says (ruling D20): a read's at once; a Changed's or a
-//   pull's on the next Sample (onSampleTick, from the extension's tick) or, with the sampler silent, by a one-shot
-//   timeout of COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS. The service gone, or a source stale, draws "no data since
-//   HH:MM". A card revealed is first given what the clients hold now, so the reveal draws the latest at once; each
-//   Sample while the cockpit is seen pulls its suspect sources (pullIfSuspicious, ruling R14).
+//   paced by the CockpitSourcePacing the layer shares with the dropdown (cockpitSourceDrawing.js, ruling D22): a read's
+//   at once; a Changed's or a pull's on the next Sample (onSampleTick, from the extension's tick) or, with the sampler
+//   silent, by a one-shot timeout of COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS (ruling D20); each drawn by
+//   drawCockpitDataCard, so the service gone, or a source stale, draws "no data since HH:MM". A card revealed is first
+//   given what the clients hold now, so the reveal draws the latest at once; each Sample while the cockpit is seen
+//   pulls its suspect sources (pullIfSuspicious, ruling R14).
 // - It draws through no texture of its own (each card draws through its own) and paints nothing itself.
 //
 // destroy() removes everything the layer added outside itself, each step guarded: both client listeners and the
-// fallback timeout first, so nothing runs against a half-destroyed card; then the cards (the system card giving the v2
-// card back), the captions, and last the tooltip, which a card hides as it goes.
-import GLib from 'gi://GLib';
+// pacing (its fallback timeout) first, so nothing runs against a half-destroyed card; then the cards (the system card
+// giving the v2 card back), the captions, and last the tooltip, which a card hides as it goes.
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {AppsCockpitCard, ConnectionsCockpitCard, SessionsCockpitCard, SystemCockpitCard} from './cockpitCards.js';
+import {CockpitSourcePacing, drawCockpitDataCard} from './cockpitSourceDrawing.js';
 import {CockpitTooltip} from './cockpitTooltip.js';
-import {
-    COCKPIT_APPS_CARD_ID, COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS, COCKPIT_CLOCK_LABEL_FORMAT,
-    COCKPIT_SOURCE_NAMES_BY_CARD_ID, MICROSECONDS_PER_SECOND,
-} from './lib/constants.js';
-import {noDataText} from './lib/cockpitFormat.js';
+import {COCKPIT_APPS_CARD_ID} from './lib/constants.js';
 import {cockpitGridGeometry, drawnCockpitCardIds, drawnCockpitCells} from './lib/cockpitGrid.js';
-import {
-    CockpitApplyTiming, cockpitCardIdsDrawing, cockpitDataCardDrawing, cockpitEventEffect, cockpitSourceNamesToPull,
-} from './lib/cockpitWiring.js';
 import {describeErrorWithStack} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
 
 const LAYER_STYLE_CLASS = 'rp-cockpit-layer';
 const CAPTION_STYLE_CLASS = 'rp-cockpit-caption';
-const APPLY_FALLBACK_TIMEOUT_NAME = '[resource-pulse] draw the pending cockpit sources';
-/** What "no data since" names for a stamp GLib cannot place as a local time (out of GLib.DateTime's range). */
-const UNPLACEABLE_CLOCK_LABEL = '';
+/** The layer, as its pacing's journal line names it (cockpitSourceDrawing.js). */
+const PACING_SURFACE_NAME = 'the cockpit layer';
 
 /** Makes each card this release draws (lib/constants.js COCKPIT_DRAWN_CARD_IDS), by its id. */
 const CARD_MAKERS_BY_ID = Object.freeze({
@@ -64,24 +57,6 @@ const SNAPSHOT_CARD_DRAWERS_BY_ID = Object.freeze({
     system: (card, pulseClient) => card.update(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel),
     apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null),
 });
-
-/** Gives each card that draws cockpit sources its sources, through its update (ruling D9). */
-const DATA_CARD_UPDATERS_BY_ID = Object.freeze({
-    connections: (card, sourcesByName) => card.update(sourcesByName.network, sourcesByName.mounts),
-    sessions: (card, sourcesByName) => card.update(sourcesByName.sessions),
-});
-
-/**
- * Writes a wall-clock stamp as a local time of day, for "no data since HH:MM".
- *
- * @param {number} realUsec - Wall-clock microseconds (a source's sampledAtUsec).
- * @returns {string} 'HH:MM', or UNPLACEABLE_CLOCK_LABEL for a stamp GLib cannot place.
- */
-function formatClockLabel(realUsec) {
-    const unixSeconds = Math.floor(realUsec / MICROSECONDS_PER_SECOND);
-    const localTime = GLib.DateTime.new_from_unix_local(unixSeconds);
-    return localTime?.format(COCKPIT_CLOCK_LABEL_FORMAT) ?? UNPLACEABLE_CLOCK_LABEL;
-}
 
 /**
  * Places an actor at a rectangle of the grid, in the layer's coordinates (the stage's: the layer sits at the
@@ -133,9 +108,11 @@ class CockpitLayer extends St.Widget {
         this._drawnCells = [];
         this._frozenCardIds = new Set();
         this._isInteractive = false;
-        // The sources a Changed or a pull brought, drawn on the next Sample or by the fallback timeout.
-        this._pendingSourceNames = new Set();
-        this._applyFallbackSourceId = null;
+        // What the data cards are given and when (ruling D22): its constructor only assigns, so it cannot throw.
+        this._pacing = new CockpitSourcePacing({
+            cockpitClient, drawnCardIds: () => this.drawnCardIds, drawCard: cardId => this._drawCard(cardId),
+            errorLog, surfaceName: PACING_SURFACE_NAME,
+        });
         this._cockpitListenerId = null;
         this._snapshotListenerId = null;
         this.connect('destroy', () => this._onDestroy());
@@ -143,7 +120,7 @@ class CockpitLayer extends St.Widget {
             this._tooltip = new CockpitTooltip();
             pulseCard.get_parent()?.remove_child(pulseCard);
             this.setLayout(cockpitClient.layout);
-            this._cockpitListenerId = cockpitClient.addListener(event => this._onCockpitEvent(event));
+            this._cockpitListenerId = cockpitClient.addListener(event => this._pacing.onCockpitEvent(event));
             this._snapshotListenerId = pulseClient.addListener(snapshot => this._onSnapshot(snapshot));
             Main.layoutManager._backgroundGroup.add_child(this);
         } catch (error) {
@@ -271,18 +248,16 @@ class CockpitLayer extends St.Widget {
     }
 
     /**
-     * One Sample of the pulse client (the extension's tick): draws the sources a Changed or a pull left pending, then
-     * pulls on suspicion each source a drawn card draws while the subscription is wanted (ruling R14).
+     * One Sample of the pulse client (the extension's tick), handed to the pacing: it draws the sources a Changed or a
+     * pull left pending, then pulls on suspicion each source a drawn card draws while the subscription is wanted
+     * (ruling R14).
      *
      * @param {object} cockpit - What the extension knows of the cockpit.
      * @param {boolean} cockpit.isSubscriptionWanted - The cockpit's subscription is wanted (something of it is seen).
      * @returns {void}
      */
     onSampleTick({isSubscriptionWanted}) {
-        this._drawPendingSources();
-        const sourceNamesToPull = cockpitSourceNamesToPull({drawnCardIds: this.drawnCardIds, isSubscriptionWanted});
-        for (const sourceName of sourceNamesToPull)
-            this._cockpitClient.pullIfSuspicious(sourceName);
+        this._pacing.onSample({isSubscriptionWanted});
     }
 
     /**
@@ -343,99 +318,9 @@ class CockpitLayer extends St.Widget {
     }
 
     /**
-     * Acts on a cockpit client event as lib/cockpitWiring.js cockpitEventEffect says (ruling D20): draws its sources at
-     * once, or leaves them pending for the next Sample, arming the fallback timeout when it says to. The client logs a
-     * listener that throws.
-     *
-     * @param {object} event - The client's event.
-     * @returns {void}
-     */
-    _onCockpitEvent(event) {
-        const isFallbackArmed = this._applyFallbackSourceId !== null;
-        const {timing, sourceNames} = cockpitEventEffect({event, isFallbackArmed});
-        if (timing === CockpitApplyTiming.NEVER)
-            return;
-        if (timing === CockpitApplyTiming.NOW) {
-            this._drawSources(sourceNames);
-            return;
-        }
-        for (const sourceName of sourceNames)
-            this._pendingSourceNames.add(sourceName);
-        if (timing === CockpitApplyTiming.NEXT_TICK_WITH_FALLBACK)
-            this._armApplyFallback();
-    }
-
-    /**
-     * Draws the cards that draw some sources (lib/cockpitWiring.js cockpitCardIdsDrawing), from what the client holds
-     * now; those sources are pending no longer.
-     *
-     * @param {string[]} sourceNames - The sources.
-     * @returns {void}
-     */
-    _drawSources(sourceNames) {
-        for (const sourceName of sourceNames)
-            this._pendingSourceNames.delete(sourceName);
-        const cardIds = cockpitCardIdsDrawing({drawnCardIds: this.drawnCardIds, sourceNames});
-        for (const cardId of cardIds)
-            this._drawCard(cardId);
-    }
-
-    /**
-     * Draws the pending sources, removing the fallback timeout first: each Sample, and the fallback itself.
-     *
-     * @returns {void}
-     */
-    _drawPendingSources() {
-        this._removeApplyFallback();
-        if (this._pendingSourceNames.size === 0)
-            return;
-        this._drawSources([...this._pendingSourceNames]);
-    }
-
-    /**
-     * Arms the one-shot fallback that draws the pending sources when no Sample comes within
-     * COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS (the sampler silent).
-     *
-     * @returns {void}
-     */
-    _armApplyFallback() {
-        this._applyFallbackSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
-            COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS, () => this._onApplyFallbackTimeout());
-        GLib.Source.set_name_by_id(this._applyFallbackSourceId, APPLY_FALLBACK_TIMEOUT_NAME);
-    }
-
-    /**
-     * The fallback: forgets its id first (it ends here), draws the pending sources, and never throws out of the
-     * callback, which runs in the compositor's main loop (a failure is logged).
-     *
-     * @returns {boolean} GLib.SOURCE_REMOVE: it runs once.
-     */
-    _onApplyFallbackTimeout() {
-        this._applyFallbackSourceId = null;
-        try {
-            this._drawPendingSources();
-        } catch (error) {
-            this._logFailure('could not draw the pending cockpit sources', error);
-        }
-        return GLib.SOURCE_REMOVE;
-    }
-
-    /**
-     * Removes the fallback timeout, if armed; the id is forgotten first.
-     *
-     * @returns {void}
-     */
-    _removeApplyFallback() {
-        if (this._applyFallbackSourceId === null)
-            return;
-        const sourceId = this._applyFallbackSourceId;
-        this._applyFallbackSourceId = null;
-        GLib.source_remove(sourceId);
-    }
-
-    /**
      * Draws one card from what the clients hold now: a card of the sampler's snapshot from the pulse client's latest, a
-     * data card from the cockpit client's sources. A frozen card only records it.
+     * data card from the cockpit client's sources (cockpitSourceDrawing.js drawCockpitDataCard). A frozen card only
+     * records it.
      *
      * @param {string} cardId - A drawn card's id.
      * @returns {void}
@@ -446,29 +331,7 @@ class CockpitLayer extends St.Widget {
         if (drawSnapshotCard)
             drawSnapshotCard(card, this._pulseClient);
         else
-            this._drawDataCard(cardId, card);
-    }
-
-    /**
-     * Draws a data card from the cockpit client: "no data since" the oldest stamp of its sources while the service is
-     * gone or one of them is stale (lib/cockpitWiring.js cockpitDataCardDrawing), else its sources.
-     *
-     * @param {string} cardId - The card's id: connections or sessions.
-     * @param {import('./cockpitCards.js').CockpitCardBase} card - The card.
-     * @returns {void}
-     */
-    _drawDataCard(cardId, card) {
-        const client = this._cockpitClient;
-        const sourcesByName = client.sourcesByName;
-        const sources = COCKPIT_SOURCE_NAMES_BY_CARD_ID[cardId].map(sourceName => ({
-            sampledAtUsec: sourcesByName[sourceName]?.sampledAtUsec ?? null,
-            isStale: client.sourceFreshness(sourceName).isStale,
-        }));
-        const drawing = cockpitDataCardDrawing({clientState: client.state, sources});
-        if (drawing.isNoData)
-            card.showNoData(noDataText(drawing.noDataSinceUsec, formatClockLabel));
-        else
-            DATA_CARD_UPDATERS_BY_ID[cardId](card, sourcesByName);
+            drawCockpitDataCard({cardId, card, cockpitClient: this._cockpitClient});
     }
 
     /**
@@ -550,17 +413,16 @@ class CockpitLayer extends St.Widget {
 
     /**
      * Removes everything the layer added outside itself, each step guarded (lib/teardown.js runEveryStep): both client
-     * listeners and the fallback timeout first, then the cards, the captions and last the tooltip. Runs on 'destroy',
-     * before Clutter destroys the children, however the layer is destroyed.
+     * listeners and the pacing (its pending sources and its fallback timeout) first, then the cards, the captions and
+     * last the tooltip. Runs on 'destroy', before Clutter destroys the children, however the layer is destroyed.
      *
      * @returns {void}
      */
     _onDestroy() {
-        this._pendingSourceNames.clear();
         runEveryStep([
             {name: 'remove the cockpit client listener', run: () => this._removeCockpitListener()},
             {name: 'remove the snapshot listener', run: () => this._removeSnapshotListener()},
-            {name: 'remove the fallback timeout', run: () => this._removeApplyFallback()},
+            {name: 'destroy the pacing', run: () => this._pacing.destroy()},
             {name: 'destroy the cards', run: () => this._destroyCards()},
             {name: 'destroy the captions', run: () => this._destroyCaptions()},
             {name: 'destroy the tooltip', run: () => this._tooltip?.destroy()},

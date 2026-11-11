@@ -182,14 +182,14 @@ shell_side_files_matching() {
   done
 }
 
-# lib/, pulseClient.js, serviceLink.js, cockpitClient.js, displayConfig.js and
-# graph.js run under plain gjs in the JS rows above, which only works while they
-# import nothing from the Shell. A listed file that is missing fails the row: an
-# absent file contains nothing, which is not a pass.
+# lib/, pulseClient.js, serviceLink.js, cockpitClient.js, displayConfig.js,
+# cockpitSourceDrawing.js and graph.js run under plain gjs in the JS rows above,
+# which only works while they import nothing from the Shell. A listed file that
+# is missing fails the row: an absent file contains nothing, which is not a pass.
 PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/serviceLink.js" "$EXT_DIR/cockpitClient.js"
-  "$EXT_DIR/displayConfig.js" "$EXT_DIR/graph.js")
-row_name="lib/, pulseClient.js, serviceLink.js, cockpitClient.js, displayConfig.js and graph.js"
-row_name+=" import nothing from resource:///"
+  "$EXT_DIR/displayConfig.js" "$EXT_DIR/cockpitSourceDrawing.js" "$EXT_DIR/graph.js")
+row_name="lib/, pulseClient.js, serviceLink.js, cockpitClient.js, displayConfig.js, cockpitSourceDrawing.js and"
+row_name+=" graph.js import nothing from resource:///"
 if ! list_files_under "$EXT_DIR/lib" LIB_MODULE_PATHS -type f -name '*.js'; then
   bad "$row_name — cannot list the JavaScript under $EXT_DIR/lib"
 elif (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
@@ -408,9 +408,11 @@ check "no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS: a planted o
 # cockpitClient.js's injectable GLIB_TIMEOUTS seam (1), whose one-shot timeouts
 # are the steps of its StartUnit chain (the wait for the service to appear, and
 # the retry delay), each returning SOURCE_REMOVE; cockpitTooltip.js's show delay
-# (1), one-shot; cockpitLayer.js's fallback that draws a Changed the next Sample
-# did not (1), one-shot, of COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS, armed only
-# while a Changed waits and removed by each Sample; extension.js's cover fallback
+# (1), one-shot; cockpitSourceDrawing.js's fallback that draws a Changed the next
+# Sample did not (1), one-shot, of COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS, armed
+# only while a Changed waits and removed by each Sample: one call site, the line
+# of its injectable seam, which the cockpit layer's pacing and the dropdown's
+# share (ruling D22), so the layer adds none; extension.js's cover fallback
 # (1), indicator.js's hover label delay (1), and the two lines of
 # pulseClient.js's injectable GLIB_TIMEOUTS seam (2). One more anywhere, a new
 # file included, fails the row until it is counted here. GJS's own setTimeout(
@@ -420,7 +422,8 @@ check "no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS: a planted o
 # call text is counted on code lines only: a line that starts as a comment (//,
 # /* or a JSDoc *) is not a call.
 SHELL_SIDE_GLIB_TIMEOUT_CALL_PATTERN='GLib[.]timeout_add(_seconds)?[(]|(^|[^A-Za-z0-9_.])set(Timeout|Interval)[(]'
-EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS='cockpitClient.js:1 cockpitLayer.js:1 cockpitTooltip.js:1 extension.js:1 indicator.js:1 '
+EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS='cockpitClient.js:1 cockpitSourceDrawing.js:1 cockpitTooltip.js:1 '
+EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS+='extension.js:1 indicator.js:1 '
 EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS+='pulseClient.js:2 '
 # glib_timeout_calls_in <extension dir>: one line, "<file>:<count>", per
 # shell-side .js file (list_shell_side_javascript) whose code lines add GLib
@@ -993,15 +996,17 @@ sorted_closure() {
   printf '%sexit=%s' "$(LC_ALL=C sort <<<"$closure_output" | tr '\n' ' ')" "$closure_exit"
 }
 # Read from the import lines of today's tree, by hand: the shell side's
-# thirty-one modules and the service side's seventeen, seven of them
+# thirty-two modules and the service side's seventeen, seven of them
 # (constants, errorLog, history, jsonFields, pressure, protocol, teardown) on
 # both. The shell side reaches cockpitCards.js and its three lib modules
 # (cockpitFormat, cockpitProtocol, cockpitStaleness) through indicator.js's
-# Resources helpers, and through extension.js the cockpit's eight: its client
-# (cockpitClient.js), its layer (cockpitLayer.js, with cockpitTooltip.js), the
+# Resources helpers, and through extension.js the cockpit's nine: its client
+# (cockpitClient.js), its layer (cockpitLayer.js, with cockpitTooltip.js and the
+# pacing and data-card drawing it shares, cockpitSourceDrawing.js), the
 # DisplayConfig reader (displayConfig.js), and lib/'s cockpitGrid,
 # cockpitInteraction, cockpitMonitor and cockpitWiring.
-EXPECTED_SHELL_CLOSURE='card.js cockpitCards.js cockpitClient.js cockpitLayer.js cockpitTooltip.js displayConfig.js '
+EXPECTED_SHELL_CLOSURE='card.js cockpitCards.js cockpitClient.js cockpitLayer.js cockpitSourceDrawing.js '
+EXPECTED_SHELL_CLOSURE+='cockpitTooltip.js displayConfig.js '
 EXPECTED_SHELL_CLOSURE+='extension.js graph.js indicator.js lib/cardRepaint.js lib/cockpitFormat.js '
 EXPECTED_SHELL_CLOSURE+='lib/cockpitGrid.js lib/cockpitInteraction.js lib/cockpitMonitor.js lib/cockpitProtocol.js '
 EXPECTED_SHELL_CLOSURE+='lib/cockpitStaleness.js lib/cockpitWiring.js lib/constants.js lib/errorLog.js lib/format.js '
@@ -5123,7 +5128,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1041
+EXPECTED_ROWS=1050
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

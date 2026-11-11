@@ -38,6 +38,7 @@ import './service-sampler.test.js';
 import './client.test.js';
 import './cockpitClient.test.js';
 import './displayConfig.test.js';
+import './cockpitSourceDrawing.test.js';
 import './cockpitGlue.test.js';
 import './graph.test.js';
 import './topbarColumns.test.js';

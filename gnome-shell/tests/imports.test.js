@@ -15,7 +15,7 @@ const GLUE_FILE_NAMES = [
 ];
 /** The modules outside lib/ that plain gjs can load (lib/ is listed from the disk). */
 const PURE_TOP_LEVEL_FILE_NAMES = [
-    'pulseClient.js', 'serviceLink.js', 'cockpitClient.js', 'displayConfig.js', 'graph.js',
+    'pulseClient.js', 'serviceLink.js', 'cockpitClient.js', 'displayConfig.js', 'cockpitSourceDrawing.js', 'graph.js',
 ];
 const LIB_DIRECTORY_NAME = 'lib';
 const JAVASCRIPT_SUFFIX = '.js';
