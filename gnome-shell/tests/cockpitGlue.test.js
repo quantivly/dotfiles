@@ -1148,9 +1148,10 @@ test('extension.js: enable() makes the cockpit client right after the pulse clie
     });
 });
 
-test('extension.js: a cockpit client event adds, removes or rebuilds the layer as cockpitLayerChange says, then ' +
-    'holds a hidden v2 card frozen (ruling D21) and places the cards again; the v2 card stops following its width ' +
-    'while the layer holds it, and is put back top right, following it again, when the layer goes', () =>
+test('extension.js: a cockpit client event adds, removes or rebuilds the layer as cockpitLayerChange says (never the ' +
+    'layout that failed in this enable), then holds a hidden v2 card frozen (ruling D21) and places the cards again, ' +
+    'whatever the add or the rebuild did; the v2 card stops following its width while the layer holds it, and is put ' +
+    'back top right, following it again, when the layer goes', () =>
     assertEqual({
         onEvent: extensionMethodStatements('_onCockpitClientEvent(event) {'),
         sync: extensionMethodStatements('_syncCockpitLayer(isLayoutEvent) {'),
@@ -1169,15 +1170,14 @@ test('extension.js: a cockpit client event adds, removes or rebuilds the layer a
             'clientState: this._cockpitClient.state,',
             'layout: this._cockpitClient.layout,',
             'isLayoutEvent,',
+            'failedLayout: this._failedCockpitLayout,',
             '});',
             'if (layerChange === CockpitLayerChange.NONE)',
             'return;',
-            'if (layerChange === CockpitLayerChange.ADD)',
-            'this._addCockpitLayer();',
-            'else if (layerChange === CockpitLayerChange.REMOVE)',
+            'if (layerChange === CockpitLayerChange.REMOVE)',
             'this._removeCockpitLayer();',
             'else',
-            'this._layer.setLayout(this._cockpitClient.layout);',
+            'this._buildCockpitLayer(layerChange);',
             'this._holdHiddenPulseCardFrozen();',
             'this._placeCard();',
         ],
@@ -1199,6 +1199,48 @@ test('extension.js: a cockpit client event adds, removes or rebuilds the layer a
             'Main.layoutManager._backgroundGroup.add_child(this._card);',
             'this._card.clearCellSize();',
             'this._followCardWidth();',
+        ],
+    }));
+
+test('extension.js: a layer that cannot be built or rebuilt never takes the extension down (ruling D25): the add and ' +
+    'the rebuild run in a try whose catch remembers the client\'s layout for this enable, logs on the error log ' +
+    'under a template key, destroys a half-rebuilt layer and puts the v2 card back top right; the add itself lets ' +
+    'the layer\'s failure out to that catch', () =>
+    assertEqual({
+        build: extensionMethodStatements('_buildCockpitLayer(layerChange) {'),
+        fallBack: extensionMethodStatements('_fallBackToTopRightCard(error) {'),
+        failureLogKey: occurrenceCount(codeOf(EXTENSION_SOURCE_FILE),
+            "const COCKPIT_LAYER_FAILURE_LOG_KEY = 'could not draw the cockpit layer';"),
+        add: extensionMethodStatements('_addCockpitLayer() {'),
+    }, {
+        build: [
+            'try {',
+            'if (layerChange === CockpitLayerChange.ADD)',
+            'this._addCockpitLayer();',
+            'else',
+            'this._layer.setLayout(this._cockpitClient.layout);',
+            '} catch (error) {',
+            'this._fallBackToTopRightCard(error);',
+            '}',
+        ],
+        fallBack: [
+            'this._failedCockpitLayout = this._cockpitClient.layout;',
+            'const errorText = describeErrorWithStack(error);',
+            'this._errorLog.log(`could not draw the cockpit layer, so the card is drawn top right: ${errorText}`,',
+            'COCKPIT_LAYER_FAILURE_LOG_KEY);',
+            'const layer = this._layer;',
+            'this._layer = null;',
+            'layer?.destroy();',
+            'this._putCardTopRight();',
+        ],
+        failureLogKey: 1,
+        add: [
+            'this._card.disconnectObject(this);',
+            'this._layer = new CockpitLayer({',
+            'cockpitClient: this._cockpitClient, pulseClient: this._client, pulseCard: this._card,',
+            'errorLog: this._errorLog, onSessionActivated: sessionId => this._activateSession(sessionId),',
+            '});',
+            'this._displayConfigReader.requestState();',
         ],
     }));
 
@@ -1333,23 +1375,25 @@ test('extension.js: a session row\'s click reaches _activateSession, which does 
         activate: statementsOf(methodBody(readExtensionFile(EXTENSION_SOURCE_FILE), '_activateSession(_sessionId) {')),
     }, {handedToTheLayer: true, activate: ['_activateSession(_sessionId) {', '}']}));
 
-test('extension.js: teardown keeps the layout to cache before anything is destroyed, clears the cockpit\'s fields, ' +
-    'removes the cockpit client listener, cancels the DisplayConfig read and destroys the layer first', () => {
+test('extension.js: teardown keeps the layout to cache before anything is destroyed, clears the cockpit\'s fields ' +
+    '(the layout that failed included, so each enable tries again), removes the cockpit client listener, cancels ' +
+    'the DisplayConfig read and destroys the layer first', () => {
     const tearDownStatements = extensionMethodStatements('_tearDown() {');
     const clearedFields = [
         'this._layer = null;', 'this._cockpitClient = null;', 'this._displayConfigReader = null;',
-        'this._displayConfigState = null;', 'this._cockpitListenerId = null;',
+        'this._displayConfigState = null;', 'this._cockpitListenerId = null;', 'this._failedCockpitLayout = null;',
         'this._visibleCardIds = VISIBLE_CARD_IDS_BEFORE_COVER_CHECK;', 'this._frozenCardPaintedAtUsecByCardId = {};',
         'this._isCockpitSubscriptionWanted = false;',
     ];
     const firstDestroyIndex = tearDownStatements.findIndex(statement => statement.includes('?.destroy()'));
+    const layerDestroyIndex =
+        tearDownStatements.indexOf('{name: \'destroy the cockpit layer\', run: () => layer?.destroy()},');
+    const cardDestroyIndex = tearDownStatements.indexOf('{name: \'destroy the card\', run: () => card?.destroy()},');
     assertEqual({
         cleared: clearedFields.map(field => tearDownStatements.filter(statement => statement === field).length),
         listenerRemoved: tearDownStatements.includes('cockpitClient?.removeListener(cockpitListenerId);'),
         firstDestroy: tearDownStatements[firstDestroyIndex],
-        layerBeforeTheCard: tearDownStatements.indexOf(
-            '{name: \'destroy the cockpit layer\', run: () => layer?.destroy()},') <
-            tearDownStatements.indexOf('{name: \'destroy the card\', run: () => card?.destroy()},'),
+        layerBeforeTheCard: layerDestroyIndex >= 0 && layerDestroyIndex < cardDestroyIndex,
     }, {
         cleared: clearedFields.map(() => 1),
         listenerRemoved: true,

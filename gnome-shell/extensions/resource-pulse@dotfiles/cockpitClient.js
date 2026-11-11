@@ -79,6 +79,7 @@ import {
 } from './lib/cockpitProtocol.js';
 import {sourceFreshness as decideSourceFreshness} from './lib/cockpitStaleness.js';
 import {RateLimitedLogger, describeError} from './lib/errorLog.js';
+import {isSameAsJson} from './lib/jsonFields.js';
 import {runEveryStep} from './lib/teardown.js';
 import {nextStartRetryDelaySeconds} from './lib/wiring.js';
 import {createServiceLink} from './serviceLink.js';
@@ -369,17 +370,6 @@ function isCancelledError(error) {
  */
 function internalFocusSessionReply() {
     return {focused: false, windowPid: null, error: COCKPIT_FOCUS_ERROR.INTERNAL, windowPidCandidates: []};
-}
-
-/**
- * Says whether two values read the same as JSON: how the client tells a layout or a source that changed.
- *
- * @param {*} firstValue - A parsed value.
- * @param {*} secondValue - Another.
- * @returns {boolean} True when their JSON texts are equal.
- */
-function isSameAsJson(firstValue, secondValue) {
-    return JSON.stringify(firstValue) === JSON.stringify(secondValue);
 }
 
 /**

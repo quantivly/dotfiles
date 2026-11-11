@@ -28,6 +28,11 @@ const LAYOUT = {
     monitor: {vendor: 'DEL', product: 'DELL U2723QE'},
     groups: [{id: 'machine', caption: 'MACHINE', columns: 2, cards: ['system', 'apps', 'connections', 'health']}],
 };
+/** LAYOUT edited: another grid, so another layout. */
+const EDITED_LAYOUT = {
+    monitor: LAYOUT.monitor,
+    groups: [{id: 'machine', caption: 'MACHINE', columns: 2, cards: ['system', 'apps']}],
+};
 const USEC_PER_SECOND = 1_000_000;
 /** FROZEN_REPAINT_INTERVAL_SECONDS (30), written out. */
 const FROZEN_REPAINT_SECONDS = 30;
@@ -87,6 +92,46 @@ test('cockpitWiring: a client event adds the layer once it is wanted, removes it
         layoutEdited: 'rebuild', sourcesWhileShown: 'none', vanishedWhileShown: 'none', nothingKnown: 'none',
         layoutEventWhileSkipped: 'none',
     });
+});
+
+/**
+ * LAYOUT as the client holds it after a later answer: a new object with the same JSON (cockpitClient.js replaces its
+ * layout object on every GetState answer and every Changed that carries one, and tells a layout event only when the
+ * JSON differs).
+ *
+ * @returns {object} A copy of LAYOUT.
+ */
+function layoutFromALaterAnswer() {
+    return JSON.parse(JSON.stringify(LAYOUT));
+}
+
+test('cockpitWiring: the layout that failed to build in this enable is not tried again while the client holds it ' +
+    '(the same JSON in a new object, as the client tells a changed layout), on any event; another layout is added ' +
+    'or rebuilt as usual, and a layer no longer wanted is still removed (ruling D25)', () => {
+    const change = (isLayerShown, clientState, layout, isLayoutEvent) =>
+        wiring.cockpitLayerChange({isLayerShown, clientState, layout, isLayoutEvent, failedLayout: LAYOUT});
+    assertEqual({
+        failedOneOnAState: change(false, LIVE, layoutFromALaterAnswer(), false),
+        failedOneOnALayoutEvent: change(false, LIVE, layoutFromALaterAnswer(), true),
+        failedOneWhileAnotherIsShown: change(true, LIVE, layoutFromALaterAnswer(), true),
+        anotherArrives: change(false, LIVE, EDITED_LAYOUT, true),
+        anotherWhileShown: change(true, LIVE, EDITED_LAYOUT, true),
+        skippedWhileShown: change(true, SKIPPED, layoutFromALaterAnswer(), false),
+        goneWhileShown: change(true, LIVE, null, true),
+    }, {
+        failedOneOnAState: 'none', failedOneOnALayoutEvent: 'none', failedOneWhileAnotherIsShown: 'none',
+        anotherArrives: 'add', anotherWhileShown: 'rebuild', skippedWhileShown: 'remove', goneWhileShown: 'remove',
+    });
+});
+
+test('cockpitWiring: the layout that failed to build in this enable is not kept for the next (the same JSON in a new ' +
+    'object), which then starts with none and tries the layout the service sends once; another layout is kept', () => {
+    const kept = (layout, failedLayout) => wiring.cockpitLayoutToKeep({clientState: LIVE, layout, failedLayout});
+    assertEqual({
+        failedOne: kept(layoutFromALaterAnswer(), LAYOUT),
+        anotherAfterAFailure: kept(EDITED_LAYOUT, LAYOUT),
+        noFailure: kept(LAYOUT, null),
+    }, {failedOne: null, anotherAfterAFailure: EDITED_LAYOUT, noFailure: LAYOUT});
 });
 
 test('cockpitWiring: the v2 card is held hidden (not drawn, kept frozen) only while the layer is shown and draws no ' +

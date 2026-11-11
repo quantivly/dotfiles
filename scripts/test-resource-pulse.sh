@@ -569,10 +569,15 @@ check "extension.js keeps the last good clock label across enables: set once, sa
 # The cockpit's layout is kept the same way (ruling D19), so the grid is drawn
 # at once after an unlock or a blank: set once, saved from the cockpit client
 # before teardown destroys it (the layout lib/cockpitWiring.js
-# cockpitLayoutToKeep keeps: none once the cockpit is SKIPPED), never reset
-# there, and seeded into each new cockpit client as its cached layout.
+# cockpitLayoutToKeep keeps: none once the cockpit is SKIPPED, nor one that
+# failed to build in this enable, ruling D25, so a broken layout is never
+# seeded into the next enable), never reset there, and seeded into each new
+# cockpit client as its cached layout. The call's argument lines are read
+# joined, from the line after its opening one to its closing one.
 LAYOUT_SAVE_STATEMENT='this._lastCockpitLayout = cockpitClient === null'
-LAYOUT_KEPT_STATEMENT=': cockpitLayoutToKeep({clientState: cockpitClient.state, layout: cockpitClient.layout});'
+LAYOUT_KEPT_STATEMENT=': cockpitLayoutToKeep({'
+LAYOUT_KEPT_ARGUMENTS='clientState: cockpitClient.state, layout: cockpitClient.layout, failedLayout: this._failedCockpitLayout, });'
+LAYOUT_KEPT_ARGUMENT_LINE_COUNT=3
 COCKPIT_CLIENT_DESTROY_STEP="{name: 'destroy the cockpit client', run: () => cockpitClient?.destroy()},"
 layout_save_line_number="$(grep -n -x -F "$LAYOUT_SAVE_STATEMENT" <<<"$teardown_lines" | head -n 1 | cut -d: -f1)"
 layout_kept_line_number="$(grep -n -x -F "$LAYOUT_KEPT_STATEMENT" <<<"$teardown_lines" | head -n 1 | cut -d: -f1)"
@@ -584,9 +589,19 @@ if [[ -n "$layout_save_line_number" && -n "$layout_kept_line_number" && -n "$coc
   && (( layout_kept_line_number < cockpit_destroy_line_number )); then
   layout_saved_before_destroy="yes"
 fi
-check "extension.js keeps the cockpit's layout across enables: set once, saved from the cockpit client (cockpitLayoutToKeep) before teardown destroys it, never reset there, and seeded into each new cockpit client" \
-  "set=$(method_body_lines 'constructor(metadata)' | grep -c -x -F 'this._lastCockpitLayout = null;') saved-before-destroy=$layout_saved_before_destroy reset-in-teardown=$(grep -c -E '^this\._lastCockpitLayout = null;' <<<"$teardown_lines") seeded=$(method_body_lines 'enable()' | grep -c -F 'cachedLayout: this._lastCockpitLayout')" \
-  "set=1 saved-before-destroy=yes reset-in-teardown=0 seeded=1"
+layout_failed_not_kept="no"
+if [[ -n "$layout_kept_line_number" ]]; then
+  layout_kept_first_argument_line=$(( layout_kept_line_number + 1 ))
+  layout_kept_last_argument_line=$(( layout_kept_line_number + LAYOUT_KEPT_ARGUMENT_LINE_COUNT ))
+  layout_kept_arguments="$(sed -n "${layout_kept_first_argument_line},${layout_kept_last_argument_line}p" \
+    <<<"$teardown_lines" | tr '\n' ' ')"
+  if [[ "${layout_kept_arguments% }" == "$LAYOUT_KEPT_ARGUMENTS" ]]; then
+    layout_failed_not_kept="yes"
+  fi
+fi
+check "extension.js keeps the cockpit's layout across enables: set once, saved from the cockpit client (cockpitLayoutToKeep, never the layout that failed to build) before teardown destroys it, never reset there, and seeded into each new cockpit client" \
+  "set=$(method_body_lines 'constructor(metadata)' | grep -c -x -F 'this._lastCockpitLayout = null;') saved-before-destroy=$layout_saved_before_destroy failed-not-kept=$layout_failed_not_kept reset-in-teardown=$(grep -c -E '^this\._lastCockpitLayout = null;' <<<"$teardown_lines") seeded=$(method_body_lines 'enable()' | grep -c -F 'cachedLayout: this._lastCockpitLayout')" \
+  "set=1 saved-before-destroy=yes failed-not-kept=yes reset-in-teardown=0 seeded=1"
 check "indicator.js re-places a shown hover label when its width or the display scale changes" \
   "$(grep -c -E "'notify::(width|scale-factor)'" "$EXT_DIR/indicator.js" 2>/dev/null)" 2
 # notify::width is emitted during allocation, and moving an actor then makes
@@ -5108,7 +5123,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1026
+EXPECTED_ROWS=1030
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

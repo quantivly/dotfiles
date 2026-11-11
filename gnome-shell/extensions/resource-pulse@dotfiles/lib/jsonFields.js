@@ -1,6 +1,8 @@
 // Typed readers of untrusted JSON values, shared by every protocol module. Each returns the value when it is of its
 // type and range, and null otherwise, so a reader can treat a missing or mistyped field as no data for that field alone.
-// Pure: no Gio and no Shell import, so it runs under plain gjs.
+// Also isSameAsJson: how the cockpit client tells a layout or a source that changed, which the extension's wiring
+// (lib/cockpitWiring.js) uses to tell the layout that failed to build. Pure: no Gio and no Shell import, so it runs
+// under plain gjs.
 
 /**
  * Parses JSON text whose top level must be an object.
@@ -30,6 +32,18 @@ export function parseJsonObject(text) {
  */
 export function isPlainObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Says whether two parsed values read the same as JSON: equal JSON texts, so a new object with the same fields in the
+ * same order is the same, whatever its identity.
+ *
+ * @param {*} firstValue - A parsed value.
+ * @param {*} secondValue - Another.
+ * @returns {boolean} True when their JSON texts are equal.
+ */
+export function isSameAsJson(firstValue, secondValue) {
+    return JSON.stringify(firstValue) === JSON.stringify(secondValue);
 }
 
 /**
