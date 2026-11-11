@@ -12,7 +12,6 @@ import {formatGibibytes, formatWholePercent} from './format.js';
 const BYTES_PER_MEBIBYTE = 1024 * 1024;
 const BYTES_PER_GIBIBYTE = 1024 * BYTES_PER_MEBIBYTE;
 const NO_VALUE_TEXT = COCKPIT_REDACTED_NAME;
-const SESSIONS_TITLE = 'SESSIONS';
 const MEMORY_TOOLTIP_NOTE = 'memory: process only; MCP servers and tool shells not counted';
 const PROCESS_AGE_MARK = '*';
 const STATES_THAT_DIM_WHEN_LONG_IDLE = ['idle', 'done'];
@@ -20,6 +19,12 @@ const CONNECTIVITY_UNKNOWN = 'unknown';
 const SEPARATOR = ' · ';
 /** What the sessions card says when herdr is not running. */
 export const herdrNotRunningText = 'herdr not running';
+/** The apps card's title. */
+export const appsCardTitle = 'APPS';
+/** The connections card's title. */
+export const connectionsCardTitle = 'CONNECTIONS';
+/** The sessions card's title, which leads its header. */
+export const sessionsCardTitle = 'SESSIONS';
 
 /**
  * Formats a memory size: GiB with one decimal from 1 GiB up, whole MiB below.
@@ -71,6 +76,53 @@ function shareOfLargest(value, largest) {
 }
 
 /**
+ * Whether a value was given at all: neither null nor undefined.
+ *
+ * @param {*} value - A source, or a part of one.
+ * @returns {boolean} True when it is present.
+ */
+function isPresent(value) {
+    return value !== null && value !== undefined;
+}
+
+/**
+ * Whether the apps card can draw a snapshot's apps: a snapshot from a sampler before the rankings, or none yet, has
+ * none. A null ranking inside is drawn as an empty list (appsRows).
+ *
+ * @param {object|null|undefined} apps - A pulse snapshot's apps.
+ * @returns {boolean} True unless the apps are missing.
+ */
+export function canDrawApps(apps) {
+    return isPresent(apps);
+}
+
+/**
+ * Whether the sessions card can draw a sessions source: it needs the rows and a count for every state. The reader
+ * keeps a source whose part is mistyped, that part null (cockpitProtocol.js); the card draws it as no data, never as a
+ * crash or a "null".
+ *
+ * @param {object|null|undefined} sessions - A sessions source.
+ * @returns {boolean} True when sessionsHeader and sessionRows can draw it.
+ */
+export function canDrawSessions(sessions) {
+    return isPresent(sessions) && isPresent(sessions.rows) && isPresent(sessions.counts) &&
+        SESSION_STATES.every(state => isPresent(sessions.counts[state]));
+}
+
+/**
+ * Whether the connections card can draw: it needs both sources, the network's uplink and VPN, and the mounts' rows.
+ * An unknown ssh master count is drawn as such (connectionsRows).
+ *
+ * @param {object|null|undefined} network - A network source.
+ * @param {object|null|undefined} mounts - A mounts source.
+ * @returns {boolean} True when connectionsRows can draw them.
+ */
+export function canDrawConnections(network, mounts) {
+    return isPresent(network) && isPresent(mounts) && isPresent(network.uplink) && isPresent(network.vpn) &&
+        isPresent(mounts.rows);
+}
+
+/**
  * The header of the sessions card.
  *
  * @param {object} sessions - A sessions source.
@@ -79,7 +131,7 @@ function shareOfLargest(value, largest) {
  */
 export function sessionsHeader(sessions) {
     return {
-        title: SESSIONS_TITLE,
+        title: sessionsCardTitle,
         count: String(sessions.rows.length),
         counts: SESSION_STATES.map(state => ({state, count: sessions.counts[state]})),
         totalMemory: memoryText(sessions.totalMemoryBytes),

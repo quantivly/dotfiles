@@ -297,6 +297,20 @@ export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'session
 export const SESSIONS_CARD_ROW_LIMIT = 6;
 /** The most rows each ranking (CPU, memory) of the apps card draws. */
 export const APPS_CARD_ROW_LIMIT = 6;
+/**
+ * The most rows the connections card draws: the uplink, the VPN and the ssh masters, then up to five mounts; mounts
+ * past it are not drawn. Its rows are built with the card, so no update makes an actor.
+ */
+export const CONNECTIONS_CARD_ROW_LIMIT = 8;
+/** Size of a cockpit row's icon and of the sessions header's state icons, in logical pixels: a panel status icon's. */
+export const COCKPIT_ROW_ICON_SIZE_PX = 16;
+/**
+ * Width of a cockpit row's bar track, as a share of its cell's width: a fixed slot at the row's end, so a bar's change
+ * never moves the name beside it, and the bars of a card line up.
+ */
+export const COCKPIT_ROW_BAR_TRACK_SHARE_OF_CELL_WIDTH = 0.15;
+/** Pixels between a state's icon and its count in the sessions header, closer than the header's other parts. */
+export const COCKPIT_STATE_COUNT_SPACING_PX = 2;
 /** Seconds in the units an idle time is written in; a session idle for less than the next unit up shows this one. */
 export const SECONDS_PER_MINUTE = 60;
 export const SECONDS_PER_HOUR = 3600;

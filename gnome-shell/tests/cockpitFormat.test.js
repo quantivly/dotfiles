@@ -176,6 +176,34 @@ test('cockpitFormat: noDataText goes through the stub clock; the herdr line is f
     assertEqual(cockpitFormat.herdrNotRunningText, 'herdr not running');
 });
 
+test('cockpitFormat: the card titles, and the sessions header\'s title is the sessions card\'s', () =>
+    assertEqual([cockpitFormat.appsCardTitle, cockpitFormat.connectionsCardTitle, cockpitFormat.sessionsCardTitle,
+        cockpitFormat.sessionsHeader(SESSIONS).title], ['APPS', 'CONNECTIONS', 'SESSIONS', 'SESSIONS']));
+
+test('cockpitFormat: the apps card draws any apps object, even with null rankings, and no data for none', () =>
+    assertEqual([{cpuRanking: null, memoryRanking: null}, null, undefined].map(cockpitFormat.canDrawApps),
+        [true, false, false]));
+
+test('cockpitFormat: the sessions card draws a source with its rows and a count for every state, empty rows ' +
+    'included; a missing source, rows, counts, or first or last count is no data', () => {
+    const withCounts = countOverrides => ({...SESSIONS, counts: {...SESSIONS.counts, ...countOverrides}});
+    assertEqual([
+        SESSIONS, {...SESSIONS, rows: []}, null, undefined, {...SESSIONS, rows: null}, {...SESSIONS, counts: null},
+        withCounts({working: null}), withCounts({unknown: null}), withCounts({unknown: undefined}),
+    ].map(cockpitFormat.canDrawSessions), [true, true, false, false, false, false, false, false, false]);
+});
+
+test('cockpitFormat: the connections card draws both sources with the uplink, the VPN and the mount rows; an ' +
+    'unknown ssh count is still drawn; any missing part is no data', () => {
+    const cases = [
+        [NETWORK, MOUNTS], [{...NETWORK, sshMasterCount: null}, MOUNTS], [NETWORK, {...MOUNTS, rows: []}],
+        [null, MOUNTS], [NETWORK, null], [undefined, MOUNTS], [{...NETWORK, uplink: null}, MOUNTS],
+        [{...NETWORK, vpn: null}, MOUNTS], [NETWORK, {...MOUNTS, rows: null}],
+    ];
+    assertEqual(cases.map(([network, mounts]) => cockpitFormat.canDrawConnections(network, mounts)),
+        [true, true, true, false, false, false, false, false, false]);
+});
+
 test('cockpitFormat: state icons and style classes for the five states', () => {
     assertEqual(['working', 'blocked', 'idle', 'done', 'unknown'].map(cockpitFormat.stateIconName), [
         'media-playback-start-symbolic', 'dialog-warning-symbolic', 'media-playback-pause-symbolic',

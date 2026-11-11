@@ -933,11 +933,13 @@ test('indicator.js is a PanelMenu.Button with a menu of its own, and the click t
 });
 
 test('indicator.js: the menu holds a non-reactive item with the second card, and an "Open Resources" item that ' +
-    'launches the first installed id in RESOURCES_APP_IDS and is hidden when none is installed', () => {
+    'launches the first installed id in RESOURCES_APP_IDS (cockpitCards.js finds and opens it) and is hidden when ' +
+    'none is installed', () => {
     const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
+    const cockpitCardsSource = readExtensionFile('cockpitCards.js');
     const buildBody = declarationBody(indicatorSource, '_buildDropdown() {');
-    const findBody = declarationBody(indicatorSource, '_findResourcesApp() {');
-    const openBody = declarationBody(indicatorSource, '_openResources() {');
+    const findBody = declarationBody(cockpitCardsSource, 'export function findResourcesApp() {');
+    const openBody = declarationBody(cockpitCardsSource, 'export function openResourcesApp() {');
     const visibilityBody = declarationBody(indicatorSource, '_syncOpenResourcesVisibility() {');
     assertEqual({
         cardItemIsInert: buildBody.includes('new PopupMenu.PopupBaseMenuItem(CARD_ITEM_PROPERTIES)') &&
@@ -948,12 +950,13 @@ test('indicator.js: the menu holds a non-reactive item with the second card, and
         openItemLabel: statementCount(buildBody,
             'this._openResourcesItem = new PopupMenu.PopupMenuItem(OPEN_RESOURCES_LABEL);'),
         labelIsTheSpecifiedOne: indicatorSource.includes('const OPEN_RESOURCES_LABEL = \'Open Resources\';'),
-        activationLaunches: buildBody.includes('this._openResourcesItem.connect(\'activate\', () => this._openResources());'),
+        activationLaunches: buildBody.includes(
+            'this._openResourcesItem.connect(\'activate\', () => openResourcesApp());'),
         lookupUsesTheSharedIds: findBody.includes('RESOURCES_APP_IDS') && findBody.includes('.find(app => app !== null)'),
         launchActivates: statementCount(openBody, 'resourcesApp.activate();'),
         launchLeavesTheOverview: statementCount(openBody, 'Main.overview.hide();'),
         hiddenWhenNoneInstalled: statementCount(visibilityBody,
-            'this._openResourcesItem.visible = this._findResourcesApp() !== undefined;'),
+            'this._openResourcesItem.visible = findResourcesApp() !== undefined;'),
     }, {
         cardItemIsInert: true, secondCardIsBuilt: 1, cardIsInTheItem: 1, cardIsNeverPlaced: false, openItemLabel: 1,
         labelIsTheSpecifiedOne: true, activationLaunches: true, lookupUsesTheSharedIds: true, launchActivates: 1,

@@ -96,7 +96,7 @@ printf '\nShell glue and packaging (%s)\n' "$EXT_DIR"
 SHELL_IMPORT_NEEDLE='resource:///org/gnome/shell'
 SYNTAX_ERROR_NEEDLE='SyntaxError'
 GLUE_PARSE_TIMEOUT_SECONDS=20
-for glue_file in extension.js indicator.js card.js cockpitTooltip.js; do
+for glue_file in extension.js indicator.js card.js cockpitTooltip.js cockpitCards.js; do
   glue_path="$EXT_DIR/$glue_file"
   row_name="$glue_file parses and gets as far as its Shell imports"
   if [[ ! -r "$glue_path" ]]; then
@@ -502,9 +502,11 @@ sorted_closure() {
   printf '%sexit=%s' "$(LC_ALL=C sort <<<"$closure_output" | tr '\n' ' ')" "$closure_exit"
 }
 # Read from the import lines of today's tree, by hand: the shell side's
-# seventeen modules and the service side's seventeen, seven of them (constants,
-# errorLog, history, jsonFields, pressure, protocol, teardown) on both.
-EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
+# twenty-one modules and the service side's seventeen, seven of them (constants,
+# errorLog, history, jsonFields, pressure, protocol, teardown) on both. The
+# shell side reaches cockpitCards.js and its three lib modules (cockpitFormat,
+# cockpitProtocol, cockpitStaleness) through indicator.js's Resources helpers.
+EXPECTED_SHELL_CLOSURE='card.js cockpitCards.js extension.js graph.js indicator.js lib/cardRepaint.js lib/cockpitFormat.js lib/cockpitProtocol.js lib/cockpitStaleness.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js '
 EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/jsonFields.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/fileIo.js service/main.js service/sampler.js '
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
@@ -3770,7 +3772,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=823
+EXPECTED_ROWS=848
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

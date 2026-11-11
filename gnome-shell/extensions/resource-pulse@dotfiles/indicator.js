@@ -1,6 +1,7 @@
 // The top-bar indicator: two mini area graphs, CPU then memory, with no text. The numbers appear in a label
 // below it once the pointer has rested on it for HOVER_LABEL_DELAY_MS (never while the menu is open). A click opens a
-// dropdown: a second card (card.js), unfrozen exactly while the menu is open, and an "Open Resources" item.
+// dropdown: a second card (card.js), unfrozen exactly while the menu is open, and an "Open Resources" item
+// (cockpitCards.js finds and opens the app, as the cockpit's system card does).
 //
 // Shell glue only: every number comes from the client, every string from lib/format.js and every shape from
 // graph.js. It runs inside gnome-shell, so destroying it removes everything it added outside itself (the hover
@@ -11,17 +12,17 @@ import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
-import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {PulseCard} from './card.js';
+import {findResourcesApp, openResourcesApp} from './cockpitCards.js';
 import {drawAreaGraph, padWithLeadingGaps} from './graph.js';
 import {
     BASELINE_RGBA, CPU_GRAPH_RGBA, HOVER_LABEL_DELAY_MS, HOVER_LABEL_FADE_IN_MS, HOVER_LABEL_FADE_OUT_MS,
-    MEMORY_GRAPH_RGBA, RESOURCES_APP_IDS, TOPBAR_GRAPH_HEIGHT_PX, TOPBAR_GRAPH_WIDTH_PX, TOPBAR_HISTORY_SAMPLES,
+    MEMORY_GRAPH_RGBA, TOPBAR_GRAPH_HEIGHT_PX, TOPBAR_GRAPH_WIDTH_PX, TOPBAR_HISTORY_SAMPLES,
 } from './lib/constants.js';
 import {hoverLabel} from './lib/format.js';
 import {hoverLabelPosition} from './lib/layout.js';
@@ -114,7 +115,7 @@ class PulseIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(cardItem);
 
         this._openResourcesItem = new PopupMenu.PopupMenuItem(OPEN_RESOURCES_LABEL);
-        this._openResourcesItem.connect('activate', () => this._openResources());
+        this._openResourcesItem.connect('activate', () => openResourcesApp());
         this.menu.addMenuItem(this._openResourcesItem);
         this._syncOpenResourcesVisibility();
     }
@@ -332,38 +333,12 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
-     * Finds the first system monitor installed, in RESOURCES_APP_IDS order.
-     *
-     * @returns {Shell.App|undefined} The app, or undefined when none is installed.
-     */
-    _findResourcesApp() {
-        const appSystem = Shell.AppSystem.get_default();
-        return RESOURCES_APP_IDS
-            .map(appId => appSystem.lookup_app(appId))
-            .find(app => app !== null);
-    }
-
-    /**
      * Shows "Open Resources" only while a system monitor is installed.
      *
      * @returns {void}
      */
     _syncOpenResourcesVisibility() {
-        this._openResourcesItem.visible = this._findResourcesApp() !== undefined;
-    }
-
-    /**
-     * Opens the first system monitor installed and leaves the overview so it is seen. The menu closes itself on
-     * the item's activation. With none installed (the item is hidden then) it does nothing.
-     *
-     * @returns {void}
-     */
-    _openResources() {
-        const resourcesApp = this._findResourcesApp();
-        if (resourcesApp === undefined)
-            return;
-        resourcesApp.activate();
-        Main.overview.hide();
+        this._openResourcesItem.visible = findResourcesApp() !== undefined;
     }
 
     /**
