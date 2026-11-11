@@ -598,7 +598,8 @@ check "extension.js's one timeout_add_seconds uses COVER_FALLBACK_INTERVAL_SECON
   "$(extension_timeouts_summary "$EXTENSION_JS")" "timeouts=1 fallback=1"
 # Teardown removes what the covered check adds while the card is covered, each
 # in a guarded step of its own (runEveryStep): the fallback timeout, and every
-# covering window's position-changed, size-changed and unmanaged.
+# covering window's position-changed, size-changed, workspace-changed and
+# unmanaged.
 FALLBACK_TEARDOWN_STEP="{name: 'remove the cover fallback timeout', run: () => this._removeCoverFallbackTimer()},"
 COVERING_WINDOWS_TEARDOWN_STEP="{name: 'disconnect from the covering windows', run: () => "
 COVERING_WINDOWS_TEARDOWN_STEP+="this._disconnectCoveringWindows()},"
@@ -3712,7 +3713,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=747
+EXPECTED_ROWS=749
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

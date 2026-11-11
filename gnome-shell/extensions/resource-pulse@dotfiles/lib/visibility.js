@@ -67,7 +67,8 @@ export function doRectsOverlap(firstRect, secondRect) {
 
 /**
  * Which rectangles contain the whole card, edges included: the windows that cover it, which the extension follows
- * (their moves, resizes and closing) while the card is covered. A card with no area yet (not sized) has none.
+ * (their moves, resizes, workspace changes and closing) while the card is covered. A card with no area yet (not sized)
+ * has none.
  *
  * @param {object} layout - The card and the windows.
  * @param {Rect} layout.cardRect - The card.

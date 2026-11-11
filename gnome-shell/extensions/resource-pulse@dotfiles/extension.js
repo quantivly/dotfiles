@@ -9,14 +9,15 @@
 // the reveal, which repaints it at once and wants the watch again, so the client gives it the latest snapshot
 // (lib/visibility.js decides what covers it), except once every FROZEN_REPAINT_INTERVAL_SECONDS, still dimmed, from the
 // latest snapshot, so a card misjudged as covered never shows stale numbers as live. The cover is checked on the
-// window-manager and display signals, and, while the card is covered, on the moves, resizes and closing of the windows
-// that cover it (so a window moved from the keyboard is seen); those come in bursts, so they are coalesced into one
-// check before the next frame. The Samples that append to the histories check it at once, with no later of their own:
-// every one while the card is visible, every COVER_BACKSTOP_TICKS-th while it is covered (a backstop for what no
-// signal reports), and each one while it is covered asks whether the frozen repaint is due. Nothing here runs on a
-// timer while Samples flow. Only with the card covered and the service silent (the client's stall watchdog has
-// published no data, so no Sample comes) does a COVER_FALLBACK_INTERVAL_SECONDS timeout check the cover and make the
-// frozen repaint, and the next Sample removes it. The shell's budget is under 0.1% of a core.
+// window-manager and display signals, and, while the card is covered, on the moves, resizes, closing and workspace
+// changes of the windows that cover it (so a window moved from the keyboard, or sent to another workspace, is seen);
+// those come in bursts, so they are coalesced into one check before the next frame. The Samples that append to the
+// histories check it at once, with no later of their own: every one while the card is visible, every
+// COVER_BACKSTOP_TICKS-th while it is covered (a backstop for what no signal reports), and each one while it is
+// covered asks whether the frozen repaint is due. Nothing here runs on a timer while Samples flow. Only with the card
+// covered and the service silent (the client's stall watchdog has published no data, so no Sample comes) does a
+// COVER_FALLBACK_INTERVAL_SECONDS timeout check the cover and make the frozen repaint, and the next Sample removes it.
+// The shell's budget is under 0.1% of a core.
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
@@ -270,8 +271,8 @@ export default class ResourcePulseExtension extends Extension {
      *   unmaximize or tile (size-changed), the end of a drag (grab-op-end), a workspace switch, and "show desktop"
      *   (Super+D) being toggled, which hides windows without minimizing them.
      * - While the card is covered, each window that covers it is followed too: a move or a resize of it (even from the
-     *   keyboard, which no other signal reports) queues the same check, and its closing drops it and queues the check
-     *   (_followCoveringWindows).
+     *   keyboard, which no other signal reports) or its being sent to another workspace queues the same check, and its
+     *   closing drops it and queues the check (_followCoveringWindows).
      * - Every history update (a Sample that appends to the histories, about every 2 s, a state, or no data) is a tick
      *   (_onCardCoverTick, a client history listener). While the card is visible each tick checks at once, with no
      *   later: it comes at most once a tick, and a later would schedule a frame each time. While it is covered only
@@ -321,7 +322,9 @@ export default class ResourcePulseExtension extends Extension {
     /**
      * Checks the cover before the next frame, once however many window-manager, display and covering-window signals
      * come before then (a restack can come several times in one frame, a dragged window moves on every one), in a
-     * BEFORE_REDRAW later as _queueCardPlacement does.
+     * BEFORE_REDRAW later as _queueCardPlacement does. The later forgets its id first, so a failure cannot leave the
+     * check marked pending for good; it never throws out of its callback, which runs inside the compositor's frame (a
+     * failure is logged, rate-limited); and it returns GLib.SOURCE_REMOVE on every path.
      *
      * @returns {void}
      */
@@ -330,7 +333,12 @@ export default class ResourcePulseExtension extends Extension {
             return;
         this._cardCoverCheckLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
             this._cardCoverCheckLaterId = null;
-            this._syncCardCover();
+            try {
+                this._syncCardCover();
+            } catch (error) {
+                const errorText = describeErrorWithStack(error);
+                this._errorLog.log(`could not check the cover: ${errorText}`);
+            }
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -350,9 +358,10 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Freezes the card while a window covers it and unfreezes it, repainting it at once, when none does, and stamps the
-     * freeze's paint, which the frozen repaint counts from; restarts the backstop's count; follows the windows that
-     * cover it; starts or removes the fallback timeout; then updates the detail watch, wanted only while the card can
-     * be seen. Does nothing without a card.
+     * freeze's paint, which the frozen repaint counts from; restarts the backstop's count; starts or removes the
+     * fallback timeout; updates the detail watch, wanted only while the card can be seen; and only then follows the
+     * windows that cover it, so a failure connecting or disconnecting one can never skip the freeze, the reveal, or the
+     * detail watch a revealed card needs to be told its snapshots. Does nothing without a card.
      *
      * @returns {void}
      */
@@ -361,13 +370,13 @@ export default class ResourcePulseExtension extends Extension {
             return;
         const {isCovered, coveringWindows} = this._readCardCover();
         this._ticksSinceCoverCheck = 0;
-        this._followCoveringWindows(coveringWindows);
         if (isCovered && this._isCardVisible)
             this._frozenCardPaintedAtUsec = GLib.get_monotonic_time();
         this._card.setFrozen(isCovered);
         this._isCardVisible = !isCovered;
         this._syncCoverFallbackTimer();
         this._syncDetailWatch();
+        this._followCoveringWindows(coveringWindows);
     }
 
     /**
@@ -491,8 +500,9 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Follows a window that covers the card: its move and its resize (from a drag, the keyboard or the application)
-     * queue the coalesced cover check, and its closing drops it at once (_onCoveringWindowUnmanaged).
+     * Follows a window that covers the card: its move and its resize (from a drag, the keyboard or the application),
+     * and its being sent to another workspace (which no global signal reports when the user does not follow it), queue
+     * the coalesced cover check, and its closing drops it at once (_onCoveringWindowUnmanaged).
      *
      * @param {Meta.Window} metaWindow - A window that contains the card.
      * @returns {void}
@@ -502,6 +512,7 @@ export default class ResourcePulseExtension extends Extension {
         metaWindow.connectObject(
             'position-changed', queueCardCoverCheck,
             'size-changed', queueCardCoverCheck,
+            'workspace-changed', queueCardCoverCheck,
             'unmanaged', () => this._onCoveringWindowUnmanaged(metaWindow),
             this);
         this._coveringWindows.add(metaWindow);
@@ -532,15 +543,21 @@ export default class ResourcePulseExtension extends Extension {
 
     /**
      * Stops following every covering window, for teardown. The set is emptied first, so a later enable() starts with
-     * none whatever a disconnection throws.
+     * none whatever a disconnection throws, and each window is disconnected under its own guard, so one that throws is
+     * logged, rate-limited, and every other window is still disconnected.
      *
      * @returns {void}
      */
     _disconnectCoveringWindows() {
         const coveringWindows = [...this._coveringWindows];
         this._coveringWindows.clear();
-        for (const metaWindow of coveringWindows)
-            metaWindow.disconnectObject(this);
+        for (const metaWindow of coveringWindows) {
+            try {
+                metaWindow.disconnectObject(this);
+            } catch (error) {
+                this._logTearDownFailure('disconnect from a covering window', error);
+            }
+        }
     }
 
     /**

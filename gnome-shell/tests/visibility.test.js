@@ -858,8 +858,8 @@ test('extension.js: while the card is frozen every tick, whether or not the back
 
 test('extension.js checks the cover on a restack, a fullscreen change, a minimize, an unminimize, a size change, ' +
     'the end of a drag, a workspace switch, "show desktop", every client update and a covering window\'s move, ' +
-    'resize or close, and its teardown disconnects every object it connects to (the covering windows through ' +
-    '_disconnectCoveringWindows) and removes that history listener as one', () => {
+    'resize, move to another workspace or close, and its teardown disconnects every object it connects to (the ' +
+    'covering windows through _disconnectCoveringWindows) and removes that history listener as one', () => {
     const extensionSource = readExtensionFile('extension.js');
     const tearDownBody = declarationBody(extensionSource, '_tearDown() {');
     const tearDownDisconnectsTheCoveringWindows = tearDownBody.includes('() => this._disconnectCoveringWindows()');
@@ -898,6 +898,7 @@ test('extension.js checks the cover on a restack, a fullscreen change, a minimiz
             'metaWindow position-changed',
             'metaWindow size-changed',
             'metaWindow unmanaged',
+            'metaWindow workspace-changed',
             'this._card notify::width',
             'this._dropdownMenu open-state-changed',
         ],
@@ -980,6 +981,7 @@ test('extension.js: the bursty window-manager, display and covering-window trigg
             'global.workspace_manager showing-desktop-changed: queueCardCoverCheck',
             'metaWindow position-changed: queueCardCoverCheck',
             'metaWindow size-changed: queueCardCoverCheck',
+            'metaWindow workspace-changed: queueCardCoverCheck',
             'metaWindow unmanaged: () => this._onCoveringWindowUnmanaged(metaWindow)',
         ],
         queuesTheCheck: [1, 1],
@@ -1041,6 +1043,40 @@ test('extension.js: the cover check is coalesced into one BEFORE_REDRAW later th
         returnsWhileQueued: 1, addsABeforeRedrawLater: true, runsTheCoverSync: 1, cancelRemovesIt: 1,
         teardownCancels: 1,
     });
+});
+
+test('extension.js: the cover check\'s later never throws out of its callback, which runs inside the compositor\'s ' +
+    'frame: it forgets its id, runs the cover sync inside a try whose catch logs the failure, and returns ' +
+    'GLib.SOURCE_REMOVE after the try, on every path', () => {
+    const queueLines = trimmedLines(declarationBody(readExtensionFile('extension.js'), '_queueCardCoverCheck() {'));
+    const addLineIndex = queueLines.findIndex(line =>
+        line.startsWith('this._cardCoverCheckLaterId = global.compositor.get_laters().add('));
+    assertEqual({
+        callbackOpening: addLineIndex < 0 ? [] : queueLines.slice(addLineIndex + 1, addLineIndex + 5),
+        catchLogs: queueLines.filter(line => line.startsWith('this._errorLog.log(')).length,
+        callbackClosing: queueLines.slice(-4),
+    }, {
+        callbackOpening: [
+            'this._cardCoverCheckLaterId = null;', 'try {', 'this._syncCardCover();', '} catch (error) {',
+        ],
+        catchLogs: 1,
+        callbackClosing: ['}', 'return GLib.SOURCE_REMOVE;', '});', '}'],
+    });
+});
+
+test('extension.js: teardown attempts every covering window: each window\'s disconnectObject sits in a try of its ' +
+    'own inside the loop, a failure logged as a teardown failure, so one that throws leaves none of the rest ' +
+    'connected', () => {
+    const disconnectLines = trimmedLines(
+        declarationBody(readExtensionFile('extension.js'), '_disconnectCoveringWindows() {'));
+    const loopIndex = disconnectLines.indexOf('for (const metaWindow of coveringWindows) {');
+    assertEqual(loopIndex < 0 ? [] : disconnectLines.slice(loopIndex + 1, loopIndex + 6), [
+        'try {',
+        'metaWindow.disconnectObject(this);',
+        '} catch (error) {',
+        'this._logTearDownFailure(\'disconnect from a covering window\', error);',
+        '}',
+    ]);
 });
 
 test('extension.js: the fallback timeout runs exactly while coverFallbackTimerChange says so, from the cover, the ' +
