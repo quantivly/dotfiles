@@ -65,11 +65,13 @@ const CLOCK_LABEL = '14:02';
 const LATER_CLOCK_LABEL = '14:05';
 const ALL_METER_INDEXES = [0, 1, 2];
 const IO_METER_INDEX = 2;
-/** How often a frozen card is repainted, as ruling R21 set it, and the cover re-check timer's tick, in seconds. */
+/** How often a frozen card is repainted, as ruling R21 set it, and how often a Sample comes, in seconds. */
 const FROZEN_REPAINT_SECONDS = 30;
-const RECHECK_TICK_SECONDS = 2;
-/** How long the frozen-repaint row drives the re-check timer: past its second repaint. */
+const SAMPLE_TICK_SECONDS = 2;
+/** How long the frozen-repaint row runs the Samples for: past its second repaint. */
 const FROZEN_RUN_SECONDS = 62;
+/** The tick from which a covered card's cover is checked again: 30 s of Samples, R21's repaint interval. */
+const COVER_BACKSTOP_TICK = 15;
 const USEC_PER_SECOND = 1_000_000;
 const ONE_USEC = 1;
 
@@ -144,8 +146,21 @@ const DISCONNECT_OBJECT_PATTERN = /([\w.]+)\??\.disconnectObject\(this\)/g;
 const OWN_FIELD_PREFIX_PATTERN = /^this\._/;
 /** One `'signal', handler` pair of a connectObject call, the handler up to the next comma. */
 const SIGNAL_HANDLER_PAIR_PATTERN = /'([\w:-]+)',\s*([^,]+?)\s*,/g;
-/** The receivers the covered check connects to in _followCardCover. */
-const COVER_SIGNAL_RECEIVERS = new Set(['global.display', 'global.window_manager', 'global.workspace_manager']);
+/**
+ * The receivers the covered check connects to: in _followCardCover, and in _startFollowingCoveringWindow, whose
+ * receiver is each window that covers the card.
+ */
+const COVER_SIGNAL_RECEIVERS = new Set([
+    'global.display', 'global.window_manager', 'global.workspace_manager', 'metaWindow',
+]);
+// The client's two kinds of listener, counted apart: a history listener added must be removed as one, since
+// removeListener on its id is a silent no-op on the other kind's map.
+const ADD_HISTORY_LISTENER_PATTERN = /\.addHistoryListener\(/g;
+const REMOVE_HISTORY_LISTENER_PATTERN = /\.removeHistoryListener\(/g;
+const ADD_SNAPSHOT_LISTENER_PATTERN = /\.addListener\(/g;
+const REMOVE_SNAPSHOT_LISTENER_PATTERN = /\.removeListener\(/g;
+/** How far extension.js indents a class method's own statements; one level more is inside an if. */
+const METHOD_STATEMENT_INDENT = ' '.repeat(8);
 
 /**
  * Reads a file of the extension as text (tests may block).
@@ -290,6 +305,15 @@ function redrawnGraphics(repaintPlan) {
 const shownState = (snapshot, newestMemoryFraction, lastGoodClockLabel = CLOCK_LABEL) =>
     ({snapshot, lastGoodClockLabel, newestMemoryFraction});
 
+/**
+ * What the cover fallback timer must do (lib/visibility.js coverFallbackTimerChange), read through the namespace.
+ *
+ * @param {{isCovered: boolean, isServiceLive: boolean, isTimerRunning: boolean}} state - The cover, the service and
+ *     the timer.
+ * @returns {string} 'start', 'stop' or 'none'.
+ */
+const fallbackTimerChange = state => visibilityModule.coverFallbackTimerChange(state);
+
 test('visibility: a maximized window containing the card covers it; one covering 99% of it does not', () => {
     const ninetyNinePercentRect = {...CARD_RECT, width: CARD_RECT.width * NINETY_NINE_PERCENT};
     assertEqual([
@@ -357,12 +381,69 @@ test('visibility: a window can cover the card only when it is a normal or dialog
     ]);
 });
 
-test('visibility: covering the card starts the cover re-check timer, a reveal stops it, and otherwise it is left ' +
-    'as it is', () => {
-    const timerChanges = [[true, false], [true, true], [false, true], [false, false]].map(
-        ([isCovered, isTimerRunning]) => visibilityModule.coverRecheckTimerChange({isCovered, isTimerRunning}));
-    assertEqual(timerChanges, ['start', 'none', 'stop', 'none']);
+test('visibility: the windows covering the card are the ones whose rectangle contains all of it, the rule ' +
+    'isCardCovered applies; a card with no area has none', () => {
+    const ninetyNinePercentRect = {...CARD_RECT, width: CARD_RECT.width * NINETY_NINE_PERCENT};
+    const touchingRect = {...CARD_RECT, x: CARD_RECT.x + CARD_RECT.width, width: NEIGHBOUR_WINDOW_SIZE_PX};
+    const windowRects = [MAXIMIZED_WINDOW_RECT, ninetyNinePercentRect, {...CARD_RECT}, touchingRect];
+    const coveringIndexes = cardRect => visibilityModule.indexesOfRectsCoveringCard({cardRect, windowRects});
+    assertEqual({
+        covering: coveringIndexes(CARD_RECT),
+        withNoArea: coveringIndexes({...CARD_RECT, width: 0}),
+        withNoWindows: visibilityModule.indexesOfRectsCoveringCard({cardRect: CARD_RECT, windowRects: []}),
+    }, {covering: [0, 2], withNoArea: [], withNoWindows: []});
 });
+
+test('visibility: the covering windows are followed by difference: one that starts covering the card is followed, ' +
+    'one that stops is released, and the same set in any order follows and releases nothing', () => {
+    const [firstWindow, secondWindow, thirdWindow] = ['first', 'second', 'third'].map(name => ({name}));
+    const firstWindowAgain = {name: 'first'};
+    const describeChanges = (heldWindows, coveringWindows) => {
+        const {windowsToFollow, windowsToRelease} =
+            visibilityModule.coveringWindowChanges({heldWindows, coveringWindows});
+        return {follow: windowsToFollow.map(({name}) => name), release: windowsToRelease.map(({name}) => name)};
+    };
+    assertEqual({
+        changed: describeChanges([firstWindow, secondWindow], [secondWindow, thirdWindow]),
+        sameInAnotherOrder: describeChanges([firstWindow, secondWindow], [secondWindow, firstWindow]),
+        anotherWindowOfTheSameName: describeChanges([firstWindow], [firstWindowAgain]),
+        noneHeldNoneCovering: describeChanges([], []),
+    }, {
+        changed: {follow: ['third'], release: ['first']},
+        sameInAnotherOrder: {follow: [], release: []},
+        anotherWindowOfTheSameName: {follow: ['first'], release: ['first']},
+        noneHeldNoneCovering: {follow: [], release: []},
+    });
+});
+
+test('visibility: the cover is checked on every tick while the card is visible', () =>
+    assertEqual(visibilityModule.isCoverBackstopDue({isCovered: false, ticksSinceCoverCheck: 0}), true));
+
+test('visibility: a covered card is checked again from the fifteenth tick, not before', () => {
+    const isDueAfterTicks = ticksSinceCoverCheck =>
+        visibilityModule.isCoverBackstopDue({isCovered: true, ticksSinceCoverCheck});
+    assertEqual([COVER_BACKSTOP_TICK - 1, COVER_BACKSTOP_TICK, COVER_BACKSTOP_TICK + 1].map(isDueAfterTicks),
+        [false, true, true]);
+});
+
+test('visibility: the fallback timer starts for a covered card whose service is silent', () =>
+    assertEqual(fallbackTimerChange({isCovered: true, isServiceLive: false, isTimerRunning: false}), 'start'));
+
+test('visibility: the fallback timer stops when the service is live again or the card is revealed', () =>
+    assertEqual({
+        liveAgain: fallbackTimerChange({isCovered: true, isServiceLive: true, isTimerRunning: true}),
+        revealed: fallbackTimerChange({isCovered: false, isServiceLive: false, isTimerRunning: true}),
+        revealedAndLive: fallbackTimerChange({isCovered: false, isServiceLive: true, isTimerRunning: true}),
+    }, {liveAgain: 'stop', revealed: 'stop', revealedAndLive: 'stop'}));
+
+test('visibility: the fallback timer changes nothing otherwise', () =>
+    assertEqual({
+        coveredSilentRunning: fallbackTimerChange({isCovered: true, isServiceLive: false, isTimerRunning: true}),
+        coveredLiveStopped: fallbackTimerChange({isCovered: true, isServiceLive: true, isTimerRunning: false}),
+        visibleSilentStopped: fallbackTimerChange({isCovered: false, isServiceLive: false, isTimerRunning: false}),
+        visibleLiveStopped: fallbackTimerChange({isCovered: false, isServiceLive: true, isTimerRunning: false}),
+    }, {coveredSilentRunning: 'none', coveredLiveStopped: 'none', visibleSilentStopped: 'none',
+        visibleLiveStopped: 'none'}));
 
 test('visibility: rectangles overlap only when they share area: touching along an edge or at a corner is not ' +
     'overlapping', () => {
@@ -516,14 +597,14 @@ test('card repaint: a change of dim redraws all three meters and the memory bar,
     ]);
 });
 
-test('visibility: a frozen card is due a repaint 30 s after it was last painted, and not before; driven by the 2 s ' +
-    're-check timer from the freeze, it repaints at 30 s and at 60 s', () => {
+test('visibility: a frozen card is due a repaint 30 s after it was last painted, and not before; asked on every 2 s ' +
+    'Sample from the freeze, it repaints at 30 s and at 60 s', () => {
     const isDueAfterUsec = elapsedUsec =>
         visibilityModule.isFrozenRepaintDue({lastFrozenPaintAtUsec: 0, nowUsec: elapsedUsec});
     const repaintSeconds = [];
     let lastFrozenPaintAtUsec = 0;
-    for (let elapsedSeconds = RECHECK_TICK_SECONDS; elapsedSeconds <= FROZEN_RUN_SECONDS;
-        elapsedSeconds += RECHECK_TICK_SECONDS) {
+    for (let elapsedSeconds = SAMPLE_TICK_SECONDS; elapsedSeconds <= FROZEN_RUN_SECONDS;
+        elapsedSeconds += SAMPLE_TICK_SECONDS) {
         const nowUsec = elapsedSeconds * USEC_PER_SECOND;
         if (visibilityModule.isFrozenRepaintDue({lastFrozenPaintAtUsec, nowUsec})) {
             repaintSeconds.push(elapsedSeconds);
@@ -740,48 +821,66 @@ test('stylesheet.css dims the frozen card in a rule of its own (.resource-pulse-
     `frozen card rule: ${JSON.stringify(frozenCardStyle)}`);
 });
 
-test('extension.js: while the card is frozen the re-check timer also repaints it, dimmed, once isFrozenRepaintDue ' +
-    'says so, timing from the freeze and then from each repaint; a revealed card is left to the reveal', () => {
+test('extension.js: while the card is frozen every tick, whether or not the backstop checked the cover, and the ' +
+    'fallback timeout repaint it, dimmed, once isFrozenRepaintDue says so, timing from the freeze and then from each ' +
+    'repaint; a revealed card is left to the reveal', () => {
     const extensionSource = readExtensionFile('extension.js');
-    const timeoutLines = trimmedLines(declarationBody(extensionSource, '_onCoverRecheckTimeout() {'));
+    const tickLines = declarationBody(extensionSource, '_onCardCoverTick() {').split('\n');
+    const timeoutLines = trimmedLines(declarationBody(extensionSource, '_onCoverFallbackTimeout() {'));
     const repaintBody = declarationBody(extensionSource, '_repaintFrozenCardIfDue() {');
-    const timerLines = trimmedLines(declarationBody(extensionSource, '_syncCoverRecheckTimer(isCovered) {'));
+    const syncLines = trimmedLines(declarationBody(extensionSource, '_syncCardCover() {'));
     const lineAfter = (lines, line) => (lines.includes(line) ? lines[lines.indexOf(line) + 1] : null);
+    const freezeCondition = 'if (isCovered && this._isCardVisible)';
+    const freezeConditionIndex = syncLines.indexOf(freezeCondition);
     assertEqual({
-        afterTheCheck: lineAfter(timeoutLines, 'this._syncCardCover();'),
+        everyTickAsksOutsideTheBackstop: tickLines
+            .filter(line => line === `${METHOD_STATEMENT_INDENT}this._repaintFrozenCardIfDue();`).length,
+        afterTheFallbackCheck: lineAfter(timeoutLines, 'this._syncCardCover();'),
         leavesARevealedCardAlone: statementCount(repaintBody, 'if (this._card === null || this._isCardVisible)'),
         decides: repaintBody.includes(
             'isFrozenRepaintDue({lastFrozenPaintAtUsec: this._frozenCardPaintedAtUsec, nowUsec})'),
         recordsEachRepaint: statementCount(repaintBody, 'this._frozenCardPaintedAtUsec = nowUsec;'),
         repaints: statementCount(repaintBody, 'this._card.repaintFrozen();'),
-        timesFromTheFreeze: lineAfter(timerLines, 'if (timerChange === CoverRecheckTimerChange.START) {'),
+        timesFromTheFreeze: lineAfter(syncLines, freezeCondition),
+        stampsBeforeRecordingTheCover: freezeConditionIndex >= 0 &&
+            freezeConditionIndex < syncLines.indexOf('this._isCardVisible = !isCovered;'),
     }, {
-        afterTheCheck: 'this._repaintFrozenCardIfDue();',
+        everyTickAsksOutsideTheBackstop: 1,
+        afterTheFallbackCheck: 'this._repaintFrozenCardIfDue();',
         leavesARevealedCardAlone: 1,
         decides: true,
         recordsEachRepaint: 1,
         repaints: 1,
         timesFromTheFreeze: 'this._frozenCardPaintedAtUsec = GLib.get_monotonic_time();',
+        stampsBeforeRecordingTheCover: true,
     });
 });
 
 test('extension.js checks the cover on a restack, a fullscreen change, a minimize, an unminimize, a size change, ' +
-    'the end of a drag, a workspace switch, "show desktop" and every client update, and its teardown disconnects ' +
-    'every object it connects to and removes that listener', () => {
+    'the end of a drag, a workspace switch, "show desktop", every client update and a covering window\'s move, ' +
+    'resize, move to another workspace or close, and its teardown disconnects every object it connects to (the ' +
+    'covering windows through _disconnectCoveringWindows) and removes that history listener as one', () => {
     const extensionSource = readExtensionFile('extension.js');
     const tearDownBody = declarationBody(extensionSource, '_tearDown() {');
+    const tearDownDisconnectsTheCoveringWindows = tearDownBody.includes('() => this._disconnectCoveringWindows()');
+    const disconnectingText = tearDownDisconnectsTheCoveringWindows
+        ? `${tearDownBody}\n${declarationBody(extensionSource, '_disconnectCoveringWindows() {')}`
+        : tearDownBody;
     const connectedSignals = [...extensionSource.matchAll(CONNECT_OBJECT_PATTERN)].flatMap(
         ([, receiver, connectArguments]) => [...connectArguments.matchAll(QUOTED_SIGNAL_NAME_PATTERN)]
             .map(([, signalName]) => `${receiver} ${signalName}`));
     const connectedReceivers = new Set([...extensionSource.matchAll(CONNECT_OBJECT_PATTERN)]
         .map(([, receiver]) => receiver.replace(OWN_FIELD_PREFIX_PATTERN, '')));
-    const disconnectedReceivers = new Set([...tearDownBody.matchAll(DISCONNECT_OBJECT_PATTERN)]
+    const disconnectedReceivers = new Set([...disconnectingText.matchAll(DISCONNECT_OBJECT_PATTERN)]
         .map(([, receiver]) => receiver.replace(OWN_FIELD_PREFIX_PATTERN, '')));
+    const countMatches = (text, pattern) => (text.match(pattern) ?? []).length;
     assertEqual({
         connectedSignals: connectedSignals.sort(),
         receiversNeverDisconnected: [...connectedReceivers].filter(receiver => !disconnectedReceivers.has(receiver)),
-        clientListenersAdded: (extensionSource.match(/\.addListener\(/g) ?? []).length,
-        clientListenersRemovedOnTeardown: (tearDownBody.match(/\.removeListener\(/g) ?? []).length,
+        historyListenersAdded: countMatches(extensionSource, ADD_HISTORY_LISTENER_PATTERN),
+        snapshotListenersAdded: countMatches(extensionSource, ADD_SNAPSHOT_LISTENER_PATTERN),
+        historyListenersRemovedOnTeardown: countMatches(tearDownBody, REMOVE_HISTORY_LISTENER_PATTERN),
+        snapshotListenersRemovedOnTeardown: countMatches(tearDownBody, REMOVE_SNAPSHOT_LISTENER_PATTERN),
     }, {
         connectedSignals: [
             'Main.layoutManager monitors-changed',
@@ -796,12 +895,18 @@ test('extension.js checks the cover on a restack, a fullscreen change, a minimiz
             'global.window_manager switch-workspace',
             'global.window_manager unminimize',
             'global.workspace_manager showing-desktop-changed',
+            'metaWindow position-changed',
+            'metaWindow size-changed',
+            'metaWindow unmanaged',
+            'metaWindow workspace-changed',
             'this._card notify::width',
             'this._dropdownMenu open-state-changed',
         ],
         receiversNeverDisconnected: [],
-        clientListenersAdded: 1,
-        clientListenersRemovedOnTeardown: 1,
+        historyListenersAdded: 1,
+        snapshotListenersAdded: 0,
+        historyListenersRemovedOnTeardown: 1,
+        snapshotListenersRemovedOnTeardown: 0,
     });
 });
 
@@ -822,33 +927,48 @@ test('extension.js: _placeCard() checks the cover right after placing the card',
     assertEqual([placeLineIndex >= 0, placeCardBody[placeLineIndex + 1]], [true, 'this._syncCardCover();']);
 });
 
-test('extension.js: _syncCardCover() freezes a covered card, records whether it can be seen, and updates the ' +
-    're-check timer and the detail watch', () => {
+test('extension.js: _syncCardCover() freezes a covered card, records whether it can be seen, restarts the ' +
+    'backstop\'s count, follows the covering windows, and updates the fallback timeout and the detail watch', () => {
     const syncBody = declarationBody(readExtensionFile('extension.js'), '_syncCardCover() {');
     const statements = [
-        'const isCovered = this._isCardCovered();',
+        'const {isCovered, coveringWindows} = this._readCardCover();',
+        'this._ticksSinceCoverCheck = 0;',
+        'this._followCoveringWindows(coveringWindows);',
         'this._card.setFrozen(isCovered);',
         'this._isCardVisible = !isCovered;',
-        'this._syncCoverRecheckTimer(isCovered);',
+        'this._syncCoverFallbackTimer();',
         'this._syncDetailWatch();',
     ];
-    assertEqual(statements.map(statement => statementCount(syncBody, statement)), [1, 1, 1, 1, 1]);
+    assertEqual(statements.map(statement => statementCount(syncBody, statement)), [1, 1, 1, 1, 1, 1, 1]);
 });
 
-test('extension.js: the bursty window-manager and display triggers queue the one coalesced cover check, while the ' +
-    'client listener and the frozen re-check timer, at most once a tick, check at once with no later', () => {
+test('extension.js: the bursty window-manager, display and covering-window triggers queue the one coalesced cover ' +
+    'check, while each client tick (counted first, then behind the backstop) and the fallback timeout check at once ' +
+    'with no later', () => {
     const extensionSource = readExtensionFile('extension.js');
     const followBody = declarationBody(extensionSource, '_followCardCover() {');
-    const timeoutBody = declarationBody(extensionSource, '_onCoverRecheckTimeout() {');
-    const coverSignalHandlers = connectedSignalHandlers(followBody)
+    const followWindowBody = declarationBody(extensionSource, '_startFollowingCoveringWindow(metaWindow) {');
+    const tickBody = declarationBody(extensionSource, '_onCardCoverTick() {');
+    const timeoutBody = declarationBody(extensionSource, '_onCoverFallbackTimeout() {');
+    const tickLines = trimmedLines(tickBody);
+    const coverSignalHandlers = connectedSignalHandlers(`${followBody}\n${followWindowBody}`)
         .filter(signalHandler => COVER_SIGNAL_RECEIVERS.has(signalHandler.split(' ')[0]));
+    const queueingStatement = 'const queueCardCoverCheck = () => this._queueCardCoverCheck();';
+    const backstopCondition = 'if (isCoverBackstopDue({isCovered, ticksSinceCoverCheck: this._ticksSinceCoverCheck}))';
+    const linesQueuingALater = bodyText =>
+        trimmedLines(bodyText).filter(line => line.includes('_queueCardCoverCheck')).length;
     assertEqual({
         coverSignalHandlers,
-        queuesTheCheck: statementCount(followBody, 'const queueCardCoverCheck = () => this._queueCardCoverCheck();'),
-        clientListenerChecksAtOnce: statementCount(followBody,
-            'this._cardCoverListenerId = this._client.addListener(() => this._syncCardCover());'),
-        timerChecksAtOnce: statementCount(timeoutBody, 'this._syncCardCover();'),
-        timerLinesQueuingALater: trimmedLines(timeoutBody).filter(line => line.includes('_queueCardCoverCheck')).length,
+        queuesTheCheck: [statementCount(followBody, queueingStatement), statementCount(followWindowBody,
+            queueingStatement)],
+        clientListenerTicks: statementCount(followBody,
+            'this._cardCoverListenerId = this._client.addHistoryListener(() => this._onCardCoverTick());'),
+        tickCountedBeforeTheBackstop: tickLines[1] === 'this._ticksSinceCoverCheck += 1;' &&
+            tickLines.indexOf(backstopCondition) > 1,
+        backstopChecksAtOnce: tickLines.includes(backstopCondition)
+            ? tickLines[tickLines.indexOf(backstopCondition) + 1] : null,
+        fallbackChecksAtOnce: statementCount(timeoutBody, 'this._syncCardCover();'),
+        linesQueuingALater: [linesQueuingALater(tickBody), linesQueuingALater(timeoutBody)],
     }, {
         coverSignalHandlers: [
             'global.display restacked: queueCardCoverCheck',
@@ -859,11 +979,51 @@ test('extension.js: the bursty window-manager and display triggers queue the one
             'global.window_manager size-changed: queueCardCoverCheck',
             'global.window_manager switch-workspace: queueCardCoverCheck',
             'global.workspace_manager showing-desktop-changed: queueCardCoverCheck',
+            'metaWindow position-changed: queueCardCoverCheck',
+            'metaWindow size-changed: queueCardCoverCheck',
+            'metaWindow workspace-changed: queueCardCoverCheck',
+            'metaWindow unmanaged: () => this._onCoveringWindowUnmanaged(metaWindow)',
         ],
-        queuesTheCheck: 1,
-        clientListenerChecksAtOnce: 1,
-        timerChecksAtOnce: 1,
-        timerLinesQueuingALater: 0,
+        queuesTheCheck: [1, 1],
+        clientListenerTicks: 1,
+        tickCountedBeforeTheBackstop: true,
+        backstopChecksAtOnce: 'this._syncCardCover();',
+        fallbackChecksAtOnce: 1,
+        linesQueuingALater: [0, 0],
+    });
+});
+
+test('extension.js follows exactly the windows covering the card, connecting and disconnecting only the ' +
+    'difference (coveringWindowChanges); a covering window closed is dropped at once, before the cover is checked ' +
+    'again; teardown empties the set and disconnects every one', () => {
+    const extensionSource = readExtensionFile('extension.js');
+    const followBody = declarationBody(extensionSource, '_followCoveringWindows(coveringWindows) {');
+    const readBody = declarationBody(extensionSource, '_readCardCover() {');
+    const disconnectLines = trimmedLines(declarationBody(extensionSource, '_disconnectCoveringWindows() {'));
+    assertEqual({
+        coveringFromThePureRule: readBody.includes('indexesOfRectsCoveringCard({cardRect, windowRects})'),
+        decidesByDifference: followBody.includes('coveringWindowChanges({'),
+        releasesTheOnesToRelease: statementCount(followBody, 'this._stopFollowingCoveringWindow(metaWindow);'),
+        followsTheOnesToFollow: statementCount(followBody, 'this._startFollowingCoveringWindow(metaWindow);'),
+        recordsAFollowedWindow: statementCount(declarationBody(extensionSource,
+            '_startFollowingCoveringWindow(metaWindow) {'), 'this._coveringWindows.add(metaWindow);'),
+        stopForgetsThenDisconnects: trimmedLines(declarationBody(extensionSource,
+            '_stopFollowingCoveringWindow(metaWindow) {')).slice(1, 3),
+        onClose: trimmedLines(declarationBody(extensionSource, '_onCoveringWindowUnmanaged(metaWindow) {')).slice(1, 3),
+        teardownEmptiesThenDisconnects: [
+            disconnectLines.indexOf('this._coveringWindows.clear();') >= 0,
+            disconnectLines.indexOf('this._coveringWindows.clear();') <
+                disconnectLines.indexOf('metaWindow.disconnectObject(this);'),
+        ],
+    }, {
+        coveringFromThePureRule: true,
+        decidesByDifference: true,
+        releasesTheOnesToRelease: 1,
+        followsTheOnesToFollow: 1,
+        recordsAFollowedWindow: 1,
+        stopForgetsThenDisconnects: ['this._coveringWindows.delete(metaWindow);', 'metaWindow.disconnectObject(this);'],
+        onClose: ['this._stopFollowingCoveringWindow(metaWindow);', 'this._queueCardCoverCheck();'],
+        teardownEmptiesThenDisconnects: [true, true],
     });
 });
 
@@ -885,21 +1045,88 @@ test('extension.js: the cover check is coalesced into one BEFORE_REDRAW later th
     });
 });
 
-test('extension.js: while the card is frozen a timer re-checks the cover every SAMPLE_INTERVAL_SECONDS, and the ' +
-    'reveal and teardown remove it', () => {
-    const extensionSource = readExtensionFile('extension.js');
-    const timerBody = declarationBody(extensionSource, '_syncCoverRecheckTimer(isCovered) {');
+test('extension.js: the cover check\'s later never throws out of its callback, which runs inside the compositor\'s ' +
+    'frame: it forgets its id, runs the cover sync inside a try whose catch logs the failure, and returns ' +
+    'GLib.SOURCE_REMOVE after the try, on every path', () => {
+    const queueLines = trimmedLines(declarationBody(readExtensionFile('extension.js'), '_queueCardCoverCheck() {'));
+    const addLineIndex = queueLines.findIndex(line =>
+        line.startsWith('this._cardCoverCheckLaterId = global.compositor.get_laters().add('));
     assertEqual({
-        decides: timerBody.includes('coverRecheckTimerChange({isCovered, isTimerRunning:'),
-        starts: timerBody.includes('GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, SAMPLE_INTERVAL_SECONDS,'),
-        stops: statementCount(timerBody, 'this._removeCoverRecheckTimer();'),
-        removeRemovesTheSource: statementCount(declarationBody(extensionSource, '_removeCoverRecheckTimer() {'),
-            'GLib.source_remove(sourceId);'),
-        keepsRunning: statementCount(declarationBody(extensionSource, '_onCoverRecheckTimeout() {'),
+        callbackOpening: addLineIndex < 0 ? [] : queueLines.slice(addLineIndex + 1, addLineIndex + 5),
+        catchLogs: queueLines.filter(line => line.startsWith('this._errorLog.log(')).length,
+        callbackClosing: queueLines.slice(-4),
+    }, {
+        callbackOpening: [
+            'this._cardCoverCheckLaterId = null;', 'try {', 'this._syncCardCover();', '} catch (error) {',
+        ],
+        catchLogs: 1,
+        callbackClosing: ['}', 'return GLib.SOURCE_REMOVE;', '});', '}'],
+    });
+});
+
+test('extension.js: teardown attempts every covering window: each window\'s disconnectObject sits in a try of its ' +
+    'own inside the loop, a failure logged as a teardown failure, so one that throws leaves none of the rest ' +
+    'connected', () => {
+    const disconnectLines = trimmedLines(
+        declarationBody(readExtensionFile('extension.js'), '_disconnectCoveringWindows() {'));
+    const loopIndex = disconnectLines.indexOf('for (const metaWindow of coveringWindows) {');
+    assertEqual(loopIndex < 0 ? [] : disconnectLines.slice(loopIndex + 1, loopIndex + 6), [
+        'try {',
+        'metaWindow.disconnectObject(this);',
+        '} catch (error) {',
+        'this._logTearDownFailure(\'disconnect from a covering window\', error);',
+        '}',
+    ]);
+});
+
+test('extension.js: the fallback timeout runs exactly while coverFallbackTimerChange says so, from the cover, the ' +
+    'client\'s isLive and whether it runs, asked on each cover check and, once a tick, on a tick that did not check ' +
+    'the cover; its callback keeps it, and its removal forgets the id before it removes the source', () => {
+    const extensionSource = readExtensionFile('extension.js');
+    const timerLines = trimmedLines(declarationBody(extensionSource, '_syncCoverFallbackTimer() {'));
+    const removeLines = trimmedLines(declarationBody(extensionSource, '_removeCoverFallbackTimer() {'));
+    const tickBody = declarationBody(extensionSource, '_onCardCoverTick() {');
+    const tickLines = trimmedLines(tickBody);
+    const lineAfter = (lines, line) => (lines.includes(line) ? lines[lines.indexOf(line) + 1] : null);
+    const startIndex = timerLines.indexOf('if (timerChange === CoverFallbackTimerChange.START) {');
+    const askingStatement = 'this._syncCoverFallbackTimer();';
+    const backstopCondition = 'if (isCoverBackstopDue({isCovered, ticksSinceCoverCheck: this._ticksSinceCoverCheck}))';
+    const backstopIndex = tickLines.indexOf(backstopCondition);
+    assertEqual({
+        decides: timerLines.slice(1, 5),
+        startsOnStart: startIndex < 0 ? [] : timerLines.slice(startIndex + 1, startIndex + 4),
+        stopsOnStop: lineAfter(timerLines, '} else if (timerChange === CoverFallbackTimerChange.STOP) {'),
+        removeForgetsThenRemoves: removeLines.slice(-4, -1),
+        keepsRunning: statementCount(declarationBody(extensionSource, '_onCoverFallbackTimeout() {'),
             'return GLib.SOURCE_CONTINUE;'),
-        teardownRemoves: statementCount(declarationBody(extensionSource, '_tearDown() {'),
-            '{name: \'remove the cover re-check timer\', run: () => this._removeCoverRecheckTimer()},'),
-    }, {decides: true, starts: true, stops: 1, removeRemovesTheSource: 1, keepsRunning: 1, teardownRemoves: 1});
+        askedOnEachCheck: statementCount(declarationBody(extensionSource, '_syncCardCover() {'), askingStatement),
+        // The tick asks itself only when the backstop did not check the cover, whose sync already asked.
+        askedOnceATick: [
+            statementCount(tickBody, askingStatement),
+            backstopIndex < 0 ? [] : tickLines.slice(backstopIndex, backstopIndex + 4),
+        ],
+    }, {
+        decides: [
+            'const timerChange = coverFallbackTimerChange({',
+            'isCovered: !this._isCardVisible,',
+            'isServiceLive: this._client?.isLive === true,',
+            'isTimerRunning: this._coverFallbackSourceId !== null,',
+        ],
+        startsOnStart: [
+            'const onFallbackTimeout = () => this._onCoverFallbackTimeout();',
+            'this._coverFallbackSourceId =',
+            'GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, COVER_FALLBACK_INTERVAL_SECONDS, onFallbackTimeout);',
+        ],
+        stopsOnStop: 'this._removeCoverFallbackTimer();',
+        removeForgetsThenRemoves: [
+            'const sourceId = this._coverFallbackSourceId;',
+            'this._coverFallbackSourceId = null;',
+            'GLib.source_remove(sourceId);',
+        ],
+        keepsRunning: 1,
+        askedOnEachCheck: 1,
+        askedOnceATick: [1, [backstopCondition, 'this._syncCardCover();', 'else', askingStatement]],
+    });
 });
 
 test('extension.js: when the overview has closed, the cover is checked again', () => {

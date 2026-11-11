@@ -1,5 +1,6 @@
 // The pure decisions behind the extension's client (pulseClient.js): when to hold a detail watch on the service, when
-// the latest Sample is too old to draw as live, and how long to wait before asking systemd to start the service again.
+// the data a state carries (the service's latest sample) is too old to draw as live, and how long to wait before asking
+// systemd to start the service again.
 // Pure: no Gio and no Shell import, so it runs under plain gjs.
 import {SAMPLE_INTERVAL_SECONDS, SAMPLE_STALL_TICKS, START_RETRY_DELAYS_SECONDS} from './constants.js';
 
@@ -26,19 +27,19 @@ export function isDetailWatchWanted({isCardVisible, isDropdownOpen, isOverviewVi
 }
 
 /**
- * Says whether the latest Sample is too old to draw as live: older than SAMPLE_STALL_TICKS intervals (6 s). Exactly
- * that old is not stale yet.
+ * Says whether the service's latest sample, as a state's snapshot carries it, is too old to draw as live: taken more
+ * than SAMPLE_STALL_TICKS intervals (6 s) ago. Exactly that old is not stale yet.
  *
  * @param {object} times - Monotonic times, in microseconds.
- * @param {number|null} times.lastSampleReceivedAtUsec - When the client last received fresh data (a Sample it drew,
- *     or a state); null when it never has, which counts as stale.
+ * @param {number|null} times.lastFreshDataAtUsec - When the client's data was last fresh: the time of the sample the
+ *     latest state's snapshot was taken from; null when it never had any, which counts as stale.
  * @param {number} times.nowUsec - Now.
  * @returns {boolean} True when stale.
  */
-export function isSampleStale({lastSampleReceivedAtUsec, nowUsec}) {
-    if (lastSampleReceivedAtUsec === null)
+export function isSampleStale({lastFreshDataAtUsec, nowUsec}) {
+    if (lastFreshDataAtUsec === null)
         return true;
-    return nowUsec - lastSampleReceivedAtUsec > SAMPLE_STALL_USEC;
+    return nowUsec - lastFreshDataAtUsec > SAMPLE_STALL_USEC;
 }
 
 /**

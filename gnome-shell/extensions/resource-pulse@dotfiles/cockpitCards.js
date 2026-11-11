@@ -6,7 +6,7 @@
 //
 // - A card is a vertical box carrying the card surface (resource-pulse-card rp-cockpit-cell), built non-reactive and
 //   drawn through its own offscreen texture, so a window drawn over it paints one rectangle. No card paints itself
-//   (no vfunc_paint or vfunc_paint_node: ruling D12).
+//   (no paint override, plain or node: ruling D12).
 // - Its rows are built with it, one per row it can show, and reused: an update sets texts, icons, classes and bar
 //   widths, each only when it changed, and hides the rows beyond the data. No update makes or destroys an actor. A
 //   list with more than it can show ends in a '+N more' line (sessions, connections).

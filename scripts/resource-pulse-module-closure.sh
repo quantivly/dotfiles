@@ -31,7 +31,12 @@
 #     names no file of the extension and is skipped.
 # What it does not: a line that is a comment (it starts with //, /* or *, as
 # every JSDoc line here does), so a type like `import('./x.js').Foo` in JSDoc
-# is no import; and `import.meta`.
+# is no import; and `import.meta`. Block comments that start a line and close
+# on it are dropped first, so `/* note */ import {a} from './a.js';` is an
+# import, while a line of nothing but comment, or one whose block comment is
+# still open at its end, is skipped. The lines inside a multi-line block
+# comment are scanned as code unless they start with *, so an import written
+# there is followed (the closure can name too many files, never too few).
 #
 # Anything else that says `import`, or a stray `from './x.js'`, is a shape it
 # does not understand: a dynamic import of a computed specifier, an import not
@@ -164,12 +169,34 @@ check_code_line() {
   fi
 }
 
+# strip_closed_leading_block_comments <line>: sets STRIPPED_LINE to the line (no
+# subshell: it runs for every line) without the block
+# comments that start it and close on it (`/* note */ import …` gives
+# `import …`, and nothing when the line is all such comments). A block comment
+# that does not close on the line is left in place, so the comment-line test
+# still skips the line. The remainder loses its leading blanks only when a
+# comment was removed, so an indented import still starts no statement.
+strip_closed_leading_block_comments() {
+  local remaining_line="$1" after_opening is_stripped=0
+  while [[ "$remaining_line" =~ ^[[:space:]]*/\* ]]; do
+    after_opening="${remaining_line#*/\*}"
+    [[ "$after_opening" == *'*/'* ]] || break
+    remaining_line="${after_opening#*\*/}"
+    remaining_line="${remaining_line#"${remaining_line%%[![:space:]]*}"}"
+    is_stripped=1
+  done
+  (( is_stripped )) || remaining_line="$1"
+  STRIPPED_LINE="$remaining_line"
+}
+
 # scan_module <module>: queues every module one module imports.
 scan_module() {
   local module="$1" line line_number=0 statement="" statement_line_number=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_number=$((line_number + 1))
-    [[ "$line" =~ $COMMENT_LINE_PATTERN ]] && continue
+    strip_closed_leading_block_comments "$line"
+    line="$STRIPPED_LINE"
+    [[ "$line" =~ $COMMENT_LINE_PATTERN || -z "$line" ]] && continue
     if [[ -n "$statement" ]]; then
       statement+=" $line"
     elif [[ "$line" =~ $IMPORT_STATEMENT_START_PATTERN || "$line" =~ $EXPORT_LIST_START_PATTERN ]]; then

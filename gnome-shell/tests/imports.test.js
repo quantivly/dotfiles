@@ -12,7 +12,7 @@ const EXTENSION_DIRECTORY_URI =
 const [EXTENSION_DIRECTORY_PATH] = GLib.filename_from_uri(EXTENSION_DIRECTORY_URI);
 const GLUE_FILE_NAMES = ['extension.js', 'indicator.js', 'card.js', 'cockpitTooltip.js', 'cockpitCards.js'];
 /** The modules outside lib/ that plain gjs can load (lib/ is listed from the disk). */
-const PURE_TOP_LEVEL_FILE_NAMES = ['pulseClient.js', 'cockpitClient.js', 'graph.js'];
+const PURE_TOP_LEVEL_FILE_NAMES = ['pulseClient.js', 'serviceLink.js', 'cockpitClient.js', 'graph.js'];
 const LIB_DIRECTORY_NAME = 'lib';
 const JAVASCRIPT_SUFFIX = '.js';
 const SHELL_RESOURCE_PREFIX = 'resource:///';
@@ -122,7 +122,7 @@ async function exportedNames(modulePath) {
 }
 
 /**
- * Every module plain gjs can load: lib/*.js, pulseClient.js, cockpitClient.js and graph.js.
+ * Every module plain gjs can load: lib/*.js, pulseClient.js, serviceLink.js, cockpitClient.js and graph.js.
  *
  * @returns {string[]} Absolute paths.
  */

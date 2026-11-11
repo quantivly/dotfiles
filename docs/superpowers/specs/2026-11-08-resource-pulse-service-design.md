@@ -6,6 +6,11 @@ document wins. Everything it does not mention stands. **Date:** 2026-11-08.
 **Extended by** [2026-11-09-desktop-cockpit-design.md](2026-11-09-desktop-cockpit-design.md): the desktop
 cockpit, a second service and a grid of cards on the same pattern (2026-11-09).
 
+**Measured and amended by**
+[2026-11-10-resource-pulse-performance-design.md](2026-11-10-resource-pulse-performance-design.md): what the
+extension costs inside gnome-shell and why, the in-shell budget set per state in place of the single 0.1% below,
+and a compiled sampler as a second stage (2026-11-11).
+
 ## Why
 
 An independent review of v1 (a9ed51e) found nothing that could destabilise the desktop. Its verdicts are in
@@ -73,6 +78,10 @@ about 236 files with roughly 1,000 async completions on the thread that draws th
 - **`PulseClient`** replaces the in-shell `Sampler`. It keeps the interface the card and indicator already use:
   `cpuHistory`, `memoryHistory`, `addListener`, `removeListener` and the latest snapshot. Behind it is an
   asynchronous D-Bus proxy, and the card and indicator change only as the UX below needs.
+  *Amended by the performance design's stage one (2026-11-11):* there is no proxy object behind it any more
+  (a name watch, a signal subscription and calls on the shell's shared connection), and it tells two kinds of
+  listener: `addHistoryListener` for what reads only the histories (the top bar, the cover check), and
+  `addListener` for the cards, which are told a snapshot only while a detail watch is wanted.
 - **No file IO and no subprocess in the shell.** The static check keeps forbidding both everywhere in the extension
   except `service/`, and the patterns grow to cover the calls the review found missing.
 
@@ -155,7 +164,7 @@ about 236 files with roughly 1,000 async completions on the thread that draws th
 
   | What | Budget |
   |---|---|
-  | gnome-shell, added by the extension | under 0.1% of one core |
+  | gnome-shell, added by the extension | under 0.1% of one core: superseded by the per-state budgets and the count budgets in the performance design's "Budgets" |
   | service, with a detail watch held | under 0.25% of one core |
   | service, with no watch | under 0.1% of one core |
   | service RSS | at most 64 MiB, flat over 24 h |

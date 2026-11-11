@@ -16,11 +16,14 @@
 // "heaviest" line, which ellipsize at their end when the line is longer than the card.
 //
 // Windows cover it most of the day. While one does, the extension freezes it (setFrozen): a new snapshot is only
-// recorded, and the card queues no relayout and no repaint until the reveal, which repaints it at once from the latest
-// snapshot. A frozen card is dimmed (the frozen pseudo-class, which stylesheet.css styles) and repainted, still dimmed,
-// every FROZEN_REPAINT_INTERVAL_SECONDS (repaintFrozen), so a card misjudged as covered reads as stale, never as live;
-// freezing costs one repaint, unseen when the card really is covered. Unfrozen, a "waiting on" meter and the memory
-// bar redraw only when the value they draw changes (lib/cardRepaint.js decides what to repaint).
+// recorded, and the card queues no relayout and no repaint until the reveal, which repaints it at once from the
+// snapshot it last recorded (a covered card is told none while the detail watch is released; the client hands it the
+// latest one in the same main-loop turn as the reveal). A frozen card is dimmed (the frozen pseudo-class, which
+// stylesheet.css styles) and repainted, still dimmed, every FROZEN_REPAINT_INTERVAL_SECONDS (repaintFrozen), so a
+// card misjudged as covered reads as stale, never as live; freezing costs one repaint, unseen when the card really
+// is covered. The card is drawn through an offscreen texture (set in _init), so a window drawing over it costs one
+// cached rectangle per frame, not a repaint of its actors. Unfrozen, a "waiting on" meter and the memory bar redraw
+// only when the value they draw changes (lib/cardRepaint.js decides what to repaint).
 //
 // Shell glue only: every string and meter band comes from lib/format.js (cardText, through lib/cardRepaint.js), every
 // shape from graph.js and the position from lib/layout.js (cardPosition). The extension adds it to the layout
@@ -161,6 +164,10 @@ class PulseCard extends St.BoxLayout {
             orientation: Clutter.Orientation.VERTICAL,
             reactive: false,
         });
+        // Draw through an offscreen texture: actors in this layer are not culled, so without it a window drawing over
+        // the card would repaint every one of the card's actors on each of its frames. The card is rendered into the
+        // texture only when its own content changes.
+        this.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);
         // Every field _onDestroy reads is set before anything below can throw.
         this._client = client;
         this._snapshotListenerId = null;
@@ -193,7 +200,7 @@ class PulseCard extends St.BoxLayout {
 
     /**
      * Freezes the card while a window covers it, repainting it once, dimmed; or unfreezes it on the reveal, which
-     * repaints it at once, undimmed, from the latest snapshot it was given. Setting the state it already has does
+     * repaints it at once, undimmed, from the snapshot it last recorded. Setting the state it already has does
      * nothing.
      *
      * @param {boolean} isFrozen - True while covered.
@@ -204,9 +211,10 @@ class PulseCard extends St.BoxLayout {
     }
 
     /**
-     * Repaints a frozen card, still dimmed, from the latest snapshot it was given: the extension's cover re-check timer
-     * calls it every FROZEN_REPAINT_INTERVAL_SECONDS while the card counts as covered. Unfrozen it does nothing, since
-     * an unfrozen card renders every snapshot already.
+     * Repaints a frozen card, still dimmed, from the latest snapshot it was given. The extension gives the card the
+     * client's latest snapshot and calls this once FROZEN_REPAINT_INTERVAL_SECONDS have passed since the card was last
+     * painted, checked on each Sample while the card is covered and on the fallback timeout while the service is
+     * silent. Unfrozen it does nothing, since an unfrozen card renders every snapshot already.
      *
      * @returns {void}
      */

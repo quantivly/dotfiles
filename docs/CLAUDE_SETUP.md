@@ -663,7 +663,7 @@ herdr-draft, and now the configuration the sections above declare, which is rend
 declared links, plugins, generated skills, memory stores and the absence of stale entries under
 `~/.claude`. It is step 6 of the
 [shared-configuration design](superpowers/specs/2026-11-04-shared-claude-config-design.md), D8 as
-amended (H1 to H11). It was `scripts/dev-sync` until DO-894, and `scripts/dev-sync` stays one release
+amended (H1 to H13). It was `scripts/dev-sync` until DO-894, and `scripts/dev-sync` stays one release
 as a wrapper that supplies `--host dev`. The script's header has the full rules.
 
 **Two forms.** From the laptop, it collects the laptop's facts (its Claude Code and herdr versions,
@@ -695,11 +695,12 @@ Rows: ✓ level · ✗ drift `--apply` fixes · ⚠ a person's step · `·` info
 | `profile` | always | the profile and its tenants, or why there is none | nothing |
 | `timer` | always | armed, not armed (`·`), or the arming still on `dev-sync.timer` | arm `host-sync.timer`, move the marker, retire the old timer |
 | `claude`, `auth`, `agent`, `herdr`, `herdr-draft` | always; `auth` is one `·` on a clauth host (H9) | as [HERDR_GUIDE.md](HERDR_GUIDE.md#working-on-dev) describes for dev | as there |
+| `gh`, after `auth` | no clauth (H13); one `·` with no gh | the GitHub token's expiry, from one `gh api --include user` | nothing |
 | `skill` | herdr installed | `herdr --skill` against the herdr skill; `herdr-draft skill --check` on the spawn skill | regenerate from this host's binary |
 | `settings` | a profile marker | `claude-settings-render.sh --check` | its `--apply`, then `--check` again |
 | `links` | `~/.dotfiles` always; `~/.dotfiles-local` with a marker, once cloned | `check-links.sh --tsv` on each checkout | that repo's `./install`, once per run, then the checker again |
 | `marketplace`, `plugin` | always; one `plugins` ⚠ instead when `settings.json` is missing or misshapen | the live `settings.json`'s declaration against what is added and installed | add, update, install |
-| `mcp` | without `--no-mcp` | the Slack and Notion sign-ins, by status word | nothing |
+| `mcp` | without `--no-mcp` | the Slack and Notion sign-ins, by status word; `LINEAR_API_KEY` by name, or one `·` where the profile serves no work tenant (H12) | nothing |
 | `clone`, `clones` | skipped only when the tenants are known and leave out `quantivly` | each `~/quantivly` clone's last fetch | fetch; a laptop run also clones what the host lacks |
 | `memory` | the store table exists; the store clones and the memory timer need known tenants | the git floor, the served stores, `claude-memory-link.sh --check`, `claude-memory-sync.sh --status`, the memory timer | clone, the link script's `--apply`, enable the memory timer |
 | `retire` | always; it moves only with a marker | stale entries under `~/.claude`, counted and named | move them to `retired/<stamp>/` |
@@ -818,11 +819,12 @@ hand with `scripts/herdr-claude-wire.sh`. Any other ✗ there is either real dri
 defect; read the row to tell which.
 
 State tables: `scripts/test-host-sync.sh` (hermetic: a fixture `HOME`, local bare repositories as
-remotes, stubs for `claude`, `herdr`, `systemctl` and the sibling scripts committed into the seed
-repo, the real link checker and redactor; CI `host-sync-test`) and `scripts/test-check-links.sh` (CI
-`check-links-test`). Before each merge a mutation sweep applies one fault at a time to a copy of the
-script or the table, names the row expected to kill it first, runs it under a timeout that kills its
-process group, and counts a mutant that kills nothing as a finding, never a pass.
+remotes, stubs for `claude`, `gh`, `herdr`, `systemctl` and the sibling scripts committed into the
+seed repo, the real link checker and redactor; CI `host-sync-test`) and
+`scripts/test-check-links.sh` (CI `check-links-test`). Before each merge a mutation sweep applies
+one fault at a time to a copy of the script or the table, names the row expected to kill it first,
+runs it under a timeout that kills its process group, and counts a mutant that kills nothing as a
+finding, never a pass.
 
 ### A host's first run (DO-897)
 
@@ -834,6 +836,67 @@ host's own git credential (M9); the memory scripts name the host by its profile 
 directory among its checkouts is skipped (M11); and `claude-doctor`'s Pools section is one note,
 with a ✗ only for a fault in the tenant table itself, most of which stop memory linking there too
 (D9). H11 is the order: the marker comes first.
+
+**A host with no checkout yet.** `scripts/server-bootstrap.sh` needs sudo and is not this path. On a
+host whose account has no sudo, the steps below are done by hand, in this order; the ones that need
+root (installing zsh and any missing system package, usually the login-shell change, and linger
+where the account may not enable its own) go to whoever holds it.
+
+- **(a) zsh on `PATH` before anything else**: `scripts/tenant-route` and `scripts/gh-route` are zsh
+  scripts, and the memory link and sync call them. Beside it, the host half of `host-sync` exits 2
+  until `git`, `jq`, `curl`, `timeout` and `flock` are all on `PATH`; a missing one is a system
+  package, so it is part of the root step. **`gh`, installed and logged in**: neither
+  `scripts/install-prerequisites.sh` nor `./install` installs it, the tracked `gitconfig` makes it
+  GitHub's HTTPS credential helper once `./install` has run, and the `gh` row reads it. **Linger
+  for the account** (`loginctl enable-linger <user>`), or its user timers stop at logout: try it as
+  the account first; root where it is refused.
+- **(b) Where the login shell is to change, a silent `~/.zshenv` first.** sshd runs every remote
+  command through the login shell, forced commands and sftp included, and zsh reads only
+  `~/.zshenv` for them, so the `PATH` the old shell's rc file supplied is gone after `chsh`. Write
+  it with that `PATH`, printing nothing (sftp fails on a shell that prints), and test it before the
+  change, one tool per call:
+
+  ```bash
+  env -i HOME="$HOME" PATH=<sshd's default> zsh -c 'command -v <tool>'
+  ```
+
+  After the change, check from the laptop with
+  `ssh -o ControlPath=none <alias> 'command -v <tool>'`: a live multiplexed connection keeps the
+  shell it authenticated with.
+- **(c) `~/.gitconfig.local` with the account's `[user]` block, and `~/.zshrc.local`, both before
+  `./install`**, which never overwrites either. `./install` links `~/.gitconfig` to the
+  repository's, which takes its identity from `~/.gitconfig.local`, and creates a missing one from
+  an example whose `[user]` is a placeholder, so commits would carry it. It creates a missing
+  `~/.zshrc.local` from the workstation template, which starts an `ssh-agent` in every shell that
+  has none; `examples/server-zshrc-local.template` starts none and can be the file's start instead.
+- **(d) `git clone --recursive` of this repository to `~/.dotfiles`,
+  `scripts/install-prerequisites.sh`, then mise** in `~/.local/bin`, where the herdr launcher and
+  host-sync look for it and where `curl https://mise.run | sh`, the installer `./install` names,
+  puts it. The prerequisites script runs `sudo chsh` while the login shell is not zsh; without sudo
+  that step fails with a warning (sudo may ask for a password first) and the rest runs. A host
+  whose own Node or Python must stay the one its work uses gets its own
+  `~/.config/mise/config.toml` as a regular file before `./install`, which keeps a config that
+  differs from the repository's; `examples/server-mise.toml` with `go` added can be its start. It
+  lists `go` and `delta`: Go builds the herdr-draft plugin (host-sync asks mise for it first,
+  `mise which go`, and falls back to a `go` on `PATH`), and delta is the pager the tracked
+  `gitconfig` names. `./install` still downloads the repository's whole tool list into mise's
+  store, since it runs `mise install` inside the checkout, but those versions are active only in a
+  shell whose directory is under `~/.dotfiles`. Otherwise `./install` links the repository's full
+  tool list, and the herdr server's launcher puts mise's versions ahead of the system's on every
+  pane's `PATH`.
+- **(e) `./install`**, then the preflight below, again if it ran before the clone (the checkouts
+  just made can be new `checkout_globs` matches), then the marker and the `--apply` of steps
+  **1** and **2** below, then **`scripts/herdr-claude-wire.sh` once** on the host, since `host-sync`
+  does not run it.
+
+A host that should hold no memory names, in its profile, a tenant no store serves (with its own
+settings fragment, or nothing [renders](#rendered-settings-do-884)): nothing is cloned, and the link
+row reads `0 linked` as long as the host's tenant table routes none of the store table's
+`checkout_globs` or `plain_dirs` matches to a tenant that no store lists. One that does makes the
+link script exit 2 (`<dir>: tenant '<tenant>' is in no store of <table>`), and the row is then ⚠
+`claude-memory-link --check could not run: …`, every run. From the first memory written there, the
+row is ⚠ `claude-memory-link: 0 linked, 0 to fix, <n> unmapped, <n> without a store: memory that no
+store link reaches; claude-memory-link --list names the keys`, which `--apply` cannot clear.
 
 **Preflight, read-only, on the host**, for two faults no `--check` row predicts:
 
@@ -899,10 +962,30 @@ Beyond what every run does (Claude Code, herdr, the generated skills), the first
 **3. Three reads prove it:**
 
 ```bash
-scripts/host-sync --host <alias> --check                            # from the laptop: no ✗, and read every ⚠
+scripts/host-sync --host <alias> --check                            # from the laptop: no ✗, and only the ⚠ rows below
 ~/.dotfiles/scripts/gh-route ~/.local/share/claude-memory/<store>   # on the host: "state" is "none" with one GitHub account
 ~/.dotfiles/scripts/claude-memory-sync.sh --status                  # on the host, after the first tick: each store's last sync
 ```
+
+The ⚠ rows a person should expect, which `--apply` cannot clear: on a host with no `agents.slice`
+unit, `slice` reads `agents.slice has no unit file, so nothing caps agents on this machine`; with
+abandoned session scopes over 200 MB, `sessions` counts them and prints the `sudo systemctl stop` to
+run, which on a host with no sudo goes to whoever holds root; on a host that holds no memory, once a
+session has written some, `memory` reads `claude-memory-link: … without a store: memory that no
+store link reaches; …` (above). Any other ⚠ is a step the host's run record names, or one to take.
+On a host without clauth, the `gh` row reads the expiry of its GitHub token from the one header
+GitHub sends for it, never the token: ✓ with the date, or that it carries none; ⚠ inside 14 days or
+after it, naming `gh auth login --with-token`; ⚠ when gh gets no 200 answer, or when the expiry's
+value cannot be read. GitHub answers an expired token with 401, so after expiry a person normally
+sees the no-answer row, which names the same command for an expired token; the dated "expired on"
+row appears only when the host's clock is ahead of GitHub's. gh refuses `gh auth login` in a shell
+that exports a GitHub token variable, which this repository's gh routing does in an interactive
+zsh, so run it with that variable cleared, the new token on its standard input:
+`env -u GH_TOKEN -u GITHUB_TOKEN gh auth login --with-token`. On a host whose profile serves no
+`quantivly` tenant, the Linear row is one `·`, `no LINEAR_API_KEY is expected on this host`, and
+`~/.zshrc.local` is not read; `claude-doctor`'s Linear section and `scripts/verify-tools.sh` still
+warn there that `LINEAR_API_KEY` is missing, since neither reads the profile, and the answer is not
+to add the key.
 
 `none` from `gh-route` means the sync uses the host's own git credential (M9). `matched` or
 `default`, with a token file, means at least one gh config dir the tables route to exists on the host
