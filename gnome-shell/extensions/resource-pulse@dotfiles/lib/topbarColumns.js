@@ -13,6 +13,15 @@
 export const GAP_COLUMN = -1;
 
 /**
+ * A graph's columns with the number of device pixels they were quantised to, so that columns quantised at one
+ * resource scale never compare equal to columns quantised at another.
+ *
+ * @typedef {object} GraphColumns
+ * @property {number[]} columns - One level per slot (quantisedColumns()), or GAP_COLUMN for a gap.
+ * @property {number} levelCount - deviceLevelCount() of the height and resource scale they were quantised at.
+ */
+
+/**
  * Clamps a fraction to 0–1, treating anything that is not a finite number as a gap, as graph.js does with what it
  * draws. Repeated here because graph.js keeps its own private and nothing under lib/ imports from outside lib/.
  *
@@ -29,7 +38,7 @@ function clampedFractionOrGap(value) {
  * How many device pixels a graph's height spans: its height in logical pixels times its resource scale rounded up,
  * since a drawing at a fractional scale goes into a buffer of the next whole scale.
  *
- * @param {number} heightPx - The graph's height in logical pixels (St.DrawingArea.get_surface_size()).
+ * @param {number} heightPx - The graph's height in logical pixels, as its drawing area reports it while it repaints.
  * @param {number} resourceScale - The graph's resource scale (Clutter.Actor.get_resource_scale()).
  * @returns {number} The levels a column can take above 0.
  */
@@ -65,6 +74,23 @@ export function areColumnsEqual(first, second) {
     if (!Array.isArray(first) || !Array.isArray(second) || first.length !== second.length)
         return false;
     return first.every((column, slotIndex) => column === second[slotIndex]);
+}
+
+/**
+ * Says whether a graph must draw again: when it has drawn nothing yet, when its current columns were quantised to
+ * another number of device pixels than the ones it drew (another resource scale), or when a column differs.
+ *
+ * @param {object} graphColumns - What to compare.
+ * @param {GraphColumns|null} graphColumns.drawnColumns - The columns the graph last drew, or null for none yet. Any
+ *     other field the caller records with them (the height they were drawn at) is ignored.
+ * @param {GraphColumns|null} graphColumns.currentColumns - The columns its history gives now; read only when
+ *     something has been drawn, so it may be null before then.
+ * @returns {boolean} True when a repaint would change what the graph shows.
+ */
+export function isGraphRepaintNeeded({drawnColumns, currentColumns}) {
+    if (drawnColumns === null || drawnColumns.levelCount !== currentColumns.levelCount)
+        return true;
+    return !areColumnsEqual(drawnColumns.columns, currentColumns.columns);
 }
 
 /**

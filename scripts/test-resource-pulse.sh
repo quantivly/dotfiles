@@ -390,25 +390,32 @@ REPAINT_DECISION_DECLARATION='_isRepaintNeeded(topbarGraph)'
 # from its declaration line to the closing brace at its indent, each line
 # trimmed. A missing file or method is no lines, so every count below is 0.
 indicator_method_lines() { sed -n "/^    $2 {\$/,/^    }\$/p" "$1" 2>/dev/null | sed 's/^[[:space:]]*//'; }
+# count_occurrences <text> <needle>: how many times the text contains the
+# needle. Counted in the text, not by grep -c, which counts lines: two on one
+# line are two.
+count_occurrences() {
+  local text="$1" needle="$2" text_without_needle
+  text_without_needle="${text//"$needle"/}"
+  printf '%s' "$(( (${#text} - ${#text_without_needle}) / ${#needle} ))"
+}
 # repaint_call_summary <indicator.js path>: how many times the file says
 # queue_repaint(, the trimmed line before each one, and how many lines of the
-# decision method compare columns. An unreadable file is a line of its own.
+# decision method compare columns (lib/topbarColumns.js isGraphRepaintNeeded).
+# An unreadable file is a line of its own.
 repaint_call_summary() {
-  local indicator_path="$1" indicator_text text_without_calls call_count guard_lines comparison_count
+  local indicator_path="$1" indicator_text guard_lines comparison_count
   if [[ ! -r "$indicator_path" ]] || ! indicator_text="$(<"$indicator_path")"; then
     printf 'cannot read %s' "$indicator_path"
     return
   fi
-  # Counted in the text, not by grep -c, which counts lines: two calls on one line are two.
-  text_without_calls="${indicator_text//"$REPAINT_CALL_NEEDLE"/}"
-  call_count=$(( (${#indicator_text} - ${#text_without_calls}) / ${#REPAINT_CALL_NEEDLE} ))
   guard_lines="$(awk -v needle="$REPAINT_CALL_NEEDLE" '
     index($0, needle) { sub(/^[ \t]+/, "", previous_line); guards = guards separator previous_line; separator = "|" }
     { previous_line = $0 }
     END { print guards }' "$indicator_path")"
   comparison_count="$(indicator_method_lines "$indicator_path" "$REPAINT_DECISION_DECLARATION" \
-    | grep -c -F 'areColumnsEqual(')"
-  printf 'calls=%s guards=[%s] compares=%s' "$call_count" "$guard_lines" "$comparison_count"
+    | grep -c -F 'isGraphRepaintNeeded(')"
+  printf 'calls=%s guards=[%s] compares=%s' "$(count_occurrences "$indicator_text" "$REPAINT_CALL_NEEDLE")" \
+    "$guard_lines" "$comparison_count"
 }
 check "indicator.js calls queue_repaint( in one place, behind the column comparison" \
   "$(repaint_call_summary "$EXT_DIR/indicator.js")" \
@@ -454,7 +461,49 @@ awk '
   { print }' "$EXT_DIR/indicator.js" >"$TOPBAR_MAPPED_FIXTURE_DIR/indicator.js" \
   || fatal "cannot plant a handler that does not draw in $TOPBAR_MAPPED_FIXTURE_DIR/indicator.js"
 check "a copy of indicator.js whose notify::mapped handler does not draw is found" \
-  "$(mapped_repaint_summary "$TOPBAR_MAPPED_FIXTURE_DIR/indicator.js")" "connected=1 draws-there=0 skips-while-unmapped=1"
+  "$(mapped_repaint_summary "$TOPBAR_MAPPED_FIXTURE_DIR/indicator.js")" \
+  "connected=1 draws-there=0 skips-while-unmapped=1"
+# St lets a drawing area report its surface size, and hand out its cairo
+# context, only inside its repaint handler: anywhere else it logs a CRITICAL and
+# the size reads 0, which made the column comparison see a change on every tick.
+# So indicator.js reads each exactly once, in _paintGraph, and compares at the
+# height its last paint recorded. Counted over the whole file, comments
+# included, as the Gio.DBusProxy row does (indicator.js's comments never spell
+# either call): a comment only adds to the counts, so it cannot hide a read
+# outside the handler.
+SURFACE_READ_NEEDLES=('get_surface_size(' 'get_context(')
+PAINT_HANDLER_DECLARATION='_paintGraph(topbarGraph)'
+# surface_reads_summary <indicator.js path>: for each needle, how many times the
+# file says it and how many times _paintGraph's body does. An unreadable file is
+# a line of its own.
+surface_reads_summary() {
+  local indicator_path="$1" indicator_text paint_handler_text needle summary="" separator=""
+  if [[ ! -r "$indicator_path" ]] || ! indicator_text="$(<"$indicator_path")"; then
+    printf 'cannot read %s' "$indicator_path"
+    return
+  fi
+  paint_handler_text="$(indicator_method_lines "$indicator_path" "$PAINT_HANDLER_DECLARATION")"
+  for needle in "${SURFACE_READ_NEEDLES[@]}"; do
+    summary+="$separator$needle file=$(count_occurrences "$indicator_text" "$needle")"
+    summary+=" repaint=$(count_occurrences "$paint_handler_text" "$needle")"
+    separator="; "
+  done
+  printf '%s' "$summary"
+}
+check "indicator.js reads the drawing area's surface size and context only inside the repaint handler" \
+  "$(surface_reads_summary "$EXT_DIR/indicator.js")" \
+  "get_surface_size( file=1 repaint=1; get_context( file=1 repaint=1"
+# The planted twin, on a copy: the surface read the decision made at tick time,
+# put back, is found.
+TOPBAR_SURFACE_FIXTURE_DIR="$WIRING_TMP/topbar-surface-fixture"
+cp -R "$EXT_DIR" "$TOPBAR_SURFACE_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $TOPBAR_SURFACE_FIXTURE_DIR"
+awk '{ print } $0 == "    _isRepaintNeeded(topbarGraph) {" {
+  print "        const [, heightPx] = topbarGraph.drawingArea.get_surface_size();" }' \
+  "$EXT_DIR/indicator.js" >"$TOPBAR_SURFACE_FIXTURE_DIR/indicator.js" \
+  || fatal "cannot plant a surface read in $TOPBAR_SURFACE_FIXTURE_DIR/indicator.js"
+check "a planted get_surface_size( outside the repaint handler in a copy of indicator.js is found" \
+  "$(surface_reads_summary "$TOPBAR_SURFACE_FIXTURE_DIR/indicator.js")" \
+  "get_surface_size( file=2 repaint=1; get_context( file=1 repaint=1"
 
 # metadata.json, parsed as JSON by gjs (never grepped). Each field is printed
 # on its own prefixed line, so an unreadable or malformed file prints none and
@@ -628,7 +677,10 @@ sorted_closure() {
 # Read from the import lines of today's tree, by hand: the shell side's
 # nineteen modules and the service side's seventeen, seven of them (constants,
 # errorLog, history, jsonFields, pressure, protocol, teardown) on both.
-EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/topbarColumns.js lib/visibility.js lib/wiring.js pulseClient.js serviceLink.js '
+EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js '
+EXPECTED_SHELL_CLOSURE+='lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js '
+EXPECTED_SHELL_CLOSURE+='lib/teardown.js lib/topbarColumns.js lib/visibility.js lib/wiring.js '
+EXPECTED_SHELL_CLOSURE+='pulseClient.js serviceLink.js '
 EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/jsonFields.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/fileIo.js service/main.js service/sampler.js '
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
@@ -3558,7 +3610,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=733
+EXPECTED_ROWS=736
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

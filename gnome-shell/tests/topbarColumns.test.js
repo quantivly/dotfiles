@@ -68,6 +68,22 @@ test('columns: equal only when both exist, have one length and match slot for sl
     });
 });
 
+test('columns: a repaint is needed with nothing drawn, at another level count, or when a column differs, and not ' +
+    'otherwise', () => {
+    const {isGraphRepaintNeeded} = topbarColumnsModule;
+    const columnsAt = (columns, levelCount) => ({columns, levelCount});
+    assertEqual({
+        nothingDrawn: isGraphRepaintNeeded({drawnColumns: null, currentColumns: columnsAt([1, -1, 2], 16)}),
+        otherLevelCount: isGraphRepaintNeeded({
+            drawnColumns: columnsAt([1, -1, 2], 16), currentColumns: columnsAt([1, -1, 2], 32)}),
+        oneColumnDiffers: isGraphRepaintNeeded({
+            drawnColumns: columnsAt([1, -1, 2], 16), currentColumns: columnsAt([1, -1, 3], 16)}),
+        identical: isGraphRepaintNeeded({
+            drawnColumns: {...columnsAt([1, -1, 2], 16), heightPx: GRAPH_HEIGHT_PX},
+            currentColumns: columnsAt([1, -1, 2], 16)}),
+    }, {nothingDrawn: true, otherLevelCount: true, oneColumnDiffers: true, identical: false});
+});
+
 test('columns: the fractions drawn are the columns\' own', () => {
     const {GAP_COLUMN, columnFractions, quantisedColumns} = topbarColumnsModule;
     const fractionsDrawnAt = resourceScale => columnFractions(

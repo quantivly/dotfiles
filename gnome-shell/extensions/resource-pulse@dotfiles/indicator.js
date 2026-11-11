@@ -28,7 +28,7 @@ import {
 } from './lib/constants.js';
 import {hoverLabel} from './lib/format.js';
 import {hoverLabelPosition} from './lib/layout.js';
-import {areColumnsEqual, columnFractions, deviceLevelCount, quantisedColumns} from './lib/topbarColumns.js';
+import {columnFractions, deviceLevelCount, isGraphRepaintNeeded, quantisedColumns} from './lib/topbarColumns.js';
 
 const ACCESSIBLE_NAME = 'Resource Pulse';
 /** PanelMenu.Button's menu alignment: 0.5 puts the dropdown's arrow under the middle of the graphs. */
@@ -55,12 +55,14 @@ const UNCONSTRAINED_HEIGHT = -1;
 const STAGE_LEFT_EDGE_PX = 0;
 
 /**
- * A graph's columns (lib/topbarColumns.js) with the device pixels of its height they were quantised to, so columns
- * quantised at one resource scale never compare equal to columns quantised at another.
+ * The columns a graph last drew (a GraphColumns of lib/topbarColumns.js), with the height it drew them at.
  *
- * @typedef {object} GraphColumns
+ * @typedef {object} DrawnColumns
  * @property {number[]} columns - One level per slot, or GAP_COLUMN for a gap.
- * @property {number} levelCount - deviceLevelCount() of the graph's height and resource scale.
+ * @property {number} levelCount - deviceLevelCount() of heightPx and the resource scale they were drawn at.
+ * @property {number} heightPx - The graph's height in logical pixels at that repaint. St reports a drawing area's
+ *     size only inside its repaint handler (anywhere else it logs a CRITICAL and the size reads 0), and repaints by
+ *     itself on any change of size, so this is the height the comparison quantises at between repaints.
  */
 
 /**
@@ -70,7 +72,7 @@ const STAGE_LEFT_EDGE_PX = 0;
  * @property {St.DrawingArea} drawingArea - The graph's actor.
  * @property {import('./lib/history.js').RingBuffer} history - The fractions it draws.
  * @property {number[]} fillRgba - Its colour, as [red, green, blue, alpha], each 0–1.
- * @property {GraphColumns|null} drawnColumns - What its repaint handler last drew; null until it first draws.
+ * @property {DrawnColumns|null} drawnColumns - What its repaint handler last drew; null until it first draws.
  */
 
 export const PulseIndicator = GObject.registerClass(
@@ -191,7 +193,8 @@ class PulseIndicator extends PanelMenu.Button {
      * @param {TopbarGraph} topbarGraph - The graph.
      * @param {number} heightPx - Its height in logical pixels.
      * @param {number} resourceScale - Its resource scale.
-     * @returns {GraphColumns} The columns, with the level count they were quantised to.
+     * @returns {import('./lib/topbarColumns.js').GraphColumns} The columns, with the level count they were quantised
+     *     to.
      */
     _currentColumns(topbarGraph, heightPx, resourceScale) {
         const newestFractions = topbarGraph.history.lastValues(TOPBAR_HISTORY_SAMPLES);
@@ -204,10 +207,11 @@ class PulseIndicator extends PanelMenu.Button {
 
     /**
      * Draws a graph's current columns (columnFractions, so the levels drawn are the levels compared), records them as
-     * the columns it last drew, and frees the context whatever happens (as the shell's own drawing areas do). St
-     * emits repaint on its own too (at the first allocation, on a style or a scale change), so the columns are always
-     * computed here, from the history at the scale being drawn: it never draws stale levels, and the next comparison
-     * is against what is on screen.
+     * the columns it last drew with the height it drew them at, and frees the context whatever happens (as the
+     * shell's own drawing areas do). The repaint handler is the one place the graph's size and cairo context may be
+     * read: St allows both only while it repaints. St emits repaint on its own too (at the first allocation, on a
+     * style or a scale change), so the columns are always computed here, from the history at the size and scale
+     * being drawn: it never draws stale levels, and the next comparison is against what is on screen.
      *
      * @param {TopbarGraph} topbarGraph - The graph being repainted.
      * @returns {void}
@@ -221,18 +225,20 @@ class PulseIndicator extends PanelMenu.Button {
         const cr = drawingArea.get_context();
         try {
             drawAreaGraph(cr, widthPx, heightPx, slotFractions, fillRgba, BASELINE_RGBA);
-            topbarGraph.drawnColumns = columnsToDraw;
+            topbarGraph.drawnColumns = {...columnsToDraw, heightPx};
         } finally {
             cr.$dispose();
         }
     }
 
     /**
-     * Says whether a graph must draw again: only while the indicator is mapped, and only when it has drawn nothing yet
-     * or the columns its history gives now differ from the ones it last drew, or were quantised to another number of
-     * device pixels. Unmapped it computes nothing and answers false, and the columns last drawn stay as they are: the
-     * repaint is owed, and the first comparison once the indicator is mapped again (notify::mapped) draws it. False
-     * once destroyed.
+     * Says whether a graph must draw again (lib/topbarColumns.js isGraphRepaintNeeded): only while the indicator is
+     * mapped, and only when it has drawn nothing yet or the columns its history gives now differ from the ones it
+     * last drew, or were quantised to another number of device pixels. The current columns are quantised at the
+     * height recorded by the last repaint and the live resource scale: St reports a drawing area's size only inside
+     * its repaint handler, and repaints by itself on any change of size, so the size is never read here. Unmapped it
+     * computes nothing and answers false, and the columns last drawn stay as they are: the repaint is owed, and the
+     * first comparison once the indicator is mapped again (notify::mapped) draws it. False once destroyed.
      *
      * @param {TopbarGraph} topbarGraph - The graph.
      * @returns {boolean} True when a repaint would change what the graph shows.
@@ -241,11 +247,10 @@ class PulseIndicator extends PanelMenu.Button {
         if (this._client === null || !this.mapped)
             return false;
         const {drawingArea, drawnColumns} = topbarGraph;
-        const [, heightPx] = drawingArea.get_surface_size();
-        const currentColumns = this._currentColumns(topbarGraph, heightPx, drawingArea.get_resource_scale());
-        if (drawnColumns === null || drawnColumns.levelCount !== currentColumns.levelCount)
-            return true;
-        return !areColumnsEqual(drawnColumns.columns, currentColumns.columns);
+        // Nothing drawn yet means no height to quantise at; isGraphRepaintNeeded answers true without one.
+        const currentColumns = drawnColumns === null ? null
+            : this._currentColumns(topbarGraph, drawnColumns.heightPx, drawingArea.get_resource_scale());
+        return isGraphRepaintNeeded({drawnColumns, currentColumns});
     }
 
     /**
