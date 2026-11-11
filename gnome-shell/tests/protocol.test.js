@@ -189,6 +189,39 @@ test('protocol: a sample payload round-trips', () => {
     });
 });
 
+test('protocol: a Sample\'s envelope carries its sequence, time and appended history, and its snapshot unread', () => {
+    const payload = buildSamplePayload({
+        snapshot: FULL_SNAPSHOT, appendedHistory: {cpu: 0.5, memory: 0.25}, sequence: 8, sampledAtUsec: SAMPLED_AT_USEC,
+    });
+    const envelope = protocolModule.parseSampleEnvelope(payload);
+    assertEqual({
+        sequence: envelope.sequence,
+        sampledAtUsec: envelope.sampledAtUsec,
+        appendedHistory: envelope.appendedHistory,
+        snapshot: protocolModule.parseEnvelopeSnapshot(envelope.rawSnapshot),
+    }, {
+        sequence: 8,
+        sampledAtUsec: SAMPLED_AT_USEC,
+        appendedHistory: {cpu: 0.5, memory: 0.25},
+        snapshot: parseSamplePayload(payload).snapshot,
+    });
+});
+
+test('protocol: an envelope\'s appended history out of range is a gap, and a missing one is null', () => {
+    const outOfRange = protocolModule.parseSampleEnvelope(JSON.stringify({appendedHistory: {cpu: 1.5}}));
+    const missing = protocolModule.parseSampleEnvelope(JSON.stringify({sequence: 1}));
+    assertEqual({outOfRange: outOfRange.appendedHistory, missing: missing.appendedHistory},
+        {outOfRange: {cpu: null, memory: null}, missing: null});
+});
+
+test('protocol: an envelope of text that is not a JSON object is null', () => {
+    assertEqual(['[]', 'nope', 42].map(input => protocolModule.parseSampleEnvelope(input)), [null, null, null]);
+});
+
+test('protocol: a raw snapshot that is not an object parses to null', () => {
+    assertEqual([null, 7, []].map(input => protocolModule.parseEnvelopeSnapshot(input)), [null, null, null]);
+});
+
 test('protocol: a watch-start reveal sample carries appendedHistory null, so the client appends nothing', () => {
     const payload = buildSamplePayload({
         snapshot: FULL_SNAPSHOT, appendedHistory: null, sequence: SEQUENCE, sampledAtUsec: SAMPLED_AT_USEC,

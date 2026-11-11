@@ -145,7 +145,39 @@ export function parseStatePayload(text) {
 }
 
 /**
- * Reads a Sample's JSON, skew-tolerantly (see the file header).
+ * Reads a Sample's small fields and leaves its snapshot unread, so a client that does not show the snapshot on this
+ * tick never pays for parsing it. Skew-tolerant (see the file header).
+ *
+ * @param {*} text - The JSON text.
+ * @returns {{sequence: number|null, sampledAtUsec: number|null, appendedHistory: AppendedHistory|null,
+ *     rawSnapshot: *}|null} The envelope, or null for text that is not a JSON object. A missing or mistyped
+ *     appendedHistory is null, like a reveal's: the client appends nothing for it. rawSnapshot is the payload's
+ *     `snapshot` value as parsed from JSON, for parseEnvelopeSnapshot.
+ */
+export function parseSampleEnvelope(text) {
+    const payload = parseJsonObject(text);
+    if (payload === null)
+        return null;
+    return {
+        sequence: countOrNull(payload.sequence),
+        sampledAtUsec: finiteNumberOrNull(payload.sampledAtUsec),
+        appendedHistory: parseAppendedHistory(payload.appendedHistory),
+        rawSnapshot: payload.snapshot,
+    };
+}
+
+/**
+ * Reads the snapshot an envelope carried, skew-tolerantly: the second step of reading a Sample.
+ *
+ * @param {*} rawSnapshot - A parseSampleEnvelope result's rawSnapshot.
+ * @returns {object|null} The snapshot, field by field as parseStatePayload reads GetState's; null unless an object.
+ */
+export function parseEnvelopeSnapshot(rawSnapshot) {
+    return parseSnapshot(rawSnapshot);
+}
+
+/**
+ * Reads a Sample's JSON, skew-tolerantly (see the file header): both steps at once.
  *
  * @param {*} text - The JSON text.
  * @returns {{snapshot: object|null, appendedHistory: AppendedHistory|null, sequence: number|null,
@@ -153,14 +185,14 @@ export function parseStatePayload(text) {
  *     mistyped appendedHistory is null, like a reveal's: the client appends nothing for it.
  */
 export function parseSamplePayload(text) {
-    const payload = parseJsonObject(text);
-    if (payload === null)
+    const envelope = parseSampleEnvelope(text);
+    if (envelope === null)
         return null;
     return {
-        snapshot: parseSnapshot(payload.snapshot),
-        appendedHistory: parseAppendedHistory(payload.appendedHistory),
-        sequence: countOrNull(payload.sequence),
-        sampledAtUsec: finiteNumberOrNull(payload.sampledAtUsec),
+        snapshot: parseEnvelopeSnapshot(envelope.rawSnapshot),
+        appendedHistory: envelope.appendedHistory,
+        sequence: envelope.sequence,
+        sampledAtUsec: envelope.sampledAtUsec,
     };
 }
 
