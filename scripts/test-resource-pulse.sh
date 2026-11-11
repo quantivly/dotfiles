@@ -377,6 +377,85 @@ check "a width change moves the card and the hover label in a BEFORE_REDRAW late
   "$deferred_placement_summary| teardown-step=$teardown_cancels_placement on-destroy=$on_destroy_removes_later" \
   "extension.js:2/2/1 indicator.js:1/1/1 | teardown-step=1 on-destroy=1"
 
+# The top bar asks for a frame only when a graph's columns change by a whole
+# device pixel, and only while the indicator is mapped. The arithmetic is
+# lib/topbarColumns.js, with its rows in gnome-shell/tests/topbarColumns.test.js;
+# the glue runs only inside gnome-shell, so these rows read it. A drawing area's
+# queue_repaint() is neither cheap nor lazy, so indicator.js calls it in exactly
+# one place, behind the decision that compares columns: one call more, anywhere,
+# redraws identical pixels on every tick, as the top bar did before.
+REPAINT_CALL_NEEDLE='queue_repaint('
+REPAINT_DECISION_DECLARATION='_isRepaintNeeded(topbarGraph)'
+# indicator_method_lines <indicator.js path> <declaration>: the method's body,
+# from its declaration line to the closing brace at its indent, each line
+# trimmed. A missing file or method is no lines, so every count below is 0.
+indicator_method_lines() { sed -n "/^    $2 {\$/,/^    }\$/p" "$1" 2>/dev/null | sed 's/^[[:space:]]*//'; }
+# repaint_call_summary <indicator.js path>: how many times the file says
+# queue_repaint(, the trimmed line before each one, and how many lines of the
+# decision method compare columns. An unreadable file is a line of its own.
+repaint_call_summary() {
+  local indicator_path="$1" indicator_text text_without_calls call_count guard_lines comparison_count
+  if [[ ! -r "$indicator_path" ]] || ! indicator_text="$(<"$indicator_path")"; then
+    printf 'cannot read %s' "$indicator_path"
+    return
+  fi
+  # Counted in the text, not by grep -c, which counts lines: two calls on one line are two.
+  text_without_calls="${indicator_text//"$REPAINT_CALL_NEEDLE"/}"
+  call_count=$(( (${#indicator_text} - ${#text_without_calls}) / ${#REPAINT_CALL_NEEDLE} ))
+  guard_lines="$(awk -v needle="$REPAINT_CALL_NEEDLE" '
+    index($0, needle) { sub(/^[ \t]+/, "", previous_line); guards = guards separator previous_line; separator = "|" }
+    { previous_line = $0 }
+    END { print guards }' "$indicator_path")"
+  comparison_count="$(indicator_method_lines "$indicator_path" "$REPAINT_DECISION_DECLARATION" \
+    | grep -c -F 'areColumnsEqual(')"
+  printf 'calls=%s guards=[%s] compares=%s' "$call_count" "$guard_lines" "$comparison_count"
+}
+check "indicator.js calls queue_repaint( in one place, behind the column comparison" \
+  "$(repaint_call_summary "$EXT_DIR/indicator.js")" \
+  "calls=1 guards=[if (this._isRepaintNeeded(topbarGraph))] compares=1"
+# The planted twin, on a copy of the extension: the unguarded call the history
+# listener made before, put back, is found.
+TOPBAR_REPAINT_FIXTURE_DIR="$WIRING_TMP/topbar-repaint-fixture"
+cp -R "$EXT_DIR" "$TOPBAR_REPAINT_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $TOPBAR_REPAINT_FIXTURE_DIR"
+awk '{ print } $0 == "    _onHistoriesChanged() {" { print "        this._cpuGraph.drawingArea.queue_repaint();" }' \
+  "$EXT_DIR/indicator.js" >"$TOPBAR_REPAINT_FIXTURE_DIR/indicator.js" \
+  || fatal "cannot plant an unguarded repaint in $TOPBAR_REPAINT_FIXTURE_DIR/indicator.js"
+check "a planted unguarded queue_repaint( in a copy of indicator.js is found" \
+  "$(repaint_call_summary "$TOPBAR_REPAINT_FIXTURE_DIR/indicator.js")" \
+  "calls=2 guards=[if (this._isRepaintNeeded(topbarGraph))|_onHistoriesChanged() {] compares=1"
+# A repaint skipped while the indicator is unmapped is owed: the decision
+# answers false then and leaves the columns last drawn as they are, and
+# notify::mapped runs the same comparison again, so a graph whose columns
+# changed while it was hidden draws once when it is shown.
+MAPPED_HANDLER_CONNECT="this.connect('notify::mapped', () => this._onMappedChanged());"
+# mapped_repaint_summary <indicator.js path>: how many lines connect
+# notify::mapped to _onMappedChanged, how many lines of that handler ask the
+# changed graphs to repaint, and how many lines of the decision skip while
+# unmapped.
+mapped_repaint_summary() {
+  local indicator_path="$1"
+  printf 'connected=%s draws-there=%s skips-while-unmapped=%s' \
+    "$(grep -c -F "$MAPPED_HANDLER_CONNECT" "$indicator_path" 2>/dev/null)" \
+    "$(indicator_method_lines "$indicator_path" '_onMappedChanged()' \
+      | grep -c -x -F 'this._queueRepaintsOfChangedGraphs();')" \
+    "$(indicator_method_lines "$indicator_path" "$REPAINT_DECISION_DECLARATION" \
+      | grep -c -x -F 'if (this._client === null || !this.mapped)')"
+}
+check "indicator.js connects notify::mapped and draws the owed repaint there" \
+  "$(mapped_repaint_summary "$EXT_DIR/indicator.js")" "connected=1 draws-there=1 skips-while-unmapped=1"
+# The planted twin, on a copy: a notify::mapped handler that only follows the
+# hover label, as it did before, is found.
+TOPBAR_MAPPED_FIXTURE_DIR="$WIRING_TMP/topbar-mapped-fixture"
+cp -R "$EXT_DIR" "$TOPBAR_MAPPED_FIXTURE_DIR" || fatal "cannot copy $EXT_DIR to $TOPBAR_MAPPED_FIXTURE_DIR"
+awk '
+  $0 == "    _onMappedChanged() {" { is_inside_handler = 1 }
+  is_inside_handler && $0 == "        this._queueRepaintsOfChangedGraphs();" { next }
+  $0 == "    }" { is_inside_handler = 0 }
+  { print }' "$EXT_DIR/indicator.js" >"$TOPBAR_MAPPED_FIXTURE_DIR/indicator.js" \
+  || fatal "cannot plant a handler that does not draw in $TOPBAR_MAPPED_FIXTURE_DIR/indicator.js"
+check "a copy of indicator.js whose notify::mapped handler does not draw is found" \
+  "$(mapped_repaint_summary "$TOPBAR_MAPPED_FIXTURE_DIR/indicator.js")" "connected=1 draws-there=0 skips-while-unmapped=1"
+
 # metadata.json, parsed as JSON by gjs (never grepped). Each field is printed
 # on its own prefixed line, so an unreadable or malformed file prints none and
 # every row below fails rather than passes.
@@ -547,9 +626,9 @@ sorted_closure() {
   printf '%sexit=%s' "$(LC_ALL=C sort <<<"$closure_output" | tr '\n' ' ')" "$closure_exit"
 }
 # Read from the import lines of today's tree, by hand: the shell side's
-# eighteen modules and the service side's seventeen, seven of them (constants,
+# nineteen modules and the service side's seventeen, seven of them (constants,
 # errorLog, history, jsonFields, pressure, protocol, teardown) on both.
-EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/visibility.js lib/wiring.js pulseClient.js serviceLink.js '
+EXPECTED_SHELL_CLOSURE='card.js extension.js graph.js indicator.js lib/cardRepaint.js lib/constants.js lib/errorLog.js lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js lib/teardown.js lib/topbarColumns.js lib/visibility.js lib/wiring.js pulseClient.js serviceLink.js '
 EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/jsonFields.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/fileIo.js service/main.js service/sampler.js '
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
@@ -3479,7 +3558,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=724
+EXPECTED_ROWS=733
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
