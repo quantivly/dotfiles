@@ -461,6 +461,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     core for the whole shell, median of three rounds: card covered with idle input 0.326 → 0.075; covered
     with busy input 0.329 → 0.156; card visible with busy input 0.418 → 0.264; major collections a minute
     6 → 1, an idle shell's own rate.
+  - **On the live shell,** read the evening it was deployed (Wi-Fi, battery, a load of 8 to 10): the
+    extension triggers no collection (two traces), costs a third of what it did under a repainting window
+    (1.29 → 0.43), and costs what it did with the card covered or visible (0.37 to 0.56), about twice the
+    nested budgets. gnome-shell forces a collection about every 10 s by itself there, and each Sample that
+    changes the top bar costs the compositor a 3 ms frame. The design's "Measured on the live shell".
   - **No D-Bus proxy object.** `PulseClient` follows the service through a name watch, a signal
     subscription and calls on the shell's shared connection (`serviceLink.js`). A proxy owned only by
     JavaScript, with handlers, made GJS force a full, non-incremental collection 10 s after every Sample:
