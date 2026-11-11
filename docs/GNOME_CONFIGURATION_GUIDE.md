@@ -153,7 +153,8 @@ at once, undimmed, and takes the watch again. `Super+D` reveals it without waiti
 The top bar's graphs are redrawn only when a column changes by a whole device pixel, and only while the
 top bar is shown. The card is drawn through an offscreen texture, so a window drawing over it does not
 repaint it. Whether the card is covered is checked again on window changes, on the covering window's own
-moves, and on every fifteenth sample; only while the service is silent and the card covered does a
+moves, and on a sample: every one while the card is visible, every fifteenth while it is covered. Only
+while the service is silent and the card covered does a
 10-second check run. The budgets, and the request that checks them: [What it costs](#what-it-costs).
 
 **The dropdown.** Clicking the top-bar graphs opens a dropdown holding a second card, live while it is
@@ -459,9 +460,12 @@ scripts/resource-pulse-nested.sh stop
   moment, not against the table. A collections budget broken by one, in one state of one run, can be
   chance (an idle shell makes one or two a minute): run it again.
 - **Why these budgets.** `docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md` has the
-  measurements behind each. Three things cost most, and each count above guards one: a D-Bus proxy object
-  owned only by JavaScript made GJS force a full collection after every Sample; two 2-second timers cost as
-  much as the Sample itself; and the top bar and a covered card were redrawn when no pixel had changed.
+  measurements behind each. Three things cost most: a D-Bus proxy object owned only by JavaScript made GJS
+  force a full collection after every Sample; two 2-second timers cost as much as the Sample itself; and the
+  top bar and a covered card were redrawn when no pixel had changed. The counts above guard the first and
+  the third. No count moves for a timer that draws nothing, so the timers are guarded in the suite below:
+  a row pins every timeout the shell side adds, by file and count, and a new one fails it until it is
+  counted there on purpose.
 - **Not budgeted yet: nothing visible.** With the top bar hidden and the card covered the extension still
   receives Samples, since a card judged covered may still be seen through a translucent window and is kept
   fresh. That state is `perf`'s fourth line; taking it to zero is stage two's.

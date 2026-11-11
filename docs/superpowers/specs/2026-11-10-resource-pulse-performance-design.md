@@ -551,9 +551,21 @@ Each was a point the design left open, or a defect a review or a nested check fo
 - **The replay restarts on every `scenario` request,** also for the word already playing, so "busy" is the
   same input every run and not an offset of the shell's start time.
 - **Timers are guarded by rows in the state table, not by `perf`.** "Budgets" below says `perf` fails on a
-  repeating timer. It does not look for one: no shell-side file may add a timeout of the Sample interval,
-  the extension's one `timeout_add_seconds` must be the fallback's, and the client's only timeout while
-  Samples flow is the watchdog, each pinned by a row with a planted twin.
+  repeating timer. It does not look for one, and no count moves for a timer that draws nothing. One row,
+  with a planted twin, pins every timeout the shell side adds, by file and count (GLib's two calls and
+  GJS's own `setTimeout` and `setInterval`), so a new one fails until it is counted there on purpose. Three
+  more rows say what the known ones are: none of the Sample interval, the extension's one is the fallback's,
+  and the client's only timeout while Samples flow is the watchdog. The whole-branch review found the gap.
+
+### The deploy restarts the sampler once
+
+The plan said a deploy of this work restarts no service, since nothing under `service/` changed. That was
+wrong. `./install`'s refresh step try-restarts a running unit when a module in its import closure changed
+after it started, and this work adds names to `lib/constants.js` (in both services' closures) and to
+`lib/protocol.js` (in the sampler's). So at the deploy the sampler restarts, its histories start again and
+refill within five minutes, and the extension still running shows "no data" for a moment; the cockpit
+service restarts too if it is running. Both changes only add, so nothing else follows. The whole-branch
+review found it. No code was moved to avoid it.
 
 ### Measured after the build
 
@@ -638,7 +650,8 @@ subtracted. % of one core, added by the extension.
 - **What gates a merge.** The counts do: the nested `perf` request fails on a repeating timer, on a paint while
   unmapped, on more than one frame a tick, and on more forced collections than the disabled shell showed in the
   same run. The percentages are reported, not gated. A median more than 0.05 over its budget is raised with the
-  owner before merging.
+  owner before merging. *As built, `perf` does not look for a timer; a row of the state table counts the
+  shell side's timeouts instead. See "Stage one as built".*
 
 ## Testing and the measurement harness
 
@@ -715,6 +728,11 @@ description, so it travels with the merge.
    subscription under a fullscreen window, so a covered card stays fresh. Taking that state to zero needs a
    way to keep the covered card's 30 s repaint fresh without the 2 s Samples: with stage two, from the service
    side (a slow signal for a covered card). See "Stage one as built".
+10. **The glue checks, in the repository** (added 2026-11-11, by the whole-branch review). The shell-side
+    glue cannot run under plain `gjs`; its behaviour was proved by four scripts run in the nested shell
+    (listeners, the watchdog, the top bar's repaints, the cover check with a real window), which live with
+    the measurement tools outside the repository. Bring the cover check in as a nested request when the
+    cockpit adds cards, and teach `perf`'s probe the cockpit's objects.
 
 ## My calls (for the owner to check)
 

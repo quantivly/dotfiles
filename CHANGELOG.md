@@ -121,8 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     changed after it started), with a "cannot tell" ⚠ when that closure cannot be worked out, and one
     for an older unit file (its file changed after it started; the remedy is
     `systemctl --user daemon-reload && systemctl --user try-restart <unit>`). Both are suppressed for
-    a unit that is not running, for the cockpit as for the sampler. Every call it
-    makes is bounded at 3 s. `scripts/resource-pulse-cost.sh` measures gnome-shell, and with
+    a unit that is not running, for the cockpit as for the sampler. Every call it makes is bounded at
+    3 s. `scripts/resource-pulse-cost.sh` measures gnome-shell, and with
     `--service` (anywhere on the line; a leftover word is a usage error) the service; every number and budget is defined in `docs/GNOME_CONFIGURATION_GUIDE.md`.
     `check-timer-health.sh` reports a unit with no `[Install]` as started on demand, not as an arming
     decision.
@@ -454,7 +454,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   garbage collection every 10 seconds.** Stage one of
   `docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md`, built from
   `docs/superpowers/plans/2026-11-11-resource-pulse-performance-stage-one.md`. Nothing under `service/` and
-  no field of `ResourcePulse1` changed, and the look is the same. It takes effect at the next login.
+  no field of `ResourcePulse1` changed, and the look is the same. It takes effect at the next login. The
+  deploy restarts the sampler once, since two shared modules it loads gained names (`lib/constants.js`,
+  `lib/protocol.js`): the graphs' history starts again and refills within five minutes.
   - **Measured,** the shipped extension against this one side by side in the isolated nested shell, % of one
     core for the whole shell, median of three rounds: card covered with idle input 0.326 → 0.075; covered
     with busy input 0.329 → 0.156; card visible with busy input 0.418 → 0.264; major collections a minute
@@ -466,7 +468,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Nothing on a timer while Samples flow.** One watchdog, pushed back by each Sample, replaces the
     client's 2-second stale check, so a silent service shows "no data" 6 s after its last sample, where it
     took 6 to 9. The card's cover is checked on window changes, on the covering window's own moves and
-    workspace, and on every fifteenth Sample; the 2-second re-check timer is gone, and a 10-second check
+    workspace, and on a Sample (every one while the card is visible, every fifteenth while it is
+    covered); the 2-second re-check timer is gone, and a 10-second check
     runs only while the service is silent and the card covered.
   - **Nothing drawn that did not change.** The top bar's graphs redraw only when a column changes by a
     whole device pixel, and only while the top bar is shown. The card is drawn through an offscreen
@@ -474,7 +477,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Sample's snapshot is parsed only when something reads it.
   - **A gate.** `scripts/resource-pulse-nested.sh perf` measures five states in the nested shell and fails
     on count budgets: forced collections, frames, top-bar paints while hidden, the card's offscreen
-    redirect. `start` gains `--gc-log` and `--replay`, and `scenario` chooses the replayed input.
+    redirect. A row of the state table counts every timeout the shell side adds, since no measurement
+    catches a timer that draws nothing. `start` gains `--gc-log` and `--replay`, and `scenario` chooses
+    the replayed input.
     `scripts/resource-pulse-cost.sh` reads CPU from the scheduler's nanosecond counters and gains
     `--tick-median`. The in-shell budget is per state now, in place of the single 0.1%: the guide's "What
     it costs".

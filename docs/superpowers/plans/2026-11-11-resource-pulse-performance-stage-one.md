@@ -24,7 +24,8 @@ compiled sampler) is not in this plan.
 
 - The four deal-breakers are binding: desktop instability; wrong or laggy numbers; cost; upkeep.
 - **No service-side change:** nothing under `service/`, no field of `ResourcePulse1`, no unit file. A deploy of
-  this work restarts no service.
+  this work restarts no service. *(Wrong as built: it restarts the sampler once. See the note under "After the
+  last task".)*
 - **No cockpit file is edited:** `lib/cockpit*.js`, `service/cockpit*.js`, `service/sources/`,
   `systemd/cockpit.service` and the cockpit plans stay as they are.
 - **The shell does no file IO and starts no subprocess;** every D-Bus call is asynchronous with
@@ -581,6 +582,8 @@ Behaviour is unchanged in this task: only what carries the owner, the Samples an
 
 1. A whole-branch review, then the merge and the fast-forward deploy under the owner's standing rule (squash,
    never `--admin`; surface red CI). The deploy restarts no service: nothing under `service/` changed.
+   *Wrong, found by the whole-branch review: the deploy restarts the sampler once, because two shared
+   modules it loads changed. See the design's "Stage one as built".*
 2. The drawing side takes effect at the owner's next login. After it: `gnome-status` shows no older-copy ⚠;
    `scripts/resource-pulse-cost.sh --tick-median 120` on the live shell with the card covered.
 3. The second live reading, with the owner's word and while he is away, using the session's
