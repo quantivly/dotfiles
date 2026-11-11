@@ -495,6 +495,19 @@ the table's `stale_after_minutes`".
   count a conditional link that is absent as in place (`check-links.sh` state `conditional-absent`,
   which does not say whether the link should be there).
 
+**Amended 2026-11-11 (DO-900):** two amendments, from the plan
+`docs/superpowers/plans/2026-11-11-claude-host-without-work-tenant.md`.
+
+- **(H12)** The `LINEAR_API_KEY` row is a person's step only where the profile serves the work tenant
+  or its tenants are unknown; elsewhere it is one information row and the local rc file is not read.
+- **(H13)** A `gh` row reports the expiry of the host's GitHub token from the
+  `github-authentication-token-expiration` response header, reading the token gh resolves by default
+  in the run's own environment: ✓ with the date, ⚠ inside 14 days, after it, and for a value that
+  cannot be read, ✓ 'carries no expiry' for a token that sends none, ⚠ when gh gets no 200 answer (a
+  rejected token included), `·` with no gh on the host, no row where clauth manages accounts.
+  GitHub answers an expired token with 401, so after expiry the row is normally that no-answer ⚠;
+  the dated 'expired on' ⚠ appears only when the host's clock is ahead of GitHub's.
+
 ### D9. The doctor says whether the live config is the declared one
 
 `claude-doctor` gains a "config" section on every host: every declared link is a symlink
@@ -539,6 +552,16 @@ herdr wiring, timer armed). Its gh token is scoped to `ZviBaratz/nanoclaw` only;
 replaces it with one fine-grained `ZviBaratz` token scoped to `nanoclaw`, `dotfiles-local`
 and the personal memory store (Q3), stored the way the current one is, and `host-sync`
 reports its age as it does the Claude token's.
+
+**Amended 2026-11-11:** `scripts/server-bootstrap.sh` requires sudo, so a host without it is
+bootstrapped by hand (`docs/CLAUDE_SETUP.md`, 'A host with no checkout yet'). 'Reports its age' reads
+'reports its expiry' (H13): GitHub exposes no creation date. Which credential reads the overlay,
+whether the host serves a memory store, and whether its login shell and herdr server change in the
+joining step are that host's decisions, recorded with its run, and may be narrower than this
+section: a credential that can write the overlay can change what every other host installs. A
+host's own rules are a user-level rule file linked on that host only, not a variant of a root
+`CLAUDE.md` (D0 and steps 2 and 3 said 'host-root variants'): two conditional links cannot share
+one target under the link checker, and a root file is not read from a worktree outside that root.
 
 ### D12. What stays per host, on purpose
 
@@ -631,6 +654,13 @@ count on remote hosts (DO-666, "seats"); rabota lanes on sol-build (remote-lanes
 - dev and sol-build: `host-sync --check` all ✓; `ssh <host> 'PATH=$HOME/.local/bin:$PATH
   claude-doctor'` clean; a session there shows `zvi-voice`, `rabota`, `run-later`, `herdr`,
   `spawn` in its skills list and the rendered permissions.
+
+  **Amended 2026-11-11:** 'all ✓' reads 'no ✗, and every ⚠ a step the host's run record names': a
+  host with no `agents.slice` unit, an unsigned MCP server or abandoned session scopes carries ⚠
+  rows that `--apply` cannot clear. `claude-doctor` 'clean' reads 'no ✗': on a host whose profile
+  serves no work tenant its Linear section, the herdr launcher and `scripts/verify-tools.sh` still
+  warn that `LINEAR_API_KEY` is missing, since none of the three reads the profile (carried to
+  step 10); the key is not added there.
 - Memory round trip: write a memory in a dev session on a repo both hosts have; within
   one timer tick + one laptop tick the file is in the laptop's store for that repo, and
   vice versa; a deliberate same-file edit on both sides produces the `<name>.<host>.md`
