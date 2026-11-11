@@ -13,7 +13,7 @@
 # machine must change nothing, which is the "no-op" the plan's B1 promises.
 #
 # HERMETIC. Every case builds a fresh fake $HOME that is LEVEL, then breaks one
-# thing. claude, herdr, mise and systemctl are stubs in $HOME/.local/bin (which
+# thing. claude, gh, herdr, mise and systemctl are stubs in $HOME/.local/bin (which
 # host-sync puts first on PATH itself), each recording its calls. git is real,
 # against bare repos served over file://. The npm registry is a file:// JSON. No
 # network, no real ~/.claude, nothing outside mktemp -d.
@@ -158,6 +158,51 @@ STUB
 echo "ssh-agent $*" >>"$HOME/stub/calls"
 STUB
     chmod +x "$b/ssh-add" "$b/ssh-agent"
+    # gh, so no case reaches a real one (/usr/bin/gh on the laptop and on CI). `api --include user
+    # --jq .login` answers in the shape measured on a host: the status line with no CR, the header
+    # lines each ending in CR, a CR-only line, then the login with no CR: stub-login, or what
+    # gh-login holds. The expiry header is sent only when gh-expiry exists, holding its value, under
+    # GitHub's spelling unless gh-header-lowercase exists. gh-status-401: a rejected token's answer as
+    # measured on the laptop (the 401 status line with no CR, headers with the expiry header among
+    # them, then the JSON error body, its lines ending in CR but the last), and exit 1. gh-hang:
+    # nothing for 5 s, then the gh-hang-finished marker and exit 0, so a row can tell a call cut
+    # short from one left to finish; gh-fail: exit 1, nothing. As gh 2.46.0 does (measured), every
+    # header name is wrapped in ESC[1;34m … ESC[m, the status line left plain, when CLICOLOR_FORCE is
+    # set to anything but 0 or GH_FORCE_TTY is set, even though the answer goes to a pipe. NO_COLOR,
+    # which wins over GH_FORCE_TTY on gh and which no row sets, is not modelled.
+    cat >"$b/gh" <<'STUB'
+#!/usr/bin/env bash
+S="$HOME/stub"; echo "gh $*" >>"$S/calls"
+[[ "$*" == "api --include user --jq .login" ]] || exit 0
+if [[ -e "$S/gh-hang" ]]; then sleep 5; : >"$S/gh-hang-finished"; exit 0; fi
+[[ -e "$S/gh-fail" ]] && exit 1
+# One header line as gh prints it: $1 = the name, coloured where colour is forced; $2 = the value.
+print_header() {
+    local header_name_shown="$1"
+    if [[ -n "${CLICOLOR_FORCE:-}" && "$CLICOLOR_FORCE" != 0 || -n "${GH_FORCE_TTY:-}" ]]; then
+        header_name_shown=$'\033[1;34m'"$1"$'\033[m'
+    fi
+    printf '%s: %s\r\n' "$header_name_shown" "$2"
+}
+print_expiry_header() {
+    [[ -e "$S/gh-expiry" ]] || return 0
+    local expiry_header_name="Github-Authentication-Token-Expiration"
+    [[ -e "$S/gh-header-lowercase" ]] && expiry_header_name="${expiry_header_name,,}"
+    print_header "$expiry_header_name" "$(cat "$S/gh-expiry")"
+}
+if [[ -e "$S/gh-status-401" ]]; then
+    printf 'HTTP/2.0 401 Unauthorized\n'
+    print_header Content-Type 'application/json; charset=utf-8'
+    print_expiry_header
+    printf '\r\n{\r\n  "message": "Bad credentials",\r\n  "documentation_url": "https://docs.github.com/rest",\r\n  "status": "401"\r\n}\n'
+    exit 1
+fi
+printf 'HTTP/2.0 200 OK\n'
+print_expiry_header
+answered_login="stub-login"
+[[ -e "$S/gh-login" ]] && answered_login="$(cat "$S/gh-login")"
+printf '\r\n%s\n' "$answered_login"
+STUB
     cat >"$b/herdr" <<'STUB'
 #!/usr/bin/env bash
 S="$HOME/stub"; echo "herdr $*" >>"$S/calls"
@@ -1615,6 +1660,26 @@ has   "no LINEAR_API_KEY on this host: ⚠" "$OUT" "LINEAR_API_KEY is not in thi
 mapfile -t F < <(facts)
 OUT="$(LINEAR_API_KEY=inherited HOME="$H" PATH="/usr/local/bin:/usr/bin:/bin" bash "$SUT" --here --check "${F[@]}" 2>&1)"
 has   "a key in the CALLER's environment does not read as in the file" "$OUT" "LINEAR_API_KEY is not in this host's ~/.zshrc.local"
+# A profile that serves no work tenant expects no Linear key (H12). This profile also leaves the
+# table's memory stores mismatched (a ⚠ and a ✗ under memory), so no row here reads the summary.
+NO_LINEAR_KEY_EXPECTED="· mcp            linear-key: no LINEAR_API_KEY is expected on this host (its profile serves no quantivly tenant)"
+new_case
+echo '{"tenants":["personal"]}' >"$H/.dotfiles-local/hosts/p.json"
+: >"$H/.zshrc.local"
+run_level --check
+has   "no work tenant: · no LINEAR_API_KEY expected, naming the tenant" "$OUT" "$NO_LINEAR_KEY_EXPECTED"
+hasnt "no work tenant: no ⚠ asking for the key" "$OUT" "LINEAR_API_KEY is not in this host's"
+printf 'export LINEAR_API_KEY=%s\n' "$FAKE_KEY" >"$H/.zshrc.local"
+run_level --check
+# The two rows after this one are hasnt rows, which a run that printed nothing would also pass.
+has   "no work tenant, a key in the file: the run reached the MCP rows (· no key expected)" "$OUT" "$NO_LINEAR_KEY_EXPECTED"
+hasnt "no work tenant: a key in ~/.zshrc.local is not reported as set" "$OUT" "LINEAR_API_KEY is set"
+hasnt "no work tenant: the key's value is never printed" "$OUT" "$FAKE_KEY"
+new_case
+: >"$H/.zshrc.local"
+rm -rf "$H/.dotfiles-local"   # the marker stays: a profile named, its tenants unknown
+run_level --check
+has   "tenants unknown: the key is still asked for, ⚠" "$OUT" "⚠ mcp            LINEAR_API_KEY is not in this host's ~/.zshrc.local"
 
 echo "== clones"
 new_case
@@ -2606,6 +2671,101 @@ rm -rf "$H/.config/claude-oauth"; creds login
 run_level --check
 hasnt "no token stored: the /login is the only login, so no write-back row" "$OUT" "is back on this host"
 
+echo "== the GitHub token"
+# gh's own token (H13). GitHub tells nothing about a token but its expiry, as a header on every
+# authenticated answer for a token that expires, so the row reads that header and the login, never
+# the token. A row's date needle is the date of the very string the stub sends, so a second ticking
+# over between the two cannot flip it. Only the two threshold rows assert a day count, and each sits
+# an hour from the boundary, so the seconds a run takes cannot flip it either.
+GH_OK="$(printf '✓ %-14s ' gh)"; GH_OPER="$(printf '⚠ %-14s ' gh)"; GH_INFO="$(printf '· %-14s ' gh)"
+GH_NO_ANSWER="${GH_OPER}gh did not answer for this host's GitHub login"
+GH_EXPIRES_OK="${GH_OK}logged in as stub-login; its token expires on"
+# The stub's expiry header carries the instant $1 (an offset `date -d` reads, '+100 days') as GitHub
+# writes it. Sets GH_EXPIRY to that string and GH_EXPIRY_DATE to its date, as the rows print it.
+set_gh_expiry() {
+    GH_EXPIRY="$(date -u -d "$1" '+%F %T UTC')"
+    echo "$GH_EXPIRY" >"$H/stub/gh-expiry"
+    GH_EXPIRY_DATE="${GH_EXPIRY%% *}"
+}
+new_case
+run_level --check
+has   "gh: a token with no expiry header is ✓, naming the login" "$OUT" "${GH_OK}logged in as stub-login; its token carries no expiry"
+has   "gh: gh api user is called, headers included" "$(calls)" "gh api --include user --jq .login"
+new_case
+set_gh_expiry '+100 days'
+run_level --check
+has   "gh: a token 100 days from expiry is ✓, with its date" "$OUT" "$GH_EXPIRES_OK $GH_EXPIRY_DATE"
+# A guard, not one rule's pin: each value the row prints has two defences against a CR, the strip
+# and its own (the login check for the login, the date reformat for the date), so no single change
+# fails it. The strip itself is pinned by G7 and G14 (mutant m4).
+hasnt "gh: guard (no single change fails it): no CR of gh's answer reaches a row" "$OUT" $'\r'
+new_case
+set_gh_expiry '+5 days'
+run_level --check
+has   "gh: a token 5 days from expiry is ⚠, with its date" "$OUT" "${GH_OPER}the GitHub token of stub-login expires on $GH_EXPIRY_DATE"
+has   "gh: a token near expiry is counted as a person's step" "$OUT" "1 step(s) need a person"
+check "gh: a token near expiry is not drift (--check exits 0)" "$RC" 0
+new_case
+set_gh_expiry '-1 day'
+run_level --check
+has   "gh: a token that expired yesterday is ⚠ expired, with its date" "$OUT" "${GH_OPER}the GitHub token of stub-login expired on $GH_EXPIRY_DATE"
+new_case
+echo 'soon; rm x' >"$H/stub/gh-expiry"
+run_level --check
+has   "gh: an expiry date -d cannot parse is ⚠, shown with its unsafe characters masked" "$OUT" \
+    "${GH_OPER}logged in as stub-login, but its token's expiry cannot be read (soon? rm x)"
+new_case
+touch "$H/stub/gh-fail"
+run_level --check
+has   "gh: gh api failing is ⚠, no answer" "$OUT" "$GH_NO_ANSWER"
+new_case
+touch "$H/stub/gh-hang"
+HOST_SYNC_GH_TIMEOUT_S=1 run_level --check
+has   "gh: gh api hanging is ⚠, no answer, once the timeout ends it" "$OUT" "$GH_NO_ANSWER"
+check "gh: a hanging gh api is cut short at the timeout, never left to finish" "$(present "$H/stub/gh-hang-finished")" gone
+new_case
+set_gh_expiry '+100 days'; touch "$H/stub/gh-header-lowercase"
+run_level --check
+has   "gh: the expiry header's name is matched whatever its case" "$OUT" "$GH_EXPIRES_OK $GH_EXPIRY_DATE"
+new_case
+mkdir "$H/.clauth"
+run_level --check
+check "gh: no row where clauth manages the accounts (gh is routed per directory there)" "$(area_rows gh)" 0
+hasnt "gh: gh api is not called where clauth manages the accounts" "$(calls)" "gh api"
+new_case
+HOST_SYNC_GH_BIN=gh-not-installed run_level --check
+has   "gh: no gh on the host is ·, said so" "$OUT" "${GH_INFO}no gh on this host"
+new_case
+: >"$H/stub/gh-expiry"
+run_level --check
+has   "gh: an expiry header with an empty value is ⚠, cannot be read, never read as today" "$OUT" \
+    "${GH_OPER}logged in as stub-login, but its token's expiry cannot be read ()"
+# A rejected token's answer is not empty, and carries the expiry header like any other.
+new_case
+set_gh_expiry '+100 days'; touch "$H/stub/gh-status-401"
+run_level --check
+has   "gh: a 401 answer is ⚠, whatever headers it carries" "$OUT" "$GH_NO_ANSWER"
+# The warning threshold from both sides. A single relative unit, which GNU and uutils date both read.
+new_case
+set_gh_expiry '+337 hours'
+run_level --check
+has   "gh: a token 14 days and an hour from expiry is ✓" "$OUT" "$GH_EXPIRES_OK $GH_EXPIRY_DATE (14 day(s))"
+new_case
+set_gh_expiry '+335 hours'
+run_level --check
+has   "gh: a token an hour under 14 days from expiry is ⚠" "$OUT" \
+    "${GH_OPER}the GitHub token of stub-login expires on $GH_EXPIRY_DATE, in 13 day(s)"
+new_case
+echo 'bad login;x' >"$H/stub/gh-login"
+run_level --check
+has   "gh: a login that is not a GitHub login is shown as ?" "$OUT" "${GH_OK}logged in as ?; its token carries no expiry"
+# A caller's shell, or a host's sshd or ~/.zshenv, can export a variable that forces gh's colour; a
+# coloured header name would read as no expiry header, and the row as ✓ "carries no expiry".
+new_case
+set_gh_expiry '+100 days'
+CLICOLOR_FORCE=1 run_level --check
+has   "gh: a caller forcing colour does not hide the expiry header" "$OUT" "$GH_EXPIRES_OK $GH_EXPIRY_DATE"
+
 echo "== claude_procs reads no environment into bash (F11)"
 new_case
 # The running process carries a SECOND fake token, which only the /proc scan could ever see.
@@ -3011,7 +3171,7 @@ env -i HOME="$H" USER=t PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$C/run" "$LAUNCH" 
 check "launcher through a dangling link: no token" "$(cat "$C/server-env")" no
 
 printf '\n'
-EXPECTED_ROWS=649
+EXPECTED_ROWS=677
 if (( PASS + FAIL != EXPECTED_ROWS )); then
     printf '\033[1;31mROW COUNT\033[0m: expected %d rows, %d ran — a check vanished or was added without updating EXPECTED_ROWS\n' \
         "$EXPECTED_ROWS" "$((PASS + FAIL))" >&2

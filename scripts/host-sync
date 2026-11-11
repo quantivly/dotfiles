@@ -44,8 +44,9 @@
 # WHAT IT WILL NOT DO, AND REPORTS INSTEAD (⚠ rows, for the operator):
 #   - sign in to an OAuth MCP server (Slack, Notion). That is an interactive
 #     `/mcp` on dev, and no credential passes through here.
-#   - put LINEAR_API_KEY on dev. It is checked by name only, and its value is
-#     never read out.
+#   - put LINEAR_API_KEY on a host whose profile serves the work tenant, or whose
+#     tenants are not known yet (no other host is asked for it). It is checked by
+#     name only, and its value is never read out.
 #   - move a dotfiles checkout that is not on main, has diverged, or has local
 #     edits to a file origin/main also changes.
 #   - replace a herdr-draft that is LINKED from a local checkout, or touch a
@@ -86,7 +87,9 @@
 # overlay, and is then kept on origin/main exactly as ~/.dotfiles is. Without it, no overlay row
 # runs. The ~/quantivly clones are skipped only when the tenants are known and leave out the work
 # tenant: a host whose overlay is not cloned yet goes on fetching them. Where clauth manages the
-# Claude accounts (~/.clauth), the long-lived-token rows do not apply (H9). With a profile,
+# Claude accounts (~/.clauth), the long-lived-token rows do not apply (H9), nor does the gh row, which
+# elsewhere reports when gh's GitHub token expires, from the one header GitHub sends for it, never the
+# token, and asks a person for a new one 14 days ahead (H13). With a profile,
 # settings.json is the renderer's (scripts/claude-settings-render.sh); on every host, the links both
 # checkouts declare are checked by scripts/check-links.sh (H8). Where the overlay carries the memory
 # store table, the stores that serve the profile's tenants are cloned and the memory sync's timer is
@@ -115,7 +118,8 @@
 # HOST_SYNC_GITHUB_BASE), CLAUDE_SETTINGS_RENDER_MARKER (the renderer's own name for the profile
 # marker), CLAUDE_MEMORY_STORES_ROOT and CLAUDE_MEMORY_CONFIG (the memory scripts' own names for where
 # the stores are checked out and for their table), HOST_SYNC_NO_SCOPE=1 (skip the systemd-run wrapper), HOST_SYNC_SSH (the ssh command),
-# HOST_SYNC_PROC (/proc), HOST_SYNC_TOKEN_WARN_D.
+# HOST_SYNC_PROC (/proc), HOST_SYNC_TOKEN_WARN_D, HOST_SYNC_GH_BIN (the gh command),
+# HOST_SYNC_GH_TIMEOUT_S, HOST_SYNC_GH_TOKEN_WARN_D.
 
 set -uo pipefail
 
@@ -153,6 +157,22 @@ SCOPE_MIN_MB="${HOST_SYNC_SCOPE_MIN_MB:-200}"
 # A setup-token token lives a year (code.claude.com/docs/en/authentication). Warn a month ahead.
 TOKEN_LIFE_D=365
 TOKEN_WARN_D="${HOST_SYNC_TOKEN_WARN_D:-335}"
+# The GitHub token gh holds (H13). GitHub exposes no creation date, only an expiry: a token that
+# expires carries GH_EXPIRY_HEADER (its name compared case-insensitively) on every authenticated
+# answer. One `gh api user` call, bounded by GH_API_TIMEOUT_SECONDS, reads it; warn two weeks ahead.
+GH_BIN="${HOST_SYNC_GH_BIN:-gh}"
+GH_API_TIMEOUT_SECONDS="${HOST_SYNC_GH_TIMEOUT_S:-30}"
+GH_TOKEN_WARN_DAYS="${HOST_SYNC_GH_TOKEN_WARN_D:-14}"
+GH_EXPIRY_HEADER='github-authentication-token-expiration'
+SECONDS_PER_DAY=86400
+# The status line of an answer gh got (`gh api --include` prints it first), a header's value after
+# its colon (captured without the spaces and tabs around it), a GitHub login, an instant as
+# `date +%s` prints it, and a character of an unreadable expiry a row shows as ? (a glob).
+GH_STATUS_OK_RE='^HTTP/[0-9.]+ 200'
+HEADER_VALUE_RE='^[[:blank:]]*(.*[^[:blank:]])?[[:blank:]]*$'
+GITHUB_LOGIN_RE='^[A-Za-z0-9-]+$'
+EPOCH_SECONDS_RE='^-?[0-9]+$'
+UNSHOWN_EXPIRY_CHAR='[^A-Za-z0-9 :+-]'
 PROC="${HOST_SYNC_PROC:-/proc}"
 
 # The directory the armed / disarmed markers live in. The daily timer's marker is what makes
@@ -829,6 +849,86 @@ here_auth() {
         row oper auth "$w of $n Claude process(es) started without the token and still refresh the shared /login; restart them when idle"
     fi
     here_login_back
+}
+
+# The GitHub token gh holds on this host (H13), from the one answer `gh api user` gives: its status
+# line, the expiry header and the login, never the token, its file or `gh auth`. The token is the
+# credential gh resolves in this run's own environment, the one the run's own HTTPS fetches use too
+# (git's credential helper is gh). A GitHub token variable the caller exported outranks gh's stored
+# login; the timer's run and the laptop-driven run carry none, so there it is the stored one. The
+# call clears CLICOLOR_FORCE and GH_FORCE_TTY, which make gh colour the header names it prints. Takes
+# no arguments; reads CLAUTH_DIR and the GH_* settings; prints at most one row, in area gh; sets
+# nothing; returns 0.
+here_gh_token() {
+    local answer status_line line last_line='' line_number=0 in_header_block=1 header_name
+    local login expiry='' has_expiry_header=0 expiry_s now_s expiry_date days_left expiry_shown
+    # Where clauth manages the accounts, gh is routed per directory (H9's reason), so no one token
+    # is this host's, and gh is not asked.
+    [[ -d "$CLAUTH_DIR" ]] && return 0
+    if ! command -v "$GH_BIN" >/dev/null 2>&1; then
+        row info gh "no gh on this host"
+        return 0
+    fi
+    # The call's exit status is deliberately not read: the status line decides. A 200 proves GitHub
+    # accepted the token, and gh prints the status line and every header before it reads the body,
+    # so a body that fails or times out afterwards leaves the expiry right and the login shown as ?.
+    # Reading the exit status would call an accepted token "missing, revoked or expired".
+    # gh wraps every header NAME in colour escapes, even into a pipe, when CLICOLOR_FORCE (anything
+    # but 0) or GH_FORCE_TTY forces it, and a coloured name is not the header this row looks for:
+    # the expiry would read as absent. So both are cleared for this one call.
+    answer="$(cd "$HOME" && timeout "$GH_API_TIMEOUT_SECONDS" env -u CLICOLOR_FORCE -u GH_FORCE_TTY \
+        "$GH_BIN" api --include user --jq .login 2>/dev/null </dev/null)"
+    status_line="${answer%%$'\n'*}"
+    if [[ ! "$status_line" =~ $GH_STATUS_OK_RE ]]; then
+        # GitHub answers an expired token with 401, so this, not the dated row below, is what a
+        # person sees after expiry; a rate limit, an outage or a dead network land here too.
+        row oper gh "gh did not answer for this host's GitHub login (gh api user): its token may be missing, revoked or expired, or GitHub could not be reached; for an expired token, issue a new one and store it with gh auth login --with-token"
+        return 0
+    fi
+    # Over HTTP/2 gh ends every header line, and the empty line after them, with a CR.
+    answer="${answer//$'\r'/}"
+    # The header block runs from the line after the status line to the first empty line; --jq
+    # leaves the login alone on the answer's last non-empty line.
+    while IFS= read -r line; do
+        line_number=$((line_number + 1))
+        [[ -n "$line" ]] && last_line="$line"
+        (( line_number == 1 || ! in_header_block )) && continue
+        if [[ -z "$line" ]]; then
+            in_header_block=0
+        elif [[ "$line" == *:* ]]; then
+            header_name="${line%%:*}"
+            [[ "${header_name,,}" == "$GH_EXPIRY_HEADER" ]] || continue
+            has_expiry_header=1
+            # A CR is not a blank, so only the strip above removes one.
+            [[ "${line#*:}" =~ $HEADER_VALUE_RE ]] && expiry="${BASH_REMATCH[1]:-}"
+        fi
+    done <<<"$answer"
+    login="$last_line"
+    [[ "$login" =~ $GITHUB_LOGIN_RE ]] || login='?'
+    if (( ! has_expiry_header )); then
+        row ok gh "logged in as $login; its token carries no expiry"
+        return 0
+    fi
+    # An empty value is tested first: both GNU and uutils date read an empty string as today.
+    if [[ -z "$expiry" ]] || ! expiry_s="$(TZ=UTC date -d "$expiry" +%s 2>/dev/null)" ||
+        [[ ! "$expiry_s" =~ $EPOCH_SECONDS_RE ]]; then
+        # Unquoted, so the constant is a glob: every character outside its set becomes ?.
+        expiry_shown="${expiry//$UNSHOWN_EXPIRY_CHAR/?}"
+        row oper gh "logged in as $login, but its token's expiry cannot be read ($expiry_shown)"
+        return 0
+    fi
+    now_s="$(date +%s)"
+    expiry_date="$(TZ=UTC date -d "@$expiry_s" +%F)"
+    if (( expiry_s <= now_s )); then
+        row oper gh "the GitHub token of $login expired on $expiry_date: issue a new one and store it with gh auth login --with-token"
+        return 0
+    fi
+    days_left=$(( (expiry_s - now_s) / SECONDS_PER_DAY ))
+    if (( days_left < GH_TOKEN_WARN_DAYS )); then
+        row oper gh "the GitHub token of $login expires on $expiry_date, in $days_left day(s): regenerate it on GitHub and store it with gh auth login --with-token"
+    else
+        row ok gh "logged in as $login; its token expires on $expiry_date ($days_left day(s))"
+    fi
 }
 
 server_version() { "$HERDR" status server 2>/dev/null </dev/null | awk '$1=="version:"{print $2; exit}'; }
@@ -1610,6 +1710,10 @@ here_plugins() {
     done < <(declared_plugins)
 }
 
+# The MCP rows: the slack and notion sign-ins, then LINEAR_API_KEY by name. Takes no arguments;
+# reads NO_MCP, the live settings, WORK_TENANT and the profile's tenants (read_profile); runs
+# `claude mcp list`, and, only where the Linear key is expected, sources ~/.zshrc.local in a child
+# zsh whose output is discarded, to test the key by name; sets nothing; returns 0.
 here_mcp() {
     local out srv line
     (( NO_MCP )) && return 0
@@ -1629,6 +1733,13 @@ here_mcp() {
             *) row oper mcp "$srv failed to connect: ${line##* - }" ;;
         esac
     done
+    # linear-key serves the work tenant's Linear, so a profile known to leave that tenant out
+    # expects no key (H12), and ~/.zshrc.local is not even read for one. Unknown tenants keep
+    # the check below, as they keep the work clones.
+    if tenants_exclude "$WORK_TENANT"; then
+        row info mcp "linear-key: no LINEAR_API_KEY is expected on this host (its profile serves no $WORK_TENANT tenant)"
+        return 0
+    fi
     # Checked whether or not linear-key is enabled yet: it is a step for a person, and
     # they should see it before --apply rather than after.
     # linear-key sends LINEAR_API_KEY from the session environment. On dev that comes from
@@ -2300,6 +2411,7 @@ here_rows() {
     here_timer
     here_claude
     here_auth
+    here_gh_token
     here_agent
     here_herdr
     here_draft
