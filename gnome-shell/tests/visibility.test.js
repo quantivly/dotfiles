@@ -461,12 +461,58 @@ test('visibility: rectangles overlap only when they share area: touching along a
     });
 });
 
-test('visibility: a fullscreen primary monitor covers the card even with no window over it; otherwise the windows ' +
+test('visibility: a fullscreen monitor covers the card on it even with no window over it; otherwise the windows ' +
     'decide', () => {
-    const isCovered = (isPrimaryMonitorInFullscreen, windowRects) =>
-        visibilityModule.isCardCovered({isPrimaryMonitorInFullscreen, cardRect: CARD_RECT, windowRects});
+    const isCovered = (isMonitorInFullscreen, windowRects) =>
+        visibilityModule.isCardCovered({isMonitorInFullscreen, cardRect: CARD_RECT, windowRects});
     assertEqual([isCovered(true, []), isCovered(false, []), isCovered(false, [MAXIMIZED_WINDOW_RECT])],
         [true, false, true]);
+});
+
+test('visibility: every drawn card is checked on its own (cardsCover): a card one window contains is covered, one ' +
+    'only partly under a window is visible; the windows followed are those containing any card, once each, in ' +
+    'order; a fullscreen monitor covers every card', () => {
+    const neighbourCardRect = {...CARD_RECT, y: CARD_RECT.y + CARD_RECT.height + NEIGHBOUR_WINDOW_SIZE_PX};
+    const overFirstCardRect = {...CARD_RECT};
+    const overBothCardsRect = {x: CARD_RECT.x, y: CARD_RECT.y, width: CARD_RECT.width,
+        height: neighbourCardRect.y + neighbourCardRect.height - CARD_RECT.y};
+    const partlyOverNeighbourRect = {...neighbourCardRect, width: neighbourCardRect.width - ONE_PIXEL};
+    const cards = [{cardId: 'system', rect: CARD_RECT}, {cardId: 'apps', rect: neighbourCardRect}];
+    const cover = (isMonitorInFullscreen, windowRects) =>
+        visibilityModule.cardsCover({cards, isMonitorInFullscreen, windowRects});
+    assertEqual({
+        firstCovered: cover(false, [partlyOverNeighbourRect, overFirstCardRect]),
+        bothUnderOneWindow: cover(false, [overBothCardsRect, overFirstCardRect]),
+        noWindows: cover(false, []),
+        fullscreen: cover(true, [overFirstCardRect]),
+    }, {
+        firstCovered: {isEveryCardCovered: false, coveredCardIds: ['system'], visibleCardIds: ['apps'],
+            coveringWindowIndexes: [1]},
+        bothUnderOneWindow: {isEveryCardCovered: true, coveredCardIds: ['system', 'apps'], visibleCardIds: [],
+            coveringWindowIndexes: [0, 1]},
+        noWindows: {isEveryCardCovered: false, coveredCardIds: [], visibleCardIds: ['system', 'apps'],
+            coveringWindowIndexes: []},
+        fullscreen: {isEveryCardCovered: true, coveredCardIds: ['system', 'apps'], visibleCardIds: [],
+            coveringWindowIndexes: [0]},
+    });
+});
+
+test('visibility: with no card drawn (a layout naming none this release knows) every card counts as covered, so ' +
+    'nothing is checked on every tick and no watch is held for it', () =>
+    assertEqual(visibilityModule.cardsCover({cards: [], isMonitorInFullscreen: false, windowRects: []}), {
+        isEveryCardCovered: true, coveredCardIds: [], visibleCardIds: [], coveringWindowIndexes: [],
+    }));
+
+test('visibility: a card newly covered is stamped as painted now (its freeze), one still covered keeps its stamp, ' +
+    'and a revealed card loses its stamp (frozenPaintStamps)', () => {
+    const systemPaintedAtUsec = 7 * USEC_PER_SECOND;
+    const appsPaintedAtUsec = 9 * USEC_PER_SECOND;
+    const nowUsec = 40 * USEC_PER_SECOND;
+    assertEqual(visibilityModule.frozenPaintStamps({
+        stampsByCardId: {system: systemPaintedAtUsec, apps: appsPaintedAtUsec},
+        coveredCardIds: ['system', 'sessions'],
+        nowUsec,
+    }), {system: systemPaintedAtUsec, sessions: nowUsec});
 });
 
 test('card repaint: an unfrozen card renders every snapshot, and its first render repaints the memory bar and all ' +

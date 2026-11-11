@@ -607,7 +607,8 @@ test('cockpit client on a private bus: one Changed naming mounts becomes one sou
             didArrive, isRoundTripDone, eventsAfter: events.slice(eventCountBefore),
             mounts: client.sourcesByName.mounts,
         }, {
-            didArrive: true, isRoundTripDone: true, eventsAfter: [{type: 'sources', names: ['mounts']}],
+            didArrive: true, isRoundTripDone: true,
+            eventsAfter: [{type: 'sources', names: ['mounts'], cause: 'changed'}],
             mounts: RESAMPLED_MOUNTS_SOURCE,
         });
     }));
@@ -738,8 +739,9 @@ test('cockpit client on a private bus: with the subscription not wanted GetState
                 isLive: true, isSubscribedWhileUnwanted: false, hasControlSeenChange: true, eventsWhileUnwanted: [],
                 isChangedAfterStateSeen: true, isNextChangedSeen: true, isSubscribedWhileWanted: true,
                 eventsAfterChanges: [
-                    {type: 'sources', names: ['mounts']}, {type: 'sources', names: ['network']},
-                    {type: 'sources', names: ['sessions']},
+                    {type: 'sources', names: ['mounts'], cause: 'read'},
+                    {type: 'sources', names: ['network'], cause: 'changed'},
+                    {type: 'sources', names: ['sessions'], cause: 'changed'},
                 ],
                 sourcesByName: {
                     sessions: RESAMPLED_SESSIONS_SOURCE, network: RESAMPLED_NETWORK_SOURCE,

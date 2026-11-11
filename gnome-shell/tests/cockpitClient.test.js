@@ -50,6 +50,10 @@ const STARTING = 'starting';
 const SKIPPED = 'skipped';
 const LIVE = 'live';
 const VANISHED = 'vanished';
+/** CockpitSourcesCause's values, written out: what brought a sources event. */
+const READ = 'read';
+const CHANGED = 'changed';
+const PULL = 'pull';
 const FOCUSABLE_SESSION_ID = 'wL:p1';
 /** The D-Bus error systemd answers for a unit it has not loaded, or has no file for. */
 const NO_SUCH_UNIT_ERROR_NAME = 'org.freedesktop.systemd1.NoSuchUnit';
@@ -591,7 +595,7 @@ test('cockpitClient: start() calls StartUnit; the name appearing calls GetState,
         stateBeforeOwner: STARTING, stateWhileAsking: STARTING, state: LIVE,
         events: [
             {type: 'state', state: LIVE}, {type: 'layout', layout: LAYOUT, configError: null},
-            {type: 'sources', names: ['sessions', 'network', 'mounts']},
+            {type: 'sources', names: ['sessions', 'network', 'mounts'], cause: READ},
         ],
         layout: LAYOUT, configError: null, sourcesByName: SOURCES, startUnitConnections: [FAKE_CONNECTION],
         calledMethodNames: [GET_STATE], pending: [],
@@ -740,7 +744,7 @@ test('cockpitClient: a Changed carrying mounts alone tells one sources event nam
     const {client, link, events} = makeLiveClientFixture();
     emitChanged(link, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
     assertEqual({events, sourcesByName: client.sourcesByName}, {
-        events: [{type: 'sources', names: ['mounts']}],
+        events: [{type: 'sources', names: ['mounts'], cause: CHANGED}],
         sourcesByName: {...SOURCES, mounts: RESAMPLED_MOUNTS_SOURCE},
     });
 });
@@ -787,6 +791,32 @@ test('cockpitClient: a GetState that fails is logged and leaves it STARTING; the
     });
 });
 
+test('cockpitClient: a sources event says what brought it (CockpitSourcesCause, frozen): read for a state the client ' +
+    'asked for of itself (here the one an early Changed asked for), changed for a Changed, pull for a pull\'s ' +
+    'answer', async () => {
+    const {client, clock, link, events} = makeClientFixture({isSubscriptionWanted: true});
+    link.fail(GET_STATE, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached'));
+    emitChanged(link, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
+    answerState(link);
+    emitChanged(link, {sources: {network: {...NETWORK_SOURCE, sampledAtUsec: RESAMPLED_AT_USEC}}});
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    const pullPromise = client.pullIfSuspicious('mounts');
+    answerState(link);
+    await valueOnceSettled(pullPromise);
+    const {CockpitSourcesCause} = constantsModule;
+    assertEqual({
+        causes: CockpitSourcesCause, isFrozen: Object.isFrozen(CockpitSourcesCause),
+        sourcesEvents: events.filter(event => event.type === 'sources'),
+    }, {
+        causes: {READ, CHANGED, PULL}, isFrozen: true,
+        sourcesEvents: [
+            {type: 'sources', names: ['sessions', 'network', 'mounts'], cause: READ},
+            {type: 'sources', names: ['network'], cause: CHANGED},
+            {type: 'sources', names: ['network', 'mounts'], cause: PULL},
+        ],
+    });
+});
+
 test('cockpitClient: pullIfSuspicious(\'mounts\') (a 30 s interval) calls GetState at 100 s, not again at 110 s, ' +
     'and again at 131 s', async () => {
     const {client, clock, link} = makeLiveClientFixture();
@@ -824,7 +854,7 @@ test('cockpitClient: a source past three intervals is suspect but not stale; a p
         afterFresherStamp: client.sourceFreshness('mounts').isStale,
     }, {
         beforePull: false, beforePullShouldPull: true, pullResult: {pulled: true}, afterSameStamp: true,
-        eventsAfterSameStamp: [{type: 'sources', names: ['mounts']}], afterFresherStamp: false,
+        eventsAfterSameStamp: [{type: 'sources', names: ['mounts'], cause: PULL}], afterFresherStamp: false,
     });
 });
 
@@ -853,7 +883,7 @@ test('cockpitClient: a pull whose GetState fails completes the pull (D6): a serv
     // Without the reset, the answered pull's completion (S+162 s) is later than the fresh stamp, and this reads stale.
     clock.nowRealUsec = usecAfter(freshSampledAtUsec, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
     const atNextSuspicion = client.sourceFreshness('mounts');
-    const mountsEvent = {type: 'sources', names: ['mounts']};
+    const mountsEvent = {type: 'sources', names: ['mounts'], cause: PULL};
     assertEqual({
         pullResults, freshnessAfterEachPull, atNextSuspicion, state: client.state,
         pullStateCallCount: link.callsOf(GET_STATE).length - stateCallsBeforePulls, events,
@@ -945,7 +975,8 @@ test('cockpitClient: pulls for two sources made while one GetState is in flight 
             network: client.sourceFreshness('network').isStale},
     }, {
         pullStateCallCount: 1, beforeAnswer: [UNSETTLED, UNSETTLED], afterAnswer: [{pulled: true}, {pulled: true}],
-        events: [{type: 'sources', names: ['network', 'mounts']}], isStaleByName: {mounts: true, network: true},
+        events: [{type: 'sources', names: ['network', 'mounts'], cause: PULL}],
+        isStaleByName: {mounts: true, network: true},
     });
 });
 
@@ -982,7 +1013,7 @@ test('cockpitClient: the owner leaving while a pull\'s GetState is in flight com
     }, {
         beforeVanish: UNSETTLED, afterVanish: {pulled: true},
         freshness: {isStale: true, shouldPull: false, ageSeconds: 100},
-        events: [{type: 'state', state: VANISHED}, {type: 'sources', names: ['mounts']}],
+        events: [{type: 'state', state: VANISHED}, {type: 'sources', names: ['mounts'], cause: PULL}],
     });
 });
 
@@ -1022,8 +1053,8 @@ test('cockpitClient: once VANISHED, a suspect source\'s pull asks nobody and com
         pullResult: {pulled: true}, isStaleWhileGone: true, stateCallsWhileGone: 1, state: LIVE,
         isStaleAfterReturn: false,
         events: [
-            {type: 'state', state: VANISHED}, {type: 'sources', names: ['mounts']}, {type: 'state', state: LIVE},
-            {type: 'sources', names: ['mounts']},
+            {type: 'state', state: VANISHED}, {type: 'sources', names: ['mounts'], cause: PULL},
+            {type: 'state', state: LIVE}, {type: 'sources', names: ['mounts'], cause: READ},
         ],
     });
 });
@@ -1166,7 +1197,9 @@ test('cockpitClient: wanting the subscription while the service has an owner sub
     emitChanged(link, {sources: {network: {...NETWORK_SOURCE, sampledAtUsec: RESAMPLED_AT_USEC}}});
     assertEqual({actionsOnWant, isSubscribed: link.isSubscribed, events}, {
         actionsOnWant: [SUBSCRIBE, GET_STATE], isSubscribed: true,
-        events: [{type: 'sources', names: ['mounts']}, {type: 'sources', names: ['network']}],
+        events: [
+            {type: 'sources', names: ['mounts'], cause: READ}, {type: 'sources', names: ['network'], cause: CHANGED},
+        ],
     });
 });
 
@@ -1202,7 +1235,7 @@ test('cockpitClient: unwanting the subscription unsubscribes, and a GetState sti
     }, {
         isSubscribedAfterUnwant: false, stateAfterInFlightAnswer: LIVE, mountsWhileUnsubscribed: MOUNTS_SOURCE,
         actions: [SUBSCRIBE, GET_STATE, UNSUBSCRIBE, GET_STATE, SUBSCRIBE, GET_STATE],
-        eventsOnReturn: [{type: 'sources', names: ['mounts']}], mountsOnReturn: RESAMPLED_MOUNTS_SOURCE,
+        eventsOnReturn: [{type: 'sources', names: ['mounts'], cause: READ}], mountsOnReturn: RESAMPLED_MOUNTS_SOURCE,
     });
 });
 
@@ -1252,7 +1285,7 @@ test('cockpitClient: wanting the subscription while a pull\'s GetState is in fli
     }, {
         actionsFromPull: [GET_STATE, SUBSCRIBE, GET_STATE], eventsAfterSupersededAnswer: [],
         isStaleAfterSupersededAnswer: false, pullAfterSupersededAnswer: UNSETTLED,
-        eventsAfterFreshAnswer: [{type: 'sources', names: ['mounts']}], isStaleAfterFreshAnswer: true,
+        eventsAfterFreshAnswer: [{type: 'sources', names: ['mounts'], cause: READ}], isStaleAfterFreshAnswer: true,
         pullAfterFreshAnswer: {pulled: true},
     });
 });

@@ -474,10 +474,10 @@ export default class ResourcePulseExtension extends Extension {
             return {isCovered: false, coveringWindows: []};
         const cardRect = this._cardRectOnStage();
         const {metaWindows, frameRects: windowRects} = this._windowsThatCanCoverCard(primaryMonitor);
-        const isPrimaryMonitorInFullscreen = primaryMonitor.inFullscreen;
+        const isMonitorInFullscreen = primaryMonitor.inFullscreen;
         const coveringIndexes = indexesOfRectsCoveringCard({cardRect, windowRects});
         return {
-            isCovered: isCardCovered({isPrimaryMonitorInFullscreen, cardRect, windowRects}),
+            isCovered: isCardCovered({isMonitorInFullscreen, cardRect, windowRects}),
             coveringWindows: coveringIndexes.map(windowIndex => metaWindows[windowIndex]),
         };
     }

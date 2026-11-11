@@ -188,12 +188,25 @@ export const CockpitClientState = Object.freeze({
  * The `type` of each event the cockpit client tells its listeners:
  * - STATE: its CockpitClientState changed (`{type, state}`);
  * - LAYOUT: the layout or the config error changed (`{type, layout, configError}`);
- * - SOURCES: these sources changed, or a pull settled their freshness (`{type, names}`).
+ * - SOURCES: these sources changed, or a pull settled their freshness (`{type, names, cause}`, cause a
+ *   CockpitSourcesCause).
  */
 export const CockpitClientEventType = Object.freeze({
     STATE: 'state',
     LAYOUT: 'layout',
     SOURCES: 'sources',
+});
+/**
+ * What brought a cockpit client's SOURCES event (its `cause`), so the extension can pace what it draws (ruling D20):
+ * - READ: a GetState the client asked for of itself: an owner's appearance, the subscription becoming wanted (a
+ *   reveal), or a Changed that came before any state; pulls that joined it are told with it;
+ * - CHANGED: a Changed signal;
+ * - PULL: a pull's GetState (pullIfSuspicious), answered or failed, or completed at once (no owner, or the owner left).
+ */
+export const CockpitSourcesCause = Object.freeze({
+    READ: 'read',
+    CHANGED: 'changed',
+    PULL: 'pull',
 });
 /**
  * Longest name, in characters, a cockpit source publishes (a session slug or branch, a workspace label, an account, a
@@ -310,6 +323,24 @@ export const COCKPIT_GRID_MIN_SCALE = 0.5;
 export const COCKPIT_GRID_MAX_SCALE = 2;
 /** The card ids the cockpit draws; any other id in the layout still gets a cell, drawn as a placeholder. */
 export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'sessions'];
+/** The system card's id: the v2 card's cell. With no cockpit layout the v2 card, top right, is checked under it. */
+export const COCKPIT_SYSTEM_CARD_ID = 'system';
+/** The cards that draw the sampler's snapshot (the system card, the apps card), which the detail watch feeds. */
+export const COCKPIT_SNAPSHOT_CARD_IDS = Object.freeze(['system', 'apps']);
+/** The cockpit service's sources each card draws (lib/cockpitProtocol.js COCKPIT_SOURCE_NAMES): none for those two. */
+export const COCKPIT_SOURCE_NAMES_BY_CARD_ID = Object.freeze({
+    system: Object.freeze([]),
+    apps: Object.freeze([]),
+    connections: Object.freeze(['network', 'mounts']),
+    sessions: Object.freeze(['sessions']),
+});
+/**
+ * Seconds the cockpit waits for a Sample before it draws a Changed (or a pull's answer) by itself: a Changed waits for
+ * the next Sample (one frame a tick), and this one-shot timeout draws it when the sampler is silent.
+ */
+export const COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS = 3;
+/** How a cockpit card writes the time of a source's last stamp in "no data since HH:MM" (GLib.DateTime.format). */
+export const COCKPIT_CLOCK_LABEL_FORMAT = '%H:%M';
 /** The most session rows the sessions card draws; the rest collapse into a '+N more' line. */
 export const SESSIONS_CARD_ROW_LIMIT = 6;
 /** The most rows each ranking (CPU, memory) of the apps card draws. */

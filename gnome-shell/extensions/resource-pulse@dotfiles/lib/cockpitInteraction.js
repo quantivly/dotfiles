@@ -3,7 +3,8 @@
 // reads the shell into the plain inputs below; nothing here imports Gio, GLib or Shell.
 import {COCKPIT_LOG_PREFIX} from './constants.js';
 
-const DESKTOP_WINDOW_TYPE = 'desktop';
+/** The type name the glue gives a Meta.WindowType.DESKTOP window (a desktop-icons extension's), for the rule below. */
+export const DESKTOP_WINDOW_TYPE = 'desktop';
 const FOCUS_LOG_PREFIX = `${COCKPIT_LOG_PREFIX} focus:`;
 
 /**

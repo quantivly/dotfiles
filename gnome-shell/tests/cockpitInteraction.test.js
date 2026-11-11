@@ -65,3 +65,10 @@ test('cockpitInteraction: the outcome activates on focused + picked, logs otherw
     assertEqual(outcome({focused: false, error: null, windowPidCandidates: []}, null),
         {activateWindow: false, logLine: 'cockpit: focus: not focused'});
 });
+
+test('cockpitInteraction: DESKTOP_WINDOW_TYPE is the type name the glue gives a Meta.WindowType.DESKTOP window', () => {
+    assertEqual(interaction.DESKTOP_WINDOW_TYPE, 'desktop');
+    assertEqual(interaction.isDesktopInteractive({
+        windowsOnMonitor: [{windowType: interaction.DESKTOP_WINDOW_TYPE, isShowing: true}],
+    }), false);
+});

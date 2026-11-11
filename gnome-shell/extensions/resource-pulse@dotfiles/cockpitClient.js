@@ -49,6 +49,9 @@
 //   before the first answer. A layout event is told only when the layout or the config error changed.
 // - Changed replaces the sources it carries and, when it carries one, the layout; a sources event names the sources
 //   whose object changed. A Changed before any state from this owner asks for the state instead (it holds the change).
+// - A sources event says what brought it (CockpitSourcesCause): a GetState the client asked for of itself (an owner's
+//   appearance, the subscription becoming wanted, an early Changed), a Changed, or a pull. The extension draws the
+//   first at once and paces the other two to its next Sample (ruling D20).
 // - Staleness is decided by pulling, not by a timer (ruling R14): pullIfSuspicious(name) asks GetState once per
 //   interval while lib/cockpitStaleness.js suspects a source, stamping when it asked and when the answer came; a pull
 //   that answers the same old stamp makes the source stale. A GetState that fails completes the pull too (ruling D6),
@@ -65,7 +68,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {
-    CockpitClientEventType, CockpitClientState, DBUS_CALL_TIMEOUT_MS, LOG_PREFIX, START_CONFIRMATION_TIMEOUT_SECONDS,
+    CockpitClientEventType, CockpitClientState, CockpitSourcesCause, DBUS_CALL_TIMEOUT_MS, LOG_PREFIX,
+    START_CONFIRMATION_TIMEOUT_SECONDS,
 } from './lib/constants.js';
 import {
     COCKPIT_BUS_NAME, COCKPIT_CHANGED_SIGNAL_NAME, COCKPIT_CHANGED_SIGNAL_SIGNATURE, COCKPIT_FOCUS_ERROR,
@@ -626,12 +630,13 @@ export class CockpitClient {
         if (this._nameOwner === null)
             return;
         this._link.setSubscribed(true);
-        this._requestState();
+        this._requestState(CockpitSourcesCause.READ);
     }
 
     /**
      * Adds a callback for each event: {type: 'state', state}, {type: 'layout', layout, configError} or
-     * {type: 'sources', names} (CockpitClientEventType), in that order when one answer brings several.
+     * {type: 'sources', names, cause} (CockpitClientEventType; cause is a CockpitSourcesCause), in that order when one
+     * answer brings several.
      *
      * @param {(event: object) => void} callback - Called with each event.
      * @returns {number} An id for removeListener.
@@ -674,13 +679,15 @@ export class CockpitClient {
         pullStamps.requestedAtUsec = this._nowRealUsec();
         if (this._nameOwner === null) {
             pullStamps.completedAtUsec = pullStamps.requestedAtUsec;
-            this._notifyListeners({type: CockpitClientEventType.SOURCES, names: [sourceName]});
+            this._notifyListeners({
+                type: CockpitClientEventType.SOURCES, names: [sourceName], cause: CockpitSourcesCause.PULL,
+            });
             return Promise.resolve({pulled: true});
         }
         return new Promise(resolve => {
             this._pendingPulls.push({sourceName, resolve});
             if (!this._isStateRequestInFlight)
-                this._requestState();
+                this._requestState(CockpitSourcesCause.PULL);
         });
     }
 
@@ -1032,22 +1039,25 @@ export class CockpitClient {
         this._latestStartAttempt = null;
         if (this._isSubscriptionWanted)
             this._link.setSubscribed(true);
-        this._requestState();
+        this._requestState(CockpitSourcesCause.READ);
         if (this._isWatchWanted)
             this._sendWatchCockpit();
     }
 
     /**
-     * Calls GetState. Only the answer to the latest call is applied.
+     * Calls GetState. Only the answer to the latest call is applied, and its sources event carries the call's cause:
+     * pulls that join a call already in flight take its cause, and a call made since supersedes it, cause and all.
      *
+     * @param {string} cause - Why the state is asked for: CockpitSourcesCause.READ (an owner's appearance, the
+     *     subscription becoming wanted, an early Changed) or CockpitSourcesCause.PULL (pullIfSuspicious).
      * @returns {void}
      */
-    _requestState() {
+    _requestState(cause) {
         this._stateRequestNumber++;
         const stateRequestNumber = this._stateRequestNumber;
         this._isStateRequestInFlight = true;
         this._callService(COCKPIT_GET_STATE_METHOD_NAME, NO_PARAMETERS, this._cancellable,
-            (error, reply) => this._onStateAnswered(stateRequestNumber, error, reply));
+            (error, reply) => this._onStateAnswered(stateRequestNumber, cause, error, reply));
     }
 
     /**
@@ -1055,11 +1065,12 @@ export class CockpitClient {
      * an unreadable state is logged, completes those pulls (ruling D6) and changes nothing else.
      *
      * @param {number} stateRequestNumber - The call's number.
+     * @param {string} cause - Why it was called: a CockpitSourcesCause, told with the sources the answer brings.
      * @param {Error|null} error - Why the call failed, or null.
      * @param {GLib.Variant|null} reply - The reply.
      * @returns {void}
      */
-    _onStateAnswered(stateRequestNumber, error, reply) {
+    _onStateAnswered(stateRequestNumber, cause, error, reply) {
         if (this._isDestroyed || stateRequestNumber !== this._stateRequestNumber)
             return;
         this._isStateRequestInFlight = false;
@@ -1069,15 +1080,16 @@ export class CockpitClient {
         if (state === null)
             this._completeUnansweredPulls(pulledSourceNames);
         else
-            this._applyState(state, pulledSourceNames);
+            this._applyState(state, pulledSourceNames, cause);
         this._settlePulls(pendingPulls);
     }
 
     /**
      * Completes the pulls a GetState was for that failed, answered no readable state, or will not be answered because
-     * its owner left (ruling D6): their completion is stamped now and they are told as a sources event, so a suspect
-     * source whose service keeps its name but hangs, or has gone, reads stale, and its card redraws. _readStateReply
-     * logged a failure, once per key (a vanish logs nothing); the next interval's suspicion pulls again.
+     * its owner left (ruling D6): their completion is stamped now and they are told as a sources event of cause
+     * CockpitSourcesCause.PULL, so a suspect source whose service keeps its name but hangs, or has gone, reads stale,
+     * and its card redraws. _readStateReply logged a failure, once per key (a vanish logs nothing); the next interval's
+     * suspicion pulls again.
      *
      * @param {string[]} pulledSourceNames - The sources whose pulls the GetState was for; none tells nothing.
      * @returns {void}
@@ -1087,7 +1099,9 @@ export class CockpitClient {
             return;
         this._stampPullCompletions(pulledSourceNames);
         const toldSourceNames = COCKPIT_SOURCE_NAMES.filter(sourceName => pulledSourceNames.includes(sourceName));
-        this._notifyListeners({type: CockpitClientEventType.SOURCES, names: toldSourceNames});
+        this._notifyListeners({
+            type: CockpitClientEventType.SOURCES, names: toldSourceNames, cause: CockpitSourcesCause.PULL,
+        });
     }
 
     /**
@@ -1134,13 +1148,14 @@ export class CockpitClient {
      * Takes a state whole: the layout, the config error and every source replace the client's (a source the answer
      * refreshed has both pull stamps cleared), the pulled sources' completion is stamped (except where that clearing
      * ended the pull's cycle), and the client is LIVE. Then tells, in order, the state, the layout (if it changed) and
-     * the sources that changed or were pulled.
+     * the sources that changed or were pulled, with the call's cause.
      *
      * @param {object} state - lib/cockpitProtocol.js parseCockpitStatePayload's result.
      * @param {string[]} pulledSourceNames - The sources whose pulls this answer completes.
+     * @param {string} cause - Why the GetState was called (a CockpitSourcesCause).
      * @returns {void}
      */
-    _applyState(state, pulledSourceNames) {
+    _applyState(state, pulledSourceNames, cause) {
         this._hasStateFromOwner = true;
         const isLayoutChanged = this._storeLayout(state.layout, state.configError);
         const changedSourceNames = this._storeSources(state.sources);
@@ -1151,7 +1166,7 @@ export class CockpitClient {
         if (isLayoutChanged)
             this._notifyLayoutChanged();
         if (toldSourceNames.length > 0)
-            this._notifyListeners({type: CockpitClientEventType.SOURCES, names: toldSourceNames});
+            this._notifyListeners({type: CockpitClientEventType.SOURCES, names: toldSourceNames, cause});
     }
 
     /**
@@ -1181,7 +1196,7 @@ export class CockpitClient {
         }
         if (!this._hasStateFromOwner) {
             if (!this._isStateRequestInFlight && this._nameOwner !== null)
-                this._requestState();
+                this._requestState(CockpitSourcesCause.READ);
             return;
         }
         this._applyChange(change);
@@ -1200,8 +1215,11 @@ export class CockpitClient {
         const changedSourceNames = this._storeSources(change.sources);
         if (isLayoutChanged)
             this._notifyLayoutChanged();
-        if (changedSourceNames.length > 0)
-            this._notifyListeners({type: CockpitClientEventType.SOURCES, names: changedSourceNames});
+        if (changedSourceNames.length > 0) {
+            this._notifyListeners({
+                type: CockpitClientEventType.SOURCES, names: changedSourceNames, cause: CockpitSourcesCause.CHANGED,
+            });
+        }
     }
 
     /**

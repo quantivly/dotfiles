@@ -182,12 +182,14 @@ shell_side_files_matching() {
   done
 }
 
-# lib/, pulseClient.js, serviceLink.js, cockpitClient.js and graph.js run under
-# plain gjs in the JS rows above, which only works while they import nothing
-# from the Shell. A listed file that is missing fails the row: an absent file
-# contains nothing, which is not a pass.
-PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/serviceLink.js" "$EXT_DIR/cockpitClient.js" "$EXT_DIR/graph.js")
-row_name="lib/, pulseClient.js, serviceLink.js, cockpitClient.js and graph.js import nothing from resource:///"
+# lib/, pulseClient.js, serviceLink.js, cockpitClient.js, displayConfig.js and
+# graph.js run under plain gjs in the JS rows above, which only works while they
+# import nothing from the Shell. A listed file that is missing fails the row: an
+# absent file contains nothing, which is not a pass.
+PURE_MODULE_PATHS=("$EXT_DIR/pulseClient.js" "$EXT_DIR/serviceLink.js" "$EXT_DIR/cockpitClient.js"
+  "$EXT_DIR/displayConfig.js" "$EXT_DIR/graph.js")
+row_name="lib/, pulseClient.js, serviceLink.js, cockpitClient.js, displayConfig.js and graph.js"
+row_name+=" import nothing from resource:///"
 if ! list_files_under "$EXT_DIR/lib" LIB_MODULE_PATHS -type f -name '*.js'; then
   bad "$row_name — cannot list the JavaScript under $EXT_DIR/lib"
 elif (( ${#LIB_MODULE_PATHS[@]} == 0 )); then
@@ -5068,7 +5070,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=979
+EXPECTED_ROWS=1006
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

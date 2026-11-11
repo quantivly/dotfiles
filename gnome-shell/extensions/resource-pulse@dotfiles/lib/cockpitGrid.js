@@ -6,6 +6,10 @@ import {
 
 /** Added before flooring, so a product like 420 x (2/3) that floating point leaves a hair under 280 floors to 280. */
 const FLOOR_TOLERANCE = 1e-9;
+/** The work area the grid's reference lengths are given for, at the stage's origin. */
+const REFERENCE_WORK_AREA = Object.freeze({
+    x: 0, y: 0, width: COCKPIT_GRID_REFERENCE.widthPx, height: COCKPIT_GRID_REFERENCE.heightPx,
+});
 
 /**
  * @param {number} lengthPx - A length in reference pixels.
@@ -88,4 +92,33 @@ export function cockpitGridGeometry({workArea, groups}) {
  */
 export function isKnownCockpitCard(cardId) {
     return COCKPIT_DRAWN_CARD_IDS.includes(cardId);
+}
+
+/**
+ * The cells the cockpit draws a card in: the first cell of each card id it knows (isKnownCockpitCard). The cell of an
+ * id it does not know (a newer service's) and a second cell of a known id stay empty, and nothing throws for them.
+ *
+ * @param {Array<{cardId: string}>} cells - cockpitGridGeometry's cells.
+ * @returns {Array<object>} The cells drawn, the same objects, in order.
+ */
+export function drawnCockpitCells(cells) {
+    const drawnCardIds = new Set();
+    return cells.filter(cell => {
+        if (!isKnownCockpitCard(cell.cardId) || drawnCardIds.has(cell.cardId))
+            return false;
+        drawnCardIds.add(cell.cardId);
+        return true;
+    });
+}
+
+/**
+ * The card ids the cockpit draws for a layout's groups: those of drawnCockpitCells, in order. Which cards get a cell
+ * depends on the groups alone, never on the work area, so the reference work area serves.
+ *
+ * @param {Array<{id: string, caption: string, columns: number, cards: string[]}>} groups - The layout's groups.
+ * @returns {string[]} The card ids drawn.
+ */
+export function drawnCockpitCardIds(groups) {
+    const {cells} = cockpitGridGeometry({workArea: REFERENCE_WORK_AREA, groups});
+    return drawnCockpitCells(cells).map(cell => cell.cardId);
 }

@@ -72,3 +72,33 @@ test('cockpitGrid: an unknown card id still gets a cell', () => {
     assertEqual(cockpitGrid.isKnownCockpitCard('weather'), false);
     assertEqual(['system', 'apps', 'connections', 'sessions'].map(cockpitGrid.isKnownCockpitCard), [true, true, true, true]);
 });
+test('cockpitGrid: the cockpit draws a card in the first cell of each id it knows; an unknown id\'s cell and a known ' +
+    'id\'s second cell stay empty (drawnCockpitCells), and the ids drawn are the same whatever the work area', () => {
+    const groups = [
+        {id: 'machine', caption: 'MACHINE', columns: 2, cards: ['system', 'weather', 'apps', 'system']},
+        {id: 'agents', caption: 'AGENTS', columns: 1, cards: ['sessions', 'seats']},
+    ];
+    const {cells} = cockpitGrid.cockpitGridGeometry({workArea: FULL_HD, groups});
+    const drawnCells = cockpitGrid.drawnCockpitCells(cells);
+    const smallerWorkArea = {x: 1920, y: 0, width: 1280, height: 720};
+    const smallerCells = cockpitGrid.cockpitGridGeometry({workArea: smallerWorkArea, groups}).cells;
+    assertEqual({
+        drawn: drawnCells.map(cell => [cell.cardId, cell.groupId, cell.column, cell.row]),
+        drawnCellIsTheGridCell: drawnCells[0] === cells[0],
+        drawnCardIds: cockpitGrid.drawnCockpitCardIds(groups),
+        drawnAtAnotherWorkArea: cockpitGrid.drawnCockpitCells(smallerCells).map(cell => cell.cardId),
+        noGroups: cockpitGrid.drawnCockpitCardIds([]),
+        onlyUnknown: cockpitGrid.drawnCockpitCardIds([{id: 'g', caption: 'G', columns: 1, cards: ['weather']}]),
+    }, {
+        drawn: [['system', 'machine', 0, 0], ['apps', 'machine', 0, 1], ['sessions', 'agents', 0, 0]],
+        drawnCellIsTheGridCell: true,
+        drawnCardIds: ['system', 'apps', 'sessions'],
+        drawnAtAnotherWorkArea: ['system', 'apps', 'sessions'],
+        noGroups: [],
+        onlyUnknown: [],
+    });
+});
+test('cockpitGrid: a card past what its group\'s block holds gets no cell, so it is not drawn either', () => {
+    const groups = [{id: 'g', caption: 'G', columns: 1, cards: ['health', 'seats', 'sol', 'sessions']}];
+    assertEqual(cockpitGrid.drawnCockpitCardIds(groups), []);
+});

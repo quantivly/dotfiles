@@ -70,3 +70,52 @@ test('cockpitMonitor: a monitor at no logical monitor position gets null vendor 
     assertEqual(cockpitMonitor.monitorDescriptorsFromDisplayConfig(null), []);
     assertEqual(cockpitMonitor.monitorDescriptorsFromDisplayConfig([1, 'x']), []);
 });
+
+/** The two monitors of the fixture, as the glue reads Main.layoutManager.monitors: no vendor or product yet. */
+const LAYOUT_MONITORS = [
+    {index: 0, x: 0, y: 0, width: 1536, height: 960, isPrimary: true},
+    {index: 1, x: 1920, y: 0, width: 1920, height: 1080, isPrimary: false},
+];
+/** A monitor rule that names nothing, as parseLayout reads a layout without one. */
+const NO_RULE = {vendor: null, product: null};
+
+test('cockpitMonitor: the cockpit monitor is the one DisplayConfig names as the rule\'s, even when it is not the ' +
+    'largest non-primary; with no DisplayConfig answer the rule falls back to the largest non-primary', () => {
+    const laptopRule = {vendor: 'CMN', product: 'N140JCN-GT1'};
+    const indexFor = (displayConfigState, monitorRule) =>
+        cockpitMonitor.cockpitMonitorIndexFor({monitors: LAYOUT_MONITORS, displayConfigState, monitorRule});
+    assertEqual({
+        named: indexFor(DISPLAY_CONFIG_STATE, laptopRule),
+        dell: indexFor(DISPLAY_CONFIG_STATE, RULE),
+        noAnswer: indexFor(null, laptopRule),
+        noRule: indexFor(DISPLAY_CONFIG_STATE, NO_RULE),
+    }, {named: 0, dell: 1, noAnswer: 1, noRule: 1});
+});
+
+test('cockpitMonitor: a rule that names no vendor and product matches no monitor, so monitors DisplayConfig left ' +
+    'unidentified are not taken for it: the fallback chooses', () =>
+    assertEqual(cockpitMonitor.cockpitMonitorIndexFor({
+        monitors: LAYOUT_MONITORS, displayConfigState: null, monitorRule: NO_RULE,
+    }), 1));
+
+test('cockpitMonitor: undocked, the named monitor gone and only the primary left, the cockpit moves to it (Review ' +
+    'Focus 1)', () =>
+    assertEqual(cockpitMonitor.cockpitMonitorIndexFor({
+        monitors: [LAYOUT_MONITORS[0]], displayConfigState: null, monitorRule: RULE,
+    }), 0));
+
+test('cockpitMonitor: a DisplayConfig answer of an unexpected shape identifies nothing and never throws; no monitor ' +
+    'at all is no cockpit monitor', () => {
+    const malformedStates = [
+        [1, [], null, {}], [1, [], [null, 'x', [0, 0]], {}], [1, [[['DP-1']]], [[1920, 0, 1, 0, false, [null]]], {}],
+        'not a state',
+    ];
+    assertEqual({
+        malformed: malformedStates.map(displayConfigState => cockpitMonitor.cockpitMonitorIndexFor({
+            monitors: LAYOUT_MONITORS, displayConfigState, monitorRule: RULE,
+        })),
+        noMonitors: cockpitMonitor.cockpitMonitorIndexFor({
+            monitors: [], displayConfigState: DISPLAY_CONFIG_STATE, monitorRule: RULE,
+        }),
+    }, {malformed: [1, 1, 1, 1], noMonitors: null});
+});
