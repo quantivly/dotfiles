@@ -1224,3 +1224,35 @@ test('cockpitClient: wanting the subscription as it already is does nothing, nor
         actionsWhileWanted: [SUBSCRIBE, GET_STATE], actionsAfterDestroy: [],
     });
 });
+
+test('cockpitClient: wanting the subscription while a pull\'s GetState is in flight subscribes and reads GetState ' +
+    'afresh; the superseded answer applies nothing and leaves the pull waiting, and the fresh answer settles it ' +
+    'once', async () => {
+    const {client, clock, link, events} = makeClientFixture();
+    answerState(link);
+    events.length = 0;
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, 100);
+    const actionCountBeforePull = link.actions.length;
+    const pullPromise = client.pullIfSuspicious('mounts');
+    client.setSubscriptionWanted(true);
+    const actionsFromPull = link.actions.slice(actionCountBeforePull);
+    answerState(link);
+    const eventsAfterSupersededAnswer = [...events];
+    const isStaleAfterSupersededAnswer = client.sourceFreshness('mounts').isStale;
+    const pullAfterSupersededAnswer = await valueOnceSettled(pullPromise);
+    // Answered only when it was asked for, so a client that sends no fresh GetState fails on what it did, above.
+    const isFreshStateAsked = link.callsOf(GET_STATE).some(stateCall => !stateCall.isAnswered);
+    if (isFreshStateAsked)
+        answerState(link);
+    assertEqual({
+        actionsFromPull, eventsAfterSupersededAnswer, isStaleAfterSupersededAnswer, pullAfterSupersededAnswer,
+        eventsAfterFreshAnswer: events.slice(eventsAfterSupersededAnswer.length),
+        isStaleAfterFreshAnswer: client.sourceFreshness('mounts').isStale,
+        pullAfterFreshAnswer: await valueOnceSettled(pullPromise),
+    }, {
+        actionsFromPull: [GET_STATE, SUBSCRIBE, GET_STATE], eventsAfterSupersededAnswer: [],
+        isStaleAfterSupersededAnswer: false, pullAfterSupersededAnswer: UNSETTLED,
+        eventsAfterFreshAnswer: [{type: 'sources', names: ['mounts']}], isStaleAfterFreshAnswer: true,
+        pullAfterFreshAnswer: {pulled: true},
+    });
+});

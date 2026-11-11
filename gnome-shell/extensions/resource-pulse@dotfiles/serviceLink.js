@@ -173,18 +173,16 @@ class ServiceLink {
     }
 
     /**
-     * Subscribes to the descriptor's signal from its well-known name, at its object. Each subscription's callback
-     * carries its own id, so a signal GDBus had queued for a subscription since dropped is never delivered.
+     * Subscribes to the descriptor's signal from its well-known name, at its object.
      *
      * @returns {void}
      */
     _subscribeToSignal() {
         const {busName, interfaceName, signalName, objectPath} = this._descriptor;
-        const signalSubscriptionId = this._connection.signal_subscribe(busName, interfaceName, signalName, objectPath,
+        this._signalSubscriptionId = this._connection.signal_subscribe(busName, interfaceName, signalName, objectPath,
             ANY_FIRST_ARGUMENT, Gio.DBusSignalFlags.NONE,
             (_connection, _senderName, _objectPath, _interfaceName, _signalName, parameters) =>
-                this._deliverSignal(signalSubscriptionId, parameters));
-        this._signalSubscriptionId = signalSubscriptionId;
+                this._deliverSignal(parameters));
     }
 
     /**
@@ -214,15 +212,13 @@ class ServiceLink {
     }
 
     /**
-     * Hands a signal's parameters to the client, if it came through the subscription held now; nothing once
-     * destroyed.
+     * Hands a signal's parameters to the client; nothing once destroyed.
      *
-     * @param {number} signalSubscriptionId - The subscription it came through.
      * @param {GLib.Variant} parameters - The signal's parameters.
      * @returns {void}
      */
-    _deliverSignal(signalSubscriptionId, parameters) {
-        if (!this._isDestroyed && signalSubscriptionId === this._signalSubscriptionId)
+    _deliverSignal(parameters) {
+        if (!this._isDestroyed)
             this._onSignal(parameters);
     }
 }

@@ -47,7 +47,8 @@ export const COCKPIT_CHANGED_SIGNAL_NAME = 'Changed';
 /** The Changed signal's parameters as a GLib.Variant type: one string, the changed JSON. */
 export const COCKPIT_CHANGED_SIGNAL_SIGNATURE = '(s)';
 /**
- * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side and a proxy on the client side:
+ * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side; the client's link (cockpitClient.js's
+ * createCockpitLink, on serviceLink.js) calls and subscribes by the names above:
  * - GetState() → s: the state JSON (buildCockpitStatePayload), for a client that has just connected, and for
  *   gnome-status;
  * - WatchCockpit() and UnwatchCockpit(): a caller holds a watch while the cockpit monitor is visible; the service
