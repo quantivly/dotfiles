@@ -96,7 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Status and cost.** `gnome-status` gains a `Resource Pulse:` line (linked, enabled from the
     setting, shell State) and a `service:` line (its state, protocol and the age of its last sample),
     with a ⚠ line, naming its remedy, for a missing, failed, restarting, stopped, silent, stalled or
-    out-of-date service and for a desktop that runs an older copy of the drawing code. Every call it
+    out-of-date service and for a desktop that runs an older copy of the drawing code. Two more name a
+    running unit that is behind the checkout: one for older code (a module in its import closure
+    changed after it started), with a "cannot tell" ⚠ when that closure cannot be worked out, and one
+    for an older unit file (its file changed after it started; the remedy is
+    `systemctl --user daemon-reload && systemctl --user try-restart <unit>`). Both are suppressed for
+    a unit that is not running, for the cockpit as for the sampler. Every call it
     makes is bounded at 3 s. `scripts/resource-pulse-cost.sh` measures gnome-shell, and with
     `--service` (anywhere on the line; a leftover word is a usage error) the service; every number and budget is defined in `docs/GNOME_CONFIGURATION_GUIDE.md`.
     `check-timer-health.sh` reports a unit with no `[Install]` as started on demand, not as an arming

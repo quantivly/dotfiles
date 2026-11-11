@@ -909,8 +909,9 @@ mkdir -p "$CLOSURE_BLOCK_FIXTURE_DIR" || fatal "cannot create $CLOSURE_BLOCK_FIX
 printf '%s\n' \
   "/* note */ import {after_one} from './after-one.js';" \
   "/* first */ /* second */ import {after_two} from './after-two.js';" \
-  "/* import {all_comment} from './all-comment.js'; */" >"$CLOSURE_BLOCK_FIXTURE_DIR/entry.js"
-for closure_block_module in after-one.js after-two.js all-comment.js; do
+  "/* import {all_comment} from './all-comment.js'; */" \
+  "/* a */ // import {x} from './line-hidden.js';" >"$CLOSURE_BLOCK_FIXTURE_DIR/entry.js"
+for closure_block_module in after-one.js after-two.js all-comment.js line-hidden.js; do
   : >"$CLOSURE_BLOCK_FIXTURE_DIR/$closure_block_module"
 done
 check "closure: an import after a block comment closed on its own line is followed" \
@@ -1042,6 +1043,10 @@ case "$*" in
       "$active_state" "${GNOME_STATUS_SERVICE_SUB_STATE:-$(default_sub_state "$active_state")}" ;;
   "--user show -p ActiveEnterTimestamp --value --timestamp=unix resource-pulse.service")
     printf '%s\n' "${GNOME_STATUS_SERVICE_STARTED_AT-}" ;;
+  "--user show -p FragmentPath --value resource-pulse.service")
+    printf '%s\n' "${GNOME_STATUS_SERVICE_UNIT_FILE-}" ;;
+  "--user show -p FragmentPath --value cockpit.service")
+    printf '%s\n' "${GNOME_STATUS_COCKPIT_UNIT_FILE-}" ;;
   "--user show -p LoadState -p ActiveState -p SubState -p ConditionResult cockpit.service")
     [[ -z "${GNOME_STATUS_NO_MANAGER:-}" ]] || { echo "Failed to connect to user scope bus" >&2; exit 1; }
     printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nConditionResult=%s\n' "${GNOME_STATUS_COCKPIT_LOAD_STATE:-loaded}" \
@@ -1612,6 +1617,59 @@ cockpit_older_code_summary+="unchanged=$(status_warnings_naming 'runs older code
 check "gnome-status: a module service/cockpit.js runs (itself, lib/cockpitProtocol.js, or the shared service/fileIo.js) changed after the cockpit started is a ⚠ that it runs older code; a sampler-only module is not" \
   "$cockpit_older_code_summary" \
   "service/cockpit.js=1/1/sampler:0 lib/cockpitProtocol.js=1/1/sampler:0 service/fileIo.js=1/1/sampler:1 service/sampler.js=0/0/sampler:1 service/main.js=0/0/sampler:1 unchanged=0"
+
+# The unit file as systemd sees it is the link's TARGET (the checkout's systemd/<unit>): the link in the
+# user's unit directory is created now, so its own time is always after the unit started and would hide
+# the difference. FragmentPath names the link; the target's time is the one that counts.
+UNIT_FILE_FIXTURE_DIR="$WIRING_TMP/gnome-status-unit-files"
+# unit_files_with_target_mtime <epoch>: fresh unit-file links whose targets carry that mtime.
+unit_files_with_target_mtime() {
+  local unit_name
+  rm -rf "$UNIT_FILE_FIXTURE_DIR"
+  mkdir -p "$UNIT_FILE_FIXTURE_DIR/checkout" "$UNIT_FILE_FIXTURE_DIR/unit-dir" || fatal "cannot create $UNIT_FILE_FIXTURE_DIR"
+  for unit_name in resource-pulse.service cockpit.service; do
+    : >"$UNIT_FILE_FIXTURE_DIR/checkout/$unit_name"
+    touch -d "@$1" "$UNIT_FILE_FIXTURE_DIR/checkout/$unit_name" || fatal "touch -d @$1 failed"
+    ln -s "$UNIT_FILE_FIXTURE_DIR/checkout/$unit_name" "$UNIT_FILE_FIXTURE_DIR/unit-dir/$unit_name" || fatal "cannot link $unit_name"
+  done
+}
+# status_unit_file_run <cockpit ActiveState> <sampler ActiveState>: gnome-status over the linked extension, both
+# units started when the suite started, their unit files as the fixture left them.
+status_unit_file_run() {
+  reset_status_extension "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH" "$BEFORE_SHELL_START_EPOCH"
+  gnome_status_run "$ASKED_FOR_SETTING" true "HOME=$GNOME_STATUS_LINKED_HOME" "$STATUS_SERVICE_STARTED_AT" \
+    "GNOME_STATUS_SERVICE_ACTIVE_STATE=$2" "GNOME_STATUS_COCKPIT_ACTIVE_STATE=$1" "$COCKPIT_STARTED_AT" \
+    "GNOME_STATUS_SERVICE_UNIT_FILE=$UNIT_FILE_FIXTURE_DIR/unit-dir/resource-pulse.service" \
+    "GNOME_STATUS_COCKPIT_UNIT_FILE=$UNIT_FILE_FIXTURE_DIR/unit-dir/cockpit.service"
+}
+status_unit_file_warnings_naming() { status_warnings_naming "$1 runs an older unit file"; }
+unit_file_newer_summary=""
+unit_files_with_target_mtime "$AFTER_SHELL_START_EPOCH"
+status_unit_file_run active active
+for unit_name in resource-pulse.service cockpit.service; do
+  unit_file_newer_summary+="$unit_name=$(status_warnings_naming "$unit_name runs an older unit file: it changed after the unit started — systemctl --user daemon-reload && systemctl --user try-restart $unit_name")/$(status_unit_file_warnings_naming "$unit_name") "
+done
+unit_file_newer_summary+="total=$(status_warning_count)"
+check "gnome-status: a unit file (the link's target) changed after its unit started is one ⚠ naming daemon-reload and try-restart, for the sampler and for the cockpit" \
+  "$unit_file_newer_summary" "resource-pulse.service=1/1 cockpit.service=1/1 total=2"
+
+unit_file_older_summary=""
+unit_files_with_target_mtime "$BEFORE_SHELL_START_EPOCH"
+status_unit_file_run active active
+unit_file_older_summary+="older=$(status_warnings_naming 'runs an older unit file') "
+# Changed in the very second the unit started: not newer.
+unit_files_with_target_mtime "$SUITE_STARTED_AT_EPOCH"
+status_unit_file_run active active
+unit_file_older_summary+="same-second=$(status_warnings_naming 'runs an older unit file')"
+check "gnome-status: a unit file older than its unit's start, or changed in the same second, is no ⚠ (the link's own newer time does not count)" \
+  "$unit_file_older_summary" "older=0 same-second=0"
+
+unit_file_stopped_summary=""
+unit_files_with_target_mtime "$AFTER_SHELL_START_EPOCH"
+status_unit_file_run inactive inactive
+unit_file_stopped_summary+="stopped=$(status_warnings_naming 'runs an older unit file')"
+check "gnome-status: a unit that is not running gets no older-unit-file ⚠ even when its file is newer than its last start" \
+  "$unit_file_stopped_summary" "stopped=0"
 
 cockpit_gdbus_summary=""
 gnome_status_run "$ASKED_FOR_SETTING" true
@@ -4502,7 +4560,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=790
+EXPECTED_ROWS=793
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

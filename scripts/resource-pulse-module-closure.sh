@@ -34,7 +34,9 @@
 # is no import; and `import.meta`. Block comments that start a line and close
 # on it are dropped first, so `/* note */ import {a} from './a.js';` is an
 # import, while a line of nothing but comment, or one whose block comment is
-# still open at its end, is skipped.
+# still open at its end, is skipped. The lines inside a multi-line block
+# comment are scanned as code unless they start with *, so an import written
+# there is followed (the closure can name too many files, never too few).
 #
 # Anything else that says `import`, or a stray `from './x.js'`, is a shape it
 # does not understand: a dynamic import of a computed specifier, an import not
