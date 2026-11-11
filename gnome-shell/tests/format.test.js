@@ -279,9 +279,10 @@ test('tooltipPosition: a label wider than its monitor starts at the monitor\'s l
     assertEqual(tooltipPlacement({x: 1930, y: 100, width: 20, height: 20},
         {x: 1920, y: 0, width: 150, height: 864}), {x: 1920, y: 126}));
 test('tooltipPosition: a monitor that starts below the stage\'s top bounds the label by its own y', () =>
-    // Monitor y 1000..1864: the label below the anchor at 1826 would end at 1874, so it goes above, at 1746.
-    assertEqual(tooltipPlacement({x: 500, y: 1800, width: 100, height: 20},
-        {x: 0, y: 1000, width: MONITOR_WIDTH_PX, height: 864}), {x: 450, y: 1746}));
+    // Monitor y 1000..1864, anchor y 1100: below ends at 1100 + 20 + 6 + 48 = 1174 and fits. A rule that ignored the
+    // monitor's y would see a bottom at 864, cross it, find room above (1046 >= 1000) and answer y 1046.
+    assertEqual(tooltipPlacement({x: 500, y: 1100, width: 100, height: 20},
+        {x: 0, y: 1000, width: MONITOR_WIDTH_PX, height: 864}), {x: 450, y: 1126}));
 test('tooltipPosition: a label that exactly touches the monitor\'s bottom edge stays below', () =>
     // Below ends at 100 + 20 + 6 + 48 = 174 = the monitor's bottom: touching is not crossing.
     assertEqual(tooltipPlacement({x: 500, y: 100, width: 100, height: 20},

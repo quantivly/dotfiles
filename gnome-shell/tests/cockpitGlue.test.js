@@ -155,7 +155,19 @@ test('cockpitTooltip.js: showFor() for the anchor it already serves keeps a pend
             'anchorActor === this._anchor && (this._isShown || this._showTimeoutId !== null)'),
         cancelsOnlyForAnotherAnchor: showForBody.indexOf('this._cancelPendingShow();') >
             showForBody.indexOf('this._showTimeoutId !== null)'),
-    }, {sameAnchorGuard: 1, cancelsOnlyForAnotherAnchor: true});
+        takesTheAnchorThroughTheHandler: occurrenceCount(showForBody, 'this._setAnchor(anchorActor);'),
+    }, {sameAnchorGuard: 1, cancelsOnlyForAnotherAnchor: true, takesTheAnchorThroughTheHandler: 1});
+});
+
+test('cockpitTooltip.js: only _setAnchor() and _releaseAnchor() assign the anchor (and the constructor, to null)', () => {
+    const source = readExtensionFile(TOOLTIP_SOURCE_FILE).replace(JS_COMMENT_PATTERN, '');
+    const anchorAssignment = 'this._anchor = ';
+    assertEqual({
+        inTheWholeFile: occurrenceCount(source, anchorAssignment),
+        inSetAnchor: occurrenceCount(methodBody(source, '_setAnchor('), anchorAssignment),
+        inReleaseAnchor: occurrenceCount(methodBody(source, '_releaseAnchor('), anchorAssignment),
+        constructorInitialisesToNull: occurrenceCount(methodBody(source, 'constructor('), 'this._anchor = null;'),
+    }, {inTheWholeFile: 3, inSetAnchor: 1, inReleaseAnchor: 1, constructorInitialisesToNull: 1});
 });
 
 test('stylesheet.css: every cockpit class is selected, once each as a rule of its own', () => {
