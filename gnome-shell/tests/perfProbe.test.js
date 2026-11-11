@@ -131,7 +131,11 @@ function makeExtensionParts() {
  */
 function makeFakeShell(parts) {
     const stage = new FakeSignalSource();
-    const extension = {_indicator: parts?.indicator ?? null, _card: parts?.card ?? null, _client: parts?.client ?? null};
+    const extension = {
+        _indicator: parts?.indicator ?? null,
+        _card: parts?.card ?? null,
+        _client: parts?.client ?? null,
+    };
     let doesLookupFindExtension = true;
     const extensionManager = {
         lookup: uuid => (uuid === EXTENSION_UUID && doesLookupFindExtension ? {stateObj: extension} : undefined),
@@ -238,7 +242,8 @@ test('perf probe: attach-enabled refuses, naming each missing part, and connects
     });
 });
 
-test('perf probe: attach-disabled refuses while the extension has parts, and once they are gone counts frames only', () => {
+test('perf probe: attach-disabled refuses while the extension has parts, and once they are gone counts frames ' +
+    'only', () => {
     const parts = makeExtensionParts();
     const enabledShell = makeFakeShell(parts);
     const refusedAnswer = runProbe(enabledShell.scope, 'attach-disabled');
@@ -250,7 +255,10 @@ test('perf probe: attach-disabled refuses while the extension has parts, and onc
     disabledShell.extension._client = new FakeClient();
     const enabledMeanwhileAnswer = runProbe(disabledShell.scope, 'read');
     assertEqual({
-        whileEnabled: {refused: typeof refusedAnswer.refused, stageHandlers: enabledShell.stage.handlerCount('after-paint')},
+        whileEnabled: {
+            refused: typeof refusedAnswer.refused,
+            stageHandlers: enabledShell.stage.handlerCount('after-paint'),
+        },
         attached: attachAnswer.attached,
         saysFramesOnly: typeof attachAnswer.counts === 'string' && attachAnswer.counts.startsWith('frames only'),
         read: readAnswer,

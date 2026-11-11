@@ -590,11 +590,12 @@ jobs:
       # their own, never on a session bus the runner may have. systemd-analyze,
       # which verifies the service unit, ships with systemd on ubuntu-latest.
       # The card-width row measures the card's text with Pango (gjs does not
-      # pull its typelibs in) in the card's own font, Ubuntu Sans.
-      - name: Install gjs, zsh, dbus-daemon, gdbus, Pango's typelibs and Ubuntu Sans
+      # pull its typelibs in) in the card's own font, Ubuntu Sans. The row on
+      # the nested perf request's probe answers reads them with jq.
+      - name: Install gjs, zsh, dbus-daemon, gdbus, Pango's typelibs, Ubuntu Sans and jq
         uses: ./.github/actions/apt-install
         with:
-          packages: gjs zsh dbus-daemon libglib2.0-bin gir1.2-pango-1.0 fonts-ubuntu
+          packages: gjs zsh dbus-daemon libglib2.0-bin gir1.2-pango-1.0 fonts-ubuntu jq
 
       - name: Run the Resource Pulse state table
         run: ./scripts/test-resource-pulse.sh

@@ -97,6 +97,15 @@
 #       of one core and the main thread's median per tick, reported only; major
 #       collections, frames, Samples, top-bar paints and the card's redirect, counted
 #       by an in-shell probe), then one verdict line naming each broken budget
+#       (exit 1): an enabled state's major collections more than the disabled
+#       state's plus one; its frames more than its Samples plus the disabled
+#       state's frames plus two; covered and idle, more frames than the disabled
+#       state's plus three; a top-bar paint while the top bar is hidden; the card
+#       not drawn through its offscreen texture; and the disabled state's own
+#       major collections more than four (a defect that outlives disable()).
+#       Every exit once it acts on the run (a breach, a failure or a signal too)
+#       puts the run back: its window and its background measurement ended, the
+#       extension enabled and the top bar shown again
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services and everything else it started;
 #       logs (log/service.log is the sampler's, or with --replay the replay
@@ -160,6 +169,11 @@ readonly PERF_PROBE_FUNCTION_NAME='resourcePulsePerfProbe'
 readonly PERF_PROBE_ATTACH_DISABLED_REQUEST='attach-disabled'
 readonly PERF_PROBE_ATTACH_ENABLED_REQUEST='attach-enabled'
 readonly PERF_PROBE_READ_REQUEST='read'
+# The probe's two modes, and where an answer shows which one it ran in: .attached after an attach, .mode after a read.
+readonly PERF_PROBE_DISABLED_MODE='disabled'
+readonly PERF_PROBE_ENABLED_MODE='enabled'
+readonly PERF_PROBE_ATTACHED_KEY='attached'
+readonly PERF_PROBE_MODE_KEY='mode'
 # The window perf opens over the card, started as a client of the nested shell only, on Wayland alone.
 readonly PERF_WINDOW_COMMAND_NAME='gnome-calculator'
 readonly PERF_WINDOW_GDK_BACKEND='wayland'
@@ -184,12 +198,17 @@ readonly PERF_TOPBAR_HIDDEN_STATE='topbar-hidden-covered'
 readonly PERF_VISIBLE_BUSY_STATE='visible-busy'
 readonly -a PERF_ENABLED_STATE_NAMES=("$PERF_COVERED_IDLE_STATE" "$PERF_COVERED_BUSY_STATE" "$PERF_TOPBAR_HIDDEN_STATE"
     "$PERF_VISIBLE_BUSY_STATE")
-# The count budgets (docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md, "Budgets"), each over
-# the disabled state of the same run: an enabled state's major collections at most the disabled state's plus one;
-# its frames at most its Samples plus the disabled state's frames plus two; covered and idle, at most the disabled
-# state's frames plus three (the nested panel's clock and the covered card's dimmed repaint draw a few frames in any
-# window); no top-bar paint while the top bar is hidden; the card drawn through an offscreen texture (ALWAYS).
+# The count budgets (docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md, "Budgets"), the counted
+# ones over the disabled state of the same run: an enabled state's major collections at most the disabled state's
+# plus one; its frames at most its Samples plus the disabled state's frames plus two; covered and idle, at most the
+# disabled state's frames plus three (the nested panel's clock and the covered card's dimmed repaint draw a few frames
+# in any window); no top-bar paint while the top bar is hidden; the card drawn through an offscreen texture (ALWAYS).
 readonly PERF_MAJOR_COLLECTIONS_ALLOWANCE=1
+# And one absolute bound, on the disabled state itself, since the counted budgets are relative to it: an idle nested
+# shell makes one or two major collections a minute (three have been seen), and a forced-collection defect five or
+# six. One that outlives disable() (a proxy left receiving Samples, say) raises the disabled state with the rest, and
+# would pass a budget measured against it.
+readonly PERF_MAX_DISABLED_MAJOR_COLLECTIONS=4
 readonly PERF_FRAMES_OVER_SAMPLES_ALLOWANCE=2
 readonly PERF_COVERED_IDLE_FRAMES_ALLOWANCE=3
 readonly PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED=0
@@ -203,7 +222,8 @@ readonly MAJOR_COLLECTION_LINE_PREFIX='MajorGC:'
 readonly MINOR_COLLECTION_LINE_PREFIX='MinorGC:'
 # What perf runs in the nested shell around the probe: the windows of the session, the one window perf opened (an
 # error unless there is exactly one), and each state's steps. Each answers a word, or throws.
-readonly PERF_NORMAL_WINDOWS_JS='global.display.list_all_windows().filter(window => window.get_window_type() === Meta.WindowType.NORMAL)'
+readonly PERF_NORMAL_WINDOWS_JS='global.display.list_all_windows()
+    .filter(window => window.get_window_type() === Meta.WindowType.NORMAL)'
 readonly PERF_ONE_WINDOW_JS="(() => {
     const normalWindows = $PERF_NORMAL_WINDOWS_JS;
     if (normalWindows.length !== 1)
@@ -212,8 +232,14 @@ readonly PERF_ONE_WINDOW_JS="(() => {
 })()"
 readonly PERF_EXTENSION_JS="Main.extensionManager.lookup('$EXTENSION_UUID').stateObj"
 readonly PERF_COUNT_WINDOWS_JS="$PERF_NORMAL_WINDOWS_JS.length"
-readonly PERF_DISABLE_EXTENSION_JS="(() => { Main.extensionManager.disableExtension('$EXTENSION_UUID'); return 'disabled'; })()"
-readonly PERF_ENABLE_EXTENSION_JS="(() => { Main.extensionManager.enableExtension('$EXTENSION_UUID'); return 'enabled'; })()"
+readonly PERF_DISABLE_EXTENSION_JS="(() => {
+    Main.extensionManager.disableExtension('$EXTENSION_UUID');
+    return 'disabled';
+})()"
+readonly PERF_ENABLE_EXTENSION_JS="(() => {
+    Main.extensionManager.enableExtension('$EXTENSION_UUID');
+    return 'enabled';
+})()"
 readonly PERF_COVER_CARD_JS="(() => {
     const coveringWindow = $PERF_ONE_WINDOW_JS;
     coveringWindow.unminimize();
@@ -223,6 +249,21 @@ readonly PERF_COVER_CARD_JS="(() => {
 readonly PERF_UNCOVER_CARD_JS="(() => { $PERF_ONE_WINDOW_JS.minimize(); return 'uncovered'; })()"
 readonly PERF_HIDE_TOPBAR_JS="(() => { $PERF_EXTENSION_JS._indicator.hide(); return 'hidden'; })()"
 readonly PERF_SHOW_TOPBAR_JS="(() => { $PERF_EXTENSION_JS._indicator.show(); return 'shown'; })()"
+# perf's exit, on every path, puts the run back as perf found it: the extension enabled when it has no indicator
+# (perf disabled it), then the indicator shown when it has one (perf hid it). Neither throws for a part that is not
+# there.
+readonly PERF_INDICATOR_OR_NULL_JS="Main.extensionManager.lookup('$EXTENSION_UUID')?.stateObj?._indicator ?? null"
+readonly PERF_RESTORE_EXTENSION_JS="(() => {
+    if ($PERF_INDICATOR_OR_NULL_JS)
+        return 'enabled already';
+    Main.extensionManager.enableExtension('$EXTENSION_UUID');
+    return 'enabled';
+})()"
+readonly PERF_RESTORE_TOPBAR_JS="(() => {
+    const indicator = $PERF_INDICATOR_OR_NULL_JS;
+    indicator?.show();
+    return indicator ? 'shown' : 'no indicator';
+})()"
 
 # start's options, and the run value each records as requested (name=1) in state/run.values.
 readonly GC_LOG_OPTION='--gc-log'
@@ -292,6 +333,8 @@ readonly EVAL_REFUSED_REPLY_PREFIX='{"type":"bs","data":[false,'
 # /proc/<pid>/stat after the last ") ": state (field 3), ppid, pgrp, session (field 6).
 readonly STAT_STATE_INDEX_AFTER_COMM=0
 readonly STAT_SESSION_INDEX_AFTER_COMM=3
+# The parent's pid (field 4), counted the same way.
+readonly STAT_PARENT_INDEX_AFTER_COMM=1
 # Field 22, the start time in clock ticks after boot: with the pid it names one process, even after a reuse.
 readonly STAT_STARTTIME_INDEX_AFTER_COMM=19
 readonly DEAD_PROCESS_STATES='ZX'
@@ -310,9 +353,14 @@ SESSION_PIDS=()
 REMAINING_SESSION_PID_COUNT=0
 # The run values start's options ask for (gc-log, replay), in the order given, filled by parse_start_options.
 REQUESTED_START_RUN_VALUE_NAMES=()
-# The window perf opened over the card, by pid and start time (end_perf_window ends only that process).
+# The window perf opened over the card, by pid and start time (end_perf_window ends only that process, and only
+# while it is still perf's own child); the start time stays empty when it could not be read.
 PERF_WINDOW_PID=""
 PERF_WINDOW_STARTTIME=""
+# The run's verified private bus, once perf has it: what end_perf_run restores the run over.
+PERF_ADDRESS=""
+# The window's --cpu-percent job, while it runs in the background of a measurement (end_perf_cost_job ends it).
+PERF_COST_JOB_PID=""
 # What measure_perf_window read of the window just measured.
 PERF_WINDOW_CPU_PERCENT=""
 PERF_WINDOW_TICK_MEDIAN_MS=""
@@ -1724,7 +1772,10 @@ are_counts() {
 # its Samples plus the disabled state's frames plus
 # PERF_FRAMES_OVER_SAMPLES_ALLOWANCE; covered and idle, its frames at most the
 # disabled state's plus PERF_COVERED_IDLE_FRAMES_ALLOWANCE; with the top bar
-# hidden, no top-bar paint; and the card's offscreen redirect ALWAYS.
+# hidden, no top-bar paint; and the card's offscreen redirect ALWAYS. The
+# disabled state itself has one absolute bound: at most
+# PERF_MAX_DISABLED_MAJOR_COLLECTIONS major collections, so that a defect that
+# outlives disable() cannot hide in the state the others are measured against.
 # Arguments:
 #   $1 - the disabled state's major collections
 #   $2 - the disabled state's frames
@@ -1739,17 +1790,19 @@ are_counts() {
 #   counting would make every budget pass)
 #######################################
 perf_count_verdict() {
-    local disabled_major_collections="${1:-}" disabled_frames="${2:-}" state_index state_name breach
-    local major_collections frames samples topbar_paints card_redirect joined_breaches budget_noun
+    local disabled_major_collections="${1:-}" disabled_frames="${2:-}" state_index state_name breach listed_breach
+    local major_collections frames samples topbar_paints card_redirect joined_breaches budget_noun unjudgeable_reason
     local major_collections_limit frames_limit covered_idle_frames_limit
     local expected_argument_count=$(( 2 + ${#PERF_ENABLED_STATE_NAMES[@]} ))
     local -a enabled_records=("${@:3}") record_words breaches=()
     if (( $# != expected_argument_count )); then
-        print_unjudgeable_counts "wanted the disabled state's two counts and a record per enabled state ($expected_argument_count arguments), got $#"
+        unjudgeable_reason="wanted the disabled state's two counts and a record per enabled state"
+        print_unjudgeable_counts "$unjudgeable_reason ($expected_argument_count arguments), got $#"
         return "$EXIT_REFUSED"
     fi
     if ! are_counts "$disabled_major_collections" "$disabled_frames"; then
-        print_unjudgeable_counts "the disabled state's counts are not whole numbers: '$disabled_major_collections' '$disabled_frames'"
+        unjudgeable_reason="the disabled state's counts are not whole numbers"
+        print_unjudgeable_counts "$unjudgeable_reason: '$disabled_major_collections' '$disabled_frames'"
         return "$EXIT_REFUSED"
     fi
     # Every record is checked before any is judged: a count that cannot be trusted voids the run, breaches included.
@@ -1758,15 +1811,22 @@ perf_count_verdict() {
         read -r -a record_words <<<"${enabled_records[state_index]}"
         if (( ${#record_words[@]} != PERF_ENABLED_RECORD_WORD_COUNT )) || ! are_counts "${record_words[@]:0:4}"
         then
-            print_unjudgeable_counts "$state_name's record is not four whole numbers and the card's redirect: '${enabled_records[state_index]}'"
+            unjudgeable_reason="$state_name's record is not four whole numbers and the card's redirect"
+            print_unjudgeable_counts "$unjudgeable_reason: '${enabled_records[state_index]}'"
             return "$EXIT_REFUSED"
         fi
         if [[ "$state_name" == "$PERF_VISIBLE_BUSY_STATE" ]] &&
             (( record_words[1] == 0 || record_words[2] == 0 || record_words[3] == 0 )); then
-            print_unjudgeable_counts "the probe counted no frame, Sample or top-bar paint in $state_name, where each must happen: it is not counting"
+            unjudgeable_reason="the probe counted no frame, Sample or top-bar paint in $state_name,"
+            print_unjudgeable_counts "$unjudgeable_reason where each must happen: it is not counting"
             return "$EXIT_REFUSED"
         fi
     done
+    if (( disabled_major_collections > PERF_MAX_DISABLED_MAJOR_COLLECTIONS )); then
+        breach="disabled-collections: $PERF_DISABLED_STATE had $disabled_major_collections major collections,"
+        breach+=" more than $PERF_MAX_DISABLED_MAJOR_COLLECTIONS: something outlives disable(), or the run is not idle"
+        breaches+=("$breach")
+    fi
     major_collections_limit=$(( disabled_major_collections + PERF_MAJOR_COLLECTIONS_ALLOWANCE ))
     covered_idle_frames_limit=$(( disabled_frames + PERF_COVERED_IDLE_FRAMES_ALLOWANCE ))
     for state_index in "${!PERF_ENABLED_STATE_NAMES[@]}"; do
@@ -1774,19 +1834,30 @@ perf_count_verdict() {
         read -r major_collections frames samples topbar_paints card_redirect <<<"${enabled_records[state_index]}"
         frames_limit=$(( samples + disabled_frames + PERF_FRAMES_OVER_SAMPLES_ALLOWANCE ))
         if (( major_collections > major_collections_limit )); then
-            breaches+=("collections: $state_name had $major_collections major collections, more than the disabled state's $disabled_major_collections plus $PERF_MAJOR_COLLECTIONS_ALLOWANCE")
+            breach="collections: $state_name had $major_collections major collections,"
+            breach+=" more than the disabled state's $disabled_major_collections plus $PERF_MAJOR_COLLECTIONS_ALLOWANCE"
+            breaches+=("$breach")
         fi
         if (( frames > frames_limit )); then
-            breaches+=("frames-per-sample: $state_name drew $frames frames, more than its $samples Samples plus the disabled state's $disabled_frames frames plus $PERF_FRAMES_OVER_SAMPLES_ALLOWANCE")
+            breach="frames-per-sample: $state_name drew $frames frames, more than its $samples Samples"
+            breach+=" plus the disabled state's $disabled_frames frames plus $PERF_FRAMES_OVER_SAMPLES_ALLOWANCE"
+            breaches+=("$breach")
         fi
         if [[ "$state_name" == "$PERF_COVERED_IDLE_STATE" ]] && (( frames > covered_idle_frames_limit )); then
-            breaches+=("covered-idle-frames: $state_name drew $frames frames, more than the disabled state's $disabled_frames frames plus $PERF_COVERED_IDLE_FRAMES_ALLOWANCE")
+            breach="covered-idle-frames: $state_name drew $frames frames,"
+            breach+=" more than the disabled state's $disabled_frames frames plus $PERF_COVERED_IDLE_FRAMES_ALLOWANCE"
+            breaches+=("$breach")
         fi
-        if [[ "$state_name" == "$PERF_TOPBAR_HIDDEN_STATE" ]] && (( topbar_paints > PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED )); then
-            breaches+=("hidden-topbar-paints: $state_name painted the top bar while it was hidden (top-bar paints $topbar_paints, allowed $PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED)")
+        if [[ "$state_name" == "$PERF_TOPBAR_HIDDEN_STATE" ]] &&
+            (( topbar_paints > PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED )); then
+            breach="hidden-topbar-paints: $state_name painted the top bar while it was hidden"
+            breach+=" (top-bar paints $topbar_paints, allowed $PERF_HIDDEN_TOPBAR_PAINTS_ALLOWED)"
+            breaches+=("$breach")
         fi
         if [[ "$card_redirect" != "$PERF_WANTED_CARD_REDIRECT" ]]; then
-            breaches+=("card-redirect: $state_name found the card's offscreen redirect $card_redirect, not $PERF_WANTED_CARD_REDIRECT")
+            breach="card-redirect: $state_name found the card's offscreen redirect $card_redirect,"
+            breach+=" not $PERF_WANTED_CARD_REDIRECT"
+            breaches+=("$breach")
         fi
     done
     if (( ${#breaches[@]} == 0 )); then
@@ -1794,8 +1865,8 @@ perf_count_verdict() {
         return 0
     fi
     joined_breaches="${breaches[0]}"
-    for breach in "${breaches[@]:1}"; do
-        joined_breaches+="; $breach"
+    for listed_breach in "${breaches[@]:1}"; do
+        joined_breaches+="; $listed_breach"
     done
     budget_noun='budgets'
     (( ${#breaches[@]} == 1 )) && budget_noun='budget'
@@ -1816,23 +1887,56 @@ run_perf_step() {
 }
 
 #######################################
+# Succeed only when the probe's answer shows that the request ran: a JSON
+# object, no refusal, and the mode it attached in (attach-disabled,
+# attach-enabled: .attached) or read in (read: .mode) the one expected. An
+# empty answer, null, an object without that sign or with another mode (a
+# completion value lost on the way, or a probe that did not run as asked) is
+# not taken for success, so it fails here and not nine minutes later at the
+# verdict. Says why on stderr.
+# Arguments:
+#   $1 - request (attach-disabled, attach-enabled, read)
+#   $2 - the mode the answer must show (disabled, enabled)
+#   $3 - the probe's answer
+#######################################
+is_successful_perf_probe_answer() {
+    local probe_request="$1" expected_mode="$2" probe_answer="$3" probe_refusal answered_mode
+    local success_key="$PERF_PROBE_ATTACHED_KEY"
+    [[ "$probe_request" == "$PERF_PROBE_READ_REQUEST" ]] && success_key="$PERF_PROBE_MODE_KEY"
+    if ! probe_refusal="$(jq -r '.refused // empty' <<<"$probe_answer" 2>/dev/null)"; then
+        note "the in-shell probe's answer to $probe_request is not a JSON object: '$probe_answer'"
+        return 1
+    fi
+    if [[ -n "$probe_refusal" ]]; then
+        note "the in-shell probe refused $probe_request: $probe_refusal"
+        return 1
+    fi
+    answered_mode="$(jq -r --arg success_key "$success_key" '.[$success_key] // empty' <<<"$probe_answer")"
+    if [[ "$answered_mode" != "$expected_mode" ]]; then
+        note "the in-shell probe's answer to $probe_request shows no sign that it ran" \
+            "($success_key is '$answered_mode', not '$expected_mode'): '$probe_answer'"
+        return 1
+    fi
+}
+
+#######################################
 # Print the in-shell probe's JSON answer to one request: perf-probe.js's text,
 # then one call of its function, through Eval. Exit 2 when the call fails, the
-# probe throws, or it refuses (naming why): it never attaches to nothing.
+# probe throws or refuses, or its answer shows no sign that it ran in the mode
+# expected (is_successful_perf_probe_answer): it never attaches to nothing.
 # Arguments:
 #   $1 - verified private bus address
 #   $2 - request (attach-disabled, attach-enabled, read)
+#   $3 - the mode the answer must show (disabled, enabled)
 #######################################
 run_perf_probe() {
-    local address="$1" probe_request="$2" probe_source probe_call probe_code probe_answer probe_refusal
+    local address="$1" probe_request="$2" expected_mode="$3" probe_source probe_call probe_code probe_answer
     probe_source="$(<"$PERF_PROBE_PATH")" || die "cannot read $PERF_PROBE_PATH"
     probe_call="$PERF_PROBE_FUNCTION_NAME('$probe_request');"
     probe_code="$probe_source"$'\n'"$probe_call"
     probe_answer="$(eval_in_nested_shell "$address" "$probe_code")" \
         || die "the in-shell probe's $probe_request did not run"
-    probe_refusal="$(jq -r '.refused // empty' <<<"$probe_answer")" \
-        || die "the in-shell probe's answer to $probe_request is not a JSON object: $probe_answer"
-    [[ -z "$probe_refusal" ]] || die "the in-shell probe refused $probe_request: $probe_refusal"
+    is_successful_perf_probe_answer "$probe_request" "$expected_mode" "$probe_answer" || exit "$EXIT_REFUSED"
     printf '%s\n' "$probe_answer"
 }
 
@@ -1869,18 +1973,72 @@ start_perf_window() {
 }
 
 #######################################
-# Succeed while the window perf started is still the process it recorded.
+# Succeed while a pid is a running child of this shell: what perf started in
+# the background and has not reaped. A pid reused by any other process has
+# another parent.
+# Arguments:
+#   $1 - pid
+#######################################
+is_own_child_process() {
+    [[ "$1" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || return 1
+    read_stat_fields /proc "$1" || return 1
+    [[ "${STAT_FIELDS_AFTER_COMM[$STAT_PARENT_INDEX_AFTER_COMM]:-}" == "$$" ]]
+}
+
+#######################################
+# Succeed while the window perf started is still the process it recorded: its
+# own child, with the start time recorded at launch (when that could be read).
 #######################################
 is_perf_window_running() {
-    [[ -n "$PERF_WINDOW_PID" && -n "$PERF_WINDOW_STARTTIME" &&
+    is_own_child_process "$PERF_WINDOW_PID" || return 1
+    [[ -z "$PERF_WINDOW_STARTTIME" ||
         "$(starttime_of_process /proc "$PERF_WINDOW_PID")" == "$PERF_WINDOW_STARTTIME" ]]
 }
 
 #######################################
-# perf's exit: end the window it started, only while it is still that process.
+# End the window perf started, only while it is still that process (also when
+# its start time could not be read: then by the pid recorded at launch, which
+# must still be perf's own child).
 #######################################
 end_perf_window() {
     is_perf_window_running && kill -TERM "$PERF_WINDOW_PID" 2>/dev/null
+    return 0
+}
+
+#######################################
+# End a window's background --cpu-percent job, only while it is still perf's
+# own child.
+#######################################
+end_perf_cost_job() {
+    is_own_child_process "$PERF_COST_JOB_PID" && kill -TERM "$PERF_COST_JOB_PID" 2>/dev/null
+    return 0
+}
+
+#######################################
+# Put the nested run's extension back as perf found it, over the run's verified
+# private bus (nothing before perf has one): enabled, then its indicator shown.
+# Each step runs whatever the one before did, and a failure is only reported.
+#######################################
+restore_perf_extension() {
+    [[ -n "$PERF_ADDRESS" ]] || return 0
+    eval_in_nested_shell "$PERF_ADDRESS" "$PERF_RESTORE_EXTENSION_JS" >/dev/null \
+        || note "perf could not enable the extension again in the nested shell"
+    eval_in_nested_shell "$PERF_ADDRESS" "$PERF_RESTORE_TOPBAR_JS" >/dev/null \
+        || note "perf could not show the top bar again in the nested shell"
+    return 0
+}
+
+#######################################
+# perf's exit, on every path once it has started acting on the run (the EXIT
+# trap): end the window it opened and its background measurement job, then
+# enable the extension and show the top bar again. Each step is guarded, so one
+# that fails never skips the others, and none exits: it acts on the nested run
+# and perf's own children only.
+#######################################
+end_perf_run() {
+    end_perf_window
+    end_perf_cost_job
+    restore_perf_extension
     return 0
 }
 
@@ -1929,17 +2087,18 @@ request_perf_scenario() {
 #   $2 - the nested shell's pid
 #######################################
 measure_perf_window() {
-    local run_dir="$1" shell_pid="$2" window_start_offset cpu_percent_job_pid
+    local run_dir="$1" shell_pid="$2" window_start_offset
     local shell_log_path="$run_dir/log/shell.log" cpu_percent_path="$run_dir/$PERF_CPU_PERCENT_RELATIVE_PATH"
     local -a cost_command=(env "GNOME_SHELL_PID=$shell_pid" PROC_ROOT=/proc bash "$COST_SCRIPT_PATH")
     window_start_offset="$(stat -c %s "$shell_log_path")" || die "cannot read the size of $shell_log_path"
     "${cost_command[@]}" --cpu-percent "$PERF_WINDOW_SECONDS" >"$cpu_percent_path" &
-    cpu_percent_job_pid=$!
+    # Kept where perf's exit finds it: a failure below, or a signal, ends the job (end_perf_cost_job).
+    PERF_COST_JOB_PID=$!
     if ! PERF_WINDOW_TICK_MEDIAN_MS="$("${cost_command[@]}" --tick-median "$PERF_WINDOW_SECONDS")"; then
-        kill "$cpu_percent_job_pid" 2>/dev/null
         die "the cost script could not read the nested shell's main thread"
     fi
-    wait "$cpu_percent_job_pid" || die "the cost script could not read the nested shell's CPU"
+    wait "$PERF_COST_JOB_PID" || die "the cost script could not read the nested shell's CPU"
+    PERF_COST_JOB_PID=""
     PERF_WINDOW_CPU_PERCENT="$(<"$cpu_percent_path")"
     PERF_WINDOW_MAJOR_COLLECTIONS="$(count_major_collections_since "$shell_log_path" "$window_start_offset" \
         "$shell_pid")" || die "cannot count the collections in $shell_log_path"
@@ -1957,27 +2116,29 @@ measure_perf_window() {
 record_perf_state() {
     local state_name="$1" probe_answer="$2" frames samples topbar_paints card_redirect cpu_over_disabled
     local samples_by_time cpu_report
+    local state_line_format='%s: cpu=%s tick-median=%sms major-collections=%s'
+    state_line_format+=' frames=%s samples=%s top-bar-paints=%s card-redirect=%s\n'
     frames="$(perf_probe_answer_field "$probe_answer" frames)"
     if [[ "$state_name" == "$PERF_DISABLED_STATE" ]]; then
         PERF_DISABLED_MAJOR_COLLECTIONS="$PERF_WINDOW_MAJOR_COLLECTIONS"
         PERF_DISABLED_FRAMES="$frames"
         PERF_DISABLED_CPU_PERCENT="$PERF_WINDOW_CPU_PERCENT"
         samples_by_time=$(( PERF_WINDOW_SECONDS / PERF_SAMPLE_INTERVAL_SECONDS ))
-        printf '%s: cpu=%s%% tick-median=%sms major-collections=%s frames=%s samples=%s (by time: no client while disabled) top-bar-paints=- card-redirect=-\n' \
-            "$state_name" "$PERF_WINDOW_CPU_PERCENT" "$PERF_WINDOW_TICK_MEDIAN_MS" "$PERF_WINDOW_MAJOR_COLLECTIONS" \
-            "$frames" "$samples_by_time"
+        # shellcheck disable=SC2059  # The format is the two literals above, split only for the line's length.
+        printf "$state_line_format" "$state_name" "$PERF_WINDOW_CPU_PERCENT%" "$PERF_WINDOW_TICK_MEDIAN_MS" \
+            "$PERF_WINDOW_MAJOR_COLLECTIONS" "$frames" "$samples_by_time (by time: no client while disabled)" - -
         return 0
     fi
     samples="$(perf_probe_answer_field "$probe_answer" samples)"
     topbar_paints="$(perf_probe_answer_field "$probe_answer" topbarPaints)"
     card_redirect="$(perf_probe_answer_field "$probe_answer" cardRedirect)"
     PERF_ENABLED_STATE_RECORDS+=("$PERF_WINDOW_MAJOR_COLLECTIONS $frames $samples $topbar_paints $card_redirect")
-    cpu_over_disabled="$(awk -v state_percent="$PERF_WINDOW_CPU_PERCENT" -v disabled_percent="$PERF_DISABLED_CPU_PERCENT" \
-        'BEGIN { printf "%+.3f", state_percent - disabled_percent }')"
+    cpu_over_disabled="$(awk -v state_percent="$PERF_WINDOW_CPU_PERCENT" \
+        -v disabled_percent="$PERF_DISABLED_CPU_PERCENT" 'BEGIN { printf "%+.3f", state_percent - disabled_percent }')"
     cpu_report="$PERF_WINDOW_CPU_PERCENT% ($cpu_over_disabled over disabled)"
-    printf '%s: cpu=%s tick-median=%sms major-collections=%s frames=%s samples=%s top-bar-paints=%s card-redirect=%s\n' \
-        "$state_name" "$cpu_report" "$PERF_WINDOW_TICK_MEDIAN_MS" "$PERF_WINDOW_MAJOR_COLLECTIONS" "$frames" \
-        "$samples" "$topbar_paints" "$card_redirect"
+    # shellcheck disable=SC2059  # The format is the two literals above, split only for the line's length.
+    printf "$state_line_format" "$state_name" "$cpu_report" "$PERF_WINDOW_TICK_MEDIAN_MS" \
+        "$PERF_WINDOW_MAJOR_COLLECTIONS" "$frames" "$samples" "$topbar_paints" "$card_redirect"
 }
 
 #######################################
@@ -1995,18 +2156,22 @@ record_perf_state() {
 #######################################
 measure_perf_state() {
     local run_dir="$1" address="$2" shell_pid="$3" state_name="$4" scenario_name="$5" setup_js
-    local attach_request="$PERF_PROBE_ATTACH_ENABLED_REQUEST" probe_answer
+    local attach_request="$PERF_PROBE_ATTACH_ENABLED_REQUEST" probe_mode="$PERF_PROBE_ENABLED_MODE" probe_answer
+    local settling_note="$scenario_name input, $PERF_WARM_UP_SECONDS s to settle, then a $PERF_WINDOW_SECONDS s window"
     shift 5
-    note "perf: $state_name: $scenario_name input, $PERF_WARM_UP_SECONDS s to settle, then a $PERF_WINDOW_SECONDS s window"
+    note "perf: $state_name: $settling_note"
     request_perf_scenario "$run_dir" "$scenario_name"
     for setup_js in "$@"; do
         run_perf_step "$address" "set up $state_name" "$setup_js"
     done
     sleep "$PERF_WARM_UP_SECONDS"
-    [[ "$state_name" == "$PERF_DISABLED_STATE" ]] && attach_request="$PERF_PROBE_ATTACH_DISABLED_REQUEST"
-    run_perf_probe "$address" "$attach_request" >/dev/null
+    if [[ "$state_name" == "$PERF_DISABLED_STATE" ]]; then
+        attach_request="$PERF_PROBE_ATTACH_DISABLED_REQUEST"
+        probe_mode="$PERF_PROBE_DISABLED_MODE"
+    fi
+    run_perf_probe "$address" "$attach_request" "$probe_mode" >/dev/null
     measure_perf_window "$run_dir" "$shell_pid"
-    probe_answer="$(run_perf_probe "$address" "$PERF_PROBE_READ_REQUEST")" || exit "$EXIT_REFUSED"
+    probe_answer="$(run_perf_probe "$address" "$PERF_PROBE_READ_REQUEST" "$probe_mode")" || exit "$EXIT_REFUSED"
     record_perf_state "$state_name" "$probe_answer"
 }
 
@@ -2039,19 +2204,24 @@ perf_subcommand() {
     shell_pid="$(recorded_run_value "$run_dir" gnome-shell)"
     [[ "$shell_pid" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || die "refusing: the run has no recorded gnome-shell pid"
     has_collection_lines_of "$run_dir/log/shell.log" "$shell_pid" \
-        || die "refusing: $run_dir/log/shell.log holds no collection line of the nested shell ($shell_pid): is the GC log on?"
+        || die "refusing: $run_dir/log/shell.log holds no collection line of the nested shell ($shell_pid):" \
+            "is the GC log on?"
 
     window_count="$(eval_in_nested_shell "$address" "$PERF_COUNT_WINDOWS_JS")" || exit "$EXIT_REFUSED"
     [[ "$window_count" == 0 ]] \
         || die "refusing: the nested session already has $window_count window(s); perf covers the card with its own"
-    trap end_perf_window EXIT
+    # From here perf acts on the run: every exit, a failure, a breach or a signal included, puts it back.
+    PERF_ADDRESS="$address"
+    trap end_perf_run EXIT
     trap 'exit 143' TERM
     trap 'exit 130' INT
     start_perf_window "$run_dir" "$address" "$window_command_path"
     wait_for_perf_window "$address" || die "the $PERF_WINDOW_COMMAND_NAME window did not open (see $run_dir/log/)"
 
-    header_line="perf: nested gnome-shell $shell_pid of $run_dir; each state: its scenario, $PERF_WARM_UP_SECONDS s to settle, one $PERF_WINDOW_SECONDS s window with no eval running"
-    header_line+="; cpu is % of one core for the whole nested shell, the probe's own per-frame counting included, reported and not gated; the counts are gated"
+    header_line="perf: nested gnome-shell $shell_pid of $run_dir; each state: its scenario,"
+    header_line+=" $PERF_WARM_UP_SECONDS s to settle, one $PERF_WINDOW_SECONDS s window with no eval running;"
+    header_line+=" cpu is % of one core for the whole nested shell, the probe's own per-frame counting included,"
+    header_line+=" reported and not gated; the counts are gated"
     printf '%s\n' "$header_line"
     measure_perf_state "$run_dir" "$address" "$shell_pid" "$PERF_DISABLED_STATE" "$IDLE_SCENARIO_NAME" \
         "$PERF_DISABLE_EXTENSION_JS"

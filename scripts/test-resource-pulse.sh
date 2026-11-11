@@ -29,7 +29,8 @@
 # (Ubuntu: dbus-daemon), gdbus (libglib2.0-bin; gnome-status asks the real
 # service through it), and for the card-width row the Pango typelibs
 # (gir1.2-pango-1.0) and the card's font, Ubuntu Sans (fonts-ubuntu): without
-# them that row fails, never passes. No network, no root.
+# them that row fails, never passes; and for the row on perf's probe answers,
+# jq: without it that row fails, never passes. No network, no root.
 #
 # Usage: scripts/test-resource-pulse.sh
 #   RESOURCE_PULSE_EXT_DIR=<dir> points the file rows at a copy of the
@@ -2887,10 +2888,16 @@ done
 tick_window_seconds=$(( ${#TICK_MAIN_THREAD_NANOSECONDS[@]} * SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS ))
 cost_steps_run "$TICK_PROC_ROOT" "$TICK_SLEEP_STEPS" --tick-median "$tick_window_seconds"
 tick_median_summary="exit=$COST_EXIT median=$COST_OUTPUT slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")"
+# An even count, as perf's 30 ticks are: the first four ticks, 3, 1, 40 and 1.5 ms, sort to 1, 1.5, 3, 40, and the
+# script reports the UPPER of the two middle ones, 3.00 (the lower would be 1.50, their mean 2.25).
+write_fake_schedstat "$TICK_PROC_ROOT" 4242 4242 '1000000 0 1'
+write_fake_schedstat "$TICK_PROC_ROOT" 4242 4243 '0 0 1'
+cost_steps_run "$TICK_PROC_ROOT" "$TICK_SLEEP_STEPS" --tick-median $(( 4 * SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS ))
+tick_median_summary+=" even-count=$COST_EXIT/$COST_OUTPUT"
 cost_steps_run "$TICK_PROC_ROOT" "$TICK_SLEEP_STEPS" --tick-median $((SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS - 1))
 tick_median_summary+=" under-one-tick=$COST_EXIT/$(grep -c -F 'needs at least one tick' <<<"$COST_OUTPUT")"
 check "cost: --tick-median prints the median ms of the main thread's CPU per tick, read every SAMPLE_INTERVAL_SECONDS of lib/constants.js; under one tick is a usage error" \
-  "$tick_median_summary" "exit=0 median=2.50 slept=$expected_tick_sleeps under-one-tick=2/1"
+  "$tick_median_summary" "exit=0 median=2.50 slept=$expected_tick_sleeps even-count=0/3.00 under-one-tick=2/1"
 
 # A counter that cannot be read is exit 2, never a reading of 0: a thread
 # listed with no schedstat (a kernel that keeps none), a process with no task
@@ -2918,9 +2925,11 @@ unreadable_counter_verdict() {
 unreadable_counter_summary=""
 for unreadable_mode in --cpu-percent --tick-median; do
   unreadable_counter_summary+="${unreadable_mode#--}:"
-  unreadable_counter_summary+=" no-schedstat=$(unreadable_counter_verdict "$MISSING_SCHEDSTAT_PROC_ROOT" "$unreadable_mode")"
+  unreadable_counter_summary+=" no-schedstat=$(unreadable_counter_verdict "$MISSING_SCHEDSTAT_PROC_ROOT" \
+    "$unreadable_mode")"
   unreadable_counter_summary+=" no-task-dir=$(unreadable_counter_verdict "$NO_TASK_DIR_PROC_ROOT" "$unreadable_mode")"
-  unreadable_counter_summary+=" malformed=$(unreadable_counter_verdict "$MALFORMED_SCHEDSTAT_PROC_ROOT" "$unreadable_mode") "
+  unreadable_counter_summary+=" malformed=$(unreadable_counter_verdict "$MALFORMED_SCHEDSTAT_PROC_ROOT" \
+    "$unreadable_mode") "
 done
 check "cost: a schedstat that is missing, a process with no task dir and a counter that is not a number are exit 2 in both modes, never a reading" \
   "$unreadable_counter_summary" \
@@ -3048,8 +3057,9 @@ printf '\nresource-pulse-nested.sh (hermetic: no gnome-shell, nothing is started
 # here. These rows cover what it decides before anything starts: its usage,
 # the bus configs it renders, the environment allowlist, and its refusals. Every
 # run of it here has busctl, gsettings and gnome-shell replaced by stubs that
-# only record the call (jq too: CI does not install it, and no row here needs
-# it to really run), and RESOURCE_PULSE_NESTED_BASE pointed at an empty
+# only record the call (jq too: no run of the script here needs it to really
+# run; the one row that does, on perf's probe answers, calls the function
+# itself with the real jq), and RESOURCE_PULSE_NESTED_BASE pointed at an empty
 # directory, so a row that must refuse proves it reached none of them.
 #
 # That directory's name is deliberately longer than the script allows a run
@@ -3370,12 +3380,20 @@ done
 install_stub "$PERF_CALCULATOR_STUB_BIN" gnome-calculator \
   "$(printf '#!/bin/bash\nprintf "gnome-calculator %%s\\n" "$*" >>%q' "$PERF_CALCULATOR_CALLS")"
 PERF_STUBBED_PATH="$PERF_CALCULATOR_STUB_BIN:$NESTED_STUB_BIN:$PATH"
+# The case without jq: gnome-calculator's stub, busctl's stub alone (the stub dir holds a jq stub too), and the
+# minimal tools; jq is the next tool perf looks for.
+PERF_BUSCTL_ONLY_BIN="$WIRING_TMP/perf-busctl-only-bin"
+if ! mkdir -p "$PERF_BUSCTL_ONLY_BIN" || ! ln -sf "$NESTED_STUB_BIN/busctl" "$PERF_BUSCTL_ONLY_BIN/busctl"; then
+  fatal "cannot lay out $PERF_BUSCTL_ONLY_BIN"
+fi
+PERF_WITHOUT_JQ_PATH="$PERF_CALCULATOR_STUB_BIN:$PERF_BUSCTL_ONLY_BIN:$PERF_MINIMAL_BIN"
 # A collection line of the run's gnome-shell, and a log with none: only another process's line, and a word.
 PERF_COLLECTING_LOG="MinorGC:   $fake_shell_pid 0x5f2aea7ebe60   0.015299 OUT_OF_NURSERY         8.1%    256    512"
 PERF_SILENT_LOG="$(printf 'gnome-shell started\nMajorGC:   %s 0x5f2aea7ebe60  10.918717 MEM_PRESSURE\n' \
   "$NEVER_RUNNING_PID")"
-# perf_refusal_verdict <needle> <PATH> <shell log> [run values...] prints exit/needle count/busctl calls/gnome-calculator
-# calls for `perf` on the fixture run made with these values, named; with no values there is no run, and none is named.
+# perf_refusal_verdict <needle> <PATH> <shell log> [run values...] prints exit/needle count/busctl
+# calls/gnome-calculator calls for `perf` on the fixture run made with these values, named; with no values there is
+# no run, and none is named.
 perf_refusal_verdict() {
   local perf_needle="$1" perf_path="$2" perf_shell_log="$3" perf_output perf_exit
   shift 3
@@ -3410,14 +3428,16 @@ perf_refusal_summary+=" service-gone=$(perf_refusal_verdict 'replay service is n
   gc-log=1 replay=1)"
 perf_refusal_summary+=" no-calculator=$(perf_refusal_verdict 'gnome-calculator is required' \
   "$NESTED_STUB_BIN:$PERF_MINIMAL_BIN" "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" no-jq=$(perf_refusal_verdict 'jq is required' "$PERF_WITHOUT_JQ_PATH" \
+  "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
 perf_refusal_summary+=" gc-log-silent=$(perf_refusal_verdict 'holds no collection line' "$PERF_STUBBED_PATH" \
   "$PERF_SILENT_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
 perf_refusal_summary+=" all-met=$(perf_refusal_verdict 'the Eval call failed' "$PERF_STUBBED_PATH" \
   "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
 perf_refusal_summary+=" usage=$(grep -c -x -F '       scripts/resource-pulse-nested.sh perf' <<<"$NESTED_OUTPUT")"
-check "nested: perf refuses (exit 2), before busctl and without starting gnome-calculator, a run that is not live, one without gc-log=1 or replay=1, a stopped replay service, no gnome-calculator on PATH and a silent GC log" \
+check "nested: perf refuses (exit 2), before busctl and without starting gnome-calculator, a run that is not live, one without gc-log=1 or replay=1, a stopped replay service, no gnome-calculator or jq on PATH and a silent GC log" \
   "$perf_refusal_summary" \
-  "extra-argument=2/1 no-run=2/1/0/0 not-live=2/1/0/0 no-gc-log=2/1/0/0 no-replay=2/1/0/0 service-gone=2/1/0/0 no-calculator=2/1/0/0 gc-log-silent=2/1/0/0 all-met=2/1/1/0 usage=1"
+  "extra-argument=2/1 no-run=2/1/0/0 not-live=2/1/0/0 no-gc-log=2/1/0/0 no-replay=2/1/0/0 service-gone=2/1/0/0 no-calculator=2/1/0/0 no-jq=2/1/0/0 gc-log-silent=2/1/0/0 all-met=2/1/1/0 usage=1"
 rm -rf "$PERF_RUN"
 kill "$fake_shell_pid" 2>/dev/null
 wait "$fake_shell_pid" 2>/dev/null
@@ -3445,7 +3465,8 @@ perf_gc_window_offset="$(stat -c %s "$PERF_GC_LOG")"
   printf 'JS LOG: resource-pulse: MajorGC:   %s seen\n' "$PERF_GC_SHELL_PID"
   perf_gc_line MajorGC "$PERF_GC_SHELL_PID" 20.950 MEM_PRESSURE
 } >>"$PERF_GC_LOG"
-perf_gc_summary="window=$(nested_call count_major_collections_since "$PERF_GC_LOG" "$perf_gc_window_offset" "$PERF_GC_SHELL_PID")"
+perf_gc_summary="window=$(nested_call count_major_collections_since "$PERF_GC_LOG" "$perf_gc_window_offset" \
+  "$PERF_GC_SHELL_PID")"
 perf_gc_summary+=" whole-log=$(nested_call count_major_collections_since "$PERF_GC_LOG" 0 "$PERF_GC_SHELL_PID")"
 if nested_call count_major_collections_since "$WIRING_TMP/no-such-shell.log" 0 "$PERF_GC_SHELL_PID" >/dev/null 2>&1
 then perf_gc_summary+=" unreadable=passed"
@@ -3453,18 +3474,22 @@ else perf_gc_summary+=" unreadable=failed"; fi
 check "nested: perf counts the MajorGC: lines of the shell's own pid past the window's start, never the header, a MinorGC: line or another process's; an unreadable log fails" \
   "$perf_gc_summary" "window=2 whole-log=3 unreadable=failed"
 
-# perf's verdict, a pure function of the counts. The disabled state shows 2
+# perf's verdict, a pure function of the counts. The disabled state shows 4
 # major collections and 2 frames; each enabled state is "<major collections>
 # <frames> <Samples> <top-bar paints> <card redirect>", in perf's order:
 # covered-idle, covered-busy, topbar-hidden-covered, visible-busy. The in-budget
 # counts sit on every bound's edge, and the disabled state's frames are above
 # zero, so a comparison off by one either way, or a frame bound that leaves the
-# disabled state's frames out, moves a row: collections 2 + 1 = 3; frames 30
-# Samples + 2 + 2 = 34, and covered-idle's 2 + 3 = 5; no top-bar paint while
-# hidden.
-PERF_VERDICT_DISABLED_COUNTS=(2 2)
+# disabled state's frames out, moves a row: the disabled state's own collections
+# on their absolute bound, 4; an enabled state's 4 + 1 = 5; frames 30 Samples +
+# 2 + 2 = 34, and covered-idle's 2 + 3 = 5; no top-bar paint while hidden.
+PERF_VERDICT_DISABLED_MAJORS=4
+PERF_VERDICT_DISABLED_FRAMES=2
+PERF_VERDICT_DISABLED_COUNTS=("$PERF_VERDICT_DISABLED_MAJORS" "$PERF_VERDICT_DISABLED_FRAMES")
+PERF_VERDICT_EDGE_MAJORS=5
 PERF_VERDICT_STATE_NAMES=(covered-idle covered-busy topbar-hidden-covered visible-busy)
-PERF_VERDICT_EDGE_RECORDS=('3 5 30 0 ALWAYS' '3 34 30 30 ALWAYS' '3 34 30 0 ALWAYS' '3 34 30 60 ALWAYS')
+PERF_VERDICT_EDGE_RECORDS=("$PERF_VERDICT_EDGE_MAJORS 5 30 0 ALWAYS" "$PERF_VERDICT_EDGE_MAJORS 34 30 30 ALWAYS"
+  "$PERF_VERDICT_EDGE_MAJORS 34 30 0 ALWAYS" "$PERF_VERDICT_EDGE_MAJORS 34 30 60 ALWAYS")
 # perf_verdict_run <records...> runs the verdict on the disabled counts and these records; leaves
 # PERF_VERDICT_OUTPUT and PERF_VERDICT_EXIT.
 perf_verdict_run() {
@@ -3485,36 +3510,53 @@ check "nested: perf's verdict passes (exit 0) counts on every budget's edge, in 
   "exit=$PERF_VERDICT_EXIT lines=$(wc -l <<<"$PERF_VERDICT_OUTPUT") [$PERF_VERDICT_OUTPUT]" \
   "exit=0 lines=1 [perf: PASS: every count within its budget]"
 
+# The disabled state's own collections one past their absolute bound: a defect that outlives disable() raises
+# the disabled state with the enabled ones, and every relative budget then holds. Only this budget breaks: the
+# enabled states' 5 stay within 5 + 1.
+PERF_VERDICT_DISABLED_COUNTS=($((PERF_VERDICT_DISABLED_MAJORS + 1)) "$PERF_VERDICT_DISABLED_FRAMES")
+perf_disabled_breach_needle="disabled-collections: disabled had 5 major collections, more than 4: something outlives"
+perf_disabled_breach_needle+=" disable(), or the run is not idle"
+perf_verdict_run "${PERF_VERDICT_EDGE_RECORDS[@]}"
+PERF_VERDICT_DISABLED_COUNTS=("$PERF_VERDICT_DISABLED_MAJORS" "$PERF_VERDICT_DISABLED_FRAMES")
+check "nested: perf's verdict fails (exit 1) a disabled state with one more major collection than its absolute bound of 4, naming only that budget" \
+  "$PERF_VERDICT_EXIT/$(grep -c -F "$perf_disabled_breach_needle" <<<"$PERF_VERDICT_OUTPUT")/$(grep -c -F 'FAIL: 1 count budget broken: ' <<<"$PERF_VERDICT_OUTPUT")" \
+  "1/1/1"
+
 perf_collections_summary=""
 perf_frames_summary=""
 perf_redirect_summary=""
 for perf_state_index in "${!PERF_VERDICT_STATE_NAMES[@]}"; do
   perf_state_name="${PERF_VERDICT_STATE_NAMES[perf_state_index]}"
   read -r _ edge_frames edge_samples edge_paints _ <<<"${PERF_VERDICT_EDGE_RECORDS[perf_state_index]}"
+  collections_breach_needle="collections: $perf_state_name had 6 major collections, more than the disabled state's"
+  collections_breach_needle+=" 4 plus 1"
   perf_collections_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" \
-    "4 $edge_frames $edge_samples $edge_paints ALWAYS" \
-    "collections: $perf_state_name had 4 major collections, more than the disabled state's 2 plus 1")"
+    "6 $edge_frames $edge_samples $edge_paints ALWAYS" "$collections_breach_needle")"
   # One frame past Samples + 2 + 2. In covered-idle that is with no Sample at all, so that its own tighter bound
   # (the disabled state's 2 frames + 3) still holds and only this one breaks.
-  if [[ "$perf_state_name" == covered-idle ]]; then frames_breach_record="3 5 0 0 ALWAYS"
-  else frames_breach_record="3 35 30 $edge_paints ALWAYS"; fi
+  if [[ "$perf_state_name" == covered-idle ]]; then frames_breach_record="$PERF_VERDICT_EDGE_MAJORS 5 0 0 ALWAYS"
+  else frames_breach_record="$PERF_VERDICT_EDGE_MAJORS 35 30 $edge_paints ALWAYS"; fi
   read -r _ breach_frames breach_samples _ _ <<<"$frames_breach_record"
+  frames_breach_needle="frames-per-sample: $perf_state_name drew $breach_frames frames, more than its"
+  frames_breach_needle+=" $breach_samples Samples plus the disabled state's 2 frames plus 2"
   perf_frames_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" "$frames_breach_record" \
-    "frames-per-sample: $perf_state_name drew $breach_frames frames, more than its $breach_samples Samples plus the disabled state's 2 frames plus 2")"
+    "$frames_breach_needle")"
   perf_redirect_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" \
-    "3 $edge_frames $edge_samples $edge_paints 0" \
+    "$PERF_VERDICT_EDGE_MAJORS $edge_frames $edge_samples $edge_paints 0" \
     "card-redirect: $perf_state_name found the card's offscreen redirect 0, not ALWAYS")"
 done
 check "nested: perf's verdict fails (exit 1) one more major collection than the disabled state's + 1 in any enabled state, naming it" \
   "$perf_collections_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
 check "nested: perf's verdict fails (exit 1) one more frame than Samples + the disabled state's frames + 2 in any enabled state, naming it" \
   "$perf_frames_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
+covered_idle_breach_needle="covered-idle-frames: covered-idle drew 6 frames, more than the disabled state's 2 frames"
+covered_idle_breach_needle+=" plus 3"
 check "nested: perf's verdict fails (exit 1) covered-idle at one more frame than the disabled state's frames + 3, naming it" \
-  "$(perf_breach_verdict 0 '3 6 30 0 ALWAYS' "covered-idle-frames: covered-idle drew 6 frames, more than the disabled state's 2 frames plus 3")" \
-  "1/1/1"
+  "$(perf_breach_verdict 0 "$PERF_VERDICT_EDGE_MAJORS 6 30 0 ALWAYS" "$covered_idle_breach_needle")" "1/1/1"
+hidden_paint_breach_needle="hidden-topbar-paints: topbar-hidden-covered painted the top bar while it was hidden"
+hidden_paint_breach_needle+=" (top-bar paints 1, allowed 0)"
 check "nested: perf's verdict fails (exit 1) one top-bar paint while the top bar is hidden, naming it" \
-  "$(perf_breach_verdict 2 '3 34 30 1 ALWAYS' 'hidden-topbar-paints: topbar-hidden-covered painted the top bar while it was hidden (top-bar paints 1, allowed 0)')" \
-  "1/1/1"
+  "$(perf_breach_verdict 2 "$PERF_VERDICT_EDGE_MAJORS 34 30 1 ALWAYS" "$hidden_paint_breach_needle")" "1/1/1"
 check "nested: perf's verdict fails (exit 1) a card whose offscreen redirect is not ALWAYS in any enabled state, naming it" \
   "$perf_redirect_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
 
@@ -3527,27 +3569,119 @@ perf_unjudgeable_verdict() {
   perf_verdict_run "$@"
   printf '%s/%s' "$PERF_VERDICT_EXIT" "$(grep -c -F 'perf: could not judge the counts: ' <<<"$PERF_VERDICT_OUTPUT")"
 }
+PERF_VERDICT_OTHER_EDGE_RECORDS=("${PERF_VERDICT_EDGE_RECORDS[@]:1}")
 perf_unjudgeable_summary="state-missing=$(perf_unjudgeable_verdict "${PERF_VERDICT_EDGE_RECORDS[@]:0:3}")"
-perf_unjudgeable_summary+=" not-a-number=$(perf_unjudgeable_verdict '3 x 30 0 ALWAYS' "${PERF_VERDICT_EDGE_RECORDS[@]:1}")"
+perf_unjudgeable_summary+=" not-a-number=$(perf_unjudgeable_verdict '5 x 30 0 ALWAYS' \
+  "${PERF_VERDICT_OTHER_EDGE_RECORDS[@]}")"
 # A leading zero, which bash arithmetic would read as octal (08 is not a number to it).
-perf_unjudgeable_summary+=" leading-zero=$(perf_unjudgeable_verdict '3 08 30 0 ALWAYS' "${PERF_VERDICT_EDGE_RECORDS[@]:1}")"
-perf_unjudgeable_summary+=" short-record=$(perf_unjudgeable_verdict '3 5 30 ALWAYS' "${PERF_VERDICT_EDGE_RECORDS[@]:1}")"
-perf_unjudgeable_summary+=" long-record=$(perf_unjudgeable_verdict '3 5 30 0 ALWAYS 9' "${PERF_VERDICT_EDGE_RECORDS[@]:1}")"
+perf_unjudgeable_summary+=" leading-zero=$(perf_unjudgeable_verdict '5 08 30 0 ALWAYS' \
+  "${PERF_VERDICT_OTHER_EDGE_RECORDS[@]}")"
+perf_unjudgeable_summary+=" short-record=$(perf_unjudgeable_verdict '5 5 30 ALWAYS' \
+  "${PERF_VERDICT_OTHER_EDGE_RECORDS[@]}")"
+perf_unjudgeable_summary+=" long-record=$(perf_unjudgeable_verdict '5 5 30 0 ALWAYS 9' \
+  "${PERF_VERDICT_OTHER_EDGE_RECORDS[@]}")"
 for perf_dead_counter in frames Samples paints; do
   case "$perf_dead_counter" in
-    frames) perf_dead_record='3 0 30 60 ALWAYS' ;;
-    Samples) perf_dead_record='3 34 0 60 ALWAYS' ;;
-    paints) perf_dead_record='3 34 30 0 ALWAYS' ;;
+    frames) perf_dead_record='5 0 30 60 ALWAYS' ;;
+    Samples) perf_dead_record='5 34 0 60 ALWAYS' ;;
+    paints) perf_dead_record='5 34 30 0 ALWAYS' ;;
   esac
   perf_unjudgeable_summary+=" visible-busy-no-$perf_dead_counter=$(perf_unjudgeable_verdict \
     "${PERF_VERDICT_EDGE_RECORDS[@]:0:3}" "$perf_dead_record")"
 done
-PERF_VERDICT_DISABLED_COUNTS=(2 '')
+PERF_VERDICT_DISABLED_COUNTS=("$PERF_VERDICT_DISABLED_MAJORS" '')
 perf_unjudgeable_summary+=" disabled-frames-empty=$(perf_unjudgeable_verdict "${PERF_VERDICT_EDGE_RECORDS[@]}")"
-PERF_VERDICT_DISABLED_COUNTS=(2 2)
+PERF_VERDICT_DISABLED_COUNTS=("$PERF_VERDICT_DISABLED_MAJORS" "$PERF_VERDICT_DISABLED_FRAMES")
 check "nested: perf's verdict cannot judge (exit 2, never 0 or 1) a missing state, a count that is not a whole number, a record of the wrong length, or a visible-busy window with no frame, Sample or paint" \
   "$perf_unjudgeable_summary" \
   "state-missing=2/1 not-a-number=2/1 leading-zero=2/1 short-record=2/1 long-record=2/1 visible-busy-no-frames=2/1 visible-busy-no-Samples=2/1 visible-busy-no-paints=2/1 disabled-frames-empty=2/1"
+
+# What a probe answer must show before perf takes the request for done: a JSON
+# object, no refusal, and the mode the request ran in (.attached after an
+# attach, .mode after a read) the one expected. An answer lost on the way (empty,
+# null) must fail at the attach, not nine minutes later at the verdict. Each case
+# prints the check's status; only the four real answers succeed. This row runs
+# the real jq (the stub is only for runs of the script): without jq it fails.
+# perf_probe_answer_status <request> <expected mode> <answer> prints the check's status.
+perf_probe_answer_status() {
+  nested_call is_successful_perf_probe_answer "$1" "$2" "$3" 2>/dev/null
+  printf '%s' "$?"
+}
+PERF_ENABLED_READ_ANSWER='{"mode":"enabled","frames":2,"samples":3,"topbarPaints":3,"cardRedirect":"ALWAYS"}'
+perf_answer_summary="attached-enabled=$(perf_probe_answer_status attach-enabled enabled \
+  '{"attached":"enabled","reattached":true}')"
+perf_answer_summary+=" attached-disabled=$(perf_probe_answer_status attach-disabled disabled \
+  '{"attached":"disabled","counts":"frames only: with the extension disabled there is no client"}')"
+perf_answer_summary+=" read-enabled=$(perf_probe_answer_status read enabled "$PERF_ENABLED_READ_ANSWER")"
+perf_answer_summary+=" read-disabled=$(perf_probe_answer_status read disabled '{"mode":"disabled","frames":1}')"
+perf_answer_summary+=" empty=$(perf_probe_answer_status attach-enabled enabled '')"
+perf_answer_summary+=" null=$(perf_probe_answer_status attach-enabled enabled 'null')"
+perf_answer_summary+=" empty-object=$(perf_probe_answer_status attach-enabled enabled '{}')"
+perf_answer_summary+=" other-mode=$(perf_probe_answer_status attach-enabled enabled '{"attached":"disabled"}')"
+perf_answer_summary+=" read-with-attach-sign=$(perf_probe_answer_status read enabled '{"attached":"enabled"}')"
+perf_answer_summary+=" read-other-mode=$(perf_probe_answer_status read disabled "$PERF_ENABLED_READ_ANSWER")"
+perf_answer_summary+=" refused=$(perf_probe_answer_status attach-enabled enabled \
+  '{"refused":"missing the card","missing":["card"]}')"
+perf_answer_summary+=" not-an-object=$(perf_probe_answer_status attach-enabled enabled '"enabled"')"
+perf_empty_answer_output="$(nested_call is_successful_perf_probe_answer attach-enabled enabled '' 2>&1)"
+perf_answer_summary+=" says-why=$(grep -c -F 'shows no sign that it ran' <<<"$perf_empty_answer_output")"
+check "nested: perf takes a probe answer for done only when it shows the mode it ran in; an empty, null, refused or other answer fails at once (needs jq)" \
+  "$perf_answer_summary" \
+  "attached-enabled=0 attached-disabled=0 read-enabled=0 read-disabled=0 empty=1 null=1 empty-object=1 other-mode=1 read-with-attach-sign=1 read-other-mode=1 refused=1 not-an-object=1 says-why=1"
+
+# perf's exit (end_perf_run, its EXIT trap) on a fixture, from inside one bash
+# that plays perf: two children of it stand in for the window (recorded with
+# no start time, as when it could not be read) and the background measurement
+# job, and busctl is the stub, which fails every call, so each restore step
+# fails. Every step must still run: both children ended, and busctl asked once
+# to enable the extension and once to show the top bar. A recorded window that
+# is not perf's child (a process of another session) must be left alone. And
+# perf installs it as its EXIT trap.
+PERF_CLEANUP_ADDRESS="unix:path=$WIRING_TMP/perf-cleanup/bus/session.sock"
+# perf_cleanup_verdict <own-child | the pid of a process that is not its child> prints, for the window then the
+# measurement job, ended or left-running, then end_perf_run's status.
+perf_cleanup_verdict() {
+  : >"$NESTED_STUB_CALLS"
+  # shellcheck disable=SC2016  # Expanded by the child bash, which plays perf.
+  env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$NESTED_STUB_BIN:$PATH" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" \
+    bash -c '
+      source "$1" || exit 99
+      sleep 300 &
+      own_window_pid=$!
+      sleep 300 &
+      PERF_COST_JOB_PID=$!
+      cost_job_pid=$PERF_COST_JOB_PID
+      if [[ "$2" == own-child ]]; then PERF_WINDOW_PID=$own_window_pid; else PERF_WINDOW_PID=$2; fi
+      PERF_WINDOW_STARTTIME=""
+      PERF_ADDRESS="$3"
+      end_perf_run 2>/dev/null
+      cleanup_status=$?
+      # A child ended by a signal is a zombie until reaped, which read_stat_fields does not count as running.
+      process_fate() {
+        local poll
+        for poll in 1 2 3 4 5 6 7 8 9 10; do
+          read_stat_fields /proc "$1" || { printf ended; return 0; }
+          sleep 0.1
+        done
+        printf left-running
+      }
+      printf "window=%s cost-job=%s status=%s" "$(process_fate "$PERF_WINDOW_PID")" \
+        "$(process_fate "$cost_job_pid")" "$cleanup_status"
+      kill "$own_window_pid" "$cost_job_pid" 2>/dev/null
+    ' perf-cleanup "$NESTED_SCRIPT" "$1" "$PERF_CLEANUP_ADDRESS"
+}
+perf_cleanup_summary="own-child: $(perf_cleanup_verdict own-child)"
+perf_cleanup_summary+=" busctl=$(grep -c '^busctl ' "$NESTED_STUB_CALLS")"
+perf_cleanup_summary+=" enable=$(grep -c -F 'Main.extensionManager.enableExtension(' "$NESTED_STUB_CALLS")"
+perf_cleanup_summary+=" show=$(grep -c -F 'indicator?.show()' "$NESTED_STUB_CALLS")"
+other_session_process_id="$(start_sacrificial_session sleep 60)"
+other_session_process_starttime="$(starttime_of "$other_session_process_id")"
+perf_cleanup_summary+=" not-a-child: $(perf_cleanup_verdict "$other_session_process_id")"
+kill_sacrifice "$other_session_process_id" sleep "$other_session_process_starttime"
+perf_cleanup_summary+=" installed=$(grep -c -x -F '    trap end_perf_run EXIT' "$NESTED_SCRIPT")"
+check "nested: perf's exit ends its window (by pid when its start time is unknown, only if it is perf's child) and its measurement job, then asks to enable the extension and show the top bar, each step despite a failed one" \
+  "$perf_cleanup_summary" \
+  "own-child: window=ended cost-job=ended status=0 busctl=2 enable=1 show=1 not-a-child: window=left-running cost-job=ended status=0 installed=1"
 
 # `stop` signals a session only while its leader is this run's recorded
 # launcher, `timeout`: a session id is a pid, and once a run's processes are all
@@ -3788,6 +3922,56 @@ for isolated_variable in HOME TMPDIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOM
 done
 check "nested: HOME, TMPDIR and every XDG home and runtime dir are in the run; the system bus is the fake one" \
   "${dirs_outside_the_run:-none}:$(grep -c -x -F "DBUS_SYSTEM_BUS_ADDRESS=unix:path=$PREPARED_RUN/bus/system.sock" <<<"$NESTED_ENVIRONMENT")" "none:1"
+
+# perf's window is a GUI process, so it must reach the nested shell and nothing
+# else: started any other way it would open on the live desktop. start_perf_window
+# launches a stand-in gnome-calculator (by the path perf resolves) on a prepared
+# run, from a caller whose environment carries a decoy variable, a display, a
+# Wayland display and an X authority. The stand-in records the names in its
+# environment and the values its isolation rests on. Its names must be exactly
+# the run's allowlist, the three perf adds and bash's own (PWD, SHLVL); its
+# runtime dir and session bus the run's; its Wayland display the nested one.
+PERF_WINDOW_RUN="$WIRING_TMP/perf-window/rpn.PerfWin1"
+PERF_WINDOW_STAND_IN_DIR="$WIRING_TMP/perf-window-bin"
+PERF_WINDOW_STAND_IN="$PERF_WINDOW_STAND_IN_DIR/gnome-calculator"
+# What the stand-in writes, beside itself: under `env -i` no variable could name another place.
+PERF_WINDOW_ENV_NAMES="$PERF_WINDOW_STAND_IN_DIR/env-names"
+PERF_WINDOW_ENV_VALUES="$PERF_WINDOW_STAND_IN_DIR/env-values"
+PERF_WINDOW_RUN_BUS="unix:path=$PERF_WINDOW_RUN/bus/session.sock"
+if ! mkdir -p "$PERF_WINDOW_RUN" "$PERF_WINDOW_STAND_IN_DIR" || ! chmod 700 "$PERF_WINDOW_RUN" ||
+  ! nested_call prepare_run_directory "$PERF_WINDOW_RUN" PerfWin1; then
+  fatal "cannot prepare $PERF_WINDOW_RUN"
+fi
+cat >"$PERF_WINDOW_STAND_IN" <<'STAND_IN'
+#!/bin/bash
+# Stands in for gnome-calculator: records the names in its environment, and the values perf relies on, beside itself.
+record_dir="${BASH_SOURCE[0]%/*}"
+compgen -e >"$record_dir/env-names"
+printf '%s\n' "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR-unset}" "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS-unset}" \
+  "WAYLAND_DISPLAY=${WAYLAND_DISPLAY-unset}" "GDK_BACKEND=${GDK_BACKEND-unset}" >"$record_dir/env-values"
+STAND_IN
+chmod +x "$PERF_WINDOW_STAND_IN" || fatal "cannot make $PERF_WINDOW_STAND_IN executable"
+: >"$PERF_WINDOW_ENV_NAMES"
+: >"$PERF_WINDOW_ENV_VALUES"
+# shellcheck disable=SC2016  # Expanded by the child bash.
+env "${LIVE_SETTINGS_BARRIER[@]}" PERF_WINDOW_DECOY=decoy-must-not-arrive DISPLAY=:99 WAYLAND_DISPLAY=wayland-decoy \
+  XAUTHORITY="$WIRING_TMP/decoy-xauthority" \
+  bash -c 'source "$1" || exit 99; shift; start_perf_window "$@" && wait "$PERF_WINDOW_PID"' perf-window \
+  "$NESTED_SCRIPT" "$PERF_WINDOW_RUN" "$PERF_WINDOW_RUN_BUS" "$PERF_WINDOW_STAND_IN"
+perf_window_summary="exit=$?"
+# bash exports PWD and SHLVL itself; `_` only when it inherits one, which `env -i` never gives it.
+perf_window_expected_names="$( { nested_call nested_environment_assignments "$PERF_WINDOW_RUN" | cut -d= -f1
+  printf '%s\n' WAYLAND_DISPLAY GDK_BACKEND DBUS_SESSION_BUS_ADDRESS PWD SHLVL
+} | LC_ALL=C sort -u)"
+perf_window_seen_names="$(LC_ALL=C sort -u "$PERF_WINDOW_ENV_NAMES")"
+perf_window_summary+=" unexpected=[$(LC_ALL=C comm -13 <(printf '%s\n' "$perf_window_expected_names") \
+  <(printf '%s\n' "$perf_window_seen_names") | tr '\n' ' ')]"
+perf_window_summary+=" missing=[$(LC_ALL=C comm -23 <(printf '%s\n' "$perf_window_expected_names") \
+  <(printf '%s\n' "$perf_window_seen_names") | tr '\n' ' ')]"
+perf_window_summary+=" values=[$(tr '\n' ' ' <"$PERF_WINDOW_ENV_VALUES")]"
+check "nested: perf's window starts with only the run's allowlist plus its Wayland display, Wayland backend and private bus: nothing of the caller's display, X authority or other variables" \
+  "$perf_window_summary" \
+  "exit=0 unexpected=[] missing=[] values=[XDG_RUNTIME_DIR=$PERF_WINDOW_RUN/run DBUS_SESSION_BUS_ADDRESS=$PERF_WINDOW_RUN_BUS WAYLAND_DISPLAY=rp-nested-0 GDK_BACKEND=wayland ]"
 
 # fake_gdm_verdict <run dir or ''> <address> prints refused, or whatever else happened.
 FAKE_GDM_REFUSAL='refusing to connect to anything but the fake system bus'
@@ -4286,7 +4470,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=784
+EXPECTED_ROWS=788
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

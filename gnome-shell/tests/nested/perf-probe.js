@@ -214,8 +214,12 @@ function resourcePulsePerfProbe(request) {
         }
         if (probe.mode !== ENABLED_MODE)
             return {refused: 'nothing is attached: attach-disabled or attach-enabled comes before a read'};
-        if (!areAttachedParts(parts))
-            return {refused: "the extension's parts changed during the window (disabled or enabled again): its counts are void"};
+        if (!areAttachedParts(parts)) {
+            return {
+                refused: "the extension's parts changed during the window (disabled or enabled again): " +
+                    'its counts are void',
+            };
+        }
         const cardRedirect = parts.card.get_offscreen_redirect();
         const alwaysRedirect = imports.gi.Clutter.OffscreenRedirect.ALWAYS;
         return {

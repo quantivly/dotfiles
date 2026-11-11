@@ -261,8 +261,10 @@ measure_cpu_percent() {
 #######################################
 # Print the median of the main thread's CPU per Sample tick over a window, in
 # ms: the main thread's counter read once every SAMPLE_INTERVAL_SECONDS, for as
-# many whole ticks as fit in the window. Of an even number of ticks, the upper
-# of the two middle ones, as the performance session's tools took it.
+# many whole ticks as fit in the window. Of n ticks sorted, the (n/2 + 1)th,
+# rounded down: for an odd n the middle one, for an even n the UPPER of the two
+# middle ones (of perf's 30 ticks, the 16th), as the performance session's
+# tools took it; never their mean.
 # Arguments:
 #   $1 - pid
 #   $2 - window length in seconds (at least SAMPLE_INTERVAL_SECONDS)

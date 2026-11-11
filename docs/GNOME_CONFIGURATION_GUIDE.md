@@ -452,7 +452,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (784 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (788 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
 framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
@@ -465,7 +465,8 @@ nested harness against stubs. It never touches the live session, but it is **not
 its real mount and route tables. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
 (package `dbus-daemon`) and `gdbus` (`libglib2.0-bin`): without any of them it stops with exit 2. The
 card-width row also needs Pango's typelibs (`gir1.2-pango-1.0`) and the card's font, Ubuntu Sans
-(`fonts-ubuntu`): without them that row fails. Neither is ever a pass.
+(`fonts-ubuntu`), and the row on the nested `perf` request's probe answers needs `jq`: without them
+those rows fail. None is ever a pass.
 
 ## Keyboard-driven workflow (no extensions needed)
 
