@@ -10,7 +10,9 @@ import {test, assertEqual} from './harness.js';
 const EXTENSION_DIRECTORY_URI =
     GLib.uri_resolve_relative(import.meta.url, '../extensions/resource-pulse@dotfiles/', GLib.UriFlags.NONE);
 const [EXTENSION_DIRECTORY_PATH] = GLib.filename_from_uri(EXTENSION_DIRECTORY_URI);
-const GLUE_FILE_NAMES = ['extension.js', 'indicator.js', 'card.js', 'cockpitTooltip.js', 'cockpitCards.js'];
+const GLUE_FILE_NAMES = [
+    'extension.js', 'indicator.js', 'card.js', 'cockpitTooltip.js', 'cockpitCards.js', 'cockpitLayer.js',
+];
 /** The modules outside lib/ that plain gjs can load (lib/ is listed from the disk). */
 const PURE_TOP_LEVEL_FILE_NAMES = [
     'pulseClient.js', 'serviceLink.js', 'cockpitClient.js', 'displayConfig.js', 'graph.js',

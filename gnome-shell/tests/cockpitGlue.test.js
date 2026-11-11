@@ -783,15 +783,17 @@ test('cockpitCards.js: hiding a card\'s data (its no-data or herdr line) while o
     }));
 
 test('cockpitCards.js: no card paints itself (no vfunc_paint or vfunc_paint_node in the code: ruling D12), and the ' +
-    'base\'s one offscreen redirect is the file\'s only one, so a data card is drawn only through the texture the ' +
-    'base gives it and the system cell holds one texture, the adopted v2 card\'s', () => {
+    'base\'s one offscreen redirect is the file\'s only one (nor is the camelCase property set: GJS accepts ' +
+    'offscreenRedirect too), so a data card is drawn only through the texture the base gives it and the system cell ' +
+    'holds one texture, the adopted v2 card\'s', () => {
     const source = codeOf(CARDS_SOURCE_FILE);
     assertEqual({
         paintVfuncs: occurrenceCount(source, 'vfunc_paint'),
         offscreenRedirectUses: occurrenceCount(source, 'offscreen_redirect'),
+        offscreenRedirectPropertyUses: occurrenceCount(source, 'offscreenRedirect'),
         baseRedirects: occurrenceCount(classBody(source, 'CockpitCardBase'),
             'this.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);'),
-    }, {paintVfuncs: 0, offscreenRedirectUses: 1, baseRedirects: 1});
+    }, {paintVfuncs: 0, offscreenRedirectUses: 1, offscreenRedirectPropertyUses: 0, baseRedirects: 1});
 });
 
 test('cockpitCards.js: a primary-button release on the system card opens Resources; the system card draws no ' +
@@ -840,5 +842,269 @@ test('card.js: setCellSize drops the fixed width and takes the cell\'s size, cle
             'this.set_size(UNSET_SIZE, UNSET_SIZE);', '}'],
         unsetSize: 1,
         placesTopRight: 1,
+    });
+});
+
+// cockpitLayer.js: the layer that holds the cockpit's grid in the background group.
+const LAYER_SOURCE_FILE = 'cockpitLayer.js';
+
+/**
+ * The body of a method of cockpitLayer.js, comments removed.
+ *
+ * @param {string} declarationLine - The method's declaration as it starts its line.
+ * @returns {string} The body, or ''.
+ */
+function layerMethodBody(declarationLine) {
+    return methodBody(readExtensionFile(LAYER_SOURCE_FILE), declarationLine);
+}
+
+/**
+ * The statements of a method of cockpitLayer.js between its declaration and its closing brace.
+ *
+ * @param {string} declarationLine - The method's declaration as it starts its line.
+ * @returns {string[]} Its statements, trimmed.
+ */
+function layerMethodStatements(declarationLine) {
+    return statementsOf(layerMethodBody(declarationLine)).slice(1, -1);
+}
+
+test('cockpitLayer.js: the layer is a non-reactive St.Widget of class rp-cockpit-layer that, once built (its ' +
+    'tooltip, the v2 card out of its parent, the layout, both client listeners), adds itself to the background group ' +
+    'last; a failure while building destroys what was built and rethrows', () => {
+    const source = codeOf(LAYER_SOURCE_FILE);
+    const initStatements = layerMethodStatements('_init(');
+    const tryIndex = initStatements.indexOf('try {');
+    const catchIndex = initStatements.indexOf('} catch (error) {');
+    assertEqual({
+        classDeclared: occurrenceCount(source, '\nclass CockpitLayer extends St.Widget {\n'),
+        styleClassDefined: occurrenceCount(source, "const LAYER_STYLE_CLASS = 'rp-cockpit-layer';"),
+        superInit: occurrenceCount(source, 'super._init({style_class: LAYER_STYLE_CLASS, reactive: false});'),
+        built: tryIndex < 0 || catchIndex < 0 ? [] : initStatements.slice(tryIndex + 1, catchIndex),
+        onFailure: catchIndex < 0 ? [] : initStatements.slice(catchIndex + 1, catchIndex + 3),
+        backgroundGroupAdds: occurrenceCount(source, '_backgroundGroup.add_child('),
+    }, {
+        classDeclared: 1, styleClassDefined: 1, superInit: 1,
+        built: [
+            'this._tooltip = new CockpitTooltip();',
+            'pulseCard.get_parent()?.remove_child(pulseCard);',
+            'this.setLayout(cockpitClient.layout);',
+            'this._cockpitListenerId = cockpitClient.addListener(event => this._onCockpitEvent(event));',
+            'this._snapshotListenerId = pulseClient.addListener(snapshot => this._onSnapshot(snapshot));',
+            'Main.layoutManager._backgroundGroup.add_child(this);',
+        ],
+        onFailure: ['this.destroy();', 'throw error;'],
+        backgroundGroupAdds: 1,
+    });
+});
+
+test('cockpitLayer.js: placeOnMonitor lays the grid out from cockpitGridGeometry, each caption at its rectangle and ' +
+    'each card in the first cell of its id (drawnCockpitCells: an unknown id\'s cell stays empty), sized by ' +
+    'setCellSize; cardRects gives those cells; setLayout makes the cards drawnCockpitCardIds names', () =>
+    assertEqual({
+        place: layerMethodStatements('placeOnMonitor('),
+        cardRects: layerMethodStatements('cardRects('),
+        layoutMakesTheDrawnIds: occurrenceCount(layerMethodBody('setLayout('),
+            'this._syncCards(drawnCockpitCardIds(layout.groups));'),
+        captionStyleClassDefined: occurrenceCount(codeOf(LAYER_SOURCE_FILE),
+            "const CAPTION_STYLE_CLASS = 'rp-cockpit-caption';"),
+        captionsUseIt: occurrenceCount(layerMethodBody('_syncCaptions('),
+            'new St.Label({style_class: CAPTION_STYLE_CLASS})'),
+    }, {
+        place: [
+            'this._monitorIndex = monitorIndex;',
+            'const {captions, cells} = cockpitGridGeometry({workArea, groups: this._layout.groups});',
+            'captions.forEach((caption, captionIndex) => placeActor(this._captionLabels[captionIndex], caption));',
+            'this._drawnCells = drawnCockpitCells(cells);',
+            'for (const cell of this._drawnCells) {',
+            'const card = this._cardsById.get(cell.cardId);',
+            'card.set_position(cell.x, cell.y);',
+            'card.setCellSize(cell.width, cell.height);',
+            '}',
+        ],
+        cardRects: [
+            'return this._drawnCells.map(({cardId, x, y, width, height}) => ({cardId, rect: {x, y, width, height}}));',
+        ],
+        layoutMakesTheDrawnIds: 1, captionStyleClassDefined: 1, captionsUseIt: 1,
+    }));
+
+test('cockpitLayer.js: a layout change keeps the cards it still names (never remade for a re-placement), destroys ' +
+    'those it no longer names and makes only the missing ones, each taking the layer\'s interactivity, which ' +
+    'setInteractive forwards to every card on a change; cards are made for exactly COCKPIT_DRAWN_CARD_IDS', () => {
+    const source = codeOf(LAYER_SOURCE_FILE);
+    const syncStatements = layerMethodStatements('_syncCards(');
+    const makersBlock = source.split('const CARD_MAKERS_BY_ID = Object.freeze({')[1]?.split('\n});')[0] ?? '';
+    assertEqual({
+        keeps: syncStatements.slice(1, 3),
+        destroysTheRest: syncStatements.includes('card.destroy();'),
+        makesTheMissing: syncStatements.slice(-3),
+        added: layerMethodStatements('_addCard(').slice(-2),
+        setInteractive: layerMethodStatements('setInteractive('),
+        makerIds: [...makersBlock.matchAll(/^ {4}(\w+): /gm)].map(([, cardId]) => cardId),
+        sessionClick: occurrenceCount(makersBlock,
+            'new SessionsCockpitCard({tooltip, onRowActivated: onSessionActivated})'),
+        systemAdopts: occurrenceCount(makersBlock, 'new SystemCockpitCard({pulseCard, tooltip})'),
+    }, {
+        keeps: ['if (cardIds.includes(cardId))', 'continue;'],
+        destroysTheRest: true,
+        makesTheMissing: ['if (!this._cardsById.has(cardId))', 'this._addCard(cardId);', '}'],
+        added: ['this.add_child(card);', 'card.setInteractive(this._isInteractive);'],
+        setInteractive: [
+            'if (isInteractive === this._isInteractive)', 'return;', 'this._isInteractive = isInteractive;',
+            'for (const card of this._cardsById.values())', 'card.setInteractive(isInteractive);',
+        ],
+        makerIds: ['system', 'apps', 'connections', 'sessions'],
+        sessionClick: 1, systemAdopts: 1,
+    });
+});
+
+test('cockpitLayer.js: the layer draws through no offscreen texture of its own (one texture per card, never one for ' +
+    'the layer), overrides no paint vfunc and has no drawing area', () => {
+    const source = codeOf(LAYER_SOURCE_FILE);
+    assertEqual({
+        offscreenRedirect: occurrenceCount(source, 'offscreen_redirect'),
+        offscreenRedirectProperty: occurrenceCount(source, 'offscreenRedirect'),
+        paintVfuncs: occurrenceCount(source, 'vfunc_paint'),
+        drawingAreas: occurrenceCount(source, 'DrawingArea'),
+        isRead: source.length > 0,
+    }, {offscreenRedirect: 0, offscreenRedirectProperty: 0, paintVfuncs: 0, drawingAreas: 0, isRead: true});
+});
+
+test('cockpitLayer.js: a cockpit client event goes through cockpitEventEffect (ruling D20): drawn at once, or its ' +
+    'sources pending for the next Sample, arming the fallback only when it says so; drawing sources takes them out ' +
+    'of the pending ones and redraws the cards cockpitCardIdsDrawing names', () =>
+    assertEqual({
+        onEvent: layerMethodStatements('_onCockpitEvent('),
+        drawSources: layerMethodStatements('_drawSources('),
+    }, {
+        onEvent: [
+            'const isFallbackArmed = this._applyFallbackSourceId !== null;',
+            'const {timing, sourceNames} = cockpitEventEffect({event, isFallbackArmed});',
+            'if (timing === CockpitApplyTiming.NEVER)',
+            'return;',
+            'if (timing === CockpitApplyTiming.NOW) {',
+            'this._drawSources(sourceNames);',
+            'return;',
+            '}',
+            'for (const sourceName of sourceNames)',
+            'this._pendingSourceNames.add(sourceName);',
+            'if (timing === CockpitApplyTiming.NEXT_TICK_WITH_FALLBACK)',
+            'this._armApplyFallback();',
+        ],
+        drawSources: [
+            'for (const sourceName of sourceNames)',
+            'this._pendingSourceNames.delete(sourceName);',
+            'const cardIds = cockpitCardIdsDrawing({drawnCardIds: this.drawnCardIds, sourceNames});',
+            'for (const cardId of cardIds)',
+            'this._drawCard(cardId);',
+        ],
+    }));
+
+test('cockpitLayer.js: the fallback is the file\'s one timeout, a named one-shot GLib.timeout_add_seconds of ' +
+    'COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS whose callback forgets its id, draws the pending sources in a try whose ' +
+    'catch logs, and returns SOURCE_REMOVE; drawing the pending sources (each Sample) removes it first', () =>
+    assertEqual({
+        timeouts: occurrenceCount(codeOf(LAYER_SOURCE_FILE), 'timeout_add'),
+        arm: layerMethodStatements('_armApplyFallback('),
+        callback: layerMethodStatements('_onApplyFallbackTimeout('),
+        drawPendingRemovesItFirst: layerMethodStatements('_drawPendingSources(')[0],
+        remove: layerMethodStatements('_removeApplyFallback(').slice(-3),
+    }, {
+        timeouts: 1,
+        arm: [
+            'this._applyFallbackSourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,',
+            'COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS, () => this._onApplyFallbackTimeout());',
+            'GLib.Source.set_name_by_id(this._applyFallbackSourceId, APPLY_FALLBACK_TIMEOUT_NAME);',
+        ],
+        callback: [
+            'this._applyFallbackSourceId = null;',
+            'try {',
+            'this._drawPendingSources();',
+            '} catch (error) {',
+            "this._logFailure('could not draw the pending cockpit sources', error);",
+            '}',
+            'return GLib.SOURCE_REMOVE;',
+        ],
+        drawPendingRemovesItFirst: 'this._removeApplyFallback();',
+        remove: [
+            'const sourceId = this._applyFallbackSourceId;', 'this._applyFallbackSourceId = null;',
+            'GLib.source_remove(sourceId);',
+        ],
+    }));
+
+test('cockpitLayer.js: each Sample (onSampleTick, from the extension\'s tick) draws the pending sources, then pulls ' +
+    'on suspicion every source cockpitSourceNamesToPull names (none while the subscription is not wanted)', () =>
+    assertEqual(layerMethodStatements('onSampleTick('), [
+        'this._drawPendingSources();',
+        'const sourceNamesToPull = cockpitSourceNamesToPull({drawnCardIds: this.drawnCardIds, isSubscriptionWanted});',
+        'for (const sourceName of sourceNamesToPull)',
+        'this._cockpitClient.pullIfSuspicious(sourceName);',
+    ]));
+
+test('cockpitLayer.js: a card revealed is first drawn from what the clients hold, then unfrozen, so the reveal draws ' +
+    'the latest at once (ruling D20); a frozen repaint draws it so too, still dimmed; a data card draws "no data ' +
+    'since" when cockpitDataCardDrawing says so, else its sources', () => {
+    const dataStatements = layerMethodStatements('_drawDataCard(');
+    assertEqual({
+        revealedOnlyFromFrozen: occurrenceCount(layerMethodBody('setCardFrozen('),
+            'const isRevealed = !isFrozen && this._frozenCardIds.has(cardId);'),
+        revealDrawsBeforeUnfreezing: layerMethodStatements('setCardFrozen(').slice(-3),
+        repaint: layerMethodStatements('repaintFrozenCard(').slice(-2),
+        decides: dataStatements.includes(
+            'const drawing = cockpitDataCardDrawing({clientState: client.state, sources});'),
+        draws: dataStatements.slice(-4),
+    }, {
+        revealedOnlyFromFrozen: 1,
+        revealDrawsBeforeUnfreezing: ['if (isRevealed)', 'this._drawCard(cardId);', 'card.setFrozen(isFrozen);'],
+        repaint: ['this._drawCard(cardId);', 'card.repaintFrozen();'],
+        decides: true,
+        draws: [
+            'if (drawing.isNoData)', 'card.showNoData(noDataText(drawing.noDataSinceUsec, formatClockLabel));', 'else',
+            'DATA_CARD_UPDATERS_BY_ID[cardId](card, sourcesByName);',
+        ],
+    });
+});
+
+test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snapshot listener), the system card the ' +
+    'pulse client\'s latest, and each data card its sources, each through its own update (ruling D9)', () => {
+    const source = codeOf(LAYER_SOURCE_FILE);
+    assertEqual({
+        onSnapshot: layerMethodStatements('_onSnapshot('),
+        snapshotDrawers: [
+            'system: (card, pulseClient) => card.update(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel),',
+            'apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null),',
+        ].map(needle => occurrenceCount(source, needle)),
+        dataUpdaters: [
+            'connections: (card, sourcesByName) => card.update(sourcesByName.network, sourcesByName.mounts),',
+            'sessions: (card, sourcesByName) => card.update(sourcesByName.sessions),',
+        ].map(needle => occurrenceCount(source, needle)),
+    }, {
+        onSnapshot: ['this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null);'],
+        snapshotDrawers: [1, 1], dataUpdaters: [1, 1],
+    });
+});
+
+test('cockpitLayer.js: destroy removes both client listeners and the fallback timeout before destroying anything, ' +
+    'then destroys the cards (the system card giving the v2 card back), the captions and last the tooltip, each ' +
+    'step guarded (runEveryStep); every listener it adds it removes', () => {
+    const source = codeOf(LAYER_SOURCE_FILE);
+    const destroyBody = layerMethodBody('_onDestroy(');
+    assertEqual({
+        destroyHandler: occurrenceCount(layerMethodBody('_init('), "this.connect('destroy', () => this._onDestroy());"),
+        guarded: occurrenceCount(destroyBody, 'runEveryStep(['),
+        stepNames: [...destroyBody.matchAll(/\{name: '([^']+)', run: /g)].map(([, stepName]) => stepName),
+        listenersAdded: occurrenceCount(source, '.addListener('),
+        listenersRemoved: [
+            layerMethodStatements('_removeCockpitListener(')
+                .includes('this._cockpitClient.removeListener(listenerId);'),
+            layerMethodStatements('_removeSnapshotListener(').includes('this._pulseClient.removeListener(listenerId);'),
+        ],
+        everyCardDestroyed: occurrenceCount(layerMethodBody('_destroyCards('), 'run: () => card.destroy()'),
+    }, {
+        destroyHandler: 1, guarded: 1,
+        stepNames: [
+            'remove the cockpit client listener', 'remove the snapshot listener', 'remove the fallback timeout',
+            'destroy the cards', 'destroy the captions', 'destroy the tooltip',
+        ],
+        listenersAdded: 2, listenersRemoved: [true, true], everyCardDestroyed: 1,
     });
 });

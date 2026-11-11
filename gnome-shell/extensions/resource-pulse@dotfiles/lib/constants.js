@@ -325,8 +325,10 @@ export const COCKPIT_GRID_MAX_SCALE = 2;
 export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'sessions'];
 /** The system card's id: the v2 card's cell. With no cockpit layout the v2 card, top right, is checked under it. */
 export const COCKPIT_SYSTEM_CARD_ID = 'system';
+/** The apps card's id: the card the pulse client's snapshots feed, besides the system card. */
+export const COCKPIT_APPS_CARD_ID = 'apps';
 /** The cards that draw the sampler's snapshot (the system card, the apps card), which the detail watch feeds. */
-export const COCKPIT_SNAPSHOT_CARD_IDS = Object.freeze(['system', 'apps']);
+export const COCKPIT_SNAPSHOT_CARD_IDS = Object.freeze([COCKPIT_SYSTEM_CARD_ID, COCKPIT_APPS_CARD_ID]);
 /** The cockpit service's sources each card draws (lib/cockpitProtocol.js COCKPIT_SOURCE_NAMES): none for those two. */
 export const COCKPIT_SOURCE_NAMES_BY_CARD_ID = Object.freeze({
     system: Object.freeze([]),

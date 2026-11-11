@@ -98,7 +98,7 @@ printf '\nShell glue and packaging (%s)\n' "$EXT_DIR"
 SHELL_IMPORT_NEEDLE='resource:///org/gnome/shell'
 SYNTAX_ERROR_NEEDLE='SyntaxError'
 GLUE_PARSE_TIMEOUT_SECONDS=20
-for glue_file in extension.js indicator.js card.js cockpitTooltip.js cockpitCards.js; do
+for glue_file in extension.js indicator.js card.js cockpitTooltip.js cockpitCards.js cockpitLayer.js; do
   glue_path="$EXT_DIR/$glue_file"
   row_name="$glue_file parses and gets as far as its Shell imports"
   if [[ ! -r "$glue_path" ]]; then
@@ -408,16 +408,20 @@ check "no shell-side file adds a timeout of SAMPLE_INTERVAL_SECONDS: a planted o
 # cockpitClient.js's injectable GLIB_TIMEOUTS seam (1), whose one-shot timeouts
 # are the steps of its StartUnit chain (the wait for the service to appear, and
 # the retry delay), each returning SOURCE_REMOVE; cockpitTooltip.js's show delay
-# (1), one-shot; extension.js's cover fallback (1), indicator.js's hover label
-# delay (1), and the two lines of pulseClient.js's injectable GLIB_TIMEOUTS seam
-# (2). One more anywhere, a new file included, fails the row until it is counted
-# here. GJS's own setTimeout( and setInterval( are timeouts too and are counted
-# with GLib's two calls (the shell side uses neither today); a method whose name
-# merely ends that way (a letter, digit, _ or . before "set") is not one. The
+# (1), one-shot; cockpitLayer.js's fallback that draws a Changed the next Sample
+# did not (1), one-shot, of COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS, armed only
+# while a Changed waits and removed by each Sample; extension.js's cover fallback
+# (1), indicator.js's hover label delay (1), and the two lines of
+# pulseClient.js's injectable GLIB_TIMEOUTS seam (2). One more anywhere, a new
+# file included, fails the row until it is counted here. GJS's own setTimeout(
+# and setInterval( are timeouts too and are counted with GLib's two calls (the
+# shell side uses neither today); a method whose name merely ends that way (a
+# letter, digit, _ or . before "set") is not one. The
 # call text is counted on code lines only: a line that starts as a comment (//,
 # /* or a JSDoc *) is not a call.
 SHELL_SIDE_GLIB_TIMEOUT_CALL_PATTERN='GLib[.]timeout_add(_seconds)?[(]|(^|[^A-Za-z0-9_.])set(Timeout|Interval)[(]'
-EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS='cockpitClient.js:1 cockpitTooltip.js:1 extension.js:1 indicator.js:1 pulseClient.js:2 '
+EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS='cockpitClient.js:1 cockpitLayer.js:1 cockpitTooltip.js:1 extension.js:1 indicator.js:1 '
+EXPECTED_SHELL_SIDE_GLIB_TIMEOUT_CALLS+='pulseClient.js:2 '
 # glib_timeout_calls_in <extension dir>: one line, "<file>:<count>", per
 # shell-side .js file (list_shell_side_javascript) whose code lines add GLib
 # timeouts; one per such file awk cannot read, and one when the tree cannot be
@@ -564,9 +568,10 @@ check "indicator.js re-places a shown hover label when its width or the display 
 # the extension in a guarded step of _tearDown (the step itself is counted,
 # not just the remove() it calls), the indicator inside _onDestroy. extension.js
 # has a second later, the coalesced cover check, pinned by its own row in
-# gnome-shell/tests/visibility.test.js.
+# gnome-shell/tests/visibility.test.js. cockpitLayer.js queues no later and
+# follows no width: the extension places it, in its own later (0/0/0).
 deferred_placement_summary=""
-for glue_file in extension.js indicator.js; do
+for glue_file in extension.js indicator.js cockpitLayer.js; do
   glue_path="$EXT_DIR/$glue_file"
   deferred_placement_summary+="$glue_file:$(grep -c -F 'Meta.LaterType.BEFORE_REDRAW' "$glue_path" 2>/dev/null)"
   deferred_placement_summary+="/$(grep -c -F 'get_laters().remove(' "$glue_path" 2>/dev/null)"
@@ -576,7 +581,7 @@ teardown_cancels_placement="$(grep -c -F "{name: 'cancel the pending card placem
 on_destroy_removes_later="$(sed -n '/^    _onDestroy() {/,/^    }/p' "$EXT_DIR/indicator.js" 2>/dev/null | grep -c -F 'get_laters().remove(')"
 check "a width change moves the card and the hover label in a BEFORE_REDRAW later, never during allocation" \
   "$deferred_placement_summary| teardown-step=$teardown_cancels_placement on-destroy=$on_destroy_removes_later" \
-  "extension.js:2/2/1 indicator.js:1/1/1 | teardown-step=1 on-destroy=1"
+  "extension.js:2/2/1 indicator.js:1/1/1 cockpitLayer.js:0/0/0 | teardown-step=1 on-destroy=1"
 
 # The top bar asks for a frame only when a graph's columns change by a whole
 # device pixel, and only while the indicator is mapped. The arithmetic is
@@ -5070,7 +5075,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1006
+EXPECTED_ROWS=1017
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
