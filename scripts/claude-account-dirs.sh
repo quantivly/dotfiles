@@ -199,12 +199,28 @@ cred_state() {
               | .expiresAt | select(type == "number")' "$f" 2>/dev/null || return 1
 }
 
-# The claudeAiOauth block alone, canonicalised, for deciding whether two files
-# differ only in what surrounds the login (mcpOAuth entries, mostly).
-cred_login_id() {
+# The GRANT a credential carries -- its access token, refresh token and expiry,
+# canonicalised -- for deciding whether two files hold the same login and differ
+# only in what their writers store around it. The same triple claude-doctor's
+# _claude_cred_id compares, so the two cannot disagree about "identical" again.
+#
+# It used to be the whole claudeAiOauth block, which counted writer-dependent
+# fields as part of the login: on 2026-11-11 quantivly-2's account dir held its
+# store's exact grant plus subscriptionTypeSource (Claude Code writes it,
+# `clauth login` does not), and every reconcile refused the pair as undecidable
+# while the doctor called it "still identical to the store".
+#
+# Captured into a variable by the one caller and compared there; never printed.
+# The empty-token select is unreachable from cred_live_side, whose cred_state
+# checks already demand a token on both sides; it stops two token-less stubs
+# comparing "equal" for any other caller, and no state-table row can pin it.
+cred_grant_id() {
     local f="$1"
     has_jq || return 1
-    jq -e -S -c '.claudeAiOauth | select(type == "object")' "$f" 2>/dev/null || return 1
+    jq -e -S -c '.claudeAiOauth
+                 | select(type == "object")
+                 | select((.accessToken // "") != "")
+                 | {accessToken, refreshToken, expiresAt}' "$f" 2>/dev/null || return 1
 }
 
 # Bash, not zsh: `<->` is a zsh numeric glob and is a SYNTAX ERROR here.
@@ -217,7 +233,7 @@ is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 # Every branch that cannot be certain returns "?" rather than guessing. A wrong
 # answer here overwrites a working login with a dead one.
 cred_live_side() {
-    local a="$1" s="$2" ea es ra rs ma ms la ls
+    local a="$1" s="$2" ea es ra rs ma ms grant_a grant_s
     ea="$(cred_state "$a")" && ra=0 || ra=$?
     es="$(cred_state "$s")" && rs=0 || rs=$?
 
@@ -260,16 +276,17 @@ cred_live_side() {
     fi
 
     # Equal expiry, yet the files differ -- we only reach this function after
-    # `cmp -s` said so. If the LOGIN blocks are identical, the difference is
-    # everything around them, which in practice is mcpOAuth: the account dir has
-    # gained MCP-server logins the store never had. Adopting A keeps them; the
-    # old code relinked and silently discarded them, costing one browser OAuth
-    # flow per server per profile, every time the timer ran.
-    la="$(cred_login_id "$a")" || la=""
-    ls="$(cred_login_id "$s")" || ls=""
-    if [[ -n "$la" && "$la" == "$ls" ]]; then printf 'A\n'; return 0; fi
+    # `cmp -s` said so. If both carry the SAME GRANT, the difference is
+    # everything around it: MCP-server logins the store never had, or a field
+    # only one writer stores (rateLimitTier, subscriptionTypeSource). Adopting A
+    # keeps all of it -- cred_merge back-fills whatever A lacks -- where the old
+    # code relinked and silently discarded the MCP logins, costing one browser
+    # OAuth flow per server per profile, every time the timer ran.
+    grant_a="$(cred_grant_id "$a")" || grant_a=""
+    grant_s="$(cred_grant_id "$s")" || grant_s=""
+    if [[ -n "$grant_a" && "$grant_a" == "$grant_s" ]]; then printf 'A\n'; return 0; fi
 
-    # Same expiry, different logins: genuinely ambiguous.
+    # Same expiry, different grants: genuinely ambiguous.
     printf '?\n'
 }
 
@@ -313,6 +330,12 @@ cred_rotation_residual() {
     # the gap reopens on the spot. Observed on quantivly-1, 2026-09-08: refused,
     # re-authenticated as instructed, refused again with the identical residual.
     #
+    # WRITER-DEPENDENT, the second: subscriptionTypeSource. Claude Code writes it
+    # ("sign_in"); `clauth login` writes the store without it. Measured on
+    # quantivly-2, 2026-11-11, on two files holding the identical grant. The
+    # identity permit happened to rescue that one, but it cannot after a re-login,
+    # while the dir's .claude.json still names the previous account.
+    #
     # THE TEST FOR THIS CLASS: if a field can differ between two files that hold
     # the SAME account's login, it cannot be evidence about WHICH account the
     # login is for. Comparing it does not make the gate stricter, it makes it
@@ -326,7 +349,8 @@ cred_rotation_residual() {
                      .claudeAiOauth.refreshToken,
                      .claudeAiOauth.expiresAt,
                      .claudeAiOauth.refreshTokenExpiresAt,
-                     .claudeAiOauth.rateLimitTier)
+                     .claudeAiOauth.rateLimitTier,
+                     .claudeAiOauth.subscriptionTypeSource)
                  | del(.mcpOAuth)' "$f" 2>/dev/null || return 1
 }
 
