@@ -12,9 +12,20 @@
 #     --service measures it directly, the same way;
 #   - so is the cockpit service (cockpit.service): --cockpit measures it.
 #
+# CPU is read from the scheduler's own nanosecond counters, one per thread
+# (<proc root>/<pid>/task/<tid>/schedstat, first field: time on a CPU), never
+# from stat's clock ticks, which over a minute resolve only about 0.02% of one
+# core. A thread that starts during a window counts from 0; one that ends
+# during it is left out, as the scheduler keeps no counter for a thread that
+# is gone. A counter that cannot be read is exit 2, never a reading of 0.
+#
 # Usage:
 #   scripts/resource-pulse-cost.sh [--service|--cockpit] --cpu-percent <seconds>
-#       CPU over a window, as a % of ONE core
+#       CPU over a window, as a % of ONE core, every thread
+#   scripts/resource-pulse-cost.sh [--service|--cockpit] --tick-median <seconds>
+#       the median of the main thread's CPU per Sample tick (SAMPLE_INTERVAL_SECONDS)
+#       over a window of at least one tick, in ms: the steady work of a tick,
+#       where a mean would also carry the occasional collection or other one-off
 #   scripts/resource-pulse-cost.sh [--service|--cockpit] --rss-kib
 #       resident memory, KiB
 #   scripts/resource-pulse-cost.sh --rss-check <baseline_kib>
@@ -37,9 +48,9 @@
 # cockpit.service). MainPID 0 (not running, or skipped for want of its config
 # file) is exit 2.
 #
-# Reads only <proc root>/<pid>/comm, /stat and /status: no argument list, no
-# environment and no process-listing tool, all of which print what other
-# processes were started with and so end up in a transcript.
+# Reads only <proc root>/<pid>/comm, /status and /task/<tid>/schedstat: no
+# argument list, no environment and no process-listing tool, all of which print
+# what other processes were started with and so end up in a transcript.
 #
 # Environment: PROC_ROOT (default /proc, overridable for the test fixture),
 #              GNOME_SHELL_PID (never consulted with --service or --cockpit).
@@ -68,6 +79,25 @@ readonly SERVICE_START_HINT="its extension starts it, or: systemctl --user start
 readonly COCKPIT_START_HINT="it needs ~/.config/resource-pulse/cockpit.json, then: systemctl --user start $COCKPIT_UNIT"
 readonly KIB_PER_MIB=1024
 readonly EXIT_BAD_USAGE_OR_NO_MEASUREMENT=2
+# A process's threads, each with the scheduler's counters in <tid>/schedstat.
+readonly TASK_DIR_NAME="task"
+readonly SCHEDSTAT_FILE_NAME="schedstat"
+readonly NANOSECONDS_PER_SECOND=1000000000
+readonly NANOSECONDS_PER_MILLISECOND=1000000
+readonly PERCENT_PER_FRACTION=100
+# The extension's SAMPLE_INTERVAL_SECONDS (gnome-shell/extensions/resource-pulse@dotfiles/lib/constants.js): the
+# tick --tick-median reads the main thread at. The --tick-median row in scripts/test-resource-pulse.sh reads its
+# expected tick from lib/constants.js, so the two cannot drift apart unseen.
+readonly SAMPLE_INTERVAL_SECONDS=2
+readonly WHOLE_NUMBER_PATTERN='^[0-9]+$'
+readonly POSITIVE_WHOLE_NUMBER_PATTERN='^[1-9][0-9]*$'
+
+# Each thread's time on a CPU (ns), keyed by tid, as read_thread_run_nanoseconds last read it.
+declare -A THREAD_RUN_NANOSECONDS=()
+# The main thread's time on a CPU (ns), as read_main_thread_run_nanoseconds last read it.
+MAIN_THREAD_RUN_NANOSECONDS=0
+# The first field of the schedstat file read_schedstat_run_nanoseconds last read, or empty.
+RUN_NANOSECONDS_READ=""
 
 #######################################
 # Print a message to stderr and exit 2.
@@ -152,38 +182,106 @@ read_rss_kib() {
 }
 
 #######################################
-# Print utime+stime of a process in clock ticks, from its stat file. The comm
-# field may contain spaces and parentheses, so everything up to the LAST ")" is
-# dropped before the fields are counted.
+# Set RUN_NANOSECONDS_READ to the first field of a schedstat file: the thread's
+# time on a CPU, in ns. Fails, leaving it empty, when the file cannot be read;
+# exit 2 when it holds no whole number.
 # Arguments:
-#   $1 - pid
+#   $1 - schedstat path
 #######################################
-read_cpu_ticks() {
-    local stat_path="$PROC_ROOT/$1/stat" stat_line after_comm
-    local -a fields
-    [[ -r "$stat_path" ]] || die "cannot read $stat_path"
-    stat_line="$(<"$stat_path")"
-    after_comm="${stat_line##*) }"
-    read -r -a fields <<<"$after_comm"
-    # after_comm starts at field 3 (state), so utime (14) and stime (15) are indices 11 and 12.
-    [[ "${fields[11]:-}" =~ ^[0-9]+$ && "${fields[12]:-}" =~ ^[0-9]+$ ]] || die "malformed $stat_path"
-    printf '%s' "$(( fields[11] + fields[12] ))"
+read_schedstat_run_nanoseconds() {
+    local schedstat_path="$1"
+    RUN_NANOSECONDS_READ=""
+    read -r RUN_NANOSECONDS_READ _ 2>/dev/null <"$schedstat_path"
+    [[ -n "$RUN_NANOSECONDS_READ" ]] || return 1
+    [[ "$RUN_NANOSECONDS_READ" =~ $WHOLE_NUMBER_PATTERN ]] || die "malformed $schedstat_path"
 }
 
 #######################################
-# Print a process's CPU use over a window as a percent of one core.
+# Fill THREAD_RUN_NANOSECONDS with every thread's time on a CPU (ns), keyed by
+# tid. A thread whose directory is gone by the time it is read ended meanwhile
+# and is left out; a thread still listed whose schedstat cannot be read (a
+# kernel that keeps none), a process with no task directory, or no thread read
+# at all, means nothing can be measured: exit 2, never a reading of 0.
+# Arguments:
+#   $1 - pid
+#######################################
+read_thread_run_nanoseconds() {
+    local task_root="$PROC_ROOT/$1/$TASK_DIR_NAME" task_dir schedstat_path
+    THREAD_RUN_NANOSECONDS=()
+    [[ -d "$task_root" ]] || die "cannot read $task_root"
+    for task_dir in "$task_root"/[0-9]*; do
+        schedstat_path="$task_dir/$SCHEDSTAT_FILE_NAME"
+        if ! read_schedstat_run_nanoseconds "$schedstat_path"; then
+            [[ -d "$task_dir" ]] && die "cannot read $schedstat_path"
+            continue
+        fi
+        THREAD_RUN_NANOSECONDS["${task_dir##*/}"]="$RUN_NANOSECONDS_READ"
+    done
+    (( ${#THREAD_RUN_NANOSECONDS[@]} > 0 )) || die "no thread's schedstat could be read under $task_root"
+}
+
+#######################################
+# Set MAIN_THREAD_RUN_NANOSECONDS to the main thread's time on a CPU (ns): the
+# thread whose tid is the pid. Exit 2 when it cannot be read.
+# Arguments:
+#   $1 - pid
+#######################################
+read_main_thread_run_nanoseconds() {
+    local schedstat_path="$PROC_ROOT/$1/$TASK_DIR_NAME/$1/$SCHEDSTAT_FILE_NAME"
+    read_schedstat_run_nanoseconds "$schedstat_path" || die "cannot read $schedstat_path"
+    MAIN_THREAD_RUN_NANOSECONDS="$RUN_NANOSECONDS_READ"
+}
+
+#######################################
+# Print a process's CPU use over a window as a percent of one core: the time on
+# a CPU every thread gained, from the scheduler's nanosecond counters. A thread
+# that started during the window counts from 0.
 # Arguments:
 #   $1 - pid
 #   $2 - window length in seconds (positive integer)
 #######################################
 measure_cpu_percent() {
-    local pid="$1" window_seconds="$2" ticks_per_second ticks_before ticks_after
-    ticks_per_second="$(getconf CLK_TCK)" || die "getconf CLK_TCK failed"
-    ticks_before="$(read_cpu_ticks "$pid")" || exit $?
+    local pid="$1" window_seconds="$2" tid window_run_nanoseconds=0 window_nanoseconds
+    local -A run_nanoseconds_before=()
+    read_thread_run_nanoseconds "$pid"
+    for tid in "${!THREAD_RUN_NANOSECONDS[@]}"; do
+        run_nanoseconds_before["$tid"]="${THREAD_RUN_NANOSECONDS[$tid]}"
+    done
     sleep "$window_seconds"
-    ticks_after="$(read_cpu_ticks "$pid")" || exit $?
-    awk -v before="$ticks_before" -v after="$ticks_after" -v hz="$ticks_per_second" -v window="$window_seconds" \
-        'BEGIN { printf "%.2f\n", (after - before) / (hz * window) * 100 }'
+    read_thread_run_nanoseconds "$pid"
+    for tid in "${!THREAD_RUN_NANOSECONDS[@]}"; do
+        window_run_nanoseconds=$(( window_run_nanoseconds + ${THREAD_RUN_NANOSECONDS[$tid]} \
+            - ${run_nanoseconds_before[$tid]:-0} ))
+    done
+    window_nanoseconds=$(( window_seconds * NANOSECONDS_PER_SECOND ))
+    awk -v run_ns="$window_run_nanoseconds" -v window_ns="$window_nanoseconds" -v percent="$PERCENT_PER_FRACTION" \
+        'BEGIN { printf "%.3f\n", run_ns / window_ns * percent }'
+}
+
+#######################################
+# Print the median of the main thread's CPU per Sample tick over a window, in
+# ms: the main thread's counter read once every SAMPLE_INTERVAL_SECONDS, for as
+# many whole ticks as fit in the window. Of an even number of ticks, the upper
+# of the two middle ones, as the performance session's tools took it.
+# Arguments:
+#   $1 - pid
+#   $2 - window length in seconds (at least SAMPLE_INTERVAL_SECONDS)
+#######################################
+measure_tick_median_ms() {
+    local pid="$1" window_seconds="$2" tick_count tick_index previous_run_nanoseconds
+    local -a tick_run_nanoseconds=()
+    tick_count=$(( window_seconds / SAMPLE_INTERVAL_SECONDS ))
+    read_main_thread_run_nanoseconds "$pid"
+    previous_run_nanoseconds="$MAIN_THREAD_RUN_NANOSECONDS"
+    for (( tick_index = 0; tick_index < tick_count; tick_index++ )); do
+        sleep "$SAMPLE_INTERVAL_SECONDS"
+        read_main_thread_run_nanoseconds "$pid"
+        tick_run_nanoseconds+=("$(( MAIN_THREAD_RUN_NANOSECONDS - previous_run_nanoseconds ))")
+        previous_run_nanoseconds="$MAIN_THREAD_RUN_NANOSECONDS"
+    done
+    printf '%s\n' "${tick_run_nanoseconds[@]}" | sort -n \
+        | awk -v nanoseconds_per_ms="$NANOSECONDS_PER_MILLISECOND" \
+            '{ sorted[NR] = $1 } END { printf "%.2f\n", sorted[int(NR / 2) + 1] / nanoseconds_per_ms }'
 }
 
 #######################################
@@ -224,7 +322,8 @@ main() {
     local measured="$MEASURED_GNOME_SHELL" argument argument_measures mode mode_value measured_pid
     local -a mode_arguments=()
     local service_choice="[$SERVICE_FLAG|$COCKPIT_FLAG]"
-    local usage_text="usage: $0 $service_choice --cpu-percent <seconds> | $service_choice --rss-kib | --rss-check <baseline_kib>"
+    local cpu_modes="$service_choice --cpu-percent <seconds> | $service_choice --tick-median <seconds>"
+    local usage_text="usage: $0 $cpu_modes | $service_choice --rss-kib | --rss-check <baseline_kib>"
     # --service or --cockpit anywhere, one of them only; everything else is the
     # mode and its value.
     for argument in "$@"; do
@@ -244,11 +343,19 @@ main() {
     mode_value="${mode_arguments[1]:-}"
     case "$mode" in
         --cpu-percent)
-            if (( ${#mode_arguments[@]} != 2 )) || ! [[ "$mode_value" =~ ^[1-9][0-9]*$ ]]; then
+            if (( ${#mode_arguments[@]} != 2 )) || ! [[ "$mode_value" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]]; then
                 die "$usage_text"
             fi
             measured_pid="$(find_measured_pid "$measured")" || exit $?
             measure_cpu_percent "$measured_pid" "$mode_value" ;;
+        --tick-median)
+            if (( ${#mode_arguments[@]} != 2 )) || ! [[ "$mode_value" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]]; then
+                die "$usage_text"
+            fi
+            (( mode_value >= SAMPLE_INTERVAL_SECONDS )) \
+                || die "--tick-median needs at least one tick: a window of $SAMPLE_INTERVAL_SECONDS s or more"
+            measured_pid="$(find_measured_pid "$measured")" || exit $?
+            measure_tick_median_ms "$measured_pid" "$mode_value" ;;
         --rss-kib)
             (( ${#mode_arguments[@]} == 1 )) || die "$usage_text"
             measured_pid="$(find_measured_pid "$measured")" || exit $?

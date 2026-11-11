@@ -2773,12 +2773,20 @@ check "refresh: a failure deciding one unit warns in a line naming that unit, an
   "sampler-state-unreadable:exit=0 calls=[$REFRESH_PREAMBLE_CALLS$SAMPLER_STATE_CALL$COCKPIT_CHECKED_CALLS$COCKPIT_RESTART_CALL] warned=1 said=[$COCKPIT_ENTRY_RESTART_LINE] cockpit-start-unparseable:exit=0 calls=[$CALLS_SAMPLER_RESTARTED] warned=1 said=[$SAMPLER_ENTRY_RESTART_LINE]"
 
 printf '\nresource-pulse-cost.sh (fake PROC_ROOT)\n'
-# make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry.
+# make_fake_proc <root> <pid> <comm> <vmrss_kib> builds one process entry. Its
+# stat carries clock ticks (utime 100, stime 50), which the cost script must
+# never read for CPU: reading them, or falling back to them, gives a reading
+# where a row expects a different one or exit 2.
 make_fake_proc() {
   mkdir -p "$1/$2"
   printf '%s\n' "$3" >"$1/$2/comm"
   printf 'Name:\t%s\nVmRSS:\t%s kB\n' "$3" "$4" >"$1/$2/status"
   printf '%s (%s) S 1 1 1 0 -1 0 0 0 0 0 100 50 0 0 20 0 1 0 1 0 0\n' "$2" "$3" >"$1/$2/stat"
+}
+# write_fake_schedstat <root> <pid> <tid> <line> writes one thread's <root>/<pid>/task/<tid>/schedstat: the
+# scheduler's time on a CPU (ns), time waiting (ns) and timeslices.
+write_fake_schedstat() {
+  mkdir -p "$1/$2/task/$3" && printf '%s\n' "$4" >"$1/$2/task/$3/schedstat"
 }
 ONE_SHELL_ROOT="$WIRING_TMP/proc-one"
 TWO_SHELLS_ROOT="$WIRING_TMP/proc-two"
@@ -2807,52 +2815,134 @@ check "cost: two gnome-shell candidates exit 2" "$COST_EXIT" 2
 cost_run "$NO_SHELL_ROOT" --rss-kib
 check "cost: no gnome-shell candidate exits 2" "$COST_EXIT" 2
 
-# --cpu-percent over a fake window: `sleep` and `getconf` are stubs on PATH.
-# The sleep stub records the window and moves the fake gnome-shell's stat on,
-# as the window would; getconf says CLK_TCK is 250, so a hard-coded 100 Hz
-# shows. utime (field 14) goes 100 -> 160 and stime (15) 50 -> 80: 90 ticks
-# over 2 s at 250 Hz is 18.00% of one core. The neighbours move by other
-# amounts (cmajflt 13: +37, cutime 16: +50, cstime 17: +90), so reading the
-# wrong fields gives another number, as does dividing by the wrong thing.
-CPU_PROC_ROOT="$WIRING_TMP/proc-cpu"
+# CPU comes from the scheduler's own nanosecond counters, one per thread
+# (<proc>/<pid>/task/<tid>/schedstat, first field), never from stat's clock
+# ticks. `sleep` is a stub on PATH: it records each call's argument and, on its
+# Nth call, copies <steps dir>/<N>/ over the fake proc root, as that much of the
+# window would move the counters on.
 COST_STUB_BIN="$WIRING_TMP/cost-bin"
 COST_SLEEP_CALLS="$WIRING_TMP/cost-sleep-calls"
-COST_STAT_AFTER="$WIRING_TMP/cost-stat-after"
 COST_WINDOW_SECONDS=2
-make_fake_proc "$CPU_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
-printf '4242 (gnome-shell) S 1 1 1 0 -1 0 0 0 0 3 100 50 7 9 20 0 1 0 1 0 0\n' >"$CPU_PROC_ROOT/4242/stat"
-printf '4242 (gnome-shell) S 1 1 1 0 -1 0 0 0 5 40 160 80 57 99 20 0 1 0 1 0 0\n' >"$COST_STAT_AFTER"
-# shellcheck disable=SC2016  # The stubs' own source: their variables expand when they run.
+# shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
 install_stub "$COST_STUB_BIN" sleep '#!/usr/bin/env bash
 printf "%s\n" "$*" >>"$COST_SLEEP_CALLS"
-cp "$COST_STAT_AFTER" "$COST_STAT_PATH"'
-# shellcheck disable=SC2016
-install_stub "$COST_STUB_BIN" getconf '#!/usr/bin/env bash
-[[ "$1" == CLK_TCK ]] && echo 250'
-: >"$COST_SLEEP_CALLS"
-cpu_percent_output="$(PATH="$COST_STUB_BIN:$PATH" GNOME_SHELL_PID=4242 PROC_ROOT="$CPU_PROC_ROOT" \
-  COST_SLEEP_CALLS="$COST_SLEEP_CALLS" COST_STAT_AFTER="$COST_STAT_AFTER" COST_STAT_PATH="$CPU_PROC_ROOT/4242/stat" \
-  bash "$COST_SCRIPT" --cpu-percent "$COST_WINDOW_SECONDS" 2>&1)"
-cpu_percent_exit=$?
-check "cost: --cpu-percent is Δ(utime+stime) / (CLK_TCK × window) × 100, over the window it was given" \
-  "exit=$cpu_percent_exit percent=$cpu_percent_output slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
-  "exit=0 percent=18.00 slept=$COST_WINDOW_SECONDS "
+sleep_call_number=$(( $(wc -l <"$COST_SLEEP_CALLS") ))
+step_dir="$COST_SLEEP_STEPS/$sleep_call_number"
+if [[ -d "$step_dir" ]]; then cp -R "$step_dir/." "$COST_SLEEP_PROC_ROOT/"; fi'
+# cost_steps_run <proc root> <steps dir> <args...> runs the cost script against
+# a fake proc root (GNOME_SHELL_PID names its gnome-shell, 4242), the sleep stub
+# moving it through the steps; leaves COST_OUTPUT, COST_EXIT and the sleep calls.
+cost_steps_run() {
+  local proc_root="$1" steps_dir="$2"
+  shift 2
+  : >"$COST_SLEEP_CALLS"
+  COST_OUTPUT="$(PATH="$COST_STUB_BIN:$PATH" GNOME_SHELL_PID=4242 PROC_ROOT="$proc_root" \
+    COST_SLEEP_CALLS="$COST_SLEEP_CALLS" COST_SLEEP_STEPS="$steps_dir" COST_SLEEP_PROC_ROOT="$proc_root" \
+    bash "$COST_SCRIPT" "$@" 2>&1)"
+  COST_EXIT=$?
+}
+# --cpu-percent over a fake window, two threads: 4 ms and 6 ms on a CPU before,
+# each 5 ms more after, so 10 ms over 2 s is 0.500% of one core (one thread
+# alone reads 0.250). The other two fields (time waiting, timeslices) move by
+# other amounts, so reading the wrong field gives another number.
+CPU_PROC_ROOT="$WIRING_TMP/proc-cpu"
+CPU_SLEEP_STEPS="$WIRING_TMP/cost-cpu-steps"
+make_fake_proc "$CPU_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+write_fake_schedstat "$CPU_PROC_ROOT" 4242 4242 '4000000 0 1'
+write_fake_schedstat "$CPU_PROC_ROOT" 4242 4243 '6000000 0 1'
+write_fake_schedstat "$CPU_SLEEP_STEPS/1" 4242 4242 '9000000 3000000 4'
+write_fake_schedstat "$CPU_SLEEP_STEPS/1" 4242 4243 '11000000 8000000 9'
+cost_steps_run "$CPU_PROC_ROOT" "$CPU_SLEEP_STEPS" --cpu-percent "$COST_WINDOW_SECONDS"
+check "cost: --cpu-percent is every thread's Δ schedstat time on a CPU (ns) / the window × 100, over the window it was given" \
+  "exit=$COST_EXIT percent=$COST_OUTPUT slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
+  "exit=0 percent=0.500 slept=$COST_WINDOW_SECONDS "
+
+# --tick-median reads the main thread (its tid is the pid) once a tick, at the
+# extension's SAMPLE_INTERVAL_SECONDS (read here from lib/constants.js, so the
+# cost script's copy of it cannot drift unseen), and prints the median of its
+# CPU per tick in ms. Five ticks of 3, 1, 40 (a collection), 1.5 and 2.5 ms: the
+# median is 2.50 and the mean 9.60; the other thread's 100 ms a tick shows if
+# every thread were read. A window under one tick is a usage error.
+SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS="$(sed -n 's/^export const SAMPLE_INTERVAL_SECONDS = \([0-9][0-9]*\);$/\1/p' \
+  "$EXT_DIR/lib/constants.js" 2>/dev/null)"
+[[ "$SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS" =~ ^[1-9][0-9]*$ ]] \
+  || fatal "cannot read SAMPLE_INTERVAL_SECONDS from $EXT_DIR/lib/constants.js"
+TICK_PROC_ROOT="$WIRING_TMP/proc-tick"
+TICK_SLEEP_STEPS="$WIRING_TMP/cost-tick-steps"
+TICK_MAIN_THREAD_NANOSECONDS=(3000000 1000000 40000000 1500000 2500000)
+TICK_OTHER_THREAD_NANOSECONDS=100000000
+make_fake_proc "$TICK_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+write_fake_schedstat "$TICK_PROC_ROOT" 4242 4242 '1000000 0 1'
+write_fake_schedstat "$TICK_PROC_ROOT" 4242 4243 '0 0 1'
+tick_main_thread_total=1000000
+tick_other_thread_total=0
+expected_tick_sleeps=""
+for tick_index in "${!TICK_MAIN_THREAD_NANOSECONDS[@]}"; do
+  tick_main_thread_total=$((tick_main_thread_total + TICK_MAIN_THREAD_NANOSECONDS[tick_index]))
+  tick_other_thread_total=$((tick_other_thread_total + TICK_OTHER_THREAD_NANOSECONDS))
+  write_fake_schedstat "$TICK_SLEEP_STEPS/$((tick_index + 1))" 4242 4242 "$tick_main_thread_total 0 1"
+  write_fake_schedstat "$TICK_SLEEP_STEPS/$((tick_index + 1))" 4242 4243 "$tick_other_thread_total 0 1"
+  expected_tick_sleeps+="$SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS "
+done
+tick_window_seconds=$(( ${#TICK_MAIN_THREAD_NANOSECONDS[@]} * SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS ))
+cost_steps_run "$TICK_PROC_ROOT" "$TICK_SLEEP_STEPS" --tick-median "$tick_window_seconds"
+tick_median_summary="exit=$COST_EXIT median=$COST_OUTPUT slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")"
+cost_steps_run "$TICK_PROC_ROOT" "$TICK_SLEEP_STEPS" --tick-median $((SAMPLE_INTERVAL_SECONDS_IN_CONSTANTS - 1))
+tick_median_summary+=" under-one-tick=$COST_EXIT/$(grep -c -F 'needs at least one tick' <<<"$COST_OUTPUT")"
+check "cost: --tick-median prints the median ms of the main thread's CPU per tick, read every SAMPLE_INTERVAL_SECONDS of lib/constants.js; under one tick is a usage error" \
+  "$tick_median_summary" "exit=0 median=2.50 slept=$expected_tick_sleeps under-one-tick=2/1"
+
+# A counter that cannot be read is exit 2, never a reading of 0: a thread
+# listed with no schedstat (a kernel that keeps none), a process with no task
+# directory, and a first field that is not a number, in both modes. Each case
+# prints its exit and whether any number came out.
+MISSING_SCHEDSTAT_PROC_ROOT="$WIRING_TMP/proc-no-schedstat"
+NO_TASK_DIR_PROC_ROOT="$WIRING_TMP/proc-no-task-dir"
+MALFORMED_SCHEDSTAT_PROC_ROOT="$WIRING_TMP/proc-malformed-schedstat"
+NO_COST_STEPS="$WIRING_TMP/cost-no-steps"
+make_fake_proc "$MISSING_SCHEDSTAT_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+mkdir -p "$MISSING_SCHEDSTAT_PROC_ROOT/4242/task/4242"
+write_fake_schedstat "$MISSING_SCHEDSTAT_PROC_ROOT" 4242 4243 '6000000 0 1'
+make_fake_proc "$NO_TASK_DIR_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+make_fake_proc "$MALFORMED_SCHEDSTAT_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
+write_fake_schedstat "$MALFORMED_SCHEDSTAT_PROC_ROOT" 4242 4242 'n/a 0 1'
+# unreadable_counter_verdict <proc root> <mode> prints exit/no-reading, or exit/the reading it printed.
+unreadable_counter_verdict() {
+  cost_steps_run "$1" "$NO_COST_STEPS" "$2" "$COST_WINDOW_SECONDS"
+  if grep -q -E '^[0-9]+(\.[0-9]+)?$' <<<"$COST_OUTPUT"; then
+    printf '%s/reading-%s' "$COST_EXIT" "$(grep -E '^[0-9]+(\.[0-9]+)?$' <<<"$COST_OUTPUT" | head -n 1)"
+  else
+    printf '%s/no-reading' "$COST_EXIT"
+  fi
+}
+unreadable_counter_summary=""
+for unreadable_mode in --cpu-percent --tick-median; do
+  unreadable_counter_summary+="${unreadable_mode#--}:"
+  unreadable_counter_summary+=" no-schedstat=$(unreadable_counter_verdict "$MISSING_SCHEDSTAT_PROC_ROOT" "$unreadable_mode")"
+  unreadable_counter_summary+=" no-task-dir=$(unreadable_counter_verdict "$NO_TASK_DIR_PROC_ROOT" "$unreadable_mode")"
+  unreadable_counter_summary+=" malformed=$(unreadable_counter_verdict "$MALFORMED_SCHEDSTAT_PROC_ROOT" "$unreadable_mode") "
+done
+check "cost: a schedstat that is missing, a process with no task dir and a counter that is not a number are exit 2 in both modes, never a reading" \
+  "$unreadable_counter_summary" \
+  "cpu-percent: no-schedstat=2/no-reading no-task-dir=2/no-reading malformed=2/no-reading tick-median: no-schedstat=2/no-reading no-task-dir=2/no-reading malformed=2/no-reading "
 
 # --service measures the sampler service the same way, found by its unit's
 # MainPID: a systemctl stub answers that one property and records the call,
 # behind the barrier, so no real user manager is ever asked. The fake root
 # holds a gnome-shell too, named by GNOME_SHELL_PID, which --service must never
-# measure. The service's stat moves from utime 10 / stime 5 to 40 / 20: 45 ticks
-# over 2 s at 250 Hz is 9.00% of one core (its neighbours move by other amounts).
+# measure. The service's main thread goes from 10 ms to 28 ms on a CPU: 18 ms
+# over 2 s is 0.900% of one core; gnome-shell's moves by 50 ms (2.500%), so
+# measuring it instead shows.
 SERVICE_PROC_ROOT="$WIRING_TMP/proc-service"
+SERVICE_SLEEP_STEPS="$WIRING_TMP/cost-service-steps"
 FAKE_SERVICE_PID=5151
 FAKE_SERVICE_RSS_KIB=52000
 SERVICE_UNIT_NAME="resource-pulse.service"
+FAKE_SCHEDSTAT_BEFORE='10000000 0 1'
 make_fake_proc "$SERVICE_PROC_ROOT" 4242 gnome-shell "$FAKE_SHELL_RSS_KIB"
 make_fake_proc "$SERVICE_PROC_ROOT" "$FAKE_SERVICE_PID" gjs "$FAKE_SERVICE_RSS_KIB"
-FAKE_SERVICE_STAT_BEFORE="$FAKE_SERVICE_PID (gjs) S 1 1 1 0 -1 0 0 0 0 3 10 5 7 9 20 0 1 0 1 0 0"
-COST_SERVICE_STAT_AFTER="$WIRING_TMP/cost-service-stat-after"
-printf '%s (gjs) S 1 1 1 0 -1 0 0 0 5 40 40 20 57 99 20 0 1 0 1 0 0\n' "$FAKE_SERVICE_PID" >"$COST_SERVICE_STAT_AFTER"
+write_fake_schedstat "$SERVICE_SLEEP_STEPS/1" "$FAKE_SERVICE_PID" "$FAKE_SERVICE_PID" '28000000 4000000 7'
+write_fake_schedstat "$SERVICE_SLEEP_STEPS/1" 4242 4242 '60000000 9000000 11'
 COST_SYSTEMCTL_STUB_BIN="$WIRING_TMP/cost-systemctl-bin"
 COST_SYSTEMCTL_CALLS="$WIRING_TMP/cost-systemctl-calls"
 # shellcheck disable=SC2016  # The stub's own source: its variables expand when it runs.
@@ -2866,18 +2956,21 @@ esac
 exit "${COST_SYSTEMCTL_EXIT:-0}"'
 # cost_service_run <MainPID answer> <args...> [-- with COST_SYSTEMCTL_EXIT in the
 # caller's environment]; leaves COST_OUTPUT, COST_EXIT and the systemctl calls.
-# Each run starts from the service's "before" stat, which the sleep stub moves on.
+# Each run starts the service's and gnome-shell's counters from "before", which
+# the sleep stub moves on.
 cost_service_run() {
   local main_pid_answer="$1"
   shift
-  printf '%s\n' "$FAKE_SERVICE_STAT_BEFORE" >"$SERVICE_PROC_ROOT/$FAKE_SERVICE_PID/stat" \
-    || fatal "cannot reset the fake service's stat"
+  if ! write_fake_schedstat "$SERVICE_PROC_ROOT" "$FAKE_SERVICE_PID" "$FAKE_SERVICE_PID" "$FAKE_SCHEDSTAT_BEFORE" ||
+    ! write_fake_schedstat "$SERVICE_PROC_ROOT" 4242 4242 "$FAKE_SCHEDSTAT_BEFORE"; then
+    fatal "cannot reset the fake service's and gnome-shell's schedstat"
+  fi
   : >"$COST_SYSTEMCTL_CALLS"
   : >"$COST_SLEEP_CALLS"
   COST_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" PATH="$COST_STUB_BIN:$COST_SYSTEMCTL_STUB_BIN:$PATH" \
     GNOME_SHELL_PID=4242 PROC_ROOT="$SERVICE_PROC_ROOT" COST_SYSTEMCTL_CALLS="$COST_SYSTEMCTL_CALLS" \
     COST_SERVICE_MAIN_PID="$main_pid_answer" COST_SLEEP_CALLS="$COST_SLEEP_CALLS" \
-    COST_STAT_AFTER="$COST_SERVICE_STAT_AFTER" COST_STAT_PATH="$SERVICE_PROC_ROOT/$FAKE_SERVICE_PID/stat" \
+    COST_SLEEP_STEPS="$SERVICE_SLEEP_STEPS" COST_SLEEP_PROC_ROOT="$SERVICE_PROC_ROOT" \
     bash "$COST_SCRIPT" "$@" 2>&1)"
   COST_EXIT=$?
 }
@@ -2887,9 +2980,9 @@ check "cost: --service --rss-kib prints the service's VmRSS, found by its unit's
   "exit=$COST_EXIT rss=$COST_OUTPUT calls=[$(tr '\n' ';' <"$COST_SYSTEMCTL_CALLS")]" \
   "exit=0 rss=$FAKE_SERVICE_RSS_KIB calls=[$SERVICE_MAIN_PID_CALL]"
 cost_service_run "$FAKE_SERVICE_PID" --service --cpu-percent "$COST_WINDOW_SECONDS"
-check "cost: --service --cpu-percent measures the service's own stat over the window, as for gnome-shell" \
+check "cost: --service --cpu-percent measures the service's own schedstat over the window, as for gnome-shell" \
   "exit=$COST_EXIT percent=$COST_OUTPUT slept=$(tr '\n' ' ' <"$COST_SLEEP_CALLS")" \
-  "exit=0 percent=9.00 slept=$COST_WINDOW_SECONDS "
+  "exit=0 percent=0.900 slept=$COST_WINDOW_SECONDS "
 cost_unmeasurable_summary=""
 cost_service_run 0 --service --rss-kib
 cost_unmeasurable_summary+="not-running=$COST_EXIT/$(grep -c -F 'is not running' <<<"$COST_OUTPUT")"
@@ -2914,7 +3007,7 @@ cost_flag_order_summary+="rss-kib=$COST_EXIT/$COST_OUTPUT"
 cost_service_run "$FAKE_SERVICE_PID" --cpu-percent "$COST_WINDOW_SECONDS" --service
 cost_flag_order_summary+=" cpu-percent=$COST_EXIT/$COST_OUTPUT"
 check "cost: --service after the mode still measures the service" \
-  "$cost_flag_order_summary" "rss-kib=0/$FAKE_SERVICE_RSS_KIB cpu-percent=0/9.00"
+  "$cost_flag_order_summary" "rss-kib=0/$FAKE_SERVICE_RSS_KIB cpu-percent=0/0.900"
 # --cockpit measures cockpit.service the same way, by its own unit's MainPID:
 # the fake root holds the sampler's process as well as gnome-shell, and the
 # stub answers both units, so measuring either neighbour shows as its number.
@@ -3253,8 +3346,208 @@ check "nested: scenario refuses a run without replay=1, one not live and one who
   "$scenario_run_summary" \
   "no-replay=2/1/none not-live=2/1/none service-gone=2/1/none live=0/1/idle+token again=0/idle+token/new-request staging-left=0"
 rm -rf "$SCENARIO_RUN"
+
+# `perf` acts only on a live run started with --gc-log and --replay whose
+# replay service runs, with gnome-calculator on PATH, and a shell log holding a
+# collection line of the run's gnome-shell (the GC log is on). Each case below
+# defeats one requirement; the last meets them all and so reaches busctl (the
+# stub), which proves the fixture otherwise good. No case may start
+# gnome-calculator (its stub records any call). Each prints exit/its own
+# message/busctl calls/gnome-calculator calls.
+PERF_RUN="$NESTED_BASE/rpn.PerfRun1"
+PERF_CALCULATOR_STUB_BIN="$WIRING_TMP/perf-calculator-bin"
+PERF_CALCULATOR_CALLS="$WIRING_TMP/perf-calculator-calls"
+# The real gnome-calculator is in /usr/bin beside every tool, so the case
+# without it runs on a PATH of the stubs and only what perf runs before it looks
+# for gnome-calculator.
+PERF_MINIMAL_BIN="$WIRING_TMP/perf-minimal-bin"
+mkdir -p "$PERF_MINIMAL_BIN" || fatal "cannot create $PERF_MINIMAL_BIN"
+for perf_minimal_tool in bash readlink dirname stat; do
+  ln -sf "$(command -v "$perf_minimal_tool")" "$PERF_MINIMAL_BIN/$perf_minimal_tool" \
+    || fatal "cannot link $perf_minimal_tool into $PERF_MINIMAL_BIN"
+done
+# Its calls file is written into its source: a launch under `env -i` would carry no variable naming it.
+install_stub "$PERF_CALCULATOR_STUB_BIN" gnome-calculator \
+  "$(printf '#!/bin/bash\nprintf "gnome-calculator %%s\\n" "$*" >>%q' "$PERF_CALCULATOR_CALLS")"
+PERF_STUBBED_PATH="$PERF_CALCULATOR_STUB_BIN:$NESTED_STUB_BIN:$PATH"
+# A collection line of the run's gnome-shell, and a log with none: only another process's line, and a word.
+PERF_COLLECTING_LOG="MinorGC:   $fake_shell_pid 0x5f2aea7ebe60   0.015299 OUT_OF_NURSERY         8.1%    256    512"
+PERF_SILENT_LOG="$(printf 'gnome-shell started\nMajorGC:   %s 0x5f2aea7ebe60  10.918717 MEM_PRESSURE\n' \
+  "$NEVER_RUNNING_PID")"
+# perf_refusal_verdict <needle> <PATH> <shell log> [run values...] prints exit/needle count/busctl calls/gnome-calculator
+# calls for `perf` on the fixture run made with these values, named; with no values there is no run, and none is named.
+perf_refusal_verdict() {
+  local perf_needle="$1" perf_path="$2" perf_shell_log="$3" perf_output perf_exit
+  shift 3
+  rm -rf "$PERF_RUN"
+  : >"$NESTED_STUB_CALLS"
+  : >"$PERF_CALCULATOR_CALLS"
+  if (( $# > 0 )); then
+    make_run_dir "$PERF_RUN" "$@"
+    mkdir -p "$PERF_RUN/log" "$PERF_RUN/run" || fatal "cannot lay out $PERF_RUN"
+    printf '%s\n' "unix:path=$PERF_RUN/bus/session.sock,guid=0123456789abcdef" >"$PERF_RUN/state/session.addr"
+    printf '%s\n' "$perf_shell_log" >"$PERF_RUN/log/shell.log"
+  fi
+  perf_output="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" \
+    ${1:+RESOURCE_PULSE_NESTED_DIR="$PERF_RUN"} PATH="$perf_path" NESTED_STUB_CALLS="$NESTED_STUB_CALLS" \
+    RESOURCE_PULSE_NESTED_BASE="$NESTED_BASE" bash "$NESTED_SCRIPT" perf 2>&1)"
+  perf_exit=$?
+  printf '%s/%s/%s/%s' "$perf_exit" "$(grep -c -F "$perf_needle" <<<"$perf_output")" \
+    "$(grep -c '^busctl ' "$NESTED_STUB_CALLS")" "$(wc -l <"$PERF_CALCULATOR_CALLS")"
+}
+perf_live_run_values=("${live_supervisor_values[@]}" "${live_shell_values[@]}" "${live_service_values[@]}")
+nested_run perf now
+perf_refusal_summary="extra-argument=$NESTED_EXIT/$(grep -c -F 'perf takes no arguments' <<<"$NESTED_OUTPUT")"
+perf_refusal_summary+=" no-run=$(perf_refusal_verdict 'no live run' "$PERF_STUBBED_PATH" '')"
+perf_refusal_summary+=" not-live=$(perf_refusal_verdict 'is not live' "$PERF_STUBBED_PATH" "$PERF_COLLECTING_LOG" \
+  "supervisor=$NEVER_RUNNING_PID" "${live_shell_values[@]}" "${live_service_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" no-gc-log=$(perf_refusal_verdict 'was not started with --gc-log' "$PERF_STUBBED_PATH" \
+  "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" replay=1)"
+perf_refusal_summary+=" no-replay=$(perf_refusal_verdict 'was not started with --replay' "$PERF_STUBBED_PATH" \
+  "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1)"
+perf_refusal_summary+=" service-gone=$(perf_refusal_verdict 'replay service is not running' "$PERF_STUBBED_PATH" \
+  "$PERF_COLLECTING_LOG" "${live_supervisor_values[@]}" "${live_shell_values[@]}" "service=$NEVER_RUNNING_PID" \
+  gc-log=1 replay=1)"
+perf_refusal_summary+=" no-calculator=$(perf_refusal_verdict 'gnome-calculator is required' \
+  "$NESTED_STUB_BIN:$PERF_MINIMAL_BIN" "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" gc-log-silent=$(perf_refusal_verdict 'holds no collection line' "$PERF_STUBBED_PATH" \
+  "$PERF_SILENT_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" all-met=$(perf_refusal_verdict 'the Eval call failed' "$PERF_STUBBED_PATH" \
+  "$PERF_COLLECTING_LOG" "${perf_live_run_values[@]}" gc-log=1 replay=1)"
+perf_refusal_summary+=" usage=$(grep -c -x -F '       scripts/resource-pulse-nested.sh perf' <<<"$NESTED_OUTPUT")"
+check "nested: perf refuses (exit 2), before busctl and without starting gnome-calculator, a run that is not live, one without gc-log=1 or replay=1, a stopped replay service, no gnome-calculator on PATH and a silent GC log" \
+  "$perf_refusal_summary" \
+  "extra-argument=2/1 no-run=2/1/0/0 not-live=2/1/0/0 no-gc-log=2/1/0/0 no-replay=2/1/0/0 service-gone=2/1/0/0 no-calculator=2/1/0/0 gc-log-silent=2/1/0/0 all-met=2/1/1/0 usage=1"
+rm -rf "$PERF_RUN"
 kill "$fake_shell_pid" 2>/dev/null
 wait "$fake_shell_pid" 2>/dev/null
+
+# perf counts a window's major collections in the shell's log (SpiderMonkey's
+# MajorGC: lines, as `start --gc-log` makes it write them): only the lines past
+# the byte offset the window began at, and only those whose PID column is the
+# nested shell's, never the column header, a MinorGC: line, another process's
+# line or one that merely mentions MajorGC:. A log it cannot read is a failure,
+# never a count of 0.
+PERF_GC_LOG="$WIRING_TMP/perf-gc-shell.log"
+PERF_GC_SHELL_PID=3353150
+PERF_GC_HEADER='MajorGC: PID     Runtime        Timestamp  Reason               States FSNR SizeKB'
+perf_gc_line() { printf '%s:   %s 0x5f2aea7ebe60  %s %s         0 -> 0 F N      5772\n' "$1" "$2" "$3" "$4"; }
+{
+  printf '%s\n' "$PERF_GC_HEADER"
+  perf_gc_line MajorGC "$PERF_GC_SHELL_PID" 1.002 MEM_PRESSURE
+} >"$PERF_GC_LOG"
+perf_gc_window_offset="$(stat -c %s "$PERF_GC_LOG")"
+{
+  printf '%s\n' "$PERF_GC_HEADER"
+  perf_gc_line MajorGC "$PERF_GC_SHELL_PID" 10.918 MEM_PRESSURE
+  perf_gc_line MinorGC "$PERF_GC_SHELL_PID" 11.002 OUT_OF_NURSERY
+  perf_gc_line MajorGC 3353318 12.500 ALLOC_TRIGGER
+  printf 'JS LOG: resource-pulse: MajorGC:   %s seen\n' "$PERF_GC_SHELL_PID"
+  perf_gc_line MajorGC "$PERF_GC_SHELL_PID" 20.950 MEM_PRESSURE
+} >>"$PERF_GC_LOG"
+perf_gc_summary="window=$(nested_call count_major_collections_since "$PERF_GC_LOG" "$perf_gc_window_offset" "$PERF_GC_SHELL_PID")"
+perf_gc_summary+=" whole-log=$(nested_call count_major_collections_since "$PERF_GC_LOG" 0 "$PERF_GC_SHELL_PID")"
+if nested_call count_major_collections_since "$WIRING_TMP/no-such-shell.log" 0 "$PERF_GC_SHELL_PID" >/dev/null 2>&1
+then perf_gc_summary+=" unreadable=passed"
+else perf_gc_summary+=" unreadable=failed"; fi
+check "nested: perf counts the MajorGC: lines of the shell's own pid past the window's start, never the header, a MinorGC: line or another process's; an unreadable log fails" \
+  "$perf_gc_summary" "window=2 whole-log=3 unreadable=failed"
+
+# perf's verdict, a pure function of the counts. The disabled state shows 2
+# major collections and 2 frames; each enabled state is "<major collections>
+# <frames> <Samples> <top-bar paints> <card redirect>", in perf's order:
+# covered-idle, covered-busy, topbar-hidden-covered, visible-busy. The in-budget
+# counts sit on every bound's edge, and the disabled state's frames are above
+# zero, so a comparison off by one either way, or a frame bound that leaves the
+# disabled state's frames out, moves a row: collections 2 + 1 = 3; frames 30
+# Samples + 2 + 2 = 34, and covered-idle's 2 + 3 = 5; no top-bar paint while
+# hidden.
+PERF_VERDICT_DISABLED_COUNTS=(2 2)
+PERF_VERDICT_STATE_NAMES=(covered-idle covered-busy topbar-hidden-covered visible-busy)
+PERF_VERDICT_EDGE_RECORDS=('3 5 30 0 ALWAYS' '3 34 30 30 ALWAYS' '3 34 30 0 ALWAYS' '3 34 30 60 ALWAYS')
+# perf_verdict_run <records...> runs the verdict on the disabled counts and these records; leaves
+# PERF_VERDICT_OUTPUT and PERF_VERDICT_EXIT.
+perf_verdict_run() {
+  PERF_VERDICT_OUTPUT="$(nested_call perf_count_verdict "${PERF_VERDICT_DISABLED_COUNTS[@]}" "$@" 2>&1)"
+  PERF_VERDICT_EXIT=$?
+}
+# perf_breach_verdict <state index> <record> <needle> runs the verdict with one state's record replaced, and prints
+# exit/needle count/whether the line names exactly one broken budget.
+perf_breach_verdict() {
+  local -a breach_records=("${PERF_VERDICT_EDGE_RECORDS[@]}")
+  breach_records[$1]="$2"
+  perf_verdict_run "${breach_records[@]}"
+  printf '%s/%s/%s' "$PERF_VERDICT_EXIT" "$(grep -c -F "$3" <<<"$PERF_VERDICT_OUTPUT")" \
+    "$(grep -c -F 'FAIL: 1 count budget broken: ' <<<"$PERF_VERDICT_OUTPUT")"
+}
+perf_verdict_run "${PERF_VERDICT_EDGE_RECORDS[@]}"
+check "nested: perf's verdict passes (exit 0) counts on every budget's edge, in one line" \
+  "exit=$PERF_VERDICT_EXIT lines=$(wc -l <<<"$PERF_VERDICT_OUTPUT") [$PERF_VERDICT_OUTPUT]" \
+  "exit=0 lines=1 [perf: PASS: every count within its budget]"
+
+perf_collections_summary=""
+perf_frames_summary=""
+perf_redirect_summary=""
+for perf_state_index in "${!PERF_VERDICT_STATE_NAMES[@]}"; do
+  perf_state_name="${PERF_VERDICT_STATE_NAMES[perf_state_index]}"
+  read -r _ edge_frames edge_samples edge_paints _ <<<"${PERF_VERDICT_EDGE_RECORDS[perf_state_index]}"
+  perf_collections_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" \
+    "4 $edge_frames $edge_samples $edge_paints ALWAYS" \
+    "collections: $perf_state_name had 4 major collections, more than the disabled state's 2 plus 1")"
+  # One frame past Samples + 2 + 2. In covered-idle that is with no Sample at all, so that its own tighter bound
+  # (the disabled state's 2 frames + 3) still holds and only this one breaks.
+  if [[ "$perf_state_name" == covered-idle ]]; then frames_breach_record="3 5 0 0 ALWAYS"
+  else frames_breach_record="3 35 30 $edge_paints ALWAYS"; fi
+  read -r _ breach_frames breach_samples _ _ <<<"$frames_breach_record"
+  perf_frames_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" "$frames_breach_record" \
+    "frames-per-sample: $perf_state_name drew $breach_frames frames, more than its $breach_samples Samples plus the disabled state's 2 frames plus 2")"
+  perf_redirect_summary+=" $perf_state_name=$(perf_breach_verdict "$perf_state_index" \
+    "3 $edge_frames $edge_samples $edge_paints 0" \
+    "card-redirect: $perf_state_name found the card's offscreen redirect 0, not ALWAYS")"
+done
+check "nested: perf's verdict fails (exit 1) one more major collection than the disabled state's + 1 in any enabled state, naming it" \
+  "$perf_collections_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
+check "nested: perf's verdict fails (exit 1) one more frame than Samples + the disabled state's frames + 2 in any enabled state, naming it" \
+  "$perf_frames_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
+check "nested: perf's verdict fails (exit 1) covered-idle at one more frame than the disabled state's frames + 3, naming it" \
+  "$(perf_breach_verdict 0 '3 6 30 0 ALWAYS' "covered-idle-frames: covered-idle drew 6 frames, more than the disabled state's 2 frames plus 3")" \
+  "1/1/1"
+check "nested: perf's verdict fails (exit 1) one top-bar paint while the top bar is hidden, naming it" \
+  "$(perf_breach_verdict 2 '3 34 30 1 ALWAYS' 'hidden-topbar-paints: topbar-hidden-covered painted the top bar while it was hidden (top-bar paints 1, allowed 0)')" \
+  "1/1/1"
+check "nested: perf's verdict fails (exit 1) a card whose offscreen redirect is not ALWAYS in any enabled state, naming it" \
+  "$perf_redirect_summary" " covered-idle=1/1/1 covered-busy=1/1/1 topbar-hidden-covered=1/1/1 visible-busy=1/1/1"
+
+# Counts it cannot judge are exit 2, never a pass or a breach: a state missing,
+# a count that is not a whole number, a record short or long by a field, and a
+# visible-busy window in which the probe counted no frame, no Sample or no
+# paint, where each must happen (a probe that is not counting reads as clean).
+# perf_unjudgeable_verdict <records...> prints exit/whether it said it could not judge.
+perf_unjudgeable_verdict() {
+  perf_verdict_run "$@"
+  printf '%s/%s' "$PERF_VERDICT_EXIT" "$(grep -c -F 'perf: could not judge the counts: ' <<<"$PERF_VERDICT_OUTPUT")"
+}
+perf_unjudgeable_summary="state-missing=$(perf_unjudgeable_verdict "${PERF_VERDICT_EDGE_RECORDS[@]:0:3}")"
+perf_unjudgeable_summary+=" not-a-number=$(perf_unjudgeable_verdict '3 x 30 0 ALWAYS' "${PERF_VERDICT_EDGE_RECORDS[@]:1}")"
+# A leading zero, which bash arithmetic would read as octal (08 is not a number to it).
+perf_unjudgeable_summary+=" leading-zero=$(perf_unjudgeable_verdict '3 08 30 0 ALWAYS' "${PERF_VERDICT_EDGE_RECORDS[@]:1}")"
+perf_unjudgeable_summary+=" short-record=$(perf_unjudgeable_verdict '3 5 30 ALWAYS' "${PERF_VERDICT_EDGE_RECORDS[@]:1}")"
+perf_unjudgeable_summary+=" long-record=$(perf_unjudgeable_verdict '3 5 30 0 ALWAYS 9' "${PERF_VERDICT_EDGE_RECORDS[@]:1}")"
+for perf_dead_counter in frames Samples paints; do
+  case "$perf_dead_counter" in
+    frames) perf_dead_record='3 0 30 60 ALWAYS' ;;
+    Samples) perf_dead_record='3 34 0 60 ALWAYS' ;;
+    paints) perf_dead_record='3 34 30 0 ALWAYS' ;;
+  esac
+  perf_unjudgeable_summary+=" visible-busy-no-$perf_dead_counter=$(perf_unjudgeable_verdict \
+    "${PERF_VERDICT_EDGE_RECORDS[@]:0:3}" "$perf_dead_record")"
+done
+PERF_VERDICT_DISABLED_COUNTS=(2 '')
+perf_unjudgeable_summary+=" disabled-frames-empty=$(perf_unjudgeable_verdict "${PERF_VERDICT_EDGE_RECORDS[@]}")"
+PERF_VERDICT_DISABLED_COUNTS=(2 2)
+check "nested: perf's verdict cannot judge (exit 2, never 0 or 1) a missing state, a count that is not a whole number, a record of the wrong length, or a visible-busy window with no frame, Sample or paint" \
+  "$perf_unjudgeable_summary" \
+  "state-missing=2/1 not-a-number=2/1 leading-zero=2/1 short-record=2/1 long-record=2/1 visible-busy-no-frames=2/1 visible-busy-no-Samples=2/1 visible-busy-no-paints=2/1 disabled-frames-empty=2/1"
 
 # `stop` signals a session only while its leader is this run's recorded
 # launcher, `timeout`: a session id is a pid, and once a run's processes are all
@@ -3993,7 +4286,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=768
+EXPECTED_ROWS=784
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
