@@ -1108,3 +1108,252 @@ test('cockpitLayer.js: destroy removes both client listeners and the fallback ti
         listenersAdded: 2, listenersRemoved: [true, true], everyCardDestroyed: 1,
     });
 });
+
+// extension.js: the cockpit client, the layer, the cockpit monitor, the cover per card, the watch and the subscription.
+const EXTENSION_SOURCE_FILE = 'extension.js';
+
+/**
+ * The statements of a method of extension.js between its declaration and its closing brace, comments removed.
+ *
+ * @param {string} declarationLine - The method's declaration as it starts its line.
+ * @returns {string[]} Its statements, trimmed.
+ */
+function extensionMethodStatements(declarationLine) {
+    return statementsOf(methodBody(readExtensionFile(EXTENSION_SOURCE_FILE), declarationLine)).slice(1, -1);
+}
+
+test('extension.js: enable() makes the cockpit client right after the pulse client, with the shared client logger ' +
+    'and the layout kept from the last enable, and follows the cockpit (the DisplayConfig reader, the client\'s ' +
+    'events, a layer from that layout at once) before starting it', () => {
+    const enableStatements = extensionMethodStatements('enable() {');
+    const pulseClientIndex = enableStatements.findIndex(statement =>
+        statement.startsWith('this._client = new PulseClient('));
+    const pulseStartIndex = enableStatements.indexOf('this._client.start();');
+    assertEqual({
+        cockpitClient: pulseClientIndex < 0 ? null : enableStatements[pulseClientIndex + 1],
+        followsThenStarts: pulseStartIndex < 0 ? [] : enableStatements.slice(pulseStartIndex, pulseStartIndex + 3),
+        follow: extensionMethodStatements('_followCockpit() {'),
+    }, {
+        cockpitClient: 'this._cockpitClient = new CockpitClient({errorLog: this._clientLog, ' +
+            'cachedLayout: this._lastCockpitLayout});',
+        followsThenStarts: ['this._client.start();', 'this._followCockpit();', 'this._cockpitClient.start();'],
+        follow: [
+            'this._displayConfigReader = new DisplayConfigReader({',
+            'errorLog: this._clientLog, onStateRead: displayConfigState => ' +
+                'this._onDisplayConfigRead(displayConfigState),',
+            '});',
+            'this._cockpitListenerId = this._cockpitClient.addListener(event => this._onCockpitClientEvent(event));',
+            'this._syncCockpitLayer(false);',
+        ],
+    });
+});
+
+test('extension.js: a cockpit client event adds, removes or rebuilds the layer as cockpitLayerChange says, then ' +
+    'holds a hidden v2 card frozen (ruling D21) and places the cards again; the v2 card stops following its width ' +
+    'while the layer holds it, and is put back top right, following it again, when the layer goes', () =>
+    assertEqual({
+        onEvent: extensionMethodStatements('_onCockpitClientEvent(event) {'),
+        sync: extensionMethodStatements('_syncCockpitLayer(isLayoutEvent) {'),
+        holdHidden: extensionMethodStatements('_holdHiddenPulseCardFrozen() {'),
+        addStopsFollowingTheWidthFirst: extensionMethodStatements('_addCockpitLayer() {')[0],
+        addHandsTheCardOver: extensionMethodStatements('_addCockpitLayer() {')
+            .includes('cockpitClient: this._cockpitClient, pulseClient: this._client, pulseCard: this._card,'),
+        addReadsTheDisplayConfig: extensionMethodStatements('_addCockpitLayer() {').at(-1),
+        remove: extensionMethodStatements('_removeCockpitLayer() {'),
+        putTopRight: extensionMethodStatements('_putCardTopRight() {'),
+    }, {
+        onEvent: ['this._syncCockpitLayer(event.type === CockpitClientEventType.LAYOUT);'],
+        sync: [
+            'const layerChange = cockpitLayerChange({',
+            'isLayerShown: this._layer !== null,',
+            'clientState: this._cockpitClient.state,',
+            'layout: this._cockpitClient.layout,',
+            'isLayoutEvent,',
+            '});',
+            'if (layerChange === CockpitLayerChange.NONE)',
+            'return;',
+            'if (layerChange === CockpitLayerChange.ADD)',
+            'this._addCockpitLayer();',
+            'else if (layerChange === CockpitLayerChange.REMOVE)',
+            'this._removeCockpitLayer();',
+            'else',
+            'this._layer.setLayout(this._cockpitClient.layout);',
+            'this._holdHiddenPulseCardFrozen();',
+            'this._placeCard();',
+        ],
+        holdHidden: [
+            'const isHeldHidden = isPulseCardHeldHidden({',
+            'isCockpitLayerShown: this._layer !== null, drawnCardIds: this._layer?.drawnCardIds ?? [],',
+            '});',
+            'if (isHeldHidden)',
+            'this._card.setFrozen(true);',
+        ],
+        addStopsFollowingTheWidthFirst: 'this._card.disconnectObject(this);',
+        addHandsTheCardOver: true,
+        addReadsTheDisplayConfig: 'this._displayConfigReader.requestState();',
+        remove: [
+            'const layer = this._layer;', 'this._layer = null;', 'layer.destroy();', 'this._putCardTopRight();',
+        ],
+        putTopRight: [
+            'this._card.get_parent()?.remove_child(this._card);',
+            'Main.layoutManager._backgroundGroup.add_child(this._card);',
+            'this._card.clearCellSize();',
+            'this._followCardWidth();',
+        ],
+    }));
+
+test('extension.js: the layer goes on the monitor cockpitMonitorIndexFor chooses from the shell\'s monitors, ' +
+    'DisplayConfig\'s last answer and the layout\'s rule, at its work area (getWorkAreaForMonitor); a monitors ' +
+    'change forgets that answer, asks again while a layer is shown and places the cards in the coalesced later, as a ' +
+    'work-area change and a new answer do; the later never throws out of its callback', () => {
+    const extensionCode = codeOf(EXTENSION_SOURCE_FILE);
+    const queueStatements = extensionMethodStatements('_queueCardPlacement() {');
+    const placeIndex = queueStatements.indexOf('this._placeCard();');
+    assertEqual({
+        place: extensionMethodStatements('_placeCockpitLayer() {'),
+        onMonitorsChanged: extensionMethodStatements('_onMonitorsChanged() {'),
+        onAnswer: extensionMethodStatements('_onDisplayConfigRead(displayConfigState) {'),
+        connects: [
+            "Main.layoutManager.connectObject('monitors-changed', () => this._onMonitorsChanged(), this);",
+            "global.display.connectObject('workareas-changed', () => this._queueCardPlacement(), this);",
+        ].map(needle => occurrenceCount(extensionCode, needle)),
+        laterGuarded: placeIndex < 1 ? [] : queueStatements.slice(placeIndex - 1, placeIndex + 3),
+    }, {
+        place: [
+            'const monitorIndex = cockpitMonitorIndexFor({',
+            'monitors: shellMonitors(),',
+            'displayConfigState: this._displayConfigState,',
+            'monitorRule: this._layer.layout.monitor,',
+            '});',
+            'if (monitorIndex === null)',
+            'return;',
+            'const workArea = Main.layoutManager.getWorkAreaForMonitor(monitorIndex);',
+            'this._layer.placeOnMonitor(monitorIndex, workArea);',
+        ],
+        onMonitorsChanged: [
+            'this._displayConfigState = null;', 'if (this._layer !== null)',
+            'this._displayConfigReader?.requestState();', 'this._queueCardPlacement();',
+        ],
+        onAnswer: [
+            'this._displayConfigState = displayConfigState;', 'if (this._layer !== null)',
+            'this._queueCardPlacement();',
+        ],
+        connects: [1, 1],
+        laterGuarded: [
+            'try {', 'this._placeCard();', '} catch (error) {', 'const errorText = describeErrorWithStack(error);',
+        ],
+    });
+});
+
+test('extension.js: the cockpit\'s watch and its subscription get the same answer, isCockpitWatchWanted\'s, from ' +
+    'whether a cockpit card is seen, the dropdown and the overview, synced wherever the detail watch is; the detail ' +
+    'watch counts a card that draws the sampler\'s snapshot (cockpitSurfacesSeen)', () => {
+    const extensionCode = codeOf(EXTENSION_SOURCE_FILE);
+    const detailSyncs = occurrenceCount(extensionCode, '\n        this._syncDetailWatch();\n');
+    assertEqual({
+        cockpitWatch: extensionMethodStatements('_syncCockpitWatch() {'),
+        surfaces: extensionMethodStatements('_surfacesSeen() {'),
+        detailWatchCountsTheSnapshotCards: extensionMethodStatements('_syncDetailWatch() {').slice(0, 3),
+        detailSyncs,
+        cockpitSyncRightAfterEach: occurrenceCount(extensionCode,
+            '\n        this._syncDetailWatch();\n        this._syncCockpitWatch();\n'),
+    }, {
+        cockpitWatch: [
+            'const {isAnyCockpitCardVisible} = this._surfacesSeen();',
+            'const isWanted = isCockpitWatchWanted({',
+            'isAnyCockpitCardVisible,',
+            'isDropdownOpen: this._isDropdownOpen,',
+            'isOverviewVisible: this._isOverviewVisible,',
+            '});',
+            'this._isCockpitSubscriptionWanted = isWanted;',
+            'this._cockpitClient?.setWatchWanted(isWanted);',
+            'this._cockpitClient?.setSubscriptionWanted(isWanted);',
+        ],
+        surfaces: ['return cockpitSurfacesSeen({isCockpitLayerShown: this._layer !== null, visibleCardIds: ' +
+            'this._visibleCardIds});'],
+        detailWatchCountsTheSnapshotCards: [
+            'const {isSnapshotCardVisible} = this._surfacesSeen();', 'const isWanted = isDetailWatchWanted({',
+            'isCardVisible: isSnapshotCardVisible,',
+        ],
+        detailSyncs: 3,
+        cockpitSyncRightAfterEach: 3,
+    });
+});
+
+test('extension.js: every drawn card is checked on its own (cardsCover) against the windows on its monitor (the ' +
+    'primary for the v2 card, the cockpit monitor for the layer\'s cards), frozen on its own, and the layer\'s ' +
+    'interactivity follows a DESKTOP window showing there (isDesktopInteractive), read in the same pass', () => {
+    const extensionCode = codeOf(EXTENSION_SOURCE_FILE);
+    const readStatements = extensionMethodStatements('_readCardCover() {');
+    assertEqual({
+        monitor: extensionMethodStatements('_coverMonitor() {'),
+        cards: extensionMethodStatements('_drawnCardRects() {'),
+        freezeOne: extensionMethodStatements('_setCardFrozen(cardId, isFrozen) {'),
+        readsTheMonitorWindows: readStatements.slice(2, 4),
+        interactivity: readStatements.includes('isCockpitInteractive: isDesktopInteractive({windowsOnMonitor: ' +
+            'desktopWindows}),'),
+        desktopWindowsRead: [
+            occurrenceCount(extensionCode, 'desktopWindows.push(desktopWindowOf(metaWindow));'),
+            occurrenceCount(extensionCode, 'return {windowType: DESKTOP_WINDOW_TYPE, ' +
+                'isShowing: metaWindow.showing_on_its_workspace()};'),
+        ],
+        desktopWindowTypeRead: occurrenceCount(extensionCode, 'if (windowType === Meta.WindowType.DESKTOP)'),
+    }, {
+        monitor: [
+            'if (this._layer === null)', 'return Main.layoutManager.primaryMonitor ?? null;',
+            'return Main.layoutManager.monitors[this._layer.monitorIndex] ?? null;',
+        ],
+        cards: [
+            'if (this._layer !== null)', 'return this._layer.cardRects();',
+            'return [{cardId: COCKPIT_SYSTEM_CARD_ID, rect: this._cardRectOnStage()}];',
+        ],
+        freezeOne: [
+            'if (this._layer === null)', 'this._card.setFrozen(isFrozen);', 'else',
+            'this._layer.setCardFrozen(cardId, isFrozen);',
+        ],
+        readsTheMonitorWindows: [
+            'const {metaWindows, frameRects: windowRects, desktopWindows} =',
+            'monitor ? this._readWindowsOnMonitor(monitor) : NO_WINDOWS_ON_MONITOR;',
+        ],
+        interactivity: true, desktopWindowsRead: [1, 1], desktopWindowTypeRead: 1,
+    });
+});
+
+test('extension.js: each tick, after the cover and the frozen repaint, hands the layer its Sample (onSampleTick: the ' +
+    'pending sources drawn, the suspect sources pulled) with whether the subscription is wanted', () =>
+    assertEqual(extensionMethodStatements('_onCardCoverTick() {').slice(-2), [
+        'this._repaintFrozenCardsIfDue();',
+        'this._layer?.onSampleTick({isSubscriptionWanted: this._isCockpitSubscriptionWanted});',
+    ]));
+
+test('extension.js: a session row\'s click reaches _activateSession, which does nothing yet and logs nothing', () =>
+    assertEqual({
+        handedToTheLayer: extensionMethodStatements('_addCockpitLayer() {')
+            .includes('errorLog: this._errorLog, onSessionActivated: sessionId => this._activateSession(sessionId),'),
+        activate: statementsOf(methodBody(readExtensionFile(EXTENSION_SOURCE_FILE), '_activateSession(_sessionId) {')),
+    }, {handedToTheLayer: true, activate: ['_activateSession(_sessionId) {', '}']}));
+
+test('extension.js: teardown keeps the layout to cache before anything is destroyed, clears the cockpit\'s fields, ' +
+    'removes the cockpit client listener, cancels the DisplayConfig read and destroys the layer first', () => {
+    const tearDownStatements = extensionMethodStatements('_tearDown() {');
+    const clearedFields = [
+        'this._layer = null;', 'this._cockpitClient = null;', 'this._displayConfigReader = null;',
+        'this._displayConfigState = null;', 'this._cockpitListenerId = null;',
+        'this._visibleCardIds = VISIBLE_CARD_IDS_BEFORE_COVER_CHECK;', 'this._frozenCardPaintedAtUsecByCardId = {};',
+        'this._isCockpitSubscriptionWanted = false;',
+    ];
+    const firstDestroyIndex = tearDownStatements.findIndex(statement => statement.includes('?.destroy()'));
+    assertEqual({
+        cleared: clearedFields.map(field => tearDownStatements.filter(statement => statement === field).length),
+        listenerRemoved: tearDownStatements.includes('cockpitClient?.removeListener(cockpitListenerId);'),
+        firstDestroy: tearDownStatements[firstDestroyIndex],
+        layerBeforeTheCard: tearDownStatements.indexOf(
+            '{name: \'destroy the cockpit layer\', run: () => layer?.destroy()},') <
+            tearDownStatements.indexOf('{name: \'destroy the card\', run: () => card?.destroy()},'),
+    }, {
+        cleared: clearedFields.map(() => 1),
+        listenerRemoved: true,
+        firstDestroy: '{name: \'cancel the display config read\', run: () => displayConfigReader?.destroy()},',
+        layerBeforeTheCard: true,
+    });
+});

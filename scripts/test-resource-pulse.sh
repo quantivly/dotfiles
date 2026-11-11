@@ -527,18 +527,25 @@ check "no shell-side file overrides vfunc_paint or vfunc_paint_node: a planted o
 
 # extension.js imports the Shell, so its teardown cannot run here. lib/teardown.js
 # (runEveryStep, whose rows are in lifecycle.test.js) guards each step; these
-# rows read extension.js for the order of its destroy steps, the card first
-# because a card left behind would show frozen numbers as live.
+# rows read extension.js for the order of its destroy steps, every one of them
+# (any part a step destroys, so a new one cannot slip in unpinned): the
+# DisplayConfig read is cancelled first, then the cockpit layer goes, the most
+# visible part (it gives the v2 card back as it goes), then the card, because a
+# card left behind would show frozen numbers as live, the indicator, and last
+# the two clients.
 EXTENSION_JS="$EXT_DIR/extension.js"
-teardown_destroy_order="$(grep -E "run: \(\) => (card|indicator|client)\?\.destroy\(\)" "$EXTENSION_JS" 2>/dev/null \
-  | sed -E 's/.*=> ([a-z]+)\?\.destroy.*/\1/' | tr '\n' ' ')"
-check "extension.js tears down in guarded steps (runEveryStep), destroying the card, then the indicator, then the client" \
-  "$teardown_destroy_order|$(grep -c -F 'runEveryStep([' "$EXTENSION_JS" 2>/dev/null)" "card indicator client |1"
+teardown_destroy_order="$(grep -E "run: \(\) => [A-Za-z]+\?\.destroy\(\)" "$EXTENSION_JS" 2>/dev/null \
+  | sed -E 's/.*=> ([A-Za-z]+)\?\.destroy.*/\1/' | tr '\n' ' ')"
+check "extension.js tears down in guarded steps (runEveryStep): the DisplayConfig read, the layer, the card, the indicator, the cockpit client, then the client" \
+  "$teardown_destroy_order|$(grep -c -F 'runEveryStep([' "$EXTENSION_JS" 2>/dev/null)" \
+  "displayConfigReader layer card indicator cockpitClient client |1"
 # The client's own failures (a StartUnit refused, a call timed out) heal by
 # themselves, so they stay warnings; the extension's teardown failures are
 # errors. Each kind has one limiter that outlives every enable.
+# Three clients take it: the pulse client, the cockpit client and the
+# DisplayConfig reader.
 check "extension.js hands every client one rate-limited logger that writes warnings and spans enables" \
-  "$(grep -c -F 'errorLog: this._clientLog' "$EXTENSION_JS" 2>/dev/null):$(grep -c -E 'this\._clientLog = new RateLimitedLogger\(\{nowUsec, write: line => console\.warn\(line\)\}\)' "$EXTENSION_JS" 2>/dev/null)" "1:1"
+  "$(grep -c -F 'errorLog: this._clientLog' "$EXTENSION_JS" 2>/dev/null):$(grep -c -E 'this\._clientLog = new RateLimitedLogger\(\{nowUsec, write: line => console\.warn\(line\)\}\)' "$EXTENSION_JS" 2>/dev/null)" "3:1"
 # A client lives for one enable (every unlock and blank makes a new one), so the
 # last good clock label is kept in the extension, as the loggers are: set once,
 # saved from the client before teardown destroys it and never reset there, and
@@ -558,6 +565,27 @@ if [[ -n "$label_save_line_number" && -n "$client_destroy_line_number" ]] \
 fi
 check "extension.js keeps the last good clock label across enables: set once, saved from the client before teardown destroys it, never reset there, and seeded into each new client" \
   "set=$(method_body_lines 'constructor(metadata)' | grep -c -x -F 'this._lastGoodClockLabel = null;') saved-before-destroy=$label_saved_before_destroy reset-in-teardown=$(grep -c -E '^this\._lastGoodClockLabel = null;' <<<"$teardown_lines") seeded=$(method_body_lines 'enable()' | grep -c -F 'lastGoodClockLabel: this._lastGoodClockLabel')" \
+  "set=1 saved-before-destroy=yes reset-in-teardown=0 seeded=1"
+# The cockpit's layout is kept the same way (ruling D19), so the grid is drawn
+# at once after an unlock or a blank: set once, saved from the cockpit client
+# before teardown destroys it (the layout lib/cockpitWiring.js
+# cockpitLayoutToKeep keeps: none once the cockpit is SKIPPED), never reset
+# there, and seeded into each new cockpit client as its cached layout.
+LAYOUT_SAVE_STATEMENT='this._lastCockpitLayout = cockpitClient === null'
+LAYOUT_KEPT_STATEMENT=': cockpitLayoutToKeep({clientState: cockpitClient.state, layout: cockpitClient.layout});'
+COCKPIT_CLIENT_DESTROY_STEP="{name: 'destroy the cockpit client', run: () => cockpitClient?.destroy()},"
+layout_save_line_number="$(grep -n -x -F "$LAYOUT_SAVE_STATEMENT" <<<"$teardown_lines" | head -n 1 | cut -d: -f1)"
+layout_kept_line_number="$(grep -n -x -F "$LAYOUT_KEPT_STATEMENT" <<<"$teardown_lines" | head -n 1 | cut -d: -f1)"
+cockpit_destroy_line_number="$(grep -n -x -F "$COCKPIT_CLIENT_DESTROY_STEP" <<<"$teardown_lines" \
+  | head -n 1 | cut -d: -f1)"
+layout_saved_before_destroy="no"
+if [[ -n "$layout_save_line_number" && -n "$layout_kept_line_number" && -n "$cockpit_destroy_line_number" ]] \
+  && (( layout_save_line_number + 2 == layout_kept_line_number )) \
+  && (( layout_kept_line_number < cockpit_destroy_line_number )); then
+  layout_saved_before_destroy="yes"
+fi
+check "extension.js keeps the cockpit's layout across enables: set once, saved from the cockpit client (cockpitLayoutToKeep) before teardown destroys it, never reset there, and seeded into each new cockpit client" \
+  "set=$(method_body_lines 'constructor(metadata)' | grep -c -x -F 'this._lastCockpitLayout = null;') saved-before-destroy=$layout_saved_before_destroy reset-in-teardown=$(grep -c -E '^this\._lastCockpitLayout = null;' <<<"$teardown_lines") seeded=$(method_body_lines 'enable()' | grep -c -F 'cachedLayout: this._lastCockpitLayout')" \
   "set=1 saved-before-destroy=yes reset-in-teardown=0 seeded=1"
 check "indicator.js re-places a shown hover label when its width or the display scale changes" \
   "$(grep -c -E "'notify::(width|scale-factor)'" "$EXT_DIR/indicator.js" 2>/dev/null)" 2
@@ -950,16 +978,21 @@ sorted_closure() {
   printf '%sexit=%s' "$(LC_ALL=C sort <<<"$closure_output" | tr '\n' ' ')" "$closure_exit"
 }
 # Read from the import lines of today's tree, by hand: the shell side's
-# twenty-three modules and the service side's seventeen, seven of them
+# thirty-one modules and the service side's seventeen, seven of them
 # (constants, errorLog, history, jsonFields, pressure, protocol, teardown) on
 # both. The shell side reaches cockpitCards.js and its three lib modules
 # (cockpitFormat, cockpitProtocol, cockpitStaleness) through indicator.js's
-# Resources helpers.
-EXPECTED_SHELL_CLOSURE='card.js cockpitCards.js extension.js graph.js indicator.js lib/cardRepaint.js '
-EXPECTED_SHELL_CLOSURE+='lib/cockpitFormat.js lib/cockpitProtocol.js lib/cockpitStaleness.js lib/constants.js lib/errorLog.js '
-EXPECTED_SHELL_CLOSURE+='lib/format.js lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js '
-EXPECTED_SHELL_CLOSURE+='lib/teardown.js lib/topbarColumns.js lib/visibility.js lib/wiring.js '
-EXPECTED_SHELL_CLOSURE+='pulseClient.js serviceLink.js '
+# Resources helpers, and through extension.js the cockpit's eight: its client
+# (cockpitClient.js), its layer (cockpitLayer.js, with cockpitTooltip.js), the
+# DisplayConfig reader (displayConfig.js), and lib/'s cockpitGrid,
+# cockpitInteraction, cockpitMonitor and cockpitWiring.
+EXPECTED_SHELL_CLOSURE='card.js cockpitCards.js cockpitClient.js cockpitLayer.js cockpitTooltip.js displayConfig.js '
+EXPECTED_SHELL_CLOSURE+='extension.js graph.js indicator.js lib/cardRepaint.js lib/cockpitFormat.js '
+EXPECTED_SHELL_CLOSURE+='lib/cockpitGrid.js lib/cockpitInteraction.js lib/cockpitMonitor.js lib/cockpitProtocol.js '
+EXPECTED_SHELL_CLOSURE+='lib/cockpitStaleness.js lib/cockpitWiring.js lib/constants.js lib/errorLog.js lib/format.js '
+EXPECTED_SHELL_CLOSURE+='lib/history.js lib/jsonFields.js lib/layout.js lib/pressure.js lib/protocol.js '
+EXPECTED_SHELL_CLOSURE+='lib/teardown.js lib/topbarColumns.js lib/visibility.js lib/wiring.js pulseClient.js '
+EXPECTED_SHELL_CLOSURE+='serviceLink.js '
 EXPECTED_SERVICE_CLOSURE='lib/apps.js lib/cadence.js lib/cgroupParsers.js lib/constants.js lib/cpu.js lib/errorLog.js lib/history.js lib/jsonFields.js lib/memory.js lib/pressure.js lib/procParsers.js lib/protocol.js lib/teardown.js service/dbusService.js service/fileIo.js service/main.js service/sampler.js '
 check "closure: on the real tree, extension.js and service/main.js each give exactly the modules they import, directly or not" \
   "shell=[$(sorted_closure "$EXT_DIR" extension.js)] service=[$(sorted_closure "$EXT_DIR" service/main.js)]" \
@@ -5075,7 +5108,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1017
+EXPECTED_ROWS=1026
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
