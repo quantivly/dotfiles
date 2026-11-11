@@ -75,6 +75,8 @@ const START_UNIT_PARAMETERS_SIGNATURE = '(ss)';
 const START_UNIT_REPLY_SIGNATURE = '(o)';
 /** GetState → (s state). */
 const STATE_REPLY_SIGNATURE = '(s)';
+/** None of the service's methods takes parameters. */
+const NO_PARAMETERS = null;
 /** StartUnit does not ask the bus to activate systemd's name: with nobody owning it, the call fails at once. */
 const START_UNIT_CALL_FLAGS = Gio.DBusCallFlags.NO_AUTO_START;
 
@@ -1153,7 +1155,7 @@ export class PulseClient {
      * @returns {void}
      */
     _callService(methodName, cancellable, onAnswered) {
-        this._link.call(methodName, cancellable, onAnswered);
+        this._link.call(methodName, NO_PARAMETERS, cancellable, onAnswered);
     }
 
     /**

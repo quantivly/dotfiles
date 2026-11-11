@@ -2,7 +2,7 @@
 // bus, io.github.quantivly.dotfiles.Cockpit1: pulseClient.js's sibling, with the same mechanisms. It keeps what the
 // cockpit's cards draw from (the layout, the config error and each source's latest object) and tells listeners what
 // changed; it does no sampling, no file IO and no subprocess. Gio and GLib only (no Shell, St, Clutter or Meta), so it
-// runs under plain gjs, and its proxy, StartUnit, unit read, connection, clocks and timeouts are all injectable.
+// runs under plain gjs, and its link, StartUnit, unit read, connection, clocks and timeouts are all injectable.
 //
 // It runs inside gnome-shell, the compositor, so, as pulseClient.js:
 // - every D-Bus call is asynchronous, with DBUS_CALL_TIMEOUT_MS, and none is ever synchronous;
@@ -30,10 +30,21 @@
 //   collection, and the unit's PartOf=graphical-session.target points from the unit to the target, not the reverse.
 //   Any other answer (a true or unchecked condition, a read that failed otherwise: a timeout, no systemd, another
 //   error) counts as a failed attempt and is retried.
-// - It follows the bus name's owner. An owner appearing is asked GetState, whose answer makes the client LIVE and
-//   replaces its layout, config error and sources; a wanted watch is asserted again. An owner leaving makes it
-//   VANISHED and starts nothing: a service stopped on purpose stays stopped, and a crash is systemd's Restart=. Its
-//   sources are kept, so the cards keep their "no data since" times.
+// - It follows the service through serviceLink.js (a name watch, a Changed subscription and plain calls to the
+//   owner), never through a D-Bus proxy object, which would cost a forced garbage collection after every Changed
+//   (docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md). The name watch is held from the
+//   connection's arrival until destroy(); the Changed subscription only while it is wanted (setSubscriptionWanted:
+//   while something of the cockpit can be seen), so a hidden cockpit is woken by no Changed at all.
+// - It follows the bus name's owner. An owner appearing is asked GetState, wanted subscription or not (the layout
+//   decides whether a cockpit layer exists at all, so the first read cannot wait for the layer to be seen), whose
+//   answer makes the client LIVE and replaces its layout, config error and sources; a wanted subscription is made
+//   first, and a wanted watch asserted again. An owner leaving makes it VANISHED and starts nothing: a service stopped
+//   on purpose stays stopped, and a crash is systemd's Restart=. Its sources are kept, so the cards keep their "no
+//   data since" times.
+// - Wanting the subscription while an owner is there subscribes, then asks GetState: the state then covers every
+//   Changed missed while unsubscribed, a restart included, and every Changed sent after that answer is delivered
+//   (serviceLink.js's setSubscribed says why the order matters). Unwanting it unsubscribes; a GetState still on its
+//   way is applied when it answers.
 // - The layout is seeded from cachedLayout (the extension keeps the last one across enables), so the grid can be built
 //   before the first answer. A layout event is told only when the layout or the config error changed.
 // - Changed replaces the sources it carries and, when it carries one, the layout; a sources event names the sources
@@ -41,9 +52,12 @@
 // - Staleness is decided by pulling, not by a timer (ruling R14): pullIfSuspicious(name) asks GetState once per
 //   interval while lib/cockpitStaleness.js suspects a source, stamping when it asked and when the answer came; a pull
 //   that answers the same old stamp makes the source stale. A GetState that fails completes the pull too (ruling D6),
-//   so a service that keeps its name but hangs reads stale. With no owner a pull asks nobody and completes at once.
-//   A source whose stamp moves forward, by any answer or Changed, has both pull stamps cleared (ruling D5): a refreshed
-//   source starts a new suspicion cycle, and reads stale only after a pull of that cycle answers its new stamp.
+//   so a service that keeps its name but hangs reads stale. With no owner a pull asks nobody and completes at once,
+//   and an owner leaving while a pull waits completes that pull as a failed GetState does.
+//   A source whose stamp changes, by any answer or Changed, has both pull stamps cleared (ruling D5): a refreshed
+//   source starts a new suspicion cycle, and reads stale only after a pull of that cycle answers its new stamp. A stamp
+//   that moved back (the wall clock stepped back) counts as a change too: the old pull stamps, taken on the old clock,
+//   would otherwise make the new sample read stale at its first suspicion.
 // - The watch: WatchCockpit and UnwatchCockpit go out only when the wanted flag changes, and only to an owner.
 //   destroy() sends UnwatchCockpit, uncancellable and best-effort, while a watch is held: the shell's bus connection
 //   outlives the extension, and the service drops a caller's watches only when its connection closes.
@@ -63,6 +77,7 @@ import {sourceFreshness as decideSourceFreshness} from './lib/cockpitStaleness.j
 import {RateLimitedLogger, describeError} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
 import {nextStartRetryDelaySeconds} from './lib/wiring.js';
+import {createServiceLink} from './serviceLink.js';
 
 // systemd's user manager on the session bus, and what the client asks of it.
 const SYSTEMD_BUS_NAME = 'org.freedesktop.systemd1';
@@ -108,17 +123,21 @@ const UNIT_UNLOADED_SKIP_REASON = 'is no longer loaded after its start job (syst
 const STATE_REPLY_SIGNATURE = '(s)';
 const FOCUS_SESSION_PARAMETERS_SIGNATURE = '(s)';
 const FOCUS_SESSION_REPLY_SIGNATURE = '(s)';
-/**
- * The proxy loads no properties (the interface has none) and never asks the bus to activate the service: systemd
- * starts it, through StartUnit.
- */
-const PROXY_FLAGS = Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES | Gio.DBusProxyFlags.DO_NOT_AUTO_START;
 /** No call asks the bus to activate a name: a name nobody owns fails the call at once. */
 const CALL_FLAGS = Gio.DBusCallFlags.NO_AUTO_START;
-/** The GObject signal a GDBusProxy emits when the bus name's owner changes. */
-const NAME_OWNER_NOTIFY_SIGNAL = 'notify::g-name-owner';
-/** The GObject signal a GDBusProxy emits for each D-Bus signal from the owner. */
-const PROXY_DBUS_SIGNAL_SIGNAL = 'g-signal';
+/** GetState, WatchCockpit and UnwatchCockpit take no parameters. */
+const NO_PARAMETERS = null;
+/**
+ * The cockpit as its link follows it (serviceLink.js): its Changed signal, unsubscribed at creation, since the client
+ * subscribes only while the subscription is wanted.
+ */
+const COCKPIT_LINK_DESCRIPTOR = Object.freeze({
+    busName: COCKPIT_BUS_NAME,
+    objectPath: COCKPIT_OBJECT_PATH,
+    interfaceName: COCKPIT_INTERFACE_NAME,
+    signalName: COCKPIT_CHANGED_SIGNAL_NAME,
+    isSubscribedFromCreation: false,
+});
 
 // Template keys of the rate-limited journal lines whose text varies (lib/errorLog.js). Each names the cockpit, so a
 // logger the extension shares with pulseClient.js keeps their limits apart.
@@ -168,27 +187,19 @@ function startCockpitUnit(connection, cancellable, onAnswered) {
 }
 
 /**
- * Creates the proxy for the service's object, asynchronously. The proxy follows the bus name's owner
- * (notify::g-name-owner) and delivers the owner's signals (g-signal).
+ * Starts following the cockpit service on a connection (serviceLink.js's createServiceLink): watching its name from
+ * now until destroy(), and not subscribed to Changed until setSubscribed(true).
  *
  * @param {Gio.DBusConnection} connection - The session bus.
- * @param {Gio.Cancellable} cancellable - Cancels the creation.
- * @param {(error: Error|null, proxy: Gio.DBusProxy|null) => void} onCreated - Called once, with the proxy or the
- *     failure.
- * @returns {void}
+ * @param {object} callbacks - Where the link delivers.
+ * @param {(nameOwner: string|null) => void} callbacks.onOwnerChanged - The unique name owning the cockpit's bus name
+ *     when it appears, null when it vanishes; reported once soon after creation, null when nobody owns the name.
+ * @param {(parameters: GLib.Variant) => void} callbacks.onSignal - Each Changed's parameters, while subscribed.
+ * @returns {object} The link: isSubscribed, setSubscribed(isSubscribed), call(methodName, parameters, cancellable,
+ *     onAnswered) and destroy().
  */
-function createCockpitProxy(connection, cancellable, onCreated) {
-    Gio.DBusProxy.new(connection, PROXY_FLAGS, null, COCKPIT_BUS_NAME, COCKPIT_OBJECT_PATH, COCKPIT_INTERFACE_NAME,
-        cancellable, (_source, result) => {
-            let proxy;
-            try {
-                proxy = Gio.DBusProxy.new_finish(result);
-            } catch (error) {
-                onCreated(error, null);
-                return;
-            }
-            onCreated(null, proxy);
-        });
+export function createCockpitLink(connection, {onOwnerChanged, onSignal}) {
+    return createServiceLink(connection, COCKPIT_LINK_DESCRIPTOR, {onOwnerChanged, onSignal});
 }
 
 /**
@@ -368,19 +379,18 @@ function isSameAsJson(firstValue, secondValue) {
 }
 
 /**
- * Says whether a source's new object carries a later sample than the one the client holds (ruling D5): a refresh,
- * which ends the source's suspicion cycle. A first stamp counts; no stamp, the same one or an earlier one does not.
+ * Says whether a source's new object carries another sample stamp than the one the client holds (ruling D5): a
+ * refresh, which ends the source's suspicion cycle. A first stamp counts, and so does an earlier one (the wall clock
+ * stepped back); the same stamp does not.
  *
  * @param {object|null} previousSource - The source object the client holds, or null.
  * @param {object|null} nextSource - The source object an answer or a Changed carries, or null.
- * @returns {boolean} True when nextSource's sampledAtUsec is later than previousSource's, or previousSource has none.
+ * @returns {boolean} True when the two sampledAtUsec differ, a missing one reading as null.
  */
-function isSampledLater(previousSource, nextSource) {
-    const nextSampledAtUsec = nextSource?.sampledAtUsec ?? null;
-    if (nextSampledAtUsec === null)
-        return false;
+function isSampleStampChanged(previousSource, nextSource) {
     const previousSampledAtUsec = previousSource?.sampledAtUsec ?? null;
-    return previousSampledAtUsec === null || nextSampledAtUsec > previousSampledAtUsec;
+    const nextSampledAtUsec = nextSource?.sampledAtUsec ?? null;
+    return nextSampledAtUsec !== previousSampledAtUsec;
 }
 
 /**
@@ -401,9 +411,10 @@ export class CockpitClient {
      * @param {Gio.DBusConnection|null} [options.connection] - A connection to use instead of fetching busType's.
      * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable,
      *     onAnswered: (error: Error|null) => void) => void} [options.startUnit] - Asks systemd to start the service.
-     * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable,
-     *     onCreated: (error: Error|null, proxy: Gio.DBusProxy|null) => void) => void} [options.createProxy] - Creates
-     *     the service's proxy.
+     * @param {(connection: Gio.DBusConnection, callbacks: {onOwnerChanged: (nameOwner: string|null) => void,
+     *     onSignal: (parameters: GLib.Variant) => void}) => object} [options.createLink] - Starts following the
+     *     service: createCockpitLink, whose link reports the owner, delivers each Changed while subscribed and makes
+     *     the calls.
      * @param {(connection: Gio.DBusConnection, cancellable: Gio.Cancellable) => Promise<{conditionResult: boolean|null,
      *     conditionTimestampMonotonic: number|null, activeState: string|null, isUnitMissing: boolean}>}
      *     [options.readUnitCondition] - Reads cockpit.service's condition over systemd's D-Bus; a failure resolves to
@@ -424,7 +435,7 @@ export class CockpitClient {
         busType = Gio.BusType.SESSION,
         connection = null,
         startUnit = startCockpitUnit,
-        createProxy = createCockpitProxy,
+        createLink = createCockpitLink,
         readUnitCondition = readCockpitUnitCondition,
         nowUsec = () => GLib.get_monotonic_time(),
         nowRealUsec = () => GLib.get_real_time(),
@@ -436,20 +447,24 @@ export class CockpitClient {
         this._busType = busType;
         this._connection = connection;
         this._startUnit = startUnit;
-        this._createProxy = createProxy;
+        this._createLink = createLink;
         this._readUnitCondition = readUnitCondition;
         this._nowRealUsec = nowRealUsec;
         this._timeouts = timeouts;
         this._errorLog = errorLog;
         this._writeInfoLine = writeInfoLine;
 
-        // Cancels every call, read and creation in flight, at destroy(); the best-effort UnwatchCockpit uses none.
+        // Cancels every call and read in flight, and the bus connection's fetch, at destroy(); the best-effort
+        // UnwatchCockpit uses none.
         this._cancellable = new Gio.Cancellable();
         this._isStarted = false;
         this._isDestroyed = false;
         this._state = CockpitClientState.STARTING;
-        this._proxy = null;
-        this._proxyHandlerIds = [];
+        // The service on the bus (serviceLink.js), from the connection's arrival until destroy().
+        this._link = null;
+        // True while the Changed subscription is wanted (setSubscriptionWanted); the link holds it while an owner
+        // has appeared since.
+        this._isSubscriptionWanted = false;
         // The unique name owning the service's bus name, as last seen; null while nobody does.
         this._nameOwner = null;
         // The StartUnit chain's pending timeout, at most one: a retry after a failure, or the wait for the service to
@@ -475,7 +490,7 @@ export class CockpitClient {
         this._configError = null;
         this._sourcesByName = new Map(COCKPIT_SOURCE_NAMES.map(sourceName => [sourceName, null]));
         // When the client last asked for each source's state on suspicion, and when that answer came: wall clock. Both
-        // are cleared when the source's stamp moves forward (_storeSources).
+        // are cleared when the source's stamp changes (_storeSources).
         this._pullStampsBySourceName = new Map(COCKPIT_SOURCE_NAMES.map(sourceName =>
             [sourceName, emptyPullStamps()]));
         this._listeners = new Map();
@@ -523,7 +538,7 @@ export class CockpitClient {
 
     /**
      * Asks systemd to start the service, and the first time also starts following it: the bus connection and the
-     * proxy. Every call asks systemd again (each enable makes one), restarting the retries; a SKIPPED client is
+     * link. Every call asks systemd again (each enable makes one), restarting the retries; a SKIPPED client is
      * STARTING again, so a layout file created since is picked up. Nothing is connected twice. Does nothing once
      * destroyed.
      *
@@ -547,8 +562,8 @@ export class CockpitClient {
 
     /**
      * Stops everything for good: releases a held watch (an UnwatchCockpit no cancel can stop), cancels every call in
-     * flight, removes every timeout, disconnects from the proxy, settles every pull and forgets every listener. Each
-     * step runs whatever the others throw. Safe twice.
+     * flight, removes every timeout, destroys the link (its name watch and any subscription), settles every pull and
+     * forgets every listener. Each step runs whatever the others throw. Safe twice.
      *
      * @returns {void}
      */
@@ -560,7 +575,7 @@ export class CockpitClient {
             {name: 'release the cockpit watch', run: () => this._sendUnwatchCockpit(null)},
             {name: 'cancel the calls in flight', run: () => this._cancellable.cancel()},
             {name: 'remove the timeouts', run: () => this._cancelStartChainStep()},
-            {name: 'disconnect from the proxy', run: () => this._disconnectFromProxy()},
+            {name: 'destroy the link', run: () => this._destroyLink()},
             {name: 'settle the pulls in flight', run: () => this._settlePulls(this._takePendingPulls())},
             {name: 'forget the listeners', run: () => this._listeners.clear()},
         ], (stepName, error) => {
@@ -587,6 +602,31 @@ export class CockpitClient {
             this._sendWatchCockpit();
         else
             this._sendUnwatchCockpit(this._cancellable);
+    }
+
+    /**
+     * Says whether the Changed subscription is wanted: while something of the cockpit can be seen. It starts false,
+     * and a client that does not want it hears no Changed (an owner appearing is still read with GetState). Only a
+     * change acts: becoming wanted with an owner subscribes, then reads GetState (a fresh read: whatever changed while
+     * unsubscribed, a restart included); with no owner it is only recorded, and the owner's appearance subscribes and
+     * reads once. Becoming unwanted unsubscribes, and a GetState still on its way is applied when it answers. Does
+     * nothing once destroyed. Independent of setWatchWanted.
+     *
+     * @param {boolean} isWanted - True while a cockpit card or the dropdown can be seen.
+     * @returns {void}
+     */
+    setSubscriptionWanted(isWanted) {
+        if (this._isDestroyed || isWanted === this._isSubscriptionWanted)
+            return;
+        this._isSubscriptionWanted = isWanted;
+        if (!isWanted) {
+            this._link?.setSubscribed(false);
+            return;
+        }
+        if (this._nameOwner === null)
+            return;
+        this._link.setSubscribed(true);
+        this._requestState();
     }
 
     /**
@@ -650,11 +690,11 @@ export class CockpitClient {
      * @param {string} sessionId - The session row's id.
      * @returns {Promise<{focused: boolean|null, windowPid: number|null, error: string|null,
      *     windowPidCandidates: number[]}>} The reply as lib/cockpitProtocol.js parseFocusSessionReply reads it. Never
-     *     rejects: a call that fails, a reply that cannot be read, no proxy yet, an id that is not a string or a
-     *     destroyed client give the internal reply, the failures logged at most once per 10 minutes.
+     *     rejects: a call that fails (no owner included), a reply that cannot be read, no link yet, an id that is not
+     *     a string or a destroyed client give the internal reply, the failures logged at most once per 10 minutes.
      */
     focusSession(sessionId) {
-        if (this._isDestroyed || this._proxy === null || typeof sessionId !== 'string') {
+        if (this._isDestroyed || this._link === null || typeof sessionId !== 'string') {
             this._logFocusSessionFailure('the client is not following the cockpit, or the id is not a string');
             return Promise.resolve(internalFocusSessionReply());
         }
@@ -910,7 +950,8 @@ export class CockpitClient {
     }
 
     /**
-     * Sends a StartUnit that waited for the connection, and creates the service's proxy.
+     * Sends a StartUnit that waited for the connection, and starts following the service: the link reports its owner
+     * (soon after, even when nobody owns the name) and, while subscribed, delivers its Changed.
      *
      * @param {Gio.DBusConnection} connection - The bus connection.
      * @returns {void}
@@ -920,34 +961,14 @@ export class CockpitClient {
             return;
         this._connection = connection;
         this._attemptServiceStartIfConnected();
-        this._createProxy(connection, this._cancellable, (error, proxy) => this._onProxyCreated(error, proxy));
+        this._link = this._createLink(connection, {
+            onOwnerChanged: nameOwner => this._followNameOwner(nameOwner),
+            onSignal: parameters => this._onChangedSignal(parameters),
+        });
     }
 
     /**
-     * Connects to the new proxy's owner changes and signals, and takes its owner as it is now.
-     *
-     * @param {Error|null} error - Why it could not be created, or null.
-     * @param {Gio.DBusProxy|null} proxy - The proxy.
-     * @returns {void}
-     */
-    _onProxyCreated(error, proxy) {
-        if (this._isDestroyed)
-            return;
-        if (error !== null) {
-            this._logFollowFailure(error);
-            return;
-        }
-        this._proxy = proxy;
-        this._proxyHandlerIds = [
-            proxy.connect(NAME_OWNER_NOTIFY_SIGNAL, () => this._followNameOwner()),
-            proxy.connect(PROXY_DBUS_SIGNAL_SIGNAL,
-                (_proxy, _senderName, signalName, parameters) => this._onServiceSignal(signalName, parameters)),
-        ];
-        this._followNameOwner();
-    }
-
-    /**
-     * Logs that the client cannot follow the service at all (no bus connection, or no proxy), unless destroyed.
+     * Logs that the client cannot follow the service at all (no bus connection), unless destroyed.
      *
      * @param {*} error - The failure.
      * @returns {void}
@@ -960,16 +981,14 @@ export class CockpitClient {
     }
 
     /**
-     * Acts on the proxy's owner as it is now: an owner that left vanished, a new one appeared (both, for a direct
-     * change from one to another).
+     * Acts on the owner the link reports: an owner that left vanished, a new one appeared (both, for a direct change
+     * from one to another). The same owner again, nobody after nobody included, changes nothing.
      *
+     * @param {string|null} nameOwner - The unique name owning the service's bus name now, or null for none.
      * @returns {void}
      */
-    _followNameOwner() {
-        if (this._isDestroyed)
-            return;
-        const nameOwner = this._proxy.get_name_owner();
-        if (nameOwner === this._nameOwner)
+    _followNameOwner(nameOwner) {
+        if (this._isDestroyed || nameOwner === this._nameOwner)
             return;
         if (this._nameOwner !== null)
             this._onServiceVanished();
@@ -979,8 +998,10 @@ export class CockpitClient {
 
     /**
      * The service left the bus: VANISHED, its watch gone with it, its sources and their stamps kept (each reads stale
-     * on its next pull), the pulls waiting on it settled with no completion, and no StartUnit (a stop stays a stop
-     * until the next start()).
+     * on its next pull), and no StartUnit (a stop stays a stop until the next start()). The pulls waiting on it are
+     * completed as a failed GetState's are (ruling D6): their completion stamped and told as a sources event after the
+     * state event, so a suspect source reads stale now rather than one interval later; then they settle. A held
+     * subscription is kept: it is to the well-known name, so it carries on to the next owner.
      *
      * @returns {void}
      */
@@ -991,13 +1012,16 @@ export class CockpitClient {
         // An answer still on its way comes from the owner that left.
         this._stateRequestNumber++;
         this._isStateRequestInFlight = false;
-        this._settlePulls(this._takePendingPulls());
+        const pendingPulls = this._takePendingPulls();
         this._setState(CockpitClientState.VANISHED);
+        this._completeUnansweredPulls(pendingPulls.map(pendingPull => pendingPull.sourceName));
+        this._settlePulls(pendingPulls);
     }
 
     /**
      * A service is on the bus: it runs, so the StartUnit chain ends (its pending timeout removed, and a StartUnit or a
-     * unit read still on its way superseded); its state is read, and a wanted watch asserted.
+     * unit read still on its way superseded); a wanted subscription is made, its state is read whether the
+     * subscription is wanted or not (in that order: serviceLink.js's setSubscribed), and a wanted watch asserted.
      *
      * @param {string} nameOwner - Its unique name.
      * @returns {void}
@@ -1006,6 +1030,8 @@ export class CockpitClient {
         this._nameOwner = nameOwner;
         this._cancelStartChainStep();
         this._latestStartAttempt = null;
+        if (this._isSubscriptionWanted)
+            this._link.setSubscribed(true);
         this._requestState();
         if (this._isWatchWanted)
             this._sendWatchCockpit();
@@ -1020,7 +1046,7 @@ export class CockpitClient {
         this._stateRequestNumber++;
         const stateRequestNumber = this._stateRequestNumber;
         this._isStateRequestInFlight = true;
-        this._callService(COCKPIT_GET_STATE_METHOD_NAME, null, this._cancellable,
+        this._callService(COCKPIT_GET_STATE_METHOD_NAME, NO_PARAMETERS, this._cancellable,
             (error, reply) => this._onStateAnswered(stateRequestNumber, error, reply));
     }
 
@@ -1048,10 +1074,10 @@ export class CockpitClient {
     }
 
     /**
-     * Completes the pulls a GetState was for that failed or answered no readable state (ruling D6): their completion
-     * is stamped now and they are told as a sources event, so a suspect source whose service keeps its name but hangs
-     * reads stale, and its card redraws. _readStateReply logged the failure, once per key; the next interval's
-     * suspicion pulls again.
+     * Completes the pulls a GetState was for that failed, answered no readable state, or will not be answered because
+     * its owner left (ruling D6): their completion is stamped now and they are told as a sources event, so a suspect
+     * source whose service keeps its name but hangs, or has gone, reads stale, and its card redraws. _readStateReply
+     * logged a failure, once per key (a vanish logs nothing); the next interval's suspicion pulls again.
      *
      * @param {string[]} pulledSourceNames - The sources whose pulls the GetState was for; none tells nothing.
      * @returns {void}
@@ -1129,17 +1155,17 @@ export class CockpitClient {
     }
 
     /**
-     * Reads a D-Bus signal from the service: a Changed of signature '(s)' holding a JSON object is applied; another
-     * signal is ignored, and a malformed Changed is logged and dropped. Before any state from this owner it asks for
-     * the state instead (unless a GetState is on its way): the state holds this change, and a part of a state is not
-     * drawn.
+     * Reads a Changed the link delivered: one of signature '(s)' holding a JSON object is applied, and a malformed one
+     * is logged and dropped. Before any state from this owner it asks for the state instead (unless a GetState is on
+     * its way): the state holds this change, and a part of a state is not drawn. One that reaches the client while
+     * the subscription is not wanted (none should) is dropped: the GetState that follows the next subscribe reads
+     * what it carried.
      *
-     * @param {string} signalName - The D-Bus signal's name.
-     * @param {GLib.Variant} parameters - Its parameters.
+     * @param {GLib.Variant} parameters - The Changed's parameters.
      * @returns {void}
      */
-    _onServiceSignal(signalName, parameters) {
-        if (this._isDestroyed || signalName !== COCKPIT_CHANGED_SIGNAL_NAME)
+    _onChangedSignal(parameters) {
+        if (this._isDestroyed || !this._isSubscriptionWanted)
             return;
         const changedText = stringOfVariant(parameters, COCKPIT_CHANGED_SIGNAL_SIGNATURE);
         if (changedText === null) {
@@ -1193,9 +1219,9 @@ export class CockpitClient {
     }
 
     /**
-     * Keeps each source an answer or a Changed carries. A source whose stamp moves forward has both pull stamps cleared
-     * (ruling D5): it was refreshed, so it starts a new suspicion cycle, and reads stale only once a pull of that cycle
-     * answers its new stamp.
+     * Keeps each source an answer or a Changed carries. A source whose stamp changes (forward, or back with the wall
+     * clock) has both pull stamps cleared (ruling D5): it was refreshed, so it starts a new suspicion cycle, and reads
+     * stale only once a pull of that cycle answers its new stamp.
      *
      * @param {object} sources - Source objects by name; a name the client does not know is ignored.
      * @returns {string[]} The names whose object changed, in COCKPIT_SOURCE_NAMES's order.
@@ -1209,7 +1235,7 @@ export class CockpitClient {
             const source = sources[sourceName];
             if (!isSameAsJson(previousSource, source))
                 changedSourceNames.push(sourceName);
-            if (isSampledLater(previousSource, source))
+            if (isSampleStampChanged(previousSource, source))
                 this._pullStampsBySourceName.set(sourceName, emptyPullStamps());
             this._sourcesByName.set(sourceName, source);
         }
@@ -1292,7 +1318,7 @@ export class CockpitClient {
      */
     _sendWatchCockpit() {
         this._isWatchHeld = true;
-        this._callService(COCKPIT_WATCH_METHOD_NAME, null, this._cancellable,
+        this._callService(COCKPIT_WATCH_METHOD_NAME, NO_PARAMETERS, this._cancellable,
             error => this._logWatchCallFailure(COCKPIT_WATCH_METHOD_NAME, error));
     }
 
@@ -1307,7 +1333,7 @@ export class CockpitClient {
         if (!this._isWatchHeld)
             return;
         this._isWatchHeld = false;
-        this._callService(COCKPIT_UNWATCH_METHOD_NAME, null, cancellable,
+        this._callService(COCKPIT_UNWATCH_METHOD_NAME, NO_PARAMETERS, cancellable,
             error => this._logWatchCallFailure(COCKPIT_UNWATCH_METHOD_NAME, error));
     }
 
@@ -1327,39 +1353,28 @@ export class CockpitClient {
     }
 
     /**
-     * Calls a method of the service, asynchronously, with DBUS_CALL_TIMEOUT_MS.
+     * Calls a method of the service's owner through the link: asynchronously, with DBUS_CALL_TIMEOUT_MS, to the
+     * owner's unique name. With no owner the link answers an error at once, sending nothing.
      *
      * @param {string} methodName - GetState, WatchCockpit, UnwatchCockpit or FocusSession.
-     * @param {GLib.Variant|null} parameters - Its arguments, or null for none.
+     * @param {GLib.Variant|null} parameters - Its arguments, or NO_PARAMETERS.
      * @param {Gio.Cancellable|null} cancellable - The call's cancellable.
      * @param {(error: Error|null, reply: GLib.Variant|null) => void} onAnswered - Called once, with the reply or the
      *     failure.
      * @returns {void}
      */
     _callService(methodName, parameters, cancellable, onAnswered) {
-        this._proxy.call(methodName, parameters, CALL_FLAGS, DBUS_CALL_TIMEOUT_MS, cancellable, (proxy, result) => {
-            let reply;
-            try {
-                reply = proxy.call_finish(result);
-            } catch (error) {
-                onAnswered(error, null);
-                return;
-            }
-            onAnswered(null, reply);
-        });
+        this._link.call(methodName, parameters, cancellable, onAnswered);
     }
 
     /**
-     * Disconnects every handler from the proxy and lets it go.
+     * Destroys the link, if there is one, and lets it go: its name watch and any subscription end.
      *
      * @returns {void}
      */
-    _disconnectFromProxy() {
-        const proxy = this._proxy;
-        const proxyHandlerIds = this._proxyHandlerIds;
-        this._proxy = null;
-        this._proxyHandlerIds = [];
-        for (const handlerId of proxyHandlerIds)
-            proxy.disconnect(handlerId);
+    _destroyLink() {
+        const link = this._link;
+        this._link = null;
+        link?.destroy();
     }
 }

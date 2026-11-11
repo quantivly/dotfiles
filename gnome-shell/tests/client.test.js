@@ -242,8 +242,8 @@ class FakeTimeouts {
 }
 
 /**
- * A fake link to the service (serviceLink.js's ResourcePulseLink): a row reports the owner and delivers Samples, and
- * answers each call.
+ * A fake link to the service (serviceLink.js's link, as createResourcePulseLink makes it): a row reports the owner and
+ * delivers Samples, and answers each call.
  */
 class FakeLink {
     /**
@@ -255,7 +255,7 @@ class FakeLink {
         this.connection = connection;
         this._onOwnerChanged = onOwnerChanged;
         this._onSample = onSample;
-        this._isSampleSubscribed = true;
+        this._isSubscribed = true;
         this._isDestroyed = false;
         /** @type {Array<{methodName: string, cancellable: Gio.Cancellable|null, onAnswered: Function,
          *     isAnswered: boolean}>} Every call, in order. */
@@ -263,8 +263,8 @@ class FakeLink {
     }
 
     /** @returns {boolean} True while Samples are delivered: from creation until destroy(). */
-    get isSampleSubscribed() {
-        return this._isSampleSubscribed;
+    get isSubscribed() {
+        return this._isSubscribed;
     }
 
     /** @returns {boolean} True once the client has destroyed the link. */
@@ -276,11 +276,12 @@ class FakeLink {
      * Records a call; a row answers it with answer() or fail().
      *
      * @param {string} methodName - The method.
+     * @param {GLib.Variant|null} _parameters - Its arguments: none of the service's methods takes any.
      * @param {Gio.Cancellable|null} cancellable - Its cancellable.
      * @param {(error: Error|null, reply: GLib.Variant|null) => void} onAnswered - Called with the answer.
      * @returns {void}
      */
-    call(methodName, cancellable, onAnswered) {
+    call(methodName, _parameters, cancellable, onAnswered) {
         this.calls.push({methodName, cancellable, onAnswered, isAnswered: false});
     }
 
@@ -292,7 +293,7 @@ class FakeLink {
      */
     destroy() {
         this._isDestroyed = true;
-        this._isSampleSubscribed = false;
+        this._isSubscribed = false;
     }
 
     /**
@@ -348,7 +349,7 @@ class FakeLink {
      * @returns {void}
      */
     emitSample(parameters) {
-        if (this._isSampleSubscribed)
+        if (this._isSubscribed)
             this._onSample(parameters);
     }
 
@@ -1313,7 +1314,7 @@ test('client: destroy() unsubscribes, destroys the link, and leaves no pending t
     emitSample(destroyedOnSample.link, {snapshot: TICK_SNAPSHOT, appendedHistory: TICK_APPENDED_HISTORY,
         sequence: STATE_SEQUENCE + 1});
     assertEqual({
-        pendingBeforeDestroy, isSampleSubscribed: link.isSampleSubscribed, isLinkDestroyed: link.isDestroyed,
+        pendingBeforeDestroy, isSampleSubscribed: link.isSubscribed, isLinkDestroyed: link.isDestroyed,
         pendingSeconds: timeouts.pendingIntervalsSeconds(), pendingMs: timeouts.pendingIntervalsMs(), notifications,
         pendingAfterDestroyOnState: destroyedOnState.timeouts.pendingIntervalsMs(),
         pendingAfterDestroyOnSample: destroyedOnSample.timeouts.pendingIntervalsMs(),

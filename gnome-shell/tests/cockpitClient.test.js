@@ -1,8 +1,9 @@
-// cockpitClient.js with a fake D-Bus proxy, fake timeouts, a fake StartUnit and a fake systemd unit
-// (readUnitCondition), so every row runs under plain gjs, on no bus at all, in a fixed order: each fake answers only
-// when a row tells it to. The payloads are built with lib/cockpitProtocol.js's builders, as the cockpit service builds
-// them. The fakes are copies of client.test.js's, as the repo copies a few classes rather than share them between test
-// files. The real proxy, StartUnit and unit read are exercised on a private bus by cockpit-client-dbus.test.js.
+// cockpitClient.js with a fake link to the service (in place of serviceLink.js's), fake timeouts, a fake StartUnit
+// and a fake systemd unit (readUnitCondition), so every row runs under plain gjs, on no bus at all, in a fixed order:
+// each fake answers only when a row tells it to. The payloads are built with lib/cockpitProtocol.js's builders, as the
+// cockpit service builds them. The fakes are copies of client.test.js's, as the repo copies a few classes rather than
+// share them between test files. The real link, StartUnit and unit read are exercised on a private bus by
+// cockpit-client-dbus.test.js.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
@@ -22,7 +23,7 @@ const RETRY_DELAYS_SECONDS = [5, 30, 300, 300];
 const START_USEC = 1_000_000_000;
 const OWNER = ':1.42';
 const NEXT_OWNER = ':1.77';
-/** Stands in for the session bus connection: the client only hands it to createProxy, startUnit and the unit read. */
+/** Stands in for the session bus connection: the client only hands it to createLink, startUnit and the unit read. */
 const FAKE_CONNECTION = {isFakeConnection: true};
 const SERVICE_STARTED_AT_USEC = 1_794_000_000_000_000;
 /** Wall-clock time every source below was sampled at. */
@@ -41,8 +42,9 @@ const UNWATCH_COCKPIT = 'UnwatchCockpit';
 const FOCUS_SESSION = 'FocusSession';
 const CHANGED_SIGNAL = 'Changed';
 const SINGLE_STRING_SIGNATURE = '(s)';
-const NAME_OWNER_NOTIFY_SIGNAL = 'notify::g-name-owner';
-const PROXY_SIGNAL = 'g-signal';
+/** What FakeLink records in its actions for a subscribe and an unsubscribe; a call records its method's name. */
+const SUBSCRIBE = 'subscribe';
+const UNSUBSCRIBE = 'unsubscribe';
 /** CockpitClientState's values, written out. */
 const STARTING = 'starting';
 const SKIPPED = 'skipped';
@@ -106,6 +108,8 @@ const STALE_INTERVALS = 3;
 const MOUNTS_INTERVAL_SECONDS = MOUNTS_SOURCE.intervalSeconds;
 /** How old a mounts stamp may be before it is suspect: past this, the first pull is due. */
 const MOUNTS_SUSPECT_AFTER_SECONDS = STALE_INTERVALS * MOUNTS_INTERVAL_SECONDS;
+/** How far the wall clock steps back in the row where it does: an hour. */
+const CLOCK_STEP_BACK_SECONDS = 3600;
 
 /** Fake GLib timeouts: a row fires one by its interval, and sees which are still pending. */
 class FakeTimeouts {
@@ -160,47 +164,51 @@ class FakeTimeouts {
     }
 }
 
-/** A fake Gio.DBusProxy: the name owner, the two signals the client connects, and calls a row answers. */
-class FakeProxy {
+/**
+ * A fake link to the service (serviceLink.js's link, as cockpitClient.js's createCockpitLink makes it): a row reports
+ * the owner, emits Changed and answers each call. It starts unsubscribed, as the cockpit's link does, and records every
+ * subscribe, unsubscribe and call in one ordered list, so a row can read their order.
+ */
+class FakeLink {
     /**
-     * @param {string|null} nameOwner - The unique name owning the service's name, or null for none.
+     * @param {object} connection - The connection the client passed.
+     * @param {{onOwnerChanged: (nameOwner: string|null) => void, onSignal: (parameters: GLib.Variant) => void}}
+     *     callbacks - The client's.
      */
-    constructor(nameOwner) {
-        this._nameOwner = nameOwner;
-        this._handlersById = new Map();
-        this._nextHandlerId = 1;
-        /** @type {Array<{methodName: string, parameters: GLib.Variant|null, timeoutMs: number,
-         *     cancellable: Gio.Cancellable|null, callback: Function, isAnswered: boolean}>} Every call, in order. */
+    constructor(connection, {onOwnerChanged, onSignal}) {
+        this.connection = connection;
+        this._onOwnerChanged = onOwnerChanged;
+        this._onSignal = onSignal;
+        this._isSubscribed = false;
+        this._isDestroyed = false;
+        /** @type {Array<{methodName: string, parameters: GLib.Variant|null, cancellable: Gio.Cancellable|null,
+         *     onAnswered: Function, isAnswered: boolean}>} Every call, in order. */
         this.calls = [];
+        /** @type {string[]} SUBSCRIBE, UNSUBSCRIBE, or a call's method name, for each in order. */
+        this.actions = [];
     }
 
-    /** @returns {string|null} The name owner. */
-    get_name_owner() {
-        return this._nameOwner;
+    /** @returns {boolean} True while Changed is delivered. */
+    get isSubscribed() {
+        return this._isSubscribed;
     }
 
-    /**
-     * @param {string} signalName - 'notify::g-name-owner' or 'g-signal'.
-     * @param {Function} handler - The handler.
-     * @returns {number} A handler id.
-     */
-    connect(signalName, handler) {
-        const handlerId = this._nextHandlerId++;
-        this._handlersById.set(handlerId, {signalName, handler});
-        return handlerId;
+    /** @returns {boolean} True once the client has destroyed the link. */
+    get isDestroyed() {
+        return this._isDestroyed;
     }
 
     /**
-     * @param {number} handlerId - An id connect returned.
+     * Subscribes or unsubscribes, as the real link does: a change only, and nothing after destroy().
+     *
+     * @param {boolean} isSubscribed - True to deliver Changed from now on.
      * @returns {void}
      */
-    disconnect(handlerId) {
-        this._handlersById.delete(handlerId);
-    }
-
-    /** @returns {number} Handlers still connected. */
-    get connectedHandlerCount() {
-        return this._handlersById.size;
+    setSubscribed(isSubscribed) {
+        if (this._isDestroyed || isSubscribed === this._isSubscribed)
+            return;
+        this._isSubscribed = isSubscribed;
+        this.actions.push(isSubscribed ? SUBSCRIBE : UNSUBSCRIBE);
     }
 
     /**
@@ -208,25 +216,23 @@ class FakeProxy {
      *
      * @param {string} methodName - The method.
      * @param {GLib.Variant|null} parameters - Its parameters.
-     * @param {Gio.DBusCallFlags} _flags - Call flags.
-     * @param {number} timeoutMs - The call's timeout.
      * @param {Gio.Cancellable|null} cancellable - Its cancellable.
-     * @param {(proxy: FakeProxy, result: object) => void} callback - Called with the answer.
+     * @param {(error: Error|null, reply: GLib.Variant|null) => void} onAnswered - Called with the answer.
      * @returns {void}
      */
-    call(methodName, parameters, _flags, timeoutMs, cancellable, callback) {
-        this.calls.push({methodName, parameters, timeoutMs, cancellable, callback, isAnswered: false});
+    call(methodName, parameters, cancellable, onAnswered) {
+        this.calls.push({methodName, parameters, cancellable, onAnswered, isAnswered: false});
+        this.actions.push(methodName);
     }
 
     /**
-     * @param {{reply: GLib.Variant|null, error: Error|null}} result - What answer() or fail() passed.
-     * @returns {GLib.Variant|null} The reply.
-     * @throws {Error} The failure.
+     * Records the destroy and drops the subscription, as the real link does. Owner reports go on (see setNameOwner).
+     *
+     * @returns {void}
      */
-    call_finish(result) {
-        if (result.error !== null)
-            throw result.error;
-        return result.reply;
+    destroy() {
+        this._isDestroyed = true;
+        this._isSubscribed = false;
     }
 
     /**
@@ -265,69 +271,65 @@ class FakeProxy {
     }
 
     /**
-     * Changes the name owner and notifies, as GDBusProxy does on NameOwnerChanged.
+     * Reports the bus name's owner, as the name watch does: once when it starts (null when nobody owns the name), then
+     * on each change. Reported after destroy() too, so a row sees the client ignore a late report.
      *
-     * @param {string|null} nameOwner - The new owner, or null for none.
+     * @param {string|null} nameOwner - The unique name owning the service's name, or null for none.
      * @returns {void}
      */
     setNameOwner(nameOwner) {
-        this._nameOwner = nameOwner;
-        this._emit(NAME_OWNER_NOTIFY_SIGNAL, [this, null]);
+        this._onOwnerChanged(nameOwner);
     }
 
     /**
-     * Delivers a D-Bus signal from the owner, as GDBusProxy's g-signal does.
+     * Delivers a D-Bus signal from the owner as the subscription does: only while subscribed, and only Changed (the
+     * member the cockpit's link subscribes to).
      *
      * @param {string} signalName - The signal's name.
      * @param {GLib.Variant} parameters - Its parameters.
      * @returns {void}
      */
     emitSignal(signalName, parameters) {
-        this._emit(PROXY_SIGNAL, [this, this._nameOwner, signalName, parameters]);
+        if (this._isSubscribed && signalName === CHANGED_SIGNAL)
+            this._onSignal(parameters);
+    }
+
+    /**
+     * Hands parameters straight to the client's signal callback, subscribed or not: what reaches the client then is
+     * the client's own doing.
+     *
+     * @param {GLib.Variant} parameters - A signal's parameters.
+     * @returns {void}
+     */
+    handToSignalCallback(parameters) {
+        this._onSignal(parameters);
     }
 
     /**
      * @param {string} methodName - The method.
-     * @param {object} result - {reply, error}.
+     * @param {{reply: GLib.Variant|null, error: Error|null}} result - The answer.
      * @returns {void}
      * @throws {Error} When no call of that method is waiting.
      */
-    _settleOldestCall(methodName, result) {
+    _settleOldestCall(methodName, {reply, error}) {
         const call = this.calls.find(pendingCall => pendingCall.methodName === methodName && !pendingCall.isAnswered);
         if (call === undefined)
             throw new Error(`no unanswered ${methodName} call`);
         call.isAnswered = true;
-        call.callback(this, result);
-    }
-
-    /**
-     * @param {string} signalName - The GObject signal.
-     * @param {Array<*>} signalArguments - Its arguments.
-     * @returns {void}
-     */
-    _emit(signalName, signalArguments) {
-        for (const {signalName: handledSignalName, handler} of [...this._handlersById.values()]) {
-            if (handledSignalName === signalName)
-                handler(...signalArguments);
-        }
+        call.onAnswered(error, reply);
     }
 }
 
-/** A fake createProxy: a row delivers the proxy when it chooses. */
-class FakeProxyFactory {
+/** A fake createLink: records each link the client makes. */
+class FakeLinkFactory {
     constructor() {
-        /** @type {Array<{connection: object, cancellable: Gio.Cancellable, onCreated: Function}>} */
-        this.requests = [];
-        this.createProxy = (connection, cancellable, onCreated) =>
-            this.requests.push({connection, cancellable, onCreated});
-    }
-
-    /**
-     * @param {FakeProxy} proxy - The proxy to hand the latest request.
-     * @returns {void}
-     */
-    deliver(proxy) {
-        this.requests.at(LATEST_INDEX).onCreated(null, proxy);
+        /** @type {FakeLink[]} Every link made, in order. */
+        this.links = [];
+        this.createLink = (connection, callbacks) => {
+            const link = new FakeLink(connection, callbacks);
+            this.links.push(link);
+            return link;
+        };
     }
 }
 
@@ -421,24 +423,28 @@ async function valueOnceSettled(promise) {
  * Builds a client on fakes and starts it.
  *
  * @param {object} [options] - The fixture's shape.
- * @param {string|null} [options.nameOwner] - The service's owner when the proxy arrives; null for none.
- * @param {boolean} [options.isProxyDelivered] - False to leave the proxy still being created.
+ * @param {string|null} [options.nameOwner] - The service's owner when the name watch first reports; null for none.
+ * @param {boolean} [options.isOwnerReported] - False to leave the name watch's first report still to come.
  * @param {object|null} [options.cachedLayout] - The layout the extension seeds the client with; none by default.
- * @returns {object} {client, clock, timeouts, serviceStarter, proxyFactory, proxy, systemdUnit, events, logged,
+ * @param {boolean} [options.isSubscriptionWanted] - True to want the Changed subscription from the start, as the
+ *     extension does while a cockpit card can be seen. False by default, as the client starts.
+ * @returns {object} {client, clock, timeouts, serviceStarter, linkFactory, link, systemdUnit, events, logged,
  *     infoLines}.
  */
-function makeClientFixture({nameOwner = OWNER, isProxyDelivered = true, cachedLayout = undefined} = {}) {
+function makeClientFixture({
+    nameOwner = OWNER, isOwnerReported = true, cachedLayout = undefined, isSubscriptionWanted = false,
+} = {}) {
     const clock = {nowUsec: START_USEC, nowRealUsec: FIRST_STATE_REAL_USEC};
     const timeouts = new FakeTimeouts();
     const serviceStarter = new FakeServiceStarter();
-    const proxyFactory = new FakeProxyFactory();
+    const linkFactory = new FakeLinkFactory();
     const systemdUnit = new FakeSystemdUnit();
     const logged = [];
     const infoLines = [];
     const client = new cockpitClientModule.CockpitClient({
         connection: FAKE_CONNECTION,
         startUnit: serviceStarter.startUnit,
-        createProxy: proxyFactory.createProxy,
+        createLink: linkFactory.createLink,
         readUnitCondition: systemdUnit.readUnitCondition,
         nowUsec: () => clock.nowUsec,
         nowRealUsec: () => clock.nowRealUsec,
@@ -449,37 +455,38 @@ function makeClientFixture({nameOwner = OWNER, isProxyDelivered = true, cachedLa
     });
     const events = [];
     client.addListener(event => events.push(event));
+    client.setSubscriptionWanted(isSubscriptionWanted);
     client.start();
-    const proxy = new FakeProxy(nameOwner);
-    if (isProxyDelivered)
-        proxyFactory.deliver(proxy);
-    return {client, clock, timeouts, serviceStarter, proxyFactory, proxy, systemdUnit, events, logged, infoLines};
+    const [link] = linkFactory.links;
+    if (isOwnerReported)
+        link?.setNameOwner(nameOwner);
+    return {client, clock, timeouts, serviceStarter, linkFactory, link, systemdUnit, events, logged, infoLines};
 }
 
 /**
  * Answers the oldest GetState with a state payload.
  *
- * @param {FakeProxy} proxy - The fixture's proxy.
+ * @param {FakeLink} link - The fixture's link.
  * @param {object} [state] - {layout, configError, sources}; LAYOUT, no error and SOURCES by default.
  * @returns {void}
  */
-function answerState(proxy, {layout = LAYOUT, configError = null, sources = SOURCES} = {}) {
+function answerState(link, {layout = LAYOUT, configError = null, sources = SOURCES} = {}) {
     const statePayload = buildCockpitStatePayload({
         layout, configError, sources, serviceStartedAtUsec: SERVICE_STARTED_AT_USEC,
         latestPublishedAtUsec: PUBLISHED_AT_USEC,
     });
-    proxy.answer(GET_STATE, new GLib.Variant(SINGLE_STRING_SIGNATURE, [statePayload]));
+    link.answer(GET_STATE, new GLib.Variant(SINGLE_STRING_SIGNATURE, [statePayload]));
 }
 
 /**
  * Answers the oldest GetState with SOURCES, except that mounts carries another stamp.
  *
- * @param {FakeProxy} proxy - The fixture's proxy.
+ * @param {FakeLink} link - The fixture's link.
  * @param {number} sampledAtUsec - The wall-clock stamp mounts carries.
  * @returns {void}
  */
-function answerStateWithMountsSampledAt(proxy, sampledAtUsec) {
-    answerState(proxy, {sources: {...SOURCES, mounts: {...MOUNTS_SOURCE, sampledAtUsec}}});
+function answerStateWithMountsSampledAt(link, sampledAtUsec) {
+    answerState(link, {sources: {...SOURCES, mounts: {...MOUNTS_SOURCE, sampledAtUsec}}});
 }
 
 /**
@@ -494,27 +501,38 @@ function usecAfter(stampUsec, seconds) {
 }
 
 /**
- * Emits one Changed signal.
+ * A Changed signal's parameters, as the service sends them.
  *
- * @param {FakeProxy} proxy - The fixture's proxy.
  * @param {object} change - buildChangedPayload's argument, without the publish time.
- * @returns {void}
+ * @returns {GLib.Variant} The '(s)' tuple holding the payload.
  */
-function emitChanged(proxy, change) {
+function changedParameters(change) {
     const changedPayload = buildChangedPayload({publishedAtUsec: PUBLISHED_AT_USEC, ...change});
-    proxy.emitSignal(CHANGED_SIGNAL, new GLib.Variant(SINGLE_STRING_SIGNATURE, [changedPayload]));
+    return new GLib.Variant(SINGLE_STRING_SIGNATURE, [changedPayload]);
 }
 
 /**
- * A started client whose owner was there when the proxy arrived, whose StartUnit was accepted, and whose first
- * GetState was answered with LAYOUT and SOURCES at FIRST_STATE_REAL_USEC. Its events so far are cleared.
+ * Emits one Changed signal.
+ *
+ * @param {FakeLink} link - The fixture's link.
+ * @param {object} change - buildChangedPayload's argument, without the publish time.
+ * @returns {void}
+ */
+function emitChanged(link, change) {
+    link.emitSignal(CHANGED_SIGNAL, changedParameters(change));
+}
+
+/**
+ * A started client that wants the Changed subscription, whose owner was there at the name watch's first report, whose
+ * StartUnit was accepted, and whose first GetState was answered with LAYOUT and SOURCES at FIRST_STATE_REAL_USEC. Its
+ * events so far are cleared.
  *
  * @returns {object} makeClientFixture's fixture.
  */
 function makeLiveClientFixture() {
-    const fixture = makeClientFixture();
+    const fixture = makeClientFixture({isSubscriptionWanted: true});
     fixture.serviceStarter.succeed();
-    answerState(fixture.proxy);
+    answerState(fixture.link);
     fixture.events.length = 0;
     return fixture;
 }
@@ -558,17 +576,17 @@ test('cockpitClient: CockpitClientState names the four states and CockpitClientE
 
 test('cockpitClient: start() calls StartUnit; the name appearing calls GetState, whose answer makes it LIVE with the ' +
     'layout and every source, told as one state, one layout and one sources event', () => {
-    const {client, serviceStarter, proxy, timeouts, events} = makeClientFixture({nameOwner: null});
+    const {client, serviceStarter, link, timeouts, events} = makeClientFixture({nameOwner: null});
     const stateBeforeOwner = client.state;
     serviceStarter.succeed();
-    proxy.setNameOwner(OWNER);
+    link.setNameOwner(OWNER);
     const stateWhileAsking = client.state;
-    answerState(proxy);
+    answerState(link);
     assertEqual({
         stateBeforeOwner, stateWhileAsking, state: client.state, events, layout: client.layout,
         configError: client.configError, sourcesByName: client.sourcesByName,
         startUnitConnections: serviceStarter.attempts.map(attempt => attempt.connection),
-        calledMethodNames: proxy.calledMethodNames, pending: timeouts.pendingIntervalsSeconds(),
+        calledMethodNames: link.calledMethodNames, pending: timeouts.pendingIntervalsSeconds(),
     }, {
         stateBeforeOwner: STARTING, stateWhileAsking: STARTING, state: LIVE,
         events: [
@@ -679,14 +697,14 @@ test('cockpitClient: an accepted StartUnit with no name in 15 s whose unit read 
 
 test('cockpitClient: the name appearing while the unit is being read supersedes the read: no SKIPPED, no retry, ' +
     'LIVE once GetState answers', async () => {
-    const {client, timeouts, serviceStarter, proxy, systemdUnit, events} = makeClientFixture({nameOwner: null});
+    const {client, timeouts, serviceStarter, link, systemdUnit, events} = makeClientFixture({nameOwner: null});
     serviceStarter.succeed();
     timeouts.fire(START_CONFIRMATION_SECONDS);
-    proxy.setNameOwner(OWNER);
+    link.setNameOwner(OWNER);
     systemdUnit.answer(SKIPPED_UNIT_CONDITION);
     await settlePromiseCallbacks();
     const stateAfterRead = client.state;
-    answerState(proxy);
+    answerState(link);
     assertEqual({stateAfterRead, state: client.state, pending: timeouts.pendingIntervalsSeconds(),
         stateEvents: events.filter(event => event.type === 'state')},
     {stateAfterRead: STARTING, state: LIVE, pending: [], stateEvents: [{type: 'state', state: LIVE}]});
@@ -710,17 +728,17 @@ test('cockpitClient: start() on a SKIPPED client asks systemd again, from STARTI
 
 test('cockpitClient: seeded with a cached layout it has that layout before any answer, and a GetState with the same ' +
     'layout tells no layout event', () => {
-    const {client, proxy, events} = makeClientFixture({cachedLayout: LAYOUT});
+    const {client, link, events} = makeClientFixture({cachedLayout: LAYOUT});
     const layoutBeforeAnswer = client.layout;
-    answerState(proxy);
+    answerState(link);
     assertEqual({layoutBeforeAnswer, eventTypes: events.map(event => event.type)},
         {layoutBeforeAnswer: LAYOUT, eventTypes: ['state', 'sources']});
 });
 
 test('cockpitClient: a Changed carrying mounts alone tells one sources event naming mounts only, and replaces only ' +
     'that source', () => {
-    const {client, proxy, events} = makeLiveClientFixture();
-    emitChanged(proxy, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
+    const {client, link, events} = makeLiveClientFixture();
+    emitChanged(link, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
     assertEqual({events, sourcesByName: client.sourcesByName}, {
         events: [{type: 'sources', names: ['mounts']}],
         sourcesByName: {...SOURCES, mounts: RESAMPLED_MOUNTS_SOURCE},
@@ -729,8 +747,8 @@ test('cockpitClient: a Changed carrying mounts alone tells one sources event nam
 
 test('cockpitClient: a Changed carrying the layout and the config error tells one layout event, and no sources event',
     () => {
-        const {client, proxy, events} = makeLiveClientFixture();
-        emitChanged(proxy, {sources: {}, layout: EDITED_LAYOUT, configError: CONFIG_INVALID_ERROR});
+        const {client, link, events} = makeLiveClientFixture();
+        emitChanged(link, {sources: {}, layout: EDITED_LAYOUT, configError: CONFIG_INVALID_ERROR});
         assertEqual({events, layout: client.layout, configError: client.configError}, {
             events: [{type: 'layout', layout: EDITED_LAYOUT, configError: CONFIG_INVALID_ERROR}],
             layout: EDITED_LAYOUT, configError: CONFIG_INVALID_ERROR,
@@ -739,12 +757,14 @@ test('cockpitClient: a Changed carrying the layout and the config error tells on
 
 test('cockpitClient: a signal other than Changed, a Changed of another signature or text that is not JSON changes ' +
     'nothing; each malformed Changed is logged', () => {
-    const {client, proxy, events, logged} = makeLiveClientFixture();
+    const {client, link, events, logged} = makeLiveClientFixture();
     const changedPayload = buildChangedPayload({publishedAtUsec: PUBLISHED_AT_USEC,
         sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
-    proxy.emitSignal('Sample', new GLib.Variant(SINGLE_STRING_SIGNATURE, [changedPayload]));
-    proxy.emitSignal(CHANGED_SIGNAL, new GLib.Variant('(i)', [7]));
-    proxy.emitSignal(CHANGED_SIGNAL, new GLib.Variant(SINGLE_STRING_SIGNATURE, ['{"sources": {']));
+    // A signal of another name is the subscription's to drop: the link subscribes to Changed alone (pinned on the
+    // private bus by cockpit-client-dbus.test.js), and the fake drops it as the subscription does.
+    link.emitSignal('Sample', new GLib.Variant(SINGLE_STRING_SIGNATURE, [changedPayload]));
+    link.emitSignal(CHANGED_SIGNAL, new GLib.Variant('(i)', [7]));
+    link.emitSignal(CHANGED_SIGNAL, new GLib.Variant(SINGLE_STRING_SIGNATURE, ['{"sources": {']));
     assertEqual({events, sourcesByName: client.sourcesByName,
         changedLogLines: logged.filter(line => line.includes(CHANGED_SIGNAL)).length},
     {events: [], sourcesByName: SOURCES, changedLogLines: 2});
@@ -752,15 +772,15 @@ test('cockpitClient: a signal other than Changed, a Changed of another signature
 
 test('cockpitClient: a GetState that fails is logged and leaves it STARTING; the next Changed asks for the state ' +
     'again rather than draw a part of it', () => {
-    const {client, proxy, events, logged} = makeClientFixture();
-    proxy.fail(GET_STATE, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached'));
+    const {client, link, events, logged} = makeClientFixture({isSubscriptionWanted: true});
+    link.fail(GET_STATE, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached'));
     const stateAfterFailure = client.state;
-    emitChanged(proxy, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
+    emitChanged(link, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
     const eventsBeforeState = [...events];
-    answerState(proxy);
+    answerState(link);
     assertEqual({
         stateAfterFailure, eventsBeforeState, state: client.state,
-        stateCallCount: proxy.callsOf(GET_STATE).length,
+        stateCallCount: link.callsOf(GET_STATE).length,
         stateLogLines: logged.filter(line => line.includes(GET_STATE)).length,
     }, {
         stateAfterFailure: STARTING, eventsBeforeState: [], state: LIVE, stateCallCount: 2, stateLogLines: 1,
@@ -769,15 +789,15 @@ test('cockpitClient: a GetState that fails is logged and leaves it STARTING; the
 
 test('cockpitClient: pullIfSuspicious(\'mounts\') (a 30 s interval) calls GetState at 100 s, not again at 110 s, ' +
     'and again at 131 s', async () => {
-    const {client, clock, proxy} = makeLiveClientFixture();
+    const {client, clock, link} = makeLiveClientFixture();
     const pullResults = [];
     const stateCallCounts = [];
     for (const secondsAfterSample of [100, 110, 131]) {
         clock.nowRealUsec = SAMPLED_AT_USEC + secondsAfterSample * USEC_PER_SECOND;
         const pullPromise = client.pullIfSuspicious('mounts');
-        stateCallCounts.push(proxy.callsOf(GET_STATE).length);
-        if (proxy.calls.at(LATEST_INDEX).isAnswered === false)
-            answerState(proxy);
+        stateCallCounts.push(link.callsOf(GET_STATE).length);
+        if (link.calls.at(LATEST_INDEX).isAnswered === false)
+            answerState(link);
         pullResults.push(await valueOnceSettled(pullPromise));
     }
     assertEqual({pullResults, stateCallCounts}, {
@@ -787,16 +807,16 @@ test('cockpitClient: pullIfSuspicious(\'mounts\') (a 30 s interval) calls GetSta
 
 test('cockpitClient: a source past three intervals is suspect but not stale; a pull answering its same old stamp ' +
     'makes it stale and tells a sources event naming it; a fresher stamp makes it fresh again', async () => {
-    const {client, clock, proxy, events} = makeLiveClientFixture();
+    const {client, clock, link, events} = makeLiveClientFixture();
     clock.nowRealUsec = SAMPLED_AT_USEC + 100 * USEC_PER_SECOND;
     const beforePull = client.sourceFreshness('mounts');
     const pullPromise = client.pullIfSuspicious('mounts');
     clock.nowRealUsec += USEC_PER_SECOND;
-    answerState(proxy);
+    answerState(link);
     const pullResult = await valueOnceSettled(pullPromise);
     const afterSameStamp = client.sourceFreshness('mounts');
     const eventsAfterSameStamp = [...events];
-    emitChanged(proxy, {sources: {mounts: {...RESAMPLED_MOUNTS_SOURCE,
+    emitChanged(link, {sources: {mounts: {...RESAMPLED_MOUNTS_SOURCE,
         sampledAtUsec: clock.nowRealUsec - USEC_PER_SECOND}}});
     assertEqual({
         beforePull: beforePull.isStale, beforePullShouldPull: beforePull.shouldPull, pullResult,
@@ -810,28 +830,33 @@ test('cockpitClient: a source past three intervals is suspect but not stale; a p
 
 test('cockpitClient: a pull whose GetState fails completes the pull (D6): a service that keeps its name but hangs ' +
     'reads stale after one failed pull, told as a sources event and logged once; the next interval pulls again, and ' +
-    'a later pull answering a fresh stamp makes the source fresh again', async () => {
-    const {client, clock, proxy, events, logged} = makeLiveClientFixture();
-    const stateCallsBeforePulls = proxy.callsOf(GET_STATE).length;
+    'a later pull answering a fresh stamp makes the source fresh again, and three intervals after that stamp ' +
+    'suspect, not stale (D5: the fresh stamp cleared the failed pulls\' stamps)', async () => {
+    const {client, clock, link, events, logged} = makeLiveClientFixture();
+    const stateCallsBeforePulls = link.callsOf(GET_STATE).length;
     const hungServiceError = new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached');
     const freshnessAfterEachPull = [];
     const pullResults = [];
     for (const secondsAfterSample of [100, 131]) {
         clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, secondsAfterSample);
         const failedPull = client.pullIfSuspicious('mounts');
-        proxy.fail(GET_STATE, hungServiceError);
+        link.fail(GET_STATE, hungServiceError);
         pullResults.push(await valueOnceSettled(failedPull));
         freshnessAfterEachPull.push(client.sourceFreshness('mounts'));
     }
     clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, 162);
     const answeredPull = client.pullIfSuspicious('mounts');
-    answerStateWithMountsSampledAt(proxy, usecAfter(SAMPLED_AT_USEC, 161));
+    const freshSampledAtUsec = usecAfter(SAMPLED_AT_USEC, 161);
+    answerStateWithMountsSampledAt(link, freshSampledAtUsec);
     pullResults.push(await valueOnceSettled(answeredPull));
     freshnessAfterEachPull.push(client.sourceFreshness('mounts'));
+    // Without the reset, the answered pull's completion (S+162 s) is later than the fresh stamp, and this reads stale.
+    clock.nowRealUsec = usecAfter(freshSampledAtUsec, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    const atNextSuspicion = client.sourceFreshness('mounts');
     const mountsEvent = {type: 'sources', names: ['mounts']};
     assertEqual({
-        pullResults, freshnessAfterEachPull, state: client.state,
-        pullStateCallCount: proxy.callsOf(GET_STATE).length - stateCallsBeforePulls, events,
+        pullResults, freshnessAfterEachPull, atNextSuspicion, state: client.state,
+        pullStateCallCount: link.callsOf(GET_STATE).length - stateCallsBeforePulls, events,
         stateLogLines: logged.filter(line => line.includes(GET_STATE)).length,
     }, {
         pullResults: [{pulled: true}, {pulled: true}, {pulled: true}],
@@ -839,27 +864,28 @@ test('cockpitClient: a pull whose GetState fails completes the pull (D6): a serv
             {isStale: true, shouldPull: false, ageSeconds: 100}, {isStale: true, shouldPull: false, ageSeconds: 131},
             {isStale: false, shouldPull: false, ageSeconds: 1},
         ],
+        atNextSuspicion: {isStale: false, shouldPull: true, ageSeconds: 91},
         state: LIVE, pullStateCallCount: 3, events: [mountsEvent, mountsEvent, mountsEvent], stateLogLines: 1,
     });
 });
 
 test('cockpitClient: a pull answering a fresher stamp clears the source\'s pull stamps (D5): three intervals after ' +
     'that stamp it is suspect but not stale, and only a pull answering that same stamp makes it stale', async () => {
-    const {client, clock, proxy} = makeLiveClientFixture();
+    const {client, clock, link} = makeLiveClientFixture();
     const firstSuspicionUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
     // The service resampled mounts a second before the pull, and sent no Changed: the data did not change.
     const refreshedSampledAtUsec = usecAfter(firstSuspicionUsec, -1);
     clock.nowRealUsec = firstSuspicionUsec;
     const refreshingPull = client.pullIfSuspicious('mounts');
     clock.nowRealUsec = usecAfter(firstSuspicionUsec, 1);
-    answerStateWithMountsSampledAt(proxy, refreshedSampledAtUsec);
+    answerStateWithMountsSampledAt(link, refreshedSampledAtUsec);
     const refreshingPullResult = await valueOnceSettled(refreshingPull);
     const afterRefresh = client.sourceFreshness('mounts');
     clock.nowRealUsec = usecAfter(refreshedSampledAtUsec, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
     const atNextSuspicion = client.sourceFreshness('mounts');
     const sameStampPull = client.pullIfSuspicious('mounts');
     clock.nowRealUsec = usecAfter(clock.nowRealUsec, 1);
-    answerStateWithMountsSampledAt(proxy, refreshedSampledAtUsec);
+    answerStateWithMountsSampledAt(link, refreshedSampledAtUsec);
     const sameStampPullResult = await valueOnceSettled(sameStampPull);
     assertEqual({
         refreshingPullResult, afterRefresh, atNextSuspicion, sameStampPullResult,
@@ -874,10 +900,10 @@ test('cockpitClient: a pull answering a fresher stamp clears the source\'s pull 
 test('cockpitClient: the review\'s counter-example (D5): mounts (a 30 s interval) sampled at S, pulled at S+100 s ' +
     'with the answer a fresh stamp S+99 s, the pull requested and completed at S+100 s: at S+190 s it is not stale, ' +
     'and a pull is due', async () => {
-    const {client, clock, proxy} = makeLiveClientFixture();
+    const {client, clock, link} = makeLiveClientFixture();
     clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, 100);
     const pullPromise = client.pullIfSuspicious('mounts');
-    answerStateWithMountsSampledAt(proxy, usecAfter(SAMPLED_AT_USEC, 99));
+    answerStateWithMountsSampledAt(link, usecAfter(SAMPLED_AT_USEC, 99));
     const pullResult = await valueOnceSettled(pullPromise);
     clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, 190);
     assertEqual({intervalSeconds: MOUNTS_INTERVAL_SECONDS, pullResult, freshness: client.sourceFreshness('mounts')}, {
@@ -889,13 +915,13 @@ test('cockpitClient: the review\'s counter-example (D5): mounts (a 30 s interval
 test('cockpitClient: a Changed refreshing a source while its pull\'s GetState is in flight ends that pull\'s cycle ' +
     '(D5): the answer, carrying the same fresh stamp, stamps no completion, so three intervals after that stamp the ' +
     'source is suspect but not stale', async () => {
-    const {client, clock, proxy} = makeLiveClientFixture();
+    const {client, clock, link} = makeLiveClientFixture();
     const suspicionUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
     clock.nowRealUsec = suspicionUsec;
     const pullPromise = client.pullIfSuspicious('mounts');
-    emitChanged(proxy, {sources: {mounts: {...MOUNTS_SOURCE, sampledAtUsec: suspicionUsec}}});
+    emitChanged(link, {sources: {mounts: {...MOUNTS_SOURCE, sampledAtUsec: suspicionUsec}}});
     clock.nowRealUsec = usecAfter(suspicionUsec, 1);
-    answerStateWithMountsSampledAt(proxy, suspicionUsec);
+    answerStateWithMountsSampledAt(link, suspicionUsec);
     const pullResult = await valueOnceSettled(pullPromise);
     clock.nowRealUsec = usecAfter(suspicionUsec, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
     assertEqual({pullResult, freshness: client.sourceFreshness('mounts')},
@@ -904,14 +930,14 @@ test('cockpitClient: a Changed refreshing a source while its pull\'s GetState is
 
 test('cockpitClient: pulls for two sources made while one GetState is in flight join it: exactly one GetState, ' +
     'both settle only when it answers, and one sources event names both', async () => {
-    const {client, clock, proxy, events} = makeLiveClientFixture();
-    const stateCallsBeforePulls = proxy.callsOf(GET_STATE).length;
+    const {client, clock, link, events} = makeLiveClientFixture();
+    const stateCallsBeforePulls = link.callsOf(GET_STATE).length;
     clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
     const mountsPull = client.pullIfSuspicious('mounts');
     const networkPull = client.pullIfSuspicious('network');
-    const pullStateCallCount = proxy.callsOf(GET_STATE).length - stateCallsBeforePulls;
+    const pullStateCallCount = link.callsOf(GET_STATE).length - stateCallsBeforePulls;
     const beforeAnswer = [await valueOnceSettled(mountsPull), await valueOnceSettled(networkPull)];
-    answerState(proxy);
+    answerState(link);
     const afterAnswer = [await valueOnceSettled(mountsPull), await valueOnceSettled(networkPull)];
     assertEqual({
         pullStateCallCount, beforeAnswer, afterAnswer, events,
@@ -923,19 +949,56 @@ test('cockpitClient: pulls for two sources made while one GetState is in flight 
     });
 });
 
+test('cockpitClient: a Changed carrying an earlier stamp than the one held (the wall clock stepped back) clears the ' +
+    'source\'s pull stamps too: three intervals after that stamp it is suspect, not stale', async () => {
+    const {client, clock, link} = makeLiveClientFixture();
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 10);
+    const sameStampPull = client.pullIfSuspicious('mounts');
+    answerState(link);
+    const sameStampPullResult = await valueOnceSettled(sameStampPull);
+    const afterSameStampPull = client.sourceFreshness('mounts');
+    // The wall clock steps back an hour, and the service samples mounts on it: the new stamp is earlier than the old
+    // one, and than the completed pull's stamp, which is taken on the old clock.
+    const steppedBackSampledAtUsec = usecAfter(clock.nowRealUsec, -CLOCK_STEP_BACK_SECONDS);
+    clock.nowRealUsec = steppedBackSampledAtUsec;
+    emitChanged(link, {sources: {mounts: {...MOUNTS_SOURCE, sampledAtUsec: steppedBackSampledAtUsec}}});
+    clock.nowRealUsec = usecAfter(steppedBackSampledAtUsec, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    assertEqual({sameStampPullResult, afterSameStampPull, atNextSuspicion: client.sourceFreshness('mounts')}, {
+        sameStampPullResult: {pulled: true}, afterSameStampPull: {isStale: true, shouldPull: false, ageSeconds: 100},
+        atNextSuspicion: {isStale: false, shouldPull: true, ageSeconds: 91},
+    });
+});
+
+test('cockpitClient: the owner leaving while a pull\'s GetState is in flight completes that pull (D6): it settles, ' +
+    'the source reads stale, and a sources event naming it follows the VANISHED state event', async () => {
+    const {client, clock, link, events} = makeLiveClientFixture();
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 10);
+    const pullPromise = client.pullIfSuspicious('mounts');
+    const beforeVanish = await valueOnceSettled(pullPromise);
+    link.setNameOwner(null);
+    assertEqual({
+        beforeVanish, afterVanish: await valueOnceSettled(pullPromise), freshness: client.sourceFreshness('mounts'),
+        events,
+    }, {
+        beforeVanish: UNSETTLED, afterVanish: {pulled: true},
+        freshness: {isStale: true, shouldPull: false, ageSeconds: 100},
+        events: [{type: 'state', state: VANISHED}, {type: 'sources', names: ['mounts']}],
+    });
+});
+
 test('cockpitClient: the name losing its owner makes it VANISHED with its sources kept, calls no StartUnit and arms ' +
     'no retry for one (both read before destroy(), which would remove a timer), and sends no UnwatchCockpit, then or ' +
     'at destroy() (the watch left with the owner)', () => {
-    const {client, timeouts, serviceStarter, proxy, events} = makeLiveClientFixture();
+    const {client, timeouts, serviceStarter, link, events} = makeLiveClientFixture();
     client.setWatchWanted(true);
-    proxy.setNameOwner(null);
+    link.setNameOwner(null);
     client.setWatchWanted(false);
     const pendingAfterVanish = timeouts.pendingIntervalsSeconds();
     const attemptCountAfterVanish = serviceStarter.attempts.length;
     client.destroy();
     assertEqual({
         events, sourcesByName: client.sourcesByName, layout: client.layout, pendingAfterVanish,
-        attemptCountAfterVanish, calledMethodNames: proxy.calledMethodNames,
+        attemptCountAfterVanish, calledMethodNames: link.calledMethodNames,
     }, {
         events: [{type: 'state', state: VANISHED}], sourcesByName: SOURCES, layout: LAYOUT, pendingAfterVanish: [],
         attemptCountAfterVanish: 1, calledMethodNames: [GET_STATE, WATCH_COCKPIT],
@@ -944,14 +1007,14 @@ test('cockpitClient: the name losing its owner makes it VANISHED with its source
 
 test('cockpitClient: once VANISHED, a suspect source\'s pull asks nobody and completes at once, so it reads stale; ' +
     'a new owner is read with GetState and makes it LIVE', async () => {
-    const {client, clock, proxy, events} = makeLiveClientFixture();
-    proxy.setNameOwner(null);
+    const {client, clock, link, events} = makeLiveClientFixture();
+    link.setNameOwner(null);
     clock.nowRealUsec = SAMPLED_AT_USEC + 100 * USEC_PER_SECOND;
     const pullResult = await valueOnceSettled(client.pullIfSuspicious('mounts'));
     const freshnessWhileGone = client.sourceFreshness('mounts');
-    const stateCallsWhileGone = proxy.callsOf(GET_STATE).length;
-    proxy.setNameOwner(NEXT_OWNER);
-    answerState(proxy, {sources: {...SOURCES, mounts: {...MOUNTS_SOURCE, sampledAtUsec: clock.nowRealUsec}}});
+    const stateCallsWhileGone = link.callsOf(GET_STATE).length;
+    link.setNameOwner(NEXT_OWNER);
+    answerState(link, {sources: {...SOURCES, mounts: {...MOUNTS_SOURCE, sampledAtUsec: clock.nowRealUsec}}});
     assertEqual({
         pullResult, isStaleWhileGone: freshnessWhileGone.isStale, stateCallsWhileGone, state: client.state,
         isStaleAfterReturn: client.sourceFreshness('mounts').isStale, events,
@@ -965,41 +1028,42 @@ test('cockpitClient: once VANISHED, a suspect source\'s pull asks nobody and com
     });
 });
 
+// How each call goes out (to the owner's unique name, with DBUS_CALL_TIMEOUT_MS) is the link's, pinned by the link rows
+// in cockpit-client-dbus.test.js.
 test('cockpitClient: setWatchWanted(true) before the owner exists sends WatchCockpit once it appears; only a change ' +
-    'is sent, and every call is asynchronous with DBUS_CALL_TIMEOUT_MS', () => {
-    const {client, proxy} = makeClientFixture({nameOwner: null});
+    'is sent, and every call is asynchronous', () => {
+    const {client, link} = makeClientFixture({nameOwner: null});
     client.setWatchWanted(true);
-    const calledBeforeOwner = [...proxy.calledMethodNames];
-    proxy.setNameOwner(OWNER);
+    const calledBeforeOwner = [...link.calledMethodNames];
+    link.setNameOwner(OWNER);
     client.setWatchWanted(true);
     client.setWatchWanted(false);
     client.setWatchWanted(false);
-    const callShapes = new Set(proxy.calls.map(call => `${call.timeoutMs}/${typeof call.callback}`));
-    assertEqual({calledBeforeOwner, calledMethodNames: proxy.calledMethodNames, callShapes: [...callShapes]}, {
-        calledBeforeOwner: [], calledMethodNames: [GET_STATE, WATCH_COCKPIT, UNWATCH_COCKPIT],
-        callShapes: [`${constantsModule.DBUS_CALL_TIMEOUT_MS}/function`],
+    const callShapes = new Set(link.calls.map(call => typeof call.onAnswered));
+    assertEqual({calledBeforeOwner, calledMethodNames: link.calledMethodNames, callShapes: [...callShapes]}, {
+        calledBeforeOwner: [], calledMethodNames: [GET_STATE, WATCH_COCKPIT, UNWATCH_COCKPIT], callShapes: ['function'],
     });
 });
 
 test('cockpitClient: destroy() sends UnwatchCockpit (uncancellable) while the watch is held, cancels the pending ' +
-    'GetState, disconnects from the proxy, removes its timeouts, and nothing after it does anything', () => {
-    const {client, timeouts, serviceStarter, proxy, events} = makeClientFixture();
+    'GetState, destroys the link, removes its timeouts, and nothing after it does anything', () => {
+    const {client, timeouts, serviceStarter, link, events} = makeClientFixture();
     client.setWatchWanted(true);
     serviceStarter.fail();
-    const pendingStateCall = proxy.callsOf(GET_STATE)[0];
+    const pendingStateCall = link.callsOf(GET_STATE)[0];
     client.destroy();
-    const unwatchCalls = proxy.callsOf(UNWATCH_COCKPIT);
-    answerState(proxy);
+    const unwatchCalls = link.callsOf(UNWATCH_COCKPIT);
+    answerState(link);
     client.setWatchWanted(false);
     client.start();
     assertEqual({
         unwatchCancellables: unwatchCalls.map(call => call.cancellable),
         isStateCallCancelled: pendingStateCall.cancellable?.is_cancelled() ?? null,
-        connectedHandlerCount: proxy.connectedHandlerCount, pending: timeouts.pendingIntervalsSeconds(),
-        events, calledMethodNames: proxy.calledMethodNames, attemptCount: serviceStarter.attempts.length,
+        isLinkDestroyed: link.isDestroyed, pending: timeouts.pendingIntervalsSeconds(),
+        events, calledMethodNames: link.calledMethodNames, attemptCount: serviceStarter.attempts.length,
         state: client.state,
     }, {
-        unwatchCancellables: [null], isStateCallCancelled: true, connectedHandlerCount: 0, pending: [], events: [],
+        unwatchCancellables: [null], isStateCallCancelled: true, isLinkDestroyed: true, pending: [], events: [],
         calledMethodNames: [GET_STATE, WATCH_COCKPIT, UNWATCH_COCKPIT], attemptCount: 1, state: STARTING,
     });
 });
@@ -1037,12 +1101,12 @@ test('cockpitClient: destroy() while the unit is being read leaves the client as
     });
 
 test('cockpitClient: focusSession sends the id and resolves to the parsed reply', async () => {
-    const {client, proxy} = makeLiveClientFixture();
+    const {client, link} = makeLiveClientFixture();
     const replyPromise = client.focusSession(FOCUSABLE_SESSION_ID);
-    const [focusCall] = proxy.callsOf(FOCUS_SESSION);
+    const [focusCall] = link.callsOf(FOCUS_SESSION);
     const replyText = buildFocusSessionReply({focused: true, windowPid: null, error: null,
         windowPidCandidates: [4242, 4100]});
-    proxy.answer(FOCUS_SESSION, new GLib.Variant(SINGLE_STRING_SIGNATURE, [replyText]));
+    link.answer(FOCUS_SESSION, new GLib.Variant(SINGLE_STRING_SIGNATURE, [replyText]));
     assertEqual({parameters: focusCall.parameters.deepUnpack(), reply: await valueOnceSettled(replyPromise)}, {
         parameters: [FOCUSABLE_SESSION_ID],
         reply: {focused: true, windowPid: null, error: null, windowPidCandidates: [4242, 4100]},
@@ -1051,11 +1115,11 @@ test('cockpitClient: focusSession sends the id and resolves to the parsed reply'
 
 test('cockpitClient: focusSession resolves (never rejects) to the internal reply when the call fails or the reply ' +
     'is not JSON, logged once', async () => {
-    const {client, proxy, logged} = makeLiveClientFixture();
+    const {client, link, logged} = makeLiveClientFixture();
     const failedPromise = client.focusSession(FOCUSABLE_SESSION_ID);
-    proxy.fail(FOCUS_SESSION, new GLib.Error(Gio.DBusError, Gio.DBusError.NO_REPLY, 'Did not receive a reply'));
+    link.fail(FOCUS_SESSION, new GLib.Error(Gio.DBusError, Gio.DBusError.NO_REPLY, 'Did not receive a reply'));
     const unreadablePromise = client.focusSession(FOCUSABLE_SESSION_ID);
-    proxy.answer(FOCUS_SESSION, new GLib.Variant(SINGLE_STRING_SIGNATURE, ['focused']));
+    link.answer(FOCUS_SESSION, new GLib.Variant(SINGLE_STRING_SIGNATURE, ['focused']));
     assertEqual({
         failed: await valueOnceSettled(failedPromise), unreadable: await valueOnceSettled(unreadablePromise),
         focusLogLines: logged.filter(line => line.includes(FOCUS_SESSION)).length,
@@ -1063,7 +1127,7 @@ test('cockpitClient: focusSession resolves (never rejects) to the internal reply
 });
 
 test('cockpitClient: a listener that throws is logged and the next still runs; a removed one is not called', () => {
-    const {client, proxy, logged} = makeLiveClientFixture();
+    const {client, link, logged} = makeLiveClientFixture();
     const seenByLater = [];
     const removedListenerId = client.addListener(() => seenByLater.push('removed'));
     client.addListener(() => {
@@ -1071,7 +1135,92 @@ test('cockpitClient: a listener that throws is logged and the next still runs; a
     });
     client.addListener(event => seenByLater.push(event.type));
     client.removeListener(removedListenerId);
-    emitChanged(proxy, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
+    emitChanged(link, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
     assertEqual({seenByLater, listenerLogLines: logged.filter(line => line.includes('listener bug')).length},
         {seenByLater: ['sources'], listenerLogLines: 1});
+});
+
+test('cockpitClient: with the subscription not wanted (as it starts) it holds none, yet the owner\'s appearance ' +
+    'reads GetState once and makes it LIVE; a Changed handed to its signal callback reaches no listener', () => {
+    const {client, link, events} = makeClientFixture();
+    answerState(link);
+    const eventCountAfterState = events.length;
+    link.handToSignalCallback(changedParameters({sources: {mounts: RESAMPLED_MOUNTS_SOURCE}}));
+    assertEqual({
+        isSubscribed: link.isSubscribed, actions: link.actions, state: client.state,
+        eventsAfterChanged: events.slice(eventCountAfterState), mounts: client.sourcesByName.mounts,
+    }, {
+        isSubscribed: false, actions: [GET_STATE], state: LIVE, eventsAfterChanged: [], mounts: MOUNTS_SOURCE,
+    });
+});
+
+test('cockpitClient: wanting the subscription while the service has an owner subscribes, then reads GetState, in ' +
+    'that order; the answer is applied, and a Changed then reaches listeners', () => {
+    const {client, link, events} = makeClientFixture();
+    answerState(link);
+    const actionCountBeforeWant = link.actions.length;
+    events.length = 0;
+    client.setSubscriptionWanted(true);
+    const actionsOnWant = link.actions.slice(actionCountBeforeWant);
+    answerState(link, {sources: {...SOURCES, mounts: RESAMPLED_MOUNTS_SOURCE}});
+    emitChanged(link, {sources: {network: {...NETWORK_SOURCE, sampledAtUsec: RESAMPLED_AT_USEC}}});
+    assertEqual({actionsOnWant, isSubscribed: link.isSubscribed, events}, {
+        actionsOnWant: [SUBSCRIBE, GET_STATE], isSubscribed: true,
+        events: [{type: 'sources', names: ['mounts']}, {type: 'sources', names: ['network']}],
+    });
+});
+
+test('cockpitClient: wanting the subscription with no owner sends nothing; the owner\'s appearance then subscribes ' +
+    'and reads GetState once', () => {
+    const {client, link} = makeClientFixture({nameOwner: null});
+    client.setSubscriptionWanted(true);
+    const actionsBeforeOwner = [...link.actions];
+    link.setNameOwner(OWNER);
+    assertEqual({actionsBeforeOwner, actions: link.actions}, {
+        actionsBeforeOwner: [], actions: [SUBSCRIBE, GET_STATE],
+    });
+});
+
+test('cockpitClient: unwanting the subscription unsubscribes, and a GetState still in flight is applied when it ' +
+    'answers; a Changed of a new owner sent while unsubscribed is missed, and read afresh by the GetState that ' +
+    'follows the subscribe on return', () => {
+    const {client, link, events} = makeClientFixture({isSubscriptionWanted: true});
+    client.setSubscriptionWanted(false);
+    const isSubscribedAfterUnwant = link.isSubscribed;
+    answerState(link);
+    const stateAfterInFlightAnswer = client.state;
+    link.setNameOwner(NEXT_OWNER);
+    answerState(link);
+    emitChanged(link, {sources: {mounts: RESAMPLED_MOUNTS_SOURCE}});
+    const mountsWhileUnsubscribed = client.sourcesByName.mounts;
+    events.length = 0;
+    client.setSubscriptionWanted(true);
+    answerState(link, {sources: {...SOURCES, mounts: RESAMPLED_MOUNTS_SOURCE}});
+    assertEqual({
+        isSubscribedAfterUnwant, stateAfterInFlightAnswer, mountsWhileUnsubscribed, actions: link.actions,
+        eventsOnReturn: events, mountsOnReturn: client.sourcesByName.mounts,
+    }, {
+        isSubscribedAfterUnwant: false, stateAfterInFlightAnswer: LIVE, mountsWhileUnsubscribed: MOUNTS_SOURCE,
+        actions: [SUBSCRIBE, GET_STATE, UNSUBSCRIBE, GET_STATE, SUBSCRIBE, GET_STATE],
+        eventsOnReturn: [{type: 'sources', names: ['mounts']}], mountsOnReturn: RESAMPLED_MOUNTS_SOURCE,
+    });
+});
+
+test('cockpitClient: wanting the subscription as it already is does nothing, nor does setSubscriptionWanted after ' +
+    'destroy()', () => {
+    const {client, link} = makeClientFixture();
+    answerState(link);
+    const actionCountBeforeWant = link.actions.length;
+    client.setSubscriptionWanted(false);
+    client.setSubscriptionWanted(true);
+    client.setSubscriptionWanted(true);
+    answerState(link);
+    const actionsWhileWanted = link.actions.slice(actionCountBeforeWant);
+    client.destroy();
+    const actionCountAtDestroy = link.actions.length;
+    client.setSubscriptionWanted(false);
+    client.setSubscriptionWanted(true);
+    assertEqual({actionsWhileWanted, actionsAfterDestroy: link.actions.slice(actionCountAtDestroy)}, {
+        actionsWhileWanted: [SUBSCRIBE, GET_STATE], actionsAfterDestroy: [],
+    });
 });
