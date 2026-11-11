@@ -417,6 +417,18 @@ Design points that are load-bearing rather than preferences:
   it**; here that shape is what would have, so the absence counts. Generalising past it to
   "the loss" did not.
 
+  **A second writer-dependent field, 2026-11-11: `subscriptionTypeSource`.** Claude Code writes
+  it (`"sign_in"`); `clauth login` writes the store without it. After a seat rename, quantivly-2's
+  account dir held a real file with its store's exact access token, refresh token and expiry plus
+  that field, and the reconciler refused the pair as undecidable every two minutes while
+  `claude-doctor` called it "still identical to the store". The two disagreed because they
+  compared different things: the equal-expiry tie-break compared the whole `claudeAiOauth` block,
+  the doctor's `_claude_cred_id` only the token triple. The tie-break now compares the same triple
+  (`cred_grant_id`), so a field one writer adds can no longer split one grant into two logins,
+  and the shape gate excludes `subscriptionTypeSource` beside `rateLimitTier`. The gate's
+  exclusions remain a list, so the next field a writer adds will trip it again. The identity permit
+  covers that case, except while a re-login's `.claude.json` still names the old account. State table section F6a; four mutants, each killed by its own row.
+
   **CORRECTED 2026-09-08, hours after it shipped: `rateLimitTier` does NOT cause the "Fable ·
   Requires usage credits" banner, and the commit message of #123 says it does.** That claim was
   written from a measured correlation (clauth's store lacks the field) plus a teammate's report,
