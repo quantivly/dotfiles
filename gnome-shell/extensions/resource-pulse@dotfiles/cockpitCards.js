@@ -4,9 +4,10 @@
 // and the card only assigns them; the tooltip is the one CockpitTooltip (cockpitTooltip.js) a card is given: a card
 // never makes one.
 //
-// - A card is a vertical box carrying the card surface (resource-pulse-card rp-cockpit-cell), built non-reactive and
-//   drawn through its own offscreen texture, so a window drawn over it paints one rectangle. No card paints itself
-//   (no paint override, plain or node: ruling D12).
+// - A card is a vertical box carrying the card surface (resource-pulse-card rp-cockpit-cell), built non-reactive. The
+//   apps, connections and sessions cards draw through their own offscreen texture, so a window drawn over one paints
+//   one rectangle; the system card asks for none, since the v2 card it adopts draws through its own and the cell
+//   holds that one texture, not a copy of it. No card paints itself (no paint override, plain or node: ruling D12).
 // - Its rows are built with it, one per row it can show, and reused: an update sets texts, icons, classes and bar
 //   widths, each only when it changed, and hides the rows beyond the data. No update makes or destroys an actor. A
 //   list with more than it can show ends in a '+N more' line (sessions, connections).
@@ -280,15 +281,19 @@ class CockpitCardBase extends St.BoxLayout {
      *     clicked; null for a card whose rows take no click.
      * @param {string|null} [options.cellStyleClass] - The card's style classes: the cell surface, or null for a card
      *     that draws none of its own.
+     * @param {boolean} [options.isDrawnThroughOwnTexture] - Whether the card draws through an offscreen texture of its
+     *     own (Clutter.OffscreenRedirect.ALWAYS), so a window drawn over it paints one cached rectangle; false for a
+     *     card whose only child already does, where a second texture would hold a copy of the first.
      * @returns {void}
      */
-    _init({tooltip, onRowActivated = null, cellStyleClass = CELL_STYLE_CLASS}) {
+    _init({tooltip, onRowActivated = null, cellStyleClass = CELL_STYLE_CLASS, isDrawnThroughOwnTexture = true}) {
         super._init({
             style_class: cellStyleClass,
             orientation: Clutter.Orientation.VERTICAL,
             reactive: false,
-            offscreen_redirect: Clutter.OffscreenRedirect.ALWAYS,
         });
+        if (isDrawnThroughOwnTexture)
+            this.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);
         // Every field _onDestroy reads is set before anything below can throw.
         this._tooltip = tooltip;
         this._onRowActivated = onRowActivated;
@@ -638,8 +643,9 @@ export const SystemCockpitCard = GObject.registerClass(
 class SystemCockpitCard extends CockpitCardBase {
     /**
      * Adopts the extension's v2 card (card.js PulseCard) into the system cell. The cell draws one surface: the v2
-     * card keeps its own (resource-pulse-card, which its frozen dim reads), and this wrapper draws none. A click on
-     * it, while interactive, opens Resources.
+     * card keeps its own (resource-pulse-card, which its frozen dim reads), and this wrapper draws none. It holds one
+     * texture too: the v2 card draws through its own offscreen texture, and this wrapper asks for none, which would
+     * only hold a copy of it. A click on it, while interactive, opens Resources.
      *
      * @param {object} options - The card's options.
      * @param {import('./card.js').PulseCard} options.pulseCard - The v2 card; the extension owns it and destroys it.
@@ -648,7 +654,7 @@ class SystemCockpitCard extends CockpitCardBase {
      * @returns {void}
      */
     _init({pulseCard, tooltip}) {
-        super._init({tooltip, cellStyleClass: null});
+        super._init({tooltip, cellStyleClass: null, isDrawnThroughOwnTexture: false});
         this._pulseCard = pulseCard;
         this._adoptPulseCard();
         this.connect('button-release-event', (_actor, event) => this._onCardReleased(event));

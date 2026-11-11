@@ -292,23 +292,32 @@ test('cockpitCards.js: exports the base, the four cards (each a CockpitCardBase)
 });
 
 test('cockpitCards.js: a card is a vertical box with the cell surface by default, built reactive: false and drawn ' +
-    'through its own offscreen texture; only the system card asks for no surface', () => {
+    'through its own offscreen texture by default; only the system card asks for no surface and no texture (the v2 ' +
+    'card it adopts draws through its own)', () => {
     const source = codeOf(CARDS_SOURCE_FILE);
     const baseInitBody = cardMethodBody('CockpitCardBase', '_init(');
+    const baseInitStatements = statementsOf(baseInitBody);
+    const textureGuardIndex = baseInitStatements.indexOf('if (isDrawnThroughOwnTexture)');
     const superInitProperties = ['style_class: cellStyleClass,', 'orientation: Clutter.Orientation.VERTICAL,',
-        'reactive: false,', 'offscreen_redirect: Clutter.OffscreenRedirect.ALWAYS,'];
+        'reactive: false,'];
     assertEqual({
         surfaceDefined: occurrenceCount(source, "const CELL_STYLE_CLASS = 'resource-pulse-card rp-cockpit-cell';"),
-        surfaceByDefault: occurrenceCount(baseInitBody,
-            '_init({tooltip, onRowActivated = null, cellStyleClass = CELL_STYLE_CLASS}) {'),
+        surfaceAndTextureByDefault: occurrenceCount(baseInitBody, '_init({tooltip, onRowActivated = null, ' +
+            'cellStyleClass = CELL_STYLE_CLASS, isDrawnThroughOwnTexture = true}) {'),
         superInitProperties: superInitProperties.map(property => occurrenceCount(baseInitBody, property)),
+        textureWhenAsked: textureGuardIndex < 0 ? [] : baseInitStatements.slice(textureGuardIndex, textureGuardIndex + 2),
         cardsAskingForAStyle: CARD_CLASS_NAMES.filter(className =>
             cardMethodBody(className, '_init(').includes('cellStyleClass')),
+        cardsAskingAboutTheTexture: CARD_CLASS_NAMES.filter(className =>
+            cardMethodBody(className, '_init(').includes('isDrawnThroughOwnTexture')),
         systemCardAsksForNone: occurrenceCount(cardMethodBody('SystemCockpitCard', '_init('),
-            'super._init({tooltip, cellStyleClass: null});'),
+            'super._init({tooltip, cellStyleClass: null, isDrawnThroughOwnTexture: false});'),
     }, {
-        surfaceDefined: 1, surfaceByDefault: 1, superInitProperties: superInitProperties.map(() => 1),
-        cardsAskingForAStyle: ['SystemCockpitCard'], systemCardAsksForNone: 1,
+        surfaceDefined: 1, surfaceAndTextureByDefault: 1, superInitProperties: superInitProperties.map(() => 1),
+        textureWhenAsked: ['if (isDrawnThroughOwnTexture)',
+            'this.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);'],
+        cardsAskingForAStyle: ['SystemCockpitCard'], cardsAskingAboutTheTexture: ['SystemCockpitCard'],
+        systemCardAsksForNone: 1,
     });
 });
 
@@ -699,7 +708,8 @@ test('cockpitCards.js: the system card adopts the extension\'s v2 card (ruling D
         repaintFrozen: systemBody('repaintFrozen('),
         onDestroy: systemBody('_onDestroy('),
     }, {
-        init: ['_init({pulseCard, tooltip}) {', 'super._init({tooltip, cellStyleClass: null});',
+        init: ['_init({pulseCard, tooltip}) {',
+            'super._init({tooltip, cellStyleClass: null, isDrawnThroughOwnTexture: false});',
             'this._pulseCard = pulseCard;', 'this._adoptPulseCard();',
             "this.connect('button-release-event', (_actor, event) => this._onCardReleased(event));", '}'],
         adopt: ['_adoptPulseCard() {', 'const pulseCard = this._pulseCard;',
@@ -772,13 +782,16 @@ test('cockpitCards.js: hiding a card\'s data (its no-data or herdr line) while o
         sessionsOverrideGoesThroughIt: 'super._setDataShown(isDataShown);',
     }));
 
-test('cockpitCards.js: no card paints itself (no vfunc_paint or vfunc_paint_node in the code: ruling D12), so each ' +
-    'is drawn only through the offscreen texture the base asks for', () => {
+test('cockpitCards.js: no card paints itself (no vfunc_paint or vfunc_paint_node in the code: ruling D12), and the ' +
+    'base\'s one offscreen redirect is the file\'s only one, so a data card is drawn only through the texture the ' +
+    'base gives it and the system cell holds one texture, the adopted v2 card\'s', () => {
     const source = codeOf(CARDS_SOURCE_FILE);
     assertEqual({
         paintVfuncs: occurrenceCount(source, 'vfunc_paint'),
-        offscreenRedirects: occurrenceCount(source, 'offscreen_redirect: Clutter.OffscreenRedirect.ALWAYS'),
-    }, {paintVfuncs: 0, offscreenRedirects: 1});
+        offscreenRedirectUses: occurrenceCount(source, 'offscreen_redirect'),
+        baseRedirects: occurrenceCount(classBody(source, 'CockpitCardBase'),
+            'this.set_offscreen_redirect(Clutter.OffscreenRedirect.ALWAYS);'),
+    }, {paintVfuncs: 0, offscreenRedirectUses: 1, baseRedirects: 1});
 });
 
 test('cockpitCards.js: a primary-button release on the system card opens Resources; the system card draws no ' +
