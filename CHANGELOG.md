@@ -599,6 +599,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The credential reconciler treats the same grant in two writers' shapes as one login
+  (`scripts/claude-account-dirs.sh`).** The equal-expiry tie-break compared the whole
+  `claudeAiOauth` block, so `subscriptionTypeSource`, which Claude Code writes and `clauth login`
+  does not, made an account dir's copy of its store's own grant read as a different login, refused
+  as undecidable on every run (quantivly-2, 2026-11-11). A new `cred_same_grant` compares the
+  access token, refresh token and expiry, as `claude-doctor` does. It decides the tie, and it runs
+  before the rotation-shape gate, so the same grant is never refused as another account's login.
+  The gate itself is unchanged. Excluding `subscriptionTypeSource` from it, as `rateLimitTier` is
+  excluded, would let a session still on a previous account overwrite a fresh `clauth login`.
+  `scripts/test-claude-account-dirs.sh` goes from 236 to 246 rows.
+
 - **The dock Wi-Fi guard is measured by cause, not by a raw disconnect count
   (`scripts/dock-wifi-report.py`).** The week-one check reported 61 and then 31 "Wi-Fi
   disconnects while docked", which read as a guard that never fired. The check actually counted

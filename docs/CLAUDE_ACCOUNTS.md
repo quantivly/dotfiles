@@ -417,6 +417,28 @@ Design points that are load-bearing rather than preferences:
   it**; here that shape is what would have, so the absence counts. Generalising past it to
   "the loss" did not.
 
+  **A second writer-dependent field, 2026-11-11: `subscriptionTypeSource`.** Claude Code writes
+  it (`"sign_in"`); `clauth login` writes the store without it. After a seat rename, quantivly-2's
+  account dir held a real file with its store's exact access token, refresh token and expiry plus
+  that field, and the reconciler refused the pair as undecidable every two minutes while
+  `claude-doctor` called it "still identical to the store". The two disagreed because they
+  compared different things: the equal-expiry tie-break compared the whole `claudeAiOauth` block,
+  the doctor's `_claude_cred_id` only the token triple. Now `cred_same_grant` compares that triple
+  and runs twice: before the shape gate, which a shared access token skips, and as the tie-break.
+  **The first fix widened the shape gate instead, and review caught it adopting another account.**
+  Excluding `subscriptionTypeSource` from the gate, as `rateLimitTier` is, looked like the same
+  class. It is not, because of when the field is missing: right after `clauth login` moves a
+  profile to *another* account, a session still on the previous account refreshes into a real file
+  with the field, a later expiry and a `.claude.json` naming that previous account. The identity
+  permit fails, and this writer artifact is the only thing that refuses it. The exclusion adopted
+  it over the re-login, and the first round's row f31c asserted that adopt as correct. So the gate
+  keeps the field. It is luck, not proof: `cred_merge` copies the field into the store, so the
+  protection lasts only until the first adopt after a login. **Before calling a field
+  writer-dependent and excluding it, ask which wrong account its absence was refusing.** State
+  table section F6a. Seven mutants: six killed, each by its own row. The survivor drops the refresh
+  token from the triple, which is equivalent: the same access token and expiry are the same grant.
+  It stays in the triple to match the doctor's.
+
   **CORRECTED 2026-09-08, hours after it shipped: `rateLimitTier` does NOT cause the "Fable ·
   Requires usage credits" banner, and the commit message of #123 says it does.** That claim was
   written from a measured correlation (clauth's store lacks the field) plus a teammate's report,

@@ -866,6 +866,102 @@ else
 fi
 
 #-----------------------------------------------------------------------------
+section "F6a. The same grant in two writers' shapes is one login"
+#-----------------------------------------------------------------------------
+# SHIPPED BROKEN AGAIN, 2026-11-11, in a second writer-dependent field:
+# subscriptionTypeSource. Claude Code writes it ("sign_in"); `clauth login` writes
+# the store without it. quantivly-2's account dir held the SAME grant as its store
+# -- identical access token, refresh token and expiry -- and the reconciler refused
+# it as undecidable every two minutes, because the equal-expiry tie-break compared
+# the whole login block, writer-dependent fields included. claude-doctor, which
+# compares only the token triple, called the same pair "still identical".
+#
+# The two shapes as measured that day: clauth 0.16.0 keeps rateLimitTier, so both
+# carry it, and only the account dir's copy carries subscriptionTypeSource.
+CRED_SHAPE_CLAUTH_LOGIN='{"claudeAiOauth":{"accessToken":"CANARY-%s","refreshToken":"rt","expiresAt":%s,"scopes":["s"],"subscriptionType":"team","rateLimitTier":"default_claude_max_5x"}}\n'
+CRED_SHAPE_CLAUDE_CODE='{"claudeAiOauth":{"accessToken":"CANARY-%s","refreshToken":"rt","expiresAt":%s,"scopes":["s"],"subscriptionType":"team","rateLimitTier":"default_claude_max_5x","subscriptionTypeSource":"sign_in"}}\n'
+write_shaped_cred() {  # $1 = path, $2 = printf shape, $3 = marker, $4 = expiresAt
+    rm -f "$1"
+    # shellcheck disable=SC2059  # the shape IS the format string
+    printf "$2" "$3" "$4" > "$1"
+    chmod 600 "$1"
+}
+
+# The tie-break: identity proven, equal expiry, the same grant.
+new_home f31b; mk_profile p1
+run_sut p1
+set_dir_account p1 same
+write_shaped_cred "$(store_of p1)" "$CRED_SHAPE_CLAUTH_LOGIN" grant 5000
+write_shaped_cred "$ACCOUNT_ROOT/p1/.credentials.json" "$CRED_SHAPE_CLAUDE_CODE" grant 5000
+run_sut --reconcile
+no_out "the same grant in another writer's shape is not undecidable" \
+       "neither could be shown to be the live one"
+want_link "and the account dir is linked again" "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+if [[ "$(jq -r '.claudeAiOauth.subscriptionTypeSource // "ABSENT"' "$(store_of p1)")" == sign_in ]]; then
+    ok "and the field only one writer stores reaches the store"
+else
+    bad "relinking discarded the account dir's subscriptionTypeSource"
+fi
+# cred_merge back-fills from the losing side, so the field reaching the store
+# cannot say WHICH side won. The verdict can: the store winning reads kept-store.
+reconcile_verdict="$(cut -d' ' -f2 "$ACCOUNT_ROOT/p1/.reconcile-status" 2>/dev/null)"
+if [[ "$reconcile_verdict" == adopted ]]; then
+    ok "and the account dir's side is the one adopted"
+else
+    bad "the same-grant tie was not decided for the account dir (verdict: ${reconcile_verdict:-none})"
+fi
+
+# The same grant where the identity permit CANNOT help: the dir's .claude.json
+# names another account. The shared access token is the proof, so the shape gate
+# must not refuse it.
+new_home f31e; mk_profile p1
+run_sut p1
+set_dir_account p1 other
+write_shaped_cred "$(store_of p1)" "$CRED_SHAPE_CLAUTH_LOGIN" grant 5000
+write_shaped_cred "$ACCOUNT_ROOT/p1/.credentials.json" "$CRED_SHAPE_CLAUDE_CODE" grant 5000
+run_sut --reconcile
+no_out "the same grant is not refused as another account's login" \
+       "NOT a rotation of the stored one"
+want_link "and the account dir is linked again" "$ACCOUNT_ROOT/p1/.credentials.json" "$(store_of p1)"
+
+# ...but a DIFFERENT grant in that situation is the re-login hazard. Right after
+# `clauth login` moves p1 to another account, a session still on the previous one
+# refreshes into a real file with the field, a later expiry and a .claude.json
+# naming that previous account. Excluding subscriptionTypeSource from the shape
+# gate adopted it over the re-login; that was tried and reverted in review.
+new_home f31c; mk_profile p1
+run_sut p1
+set_dir_account p1 other
+write_shaped_cred "$(store_of p1)" "$CRED_SHAPE_CLAUTH_LOGIN" relogged 1000
+write_shaped_cred "$ACCOUNT_ROOT/p1/.credentials.json" "$CRED_SHAPE_CLAUDE_CODE" previous 9000
+cp "$(store_of p1)" "$TMPROOT/f31c.store"
+run_sut --reconcile
+want_out "a previous account's later grant is not adopted over a re-login" \
+         "NOT a rotation of the stored one"
+if cmp -s "$TMPROOT/f31c.store" "$(store_of p1)"; then
+    ok "and the re-login in the store survives"
+else
+    bad "a session on the previous account overwrote the re-login"
+fi
+
+# ...and two DIFFERENT grants that happen to share an expiry stay undecidable, or
+# the tie-break above would just have become "the account dir always wins".
+new_home f31d; mk_profile p1
+run_sut p1
+set_dir_account p1 same
+write_shaped_cred "$(store_of p1)" "$CRED_SHAPE_CLAUTH_LOGIN" one 5000
+write_shaped_cred "$ACCOUNT_ROOT/p1/.credentials.json" "$CRED_SHAPE_CLAUTH_LOGIN" two 5000
+cp "$(store_of p1)" "$TMPROOT/f31d.store"
+run_sut --reconcile
+want_out "two different grants with the same expiry are still undecidable" \
+         "neither could be shown to be the live one"
+if cmp -s "$TMPROOT/f31d.store" "$(store_of p1)"; then
+    ok "and the store is untouched"
+else
+    bad "an equal-expiry tie between two different grants was decided anyway"
+fi
+
+#-----------------------------------------------------------------------------
 section "F6b. A field only one writer stores must survive the merge"
 #-----------------------------------------------------------------------------
 # DESTROYED DATA BEFORE ANYONE NOTICED. clauth's store keeps 5 of the 7 keys
@@ -1930,7 +2026,7 @@ want_out "...and the build says so" "could not be copied aside"
 # whole point of it. A docs_claim row would demand it be rewritten to 159 today
 # and to something else next month, destroying the record to satisfy the guard.
 # scripts/test-claude-pick.sh is the same case, argued there first.
-EXPECTED_ROWS=236
+EXPECTED_ROWS=246
 
 if (( PASS + FAIL != EXPECTED_ROWS )); then
   printf '  \033[1;31m✗\033[0m row total: expected %d, ran %d — a check did not run\n' \
