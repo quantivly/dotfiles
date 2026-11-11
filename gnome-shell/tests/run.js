@@ -1,14 +1,15 @@
 // Entry point: gjs -m gnome-shell/tests/run.js
-// Its first import is the bus barrier (liveBusBarrier.js): the rows run only in a
-// process started with no reachable session or system bus, so a fake a row leaves
-// out can never reach the live session; a runner started otherwise runs itself
-// again behind it. Every test file is imported by a STATIC list, so a missing
-// file is an import error and never a silently smaller run.
-import './liveBusBarrier.js';
+// Its first import is the live-session barrier (liveSessionBarrier.js): the rows
+// run only in a process started with no reachable session or system bus and a
+// config home that cannot exist (so no herdr socket), so a fake a row leaves out
+// can never reach the live session; a runner started otherwise runs itself again
+// behind it. Every test file is imported by a STATIC list, so a missing file is
+// an import error and never a silently smaller run.
+import './liveSessionBarrier.js';
 import GLib from 'gi://GLib';
 import {runAll} from './harness.js';
 import './harness.test.js';
-import './liveBusBarrier.test.js';
+import './liveSessionBarrier.test.js';
 import './jsonFields.test.js';
 import './parsers.test.js';
 import './math.test.js';
