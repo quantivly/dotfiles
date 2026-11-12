@@ -4706,6 +4706,91 @@ check "nested: start records gc-log=1 and replay=1 in state/run.values for the o
   "both=[$(recorded_start_values --replay --gc-log)] gc-log=[$(recorded_start_values --gc-log)] replay=[$(recorded_start_values --replay)] none=[$(recorded_start_values)]" \
   "both=[replay=1 gc-log=1 ] gc-log=[gc-log=1 ] replay=[replay=1 ] none=[]"
 
+# `start` writes the run's cockpit fixture, which the cockpit service serves in
+# fixture mode (it never asks herdr): the checkout's nested-state.json with
+# every source stamped now and its interval the run's lifetime (a source is
+# stale only past three intervals, so never within the run), no window
+# candidates, a copy kept as written, the path recorded; the checkout's file is
+# never written. Run here on a scratch run directory: `start` itself never gets
+# that far in this suite. This row runs the real jq.
+FIXTURE_WRITE_RUN="$WIRING_TMP/fixture-write-run"
+FIXTURE_WRITE_NOW_USEC=1800000000123456
+FIXTURE_WRITE_LIFETIME_SECONDS=3600
+FIXTURE_WRITE_PATH="$FIXTURE_WRITE_RUN/state/cockpit-fixture.json"
+fixture_template_sum_before="$(sha256sum <"$COCKPIT_NESTED_FIXTURE")"
+if ! mkdir -p "$FIXTURE_WRITE_RUN/state" || ! : >"$FIXTURE_WRITE_RUN/state/run.values"; then
+  fatal "cannot lay out $FIXTURE_WRITE_RUN"
+fi
+nested_call write_run_cockpit_fixture "$FIXTURE_WRITE_RUN" "$FIXTURE_WRITE_LIFETIME_SECONDS" "$FIXTURE_WRITE_NOW_USEC"
+fixture_write_summary="exit=$?"
+fixture_write_summary+=" stamps=$(jq -c '[.state.sources[].sampledAtUsec] | unique' "$FIXTURE_WRITE_PATH" 2>&1)"
+fixture_write_summary+=" intervals=$(jq -c '[.state.sources[].intervalSeconds] | unique' "$FIXTURE_WRITE_PATH" 2>&1)"
+fixture_write_summary+=" sources=$(jq -c '.state.sources | keys' "$FIXTURE_WRITE_PATH" 2>&1)"
+fixture_write_summary+=" candidates=$(jq -c '.focusReply.windowPidCandidates' "$FIXTURE_WRITE_PATH" 2>&1)"
+fixture_write_summary+=" rest-kept=$(jq -n --slurpfile written "$FIXTURE_WRITE_PATH" --slurpfile template \
+  "$COCKPIT_NESTED_FIXTURE" '$written[0].state.layout == $template[0].state.layout
+    and $written[0].state.sources.sessions.rows == $template[0].state.sources.sessions.rows
+    and $written[0].focusReply.focused == $template[0].focusReply.focused' 2>&1)"
+fixture_write_summary+=" start-copy=$(cmp -s "$FIXTURE_WRITE_PATH" "$FIXTURE_WRITE_RUN/state/cockpit-fixture.start.json" \
+  && printf same || printf differs)"
+fixture_write_summary+=" recorded=$(grep -c -x -F "cockpit-fixture=$FIXTURE_WRITE_PATH" "$FIXTURE_WRITE_RUN/state/run.values")"
+fixture_write_summary+=" template=$([[ "$(sha256sum <"$COCKPIT_NESTED_FIXTURE")" == "$fixture_template_sum_before" ]] \
+  && printf unchanged || printf written)"
+fixture_write_summary+=" private=$(stat -c %a "$FIXTURE_WRITE_PATH" 2>&1)"
+fixture_write_summary+=" now=$(nested_call current_time_usec | grep -c -x -E '[1-9][0-9]{15}')"
+# The layout writes it (a layout it cannot write fails), and start lays out every run with its own lifetime.
+# shellcheck disable=SC2016  # Needles: the script's own lines, read as text.
+fixture_write_summary+=" laid-out=$(grep -c -x -F '    write_run_cockpit_fixture "$run_dir" "$lifetime_seconds" "$now_usec"' \
+  "$NESTED_SCRIPT")/$(grep -c -x -F '    if ! prepare_run_directory "$run_dir" "$run_suffix" "$lifetime_seconds" ||' \
+  "$NESTED_SCRIPT")"
+check "nested: start writes the run's cockpit fixture from nested-state.json: every source stamped now, its interval the run's lifetime, no window candidates, a copy kept as written, the path recorded; the checkout's file untouched (needs jq)" \
+  "$fixture_write_summary" \
+  "exit=0 stamps=[1800000000123456] intervals=[3600] sources=[\"mounts\",\"network\",\"sessions\"] candidates=[] rest-kept=true start-copy=same recorded=1 template=unchanged private=600 now=1 laid-out=1/1"
+
+# The fixture reaches the cockpit service alone: started by the in-bus stage,
+# the cockpit service sees RESOURCE_PULSE_COCKPIT_FIXTURE naming the run's
+# fixture, the sampler service does not, and the stage itself (which becomes
+# gnome-shell) keeps none. A run with no fixture recorded is refused (exit 2,
+# the reason in state/refused) before the cockpit service starts. gjs is a
+# stand-in that records which module it was started with, and the variable.
+SERVICE_START_RUN="$WIRING_TMP/service-start-run"
+SERVICE_START_STUB_BIN="$WIRING_TMP/service-start-bin"
+SERVICE_START_RECORDS="$WIRING_TMP/service-start-records"
+# shellcheck disable=SC2016  # The stand-in's own source: its $2 and the variable expand when it runs.
+install_stub "$SERVICE_START_STUB_BIN" gjs "$(printf '#!/bin/bash\nprintf "%%s:%%s\\n" "${2##*/}" "${RESOURCE_PULSE_COCKPIT_FIXTURE-unset}" >>%q' \
+  "$SERVICE_START_RECORDS")"
+# service_start_verdict <fixture recorded: yes or no> prints exit/each start the stand-in saw/the stage's variable/refused.
+service_start_verdict() {
+  local service_start_output service_start_exit
+  if ! rm -rf "$SERVICE_START_RUN" || ! mkdir -p "$SERVICE_START_RUN/state" "$SERVICE_START_RUN/log"; then
+    fatal "cannot lay out $SERVICE_START_RUN"
+  fi
+  : >"$SERVICE_START_RECORDS"
+  : >"$SERVICE_START_RUN/state/run.values"
+  if [[ "$1" == yes ]]; then
+    : >"$SERVICE_START_RUN/state/cockpit-fixture.json"
+    printf 'cockpit-fixture=%s\n' "$SERVICE_START_RUN/state/cockpit-fixture.json" >>"$SERVICE_START_RUN/state/run.values"
+  fi
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  service_start_output="$(env -u RESOURCE_PULSE_COCKPIT_FIXTURE PATH="$SERVICE_START_STUB_BIN:$PATH" bash -c '
+    source "$1" || exit 99
+    wait_for_nested_service() { return 0; }
+    start_nested_sampler "$2" && start_nested_cockpit "$2"
+    wait
+    printf "stage:%s" "${RESOURCE_PULSE_COCKPIT_FIXTURE-unset}"
+  ' service-start "$NESTED_SCRIPT" "$SERVICE_START_RUN" 2>/dev/null)"
+  service_start_exit=$?
+  printf '%s/[%s]/%s/%s' "$service_start_exit" "$(LC_ALL=C sort "$SERVICE_START_RECORDS" | tr '\n' ' ')" \
+    "$service_start_output" "$( [[ -e "$SERVICE_START_RUN/state/refused" ]] \
+      && grep -c -F 'no cockpit fixture' "$SERVICE_START_RUN/state/refused" || printf none)"
+}
+service_start_summary="fixture=$(service_start_verdict yes) no-fixture=$(service_start_verdict no)"
+# shellcheck disable=SC2016  # A needle: the script's own line, read as text.
+service_start_summary+=" stage-starts-it=$(grep -c -x -F '    start_nested_cockpit "$run_dir"' "$NESTED_SCRIPT")"
+check "nested: the run's fixture reaches the cockpit service alone (RESOURCE_PULSE_COCKPIT_FIXTURE), not the sampler nor the stage that becomes gnome-shell; a run with no fixture recorded is refused before the cockpit starts" \
+  "$service_start_summary" \
+  "fixture=0/[cockpit.js:$SERVICE_START_RUN/state/cockpit-fixture.json main.js:unset ]/stage:unset/none no-fixture=2/[main.js:unset ]//1 stage-starts-it=1"
+
 nested_run screenshot ../escape.png
 check "nested: a screenshot name with a / in it is refused before anything runs" \
   "$NESTED_EXIT:$(nested_stub_call_count):$(grep -c -F 'a screenshot name is a plain file name' <<<"$NESTED_OUTPUT")" "2:0:1"
@@ -5166,9 +5251,10 @@ cockpit_start_summary+=" $(grep '^cockpit-recorded-before-the-shell=' "$NESTED_S
 cockpit_start_summary+=" asked-the-private-bus=$(grep -c -x -F "busctl --address=$SERVICE_RUN_PRIVATE_BUS call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s $COCKPIT_BUS_NAME" "$NESTED_SERVICE_CALLS" | sed 's/^[1-9][0-9]*$/yes/')"
 cockpit_start_summary+=" logged=$(grep -c -x -F "$NESTED_SERVICE_STAND_IN_TEXT" "$SERVICE_RUN/log/cockpit.log" 2>/dev/null)"
 end_recorded_stand_ins "$SERVICE_RUN"
-check "nested: the in-bus stage starts the run's copy of service/cockpit.js after the sampler, on the private bus, before the shell" \
+# Beyond the allowlist the cockpit service gets one name: the run's fixture's (fixture mode).
+check "nested: the in-bus stage starts the run's copy of service/cockpit.js after the sampler, on the private bus, before the shell, with only the allowlist and RESOURCE_PULSE_COCKPIT_FIXTURE" \
   "$cockpit_start_summary" \
-  "exit=0 starts=[$NESTED_SERVICE_MAIN_RELATIVE_PATH $NESTED_COCKPIT_MAIN_RELATIVE_PATH ] bus=private allowlist-seen=22 unexpected=[] recorded=2 cockpit-recorded-before-the-shell=1 asked-the-private-bus=yes logged=1"
+  "exit=0 starts=[$NESTED_SERVICE_MAIN_RELATIVE_PATH $NESTED_COCKPIT_MAIN_RELATIVE_PATH ] bus=private allowlist-seen=22 unexpected=[RESOURCE_PULSE_COCKPIT_FIXTURE ] recorded=2 cockpit-recorded-before-the-shell=1 asked-the-private-bus=yes logged=1"
 
 check "nested: the harness names the run's copy of service/cockpit.js and the cockpit's bus name, beside the sampler's" \
   "entry=$(nested_constant_text COCKPIT_MAIN_RELATIVE_PATH) bus=$(nested_constant_text COCKPIT_BUS_NAME)" \
@@ -5201,9 +5287,9 @@ gc_log_summary+=" with: exit=$NESTED_SERVICE_EXIT $(shell_environment_summary)"
 gc_log_summary+=" sampler=[$(unexpected_env_names "$SAMPLER_ENV_NAMES_SEEN")]"
 gc_log_summary+=" cockpit=[$(unexpected_env_names "$COCKPIT_ENV_NAMES_SEEN")]"
 end_recorded_stand_ins "$GC_LOG_RUN"
-check "nested: with gc-log=1 the nested gnome-shell gets exactly JS_GC_PROFILE=0 and JS_GC_PROFILE_NURSERY=0 beyond the allowlist, without it neither, and the services never" \
+check "nested: with gc-log=1 the nested gnome-shell gets exactly JS_GC_PROFILE=0 and JS_GC_PROFILE_NURSERY=0 beyond the allowlist, without it neither, and the services never (the cockpit only its fixture's name)" \
   "$gc_log_summary" \
-  "without: exit=0 unexpected=[] allowlist=22 shell-gc-variables=JS_GC_PROFILE=unset,JS_GC_PROFILE_NURSERY=unset with: exit=0 unexpected=[JS_GC_PROFILE JS_GC_PROFILE_NURSERY ] allowlist=22 shell-gc-variables=JS_GC_PROFILE=0,JS_GC_PROFILE_NURSERY=0 sampler=[] cockpit=[]"
+  "without: exit=0 unexpected=[] allowlist=22 shell-gc-variables=JS_GC_PROFILE=unset,JS_GC_PROFILE_NURSERY=unset with: exit=0 unexpected=[JS_GC_PROFILE JS_GC_PROFILE_NURSERY ] allowlist=22 shell-gc-variables=JS_GC_PROFILE=0,JS_GC_PROFILE_NURSERY=0 sampler=[] cockpit=[RESOURCE_PULSE_COCKPIT_FIXTURE ]"
 
 # Fixed input: with replay=1 recorded, as `start --replay` does, the run's copy
 # of the replay service starts in place of service/main.js, given the run's copy
@@ -5330,7 +5416,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1083
+EXPECTED_ROWS=1085
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

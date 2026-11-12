@@ -42,9 +42,14 @@
 #                start), so SpiderMonkey logs every collection (MajorGC: and MinorGC:
 #                lines) to its stderr, log/shell.log
 #   cockpit      the run's copy of the cockpit service (service/cockpit.js under gjs), started
-#                the same way after the sampler, reading the config template copied into the
-#                run's XDG_CONFIG_HOME; it finds no herdr (whose socket it looks for under that
-#                config home) and no NetworkManager or UPower on the fake system bus
+#                the same way after the sampler, in fixture mode: start writes the run's
+#                state/cockpit-fixture.json from tests/fixtures/cockpit/nested-state.json, every
+#                source stamped now with an interval of the run's lifetime (so none goes stale
+#                within it) and no window candidates, and RESOURCE_PULSE_COCKPIT_FIXTURE names it
+#                to that service alone. It then runs no source, reads no config and never asks
+#                herdr (its client is never built), and answers every FocusSession with the file's
+#                focusReply; it reads the file again on change. Its config home is the run's too,
+#                so even outside fixture mode it would find no herdr socket
 #   identity     a run's launcher, supervisor, services and gnome-shell are recorded by pid AND start
 #                time (stat field 22), and count only while both match: a pid alone can be
 #                reused once its process ends
@@ -328,6 +333,22 @@ readonly -a GC_LOG_ENVIRONMENT_ASSIGNMENTS=(JS_GC_PROFILE=0 JS_GC_PROFILE_NURSER
 # The cockpit's layout config: the checkout's template, copied to this path under the run's XDG_CONFIG_HOME.
 readonly COCKPIT_CONFIG_TEMPLATE="$REPO_ROOT/examples/resource-pulse-cockpit.json.template"
 readonly COCKPIT_CONFIG_RELATIVE_PATH='resource-pulse/cockpit.json'
+# The cockpit service's fixture mode (service/cockpit.js: it runs no source, reads no config, never asks herdr, and
+# answers every FocusSession with the file's focusReply): the checkout's nested fixture, written into the run with
+# fresh stamps (write_run_cockpit_fixture) beside a copy as written, recorded as cockpit-fixture= in state/run.values,
+# and named to the cockpit service alone by its variable.
+readonly COCKPIT_FIXTURE_TEMPLATE="$REPO_ROOT/gnome-shell/tests/fixtures/cockpit/nested-state.json"
+readonly COCKPIT_FIXTURE_RELATIVE_PATH='state/cockpit-fixture.json'
+readonly COCKPIT_FIXTURE_START_RELATIVE_PATH='state/cockpit-fixture.start.json'
+readonly COCKPIT_FIXTURE_RUN_VALUE_NAME='cockpit-fixture'
+readonly COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE='RESOURCE_PULSE_COCKPIT_FIXTURE'
+# Every source stamped now ($now_usec) with an interval of the run's lifetime ($interval_seconds), no window candidates.
+# shellcheck disable=SC2016  # A jq program: jq binds $now_usec and $interval_seconds.
+readonly COCKPIT_FIXTURE_FRESH_JQ='
+    .state.sources |= with_entries(.value.sampledAtUsec = $now_usec | .value.intervalSeconds = $interval_seconds)
+    | .focusReply.windowPidCandidates = []'
+# The wall clock in microseconds, as current_time_usec prints it: sixteen digits until the year 2286.
+readonly TIME_USEC_PATTERN='^[1-9][0-9]{15}$'
 
 readonly EXIT_REQUEST_FAILED=1
 readonly EXIT_REFUSED=2
@@ -403,6 +424,9 @@ SESSION_PIDS=()
 REMAINING_SESSION_PID_COUNT=0
 # The run values start's options ask for (gc-log, replay), in the order given, filled by parse_start_options.
 REQUESTED_START_RUN_VALUE_NAMES=()
+# What start_nested_service adds to the environment of the one service it starts next (NAME=value words), set and
+# cleared by start_nested_cockpit around its call: the fixture's variable reaches the cockpit service alone.
+NEXT_SERVICE_ENVIRONMENT_ASSIGNMENTS=()
 # The window perf opened over the card, by pid and start time (end_perf_window ends only that process, and only
 # while it is still perf's own child); the start time stays empty when it could not be read.
 PERF_WINDOW_PID=""
@@ -801,14 +825,16 @@ render_bus_config() {
 # Lay out a fresh run directory: the private homes and runtime dir, the bus
 # configs, the one dconf service, the session mode, the app masks, the
 # unsafe-mode helper, a copy of the checkout's extension, a copy of the replay
-# service (which only --replay starts), and the cockpit's config template in
-# the run's config home.
+# service (which only --replay starts), the cockpit's config template in the
+# run's config home, and the cockpit's fixture (write_run_cockpit_fixture), its
+# interval the run's lifetime.
 # Arguments:
 #   $1 - run directory (exists, empty, 0700)
 #   $2 - run suffix
+#   $3 - the run's lifetime, in seconds (DEFAULT_LIFETIME_SECONDS when not given)
 #######################################
 prepare_run_directory() {
-    local run_dir="$1" run_suffix="$2" replay_file_name
+    local run_dir="$1" run_suffix="$2" lifetime_seconds="${3:-$DEFAULT_LIFETIME_SECONDS}" replay_file_name now_usec
     local cockpit_config_dir="config/${COCKPIT_CONFIG_RELATIVE_PATH%/*}"
     local -a subdirectories=(run config "$cockpit_config_dir" cache home tmp data/applications
         data/gnome-shell/extensions sysdata/gnome-shell/modes bus/session-services state log shots
@@ -827,6 +853,8 @@ prepare_run_directory() {
     cp -R -- "$NESTED_FILES_DIR/$UNSAFE_MODE_HELPER_UUID" "$run_dir/data/gnome-shell/extensions/" || return 1
     cp -R -- "$EXTENSION_SOURCE_DIR" "$run_dir/data/gnome-shell/extensions/" || return 1
     cp -- "$COCKPIT_CONFIG_TEMPLATE" "$run_dir/config/$COCKPIT_CONFIG_RELATIVE_PATH" || return 1
+    now_usec="$(current_time_usec)" || return 1
+    write_run_cockpit_fixture "$run_dir" "$lifetime_seconds" "$now_usec"
 }
 
 #######################################
@@ -900,6 +928,89 @@ is_isolated_environment() {
         return 1
     fi
     [[ -z "${WAYLAND_DISPLAY:-}" && -z "${DISPLAY:-}" ]] || { note "a display is set"; return 1; }
+}
+
+#######################################
+# Print the wall clock now in microseconds since the epoch, from bash's own
+# EPOCHREALTIME (its decimal separator, whatever the locale's, dropped); fail
+# unless that is sixteen digits.
+#######################################
+current_time_usec() {
+    local time_usec="${EPOCHREALTIME//[!0-9]/}"
+    [[ "$time_usec" =~ $TIME_USEC_PATTERN ]] || return 1
+    printf '%s' "$time_usec"
+}
+
+#######################################
+# Write the run's cockpit fixture, which the cockpit service serves in fixture
+# mode: the checkout's nested-state.json with every source's stamp set to now
+# and its interval to the run's lifetime (a source is stale only past three
+# intervals, so none goes stale within the run), and no window candidates
+# (`window` names its window there). A copy of it as written stays beside it,
+# for the check's steps to restore; the checkout's file is never written. The
+# fixture's path is recorded in state/run.values (cockpit-fixture=).
+# Arguments:
+#   $1 - run directory
+#   $2 - the run's lifetime, in seconds
+#   $3 - now, in microseconds since the epoch
+#######################################
+write_run_cockpit_fixture() {
+    local run_dir="$1" lifetime_seconds="$2" now_usec="$3"
+    local fixture_path="$run_dir/$COCKPIT_FIXTURE_RELATIVE_PATH"
+    local start_copy_path="$run_dir/$COCKPIT_FIXTURE_START_RELATIVE_PATH"
+    (umask "$PRIVATE_UMASK" && jq --argjson now_usec "$now_usec" --argjson interval_seconds "$lifetime_seconds" \
+        "$COCKPIT_FIXTURE_FRESH_JQ" "$COCKPIT_FIXTURE_TEMPLATE" >"$start_copy_path") || return 1
+    cp -- "$start_copy_path" "$fixture_path" || return 1
+    record_run_value "$run_dir" "$COCKPIT_FIXTURE_RUN_VALUE_NAME" "$fixture_path"
+}
+
+#######################################
+# Succeed when the run's cockpit service serves the run's own fixture: the
+# fixture recorded is the run's, and it exists. In fixture mode the service
+# never asks herdr (service/cockpit.js _startFixture builds no herdr client),
+# so a click on a session row can move no pane.
+# Arguments:
+#   $1 - run directory
+#######################################
+is_cockpit_fixture_run() {
+    local run_dir="$1"
+    [[ "$(recorded_run_value "$run_dir" "$COCKPIT_FIXTURE_RUN_VALUE_NAME")" == "$run_dir/$COCKPIT_FIXTURE_RELATIVE_PATH" &&
+        -f "$run_dir/$COCKPIT_FIXTURE_RELATIVE_PATH" ]]
+}
+
+#######################################
+# Replace the run's cockpit fixture with a jq program's output, in one rename,
+# so the cockpit service (which reads it again on change) never reads it half
+# written. A program that fails leaves it as it was.
+# Arguments:
+#   $1 - run directory
+#   $2 - jq program
+#   $@ - jq's own arguments (--argjson name value ...)
+#######################################
+replace_run_cockpit_fixture() {
+    local run_dir="$1" jq_program="$2" fixture_path staging_path
+    shift 2
+    fixture_path="$run_dir/$COCKPIT_FIXTURE_RELATIVE_PATH"
+    staging_path="$(mktemp "$fixture_path.XXXXXX")" || return 1
+    if ! jq "$@" "$jq_program" "$fixture_path" >"$staging_path" || ! mv -f -- "$staging_path" "$fixture_path"; then
+        rm -f -- "$staging_path"
+        return 1
+    fi
+}
+
+#######################################
+# Put the run's cockpit fixture back as start wrote it, in one rename.
+# Arguments:
+#   $1 - run directory
+#######################################
+restore_run_cockpit_fixture() {
+    local run_dir="$1" staging_path
+    staging_path="$(mktemp "$run_dir/$COCKPIT_FIXTURE_RELATIVE_PATH.XXXXXX")" || return 1
+    if ! cp -- "$run_dir/$COCKPIT_FIXTURE_START_RELATIVE_PATH" "$staging_path" ||
+        ! mv -f -- "$staging_path" "$run_dir/$COCKPIT_FIXTURE_RELATIVE_PATH"; then
+        rm -f -- "$staging_path"
+        return 1
+    fi
 }
 
 #######################################
@@ -1314,6 +1425,8 @@ wait_for_nested_service() {
 # time, for `stop`, and logged to log/<recorded name>.log. Refuses the run when
 # the service exits before owning its name (as gjs does at once with a module it
 # cannot load), or does not own it in time.
+# It gets NEXT_SERVICE_ENVIRONMENT_ASSIGNMENTS on top (env execs gjs in place, so
+# the pid recorded is the service's).
 # Arguments:
 #   $1 - run directory
 #   $2 - the name to record it under (service, cockpit)
@@ -1325,7 +1438,8 @@ start_nested_service() {
     local run_dir="$1" process_name="$2" main_relative_path="$3" bus_name="$4"
     local log_relative_path="log/$process_name.log"
     shift 4
-    gjs -m "$run_dir/$main_relative_path" "$@" >"$run_dir/$log_relative_path" 2>&1 &
+    env "${NEXT_SERVICE_ENVIRONMENT_ASSIGNMENTS[@]}" gjs -m "$run_dir/$main_relative_path" "$@" \
+        >"$run_dir/$log_relative_path" 2>&1 &
     record_running_process "$run_dir" "$process_name" "$!"
     wait_for_nested_service "$run_dir" "$process_name" "$bus_name" \
         || refuse_run "$run_dir" "the service at $main_relative_path did not take $bus_name ($log_relative_path)"
@@ -1350,6 +1464,22 @@ start_nested_sampler() {
 }
 
 #######################################
+# Start the run's copy of the cockpit service in fixture mode: with
+# COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE naming the run's fixture, which only
+# this service's environment gets (never this stage's, which becomes
+# gnome-shell). Refuses the run when start wrote no fixture.
+# Arguments:
+#   $1 - run directory
+#######################################
+start_nested_cockpit() {
+    local run_dir="$1"
+    is_cockpit_fixture_run "$run_dir" || refuse_run "$run_dir" "no cockpit fixture was written for the run"
+    NEXT_SERVICE_ENVIRONMENT_ASSIGNMENTS=("$COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE=$run_dir/$COCKPIT_FIXTURE_RELATIVE_PATH")
+    start_nested_service "$run_dir" cockpit "$COCKPIT_MAIN_RELATIVE_PATH" "$COCKPIT_BUS_NAME"
+    NEXT_SERVICE_ENVIRONMENT_ASSIGNMENTS=()
+}
+
+#######################################
 # With --gc-log (gc-log=1 recorded), export the two collection-log variables
 # and nothing else. Called last before `exec gnome-shell`, after both services
 # started, so the shell alone gets them.
@@ -1364,7 +1494,7 @@ export_gc_log_variables_when_requested() {
 #######################################
 # Stage 3, inside the private session bus: refuse unless isolated, write the
 # nested settings, start the sampler service (or the replay service) and then
-# the cockpit service, record the bus, then become gnome-shell (same pid), with
+# the cockpit service in fixture mode, record the bus, then become gnome-shell (same pid), with
 # the collection log's two variables when asked for.
 # Arguments:
 #   $1 - run directory
@@ -1378,7 +1508,7 @@ run_inside_private_session_bus() {
     write_nested_settings || refuse_run "$run_dir" "a nested setting could not be written"
     [[ -s "$XDG_CONFIG_HOME/dconf/user" ]] || refuse_run "$run_dir" "the settings did not land in the nested dconf"
     start_nested_sampler "$run_dir"
-    start_nested_service "$run_dir" cockpit "$COCKPIT_MAIN_RELATIVE_PATH" "$COCKPIT_BUS_NAME"
+    start_nested_cockpit "$run_dir"
     record_running_process "$run_dir" gnome-shell "$$"
     printf '%s\n' "$DBUS_SESSION_BUS_ADDRESS" >"$run_dir/state/session.addr"
     export_gc_log_variables_when_requested "$run_dir"
@@ -1516,9 +1646,10 @@ start_subcommand() {
         die "the run directory must be at most $MAX_RUN_DIR_PATH_CHARS plain characters (sockets live in it):" \
             "set RESOURCE_PULSE_NESTED_BASE to a shorter directory than $base_dir"
     fi
-    if ! prepare_run_directory "$run_dir" "$run_suffix" || ! verified_run_suffix "$run_dir" >/dev/null; then
+    if ! prepare_run_directory "$run_dir" "$run_suffix" "$lifetime_seconds" ||
+        ! verified_run_suffix "$run_dir" >/dev/null; then
         rm -rf -- "$run_dir"
-        die "could not lay out the run directory"
+        die "could not lay out the run directory (its cockpit fixture included)"
     fi
     if ! session_bus_config_permits_only_dconf "$run_dir/bus/session-bus.conf" "$run_dir/bus/session-services" ||
         ! system_bus_config_activates_nothing "$run_dir/bus/system-bus.conf"; then
