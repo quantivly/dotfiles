@@ -59,6 +59,11 @@ const MS_PER_SECOND = 1000;
  * that a draw with no Sample since the change, sooner than the interval less this, is no fallback's.
  */
 const FALLBACK_EARLIEST_MARGIN_MS = 500;
+/**
+ * cockpit-check.js SAMPLE_OWN_DRAW_MAX_GAP_MS: the most a name can be drawn before the watch counts the Sample that
+ * followed for the draw to be that Sample's own.
+ */
+const SAMPLE_OWN_DRAW_MAX_GAP_MS = 250;
 /** The fake pacing's fallback id while one is armed (GLib's are positive). */
 const ARMED_FALLBACK_SOURCE_ID = 7;
 
@@ -1124,9 +1129,9 @@ test('cockpit check: draw-watch is ok for the name drawn on the first Sample aft
 
 test('cockpit check: draw-watch takes a name drawn with no Sample since the change, sooner than the pacing\'s ' +
     'fallback can fire (lib/constants.js COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS less the check\'s margin, counted from ' +
-    'the first cockpit event the watch saw), for bad, naming the milliseconds; at that bound or later, after a ' +
-    'fallback armed before the watch was, or with a pacing it cannot read, the fallback may have drawn it: ' +
-    'could-not-judge; the dropdown\'s watch reads the dropdown\'s pacing', () => {
+    'the first cockpit event the watch saw), for bad, naming the milliseconds from the sessions\' change; at that ' +
+    'bound or later, after a fallback armed before the watch was, or with a pacing it cannot read, could-not-judge, ' +
+    'each saying which; the dropdown\'s watch reads the dropdown\'s pacing', () => {
     const newName = 'alpha-sync-2';
     const earliestFallbackMs = COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS * MS_PER_SECOND - FALLBACK_EARLIEST_MARGIN_MS;
     /**
@@ -1166,8 +1171,12 @@ test('cockpit check: draw-watch takes a name drawn with no Sample since the chan
     const armLayerFallback = shell => {
         shell.stateObj._layer._pacing._fallbackSourceId = ARMED_FALLBACK_SOURCE_ID;
     };
-    const fallbackDrewIt = `${COULD_NOT_JUDGE}: alpha-sync-2 was drawn with no Sample since the change: the pacing's ` +
-        'fallback timeout drew it, so the sampler was silent';
+    const drawnWithNoSample = `${COULD_NOT_JUDGE}: alpha-sync-2 was drawn with no Sample since the change`;
+    const fallbackDrewIt = `${drawnWithNoSample}: the pacing's fallback timeout drew it, so the sampler was silent`;
+    const fallbackArmedBefore = surface => `${drawnWithNoSample}: a fallback the ${surface}'s pacing armed before ` +
+        'the watch was armed may have drawn it, so the sampler is not known to be silent';
+    const pacingUnreadable = (surface, fieldPath) => `${drawnWithNoSample}: cannot read the ${surface}'s pacing ` +
+        `(${fieldPath}), so cannot tell whether its fallback drew it`;
     const drawnTooSoon = drawnMs => `${BAD}: alpha-sync-2 was drawn ${drawnMs} ms after the change with no Sample ` +
         `since: sooner than the pacing's fallback can fire (${earliestFallbackMs} ms at the earliest), so the pacing ` +
         'did not draw it';
@@ -1180,18 +1189,86 @@ test('cockpit check: draw-watch takes a name drawn with no Sample since the chan
         }}),
         // 600 ms after the sessions' change, but the other source's change, 2000 ms before it, could have armed it.
         anEarlierEventFirst: drawnWithNoSampleAt({drawnAtMs: 2600, changeAtMs: 2000, isOtherEventFirst: true}),
+        // 1500 ms after the other source's change, 500 ms after the sessions' one: the bound counts from the first,
+        // the detail from the sessions' change.
+        anEarlierEventFirstTooSoon: drawnWithNoSampleAt({drawnAtMs: 1500, changeAtMs: 1000, isOtherEventFirst: true}),
         dropdownTooSoon: drawnWithNoSampleAt({drawnAtMs: 100, surface: 'dropdown', prepare: armLayerFallback}),
         dropdownFallbackArmed: drawnWithNoSampleAt({drawnAtMs: 100, surface: 'dropdown', prepare: shell => {
             shell.stateObj._indicator._sessionsPacing._fallbackSourceId = ARMED_FALLBACK_SOURCE_ID;
         }}),
+        dropdownPacingUnreadable: drawnWithNoSampleAt({drawnAtMs: 100, surface: 'dropdown', prepare: shell => {
+            delete shell.stateObj._indicator._sessionsPacing;
+        }}),
     }, {
         justBeforeTheBound: drawnTooSoon(earliestFallbackMs - 1),
         atTheBound: fallbackDrewIt,
-        fallbackArmedBeforeTheWatch: fallbackDrewIt,
-        pacingUnreadable: fallbackDrewIt,
+        fallbackArmedBeforeTheWatch: fallbackArmedBefore('layer'),
+        pacingUnreadable: pacingUnreadable('layer', '_layer._pacing._fallbackSourceId'),
         anEarlierEventFirst: fallbackDrewIt,
+        anEarlierEventFirstTooSoon: drawnTooSoon(500),
         dropdownTooSoon: drawnTooSoon(100),
-        dropdownFallbackArmed: fallbackDrewIt,
+        dropdownFallbackArmed: fallbackArmedBefore('dropdown'),
+        dropdownPacingUnreadable: pacingUnreadable('dropdown', '_indicator._sessionsPacing._fallbackSourceId'),
+    });
+});
+
+test('cockpit check: draw-watch takes a name drawn more than SAMPLE_OWN_DRAW_MAX_GAP_MS before the Sample counted ' +
+    'after it (by a later, an idle, any route but that Sample) as drawn with no Sample since: bad sooner than the ' +
+    'pacing\'s fallback can fire, naming the milliseconds after the change and before that Sample, could-not-judge ' +
+    'at the fallback\'s time, never ok; drawn within the gap is that Sample\'s draw, ok; a second read gives the ' +
+    'same answer', () => {
+    const newName = 'alpha-sync-2';
+    const earliestFallbackMs = COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS * MS_PER_SECOND - FALLBACK_EARLIEST_MARGIN_MS;
+    const fallbackIntervalMs = COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS * MS_PER_SECOND;
+    const strayDrawAtMs = 100;
+    /**
+     * Arms a layer watch on a fresh shell, counts one Sample, lets the sessions' change come at 0 ms, draws the name at
+     * drawnAtMs, counts the next Sample at sampleAtMs (the watch's listener runs after the extension's, so a Sample's
+     * own draw comes first at the same time), and reads the watch twice.
+     *
+     * @param {{drawnAtMs: number, sampleAtMs: number}} script - When, in ms of the fake's clock after the change.
+     * @returns {string[]} Each read's verdict, with the detail for a bad or a could-not-judge.
+     */
+    const drawnThenSampledAt = ({drawnAtMs, sampleAtMs}) => {
+        const shell = makeHealthyShell();
+        const nameLabel = shell.stateObj._layer._cardsById.get('sessions')._sessionRows[0].nameLabel;
+        const events = clientEvents(shell);
+        check(shell, 'draw-watch-arm', {surface: 'layer', name: newName});
+        events.sample();
+        const changeUsec = shell.clock.usec;
+        events.change();
+        shell.clock.usec = changeUsec + drawnAtMs * USEC_PER_MS;
+        nameLabel.text = newName;
+        shell.clock.usec = changeUsec + sampleAtMs * USEC_PER_MS;
+        events.sample();
+        return [check(shell, 'draw-watch-read'), check(shell, 'draw-watch-read')]
+            .map(({verdict, detail}) => (verdict === OK ? OK : `${verdict}: ${detail}`));
+    };
+    const drawnBeforeTheSample = (drawnMs, beforeSampleMs) => `${BAD}: alpha-sync-2 was drawn ${drawnMs} ms after ` +
+        `the change with no Sample since, ${beforeSampleMs} ms before the next Sample (more than ` +
+        `${SAMPLE_OWN_DRAW_MAX_GAP_MS} ms, so not that Sample's draw): sooner than the pacing's fallback can fire ` +
+        `(${earliestFallbackMs} ms at the earliest), so the pacing did not draw it`;
+    const fallbackDrewIt = `${COULD_NOT_JUDGE}: alpha-sync-2 was drawn with no Sample since the change: the pacing's ` +
+        'fallback timeout drew it, so the sampler was silent';
+    const twice = answer => [answer, answer];
+    assertEqual({
+        aStrayDrawThenASample: drawnThenSampledAt({drawnAtMs: strayDrawAtMs, sampleAtMs: 500}),
+        drawnInItsSample: drawnThenSampledAt({drawnAtMs: 1500, sampleAtMs: 1500}),
+        justUnderTheGap: drawnThenSampledAt({drawnAtMs: strayDrawAtMs,
+            sampleAtMs: strayDrawAtMs + SAMPLE_OWN_DRAW_MAX_GAP_MS - 1}),
+        atTheGap: drawnThenSampledAt({drawnAtMs: strayDrawAtMs,
+            sampleAtMs: strayDrawAtMs + SAMPLE_OWN_DRAW_MAX_GAP_MS}),
+        justOverTheGap: drawnThenSampledAt({drawnAtMs: strayDrawAtMs,
+            sampleAtMs: strayDrawAtMs + SAMPLE_OWN_DRAW_MAX_GAP_MS + 1}),
+        atTheFallbacksTimeThenASample: drawnThenSampledAt({drawnAtMs: fallbackIntervalMs,
+            sampleAtMs: fallbackIntervalMs + 500}),
+    }, {
+        aStrayDrawThenASample: twice(drawnBeforeTheSample(strayDrawAtMs, 400)),
+        drawnInItsSample: twice(OK),
+        justUnderTheGap: twice(OK),
+        atTheGap: twice(OK),
+        justOverTheGap: twice(drawnBeforeTheSample(strayDrawAtMs, SAMPLE_OWN_DRAW_MAX_GAP_MS + 1)),
+        atTheFallbacksTimeThenASample: twice(fallbackDrewIt),
     });
 });
 
