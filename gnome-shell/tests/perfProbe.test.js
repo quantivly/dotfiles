@@ -546,6 +546,8 @@ test('perf probe: read-cockpit refuses with nothing attached, in the disabled mo
         },
     };
     const refusalOf = answer => ({refused: typeof answer.refused, missing: answer.missing});
+    // With nothing attached in the enabled mode, the reason is that one: the parts check would refuse it too.
+    const modeRefusalOf = answer => ({refused: answer.refused?.includes('attach-enabled comes before it') ?? false});
     const outcomes = {};
     for (const [caseName, removeField] of Object.entries(removals)) {
         const parts = makeExtensionParts();
@@ -559,10 +561,10 @@ test('perf probe: read-cockpit refuses with nothing attached, in the disabled mo
     const freshParts = makeExtensionParts();
     const freshShell = makeFakeShell(freshParts);
     addFakeCockpit(freshShell, freshParts, makeFakeLayer(GRID_CARD_IDS).layer, GRID_CARD_IDS);
-    outcomes.nothingAttached = refusalOf(runProbe(freshShell.scope, 'read-cockpit'));
+    outcomes.nothingAttached = modeRefusalOf(runProbe(freshShell.scope, 'read-cockpit'));
     const disabledShell = makeFakeShell(null);
     runProbe(disabledShell.scope, 'attach-disabled');
-    outcomes.disabledMode = refusalOf(runProbe(disabledShell.scope, 'read-cockpit'));
+    outcomes.disabledMode = modeRefusalOf(runProbe(disabledShell.scope, 'read-cockpit'));
     runProbe(freshShell.scope, 'attach-enabled');
     freshShell.extension._card = makeExtensionParts().card;
     outcomes.partsChanged = refusalOf(runProbe(freshShell.scope, 'read-cockpit'));
@@ -576,8 +578,8 @@ test('perf probe: read-cockpit refuses with nothing attached, in the disabled mo
         layerPacing: missingField('layerPacing'),
         dropdownPacing: missingField('dropdownPacing'),
         dropdownPacingTimer: missingField('dropdownPacing'),
-        nothingAttached: {refused: 'string'},
-        disabledMode: {refused: 'string'},
+        nothingAttached: {refused: true},
+        disabledMode: {refused: true},
         partsChanged: {refused: 'string'},
     });
 });

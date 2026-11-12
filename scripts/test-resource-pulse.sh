@@ -4352,9 +4352,12 @@ perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict visible-busy '[]' nul
 perf_cockpit_setup_summary+=" not-of-types: $(perf_cockpit_setup_verdict covered-busy '"none"' \
   "$PERF_GRID_CARD_IDS_JSON" "$PERF_COCKPIT_NOT_OF_TYPES")"
 perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict covered-busy '[]' '"apps"' "$PERF_COCKPIT_NOT_OF_TYPES")"
+# Numbers, which jq's join would write out as words: only the type check refuses them.
+perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict covered-busy '[1]' "$PERF_GRID_CARD_IDS_JSON" \
+  "$PERF_COCKPIT_NOT_OF_TYPES")"
 check "nested: perf takes an enabled state's grid as set up only when no card of it can be seen in the covered states and every card it draws in visible-busy (the v2 card alone with no layer); a mismatch, or facts not of their types, is exit 2 naming the state and what was expected (needs jq)" \
   "$perf_cockpit_setup_summary" \
-  "set-up: 0/0/1 0/0/1 0/0/1 0/0/1 grid-seen-while-covered: 2/1/0 grid-partly-covered: 2/1/0 no-grid: 0/0/1 0/0/1 2/1/0 not-of-types: 2/1/0 2/1/0"
+  "set-up: 0/0/1 0/0/1 0/0/1 0/0/1 grid-seen-while-covered: 2/1/0 grid-partly-covered: 2/1/0 no-grid: 0/0/1 0/0/1 2/1/0 not-of-types: 2/1/0 2/1/0 2/1/0"
 
 # perf's cockpit verdict, a pure function of each enabled state's record
 # "<redirects> <armed fallbacks>": the layer and the system cell's wrapper draw
