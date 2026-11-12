@@ -5402,6 +5402,448 @@ rm -rf "$OUTSIDE_SERVICE_RUN"
 check "nested: stop ends the run's recorded cockpit in its session at once" \
   "$(stop_with_recorded_sleep_in_session cockpit CkptStop1)" "0/ended/at-once"
 
+# The run's fixture is rewritten in one rename (the cockpit service reads it
+# again on change): a jq program that fails leaves it as it was, and neither
+# leaves a staging file; restore puts back the copy start wrote. On the
+# fixture written above. This row runs the real jq.
+fixture_before_rewrite="$(<"$FIXTURE_WRITE_PATH")"
+# shellcheck disable=SC2016  # A jq program: jq binds $pid.
+nested_call replace_run_cockpit_fixture "$FIXTURE_WRITE_RUN" '.focusReply.windowPidCandidates = [$pid]' --argjson pid 77
+fixture_rewrite_summary="good=$?/$(jq -c '.focusReply.windowPidCandidates' "$FIXTURE_WRITE_PATH")"
+fixture_after_good="$(<"$FIXTURE_WRITE_PATH")"
+nested_call replace_run_cockpit_fixture "$FIXTURE_WRITE_RUN" '.focusReply | error("refused")' 2>/dev/null
+fixture_rewrite_summary+=" failing=$?/$([[ "$(<"$FIXTURE_WRITE_PATH")" == "$fixture_after_good" ]] && printf unchanged || printf changed)"
+nested_call restore_run_cockpit_fixture "$FIXTURE_WRITE_RUN"
+fixture_rewrite_summary+=" restored=$?/$([[ "$(<"$FIXTURE_WRITE_PATH")" == "$fixture_before_rewrite" ]] && printf as-written || printf other)"
+fixture_rewrite_summary+=" staging-left=$(find "$FIXTURE_WRITE_RUN/state" -name 'cockpit-fixture.json.*' | wc -l)"
+check "nested: the run's fixture is rewritten in one rename, left as it was by a jq program that fails, put back as start wrote it, and no staging file is left (needs jq)" \
+  "$fixture_rewrite_summary" "good=0/[77] failing=1/unchanged restored=0/as-written staging-left=0"
+
+# What the check reads in the shell's log (shell_log_faults): an error of the
+# extension (its prefix with a CRITICAL or ERROR mark; console.warn's WARNING
+# lines are not faults), a JS ERROR whose stack names the extension (another
+# component's is not), Clutter's reparenting warnings and Mutter's activation
+# warnings, each only of the kinds asked for and only past the offset. A log it
+# cannot read fails: never no faults.
+SHELL_FAULTS_LOG="$WIRING_TMP/shell-faults.log"
+{
+  printf '%s\n' '(gnome-shell:7): Gjs-Console-WARNING **: 10:00:00.000: resource-pulse: could not start resource-pulse.service'
+  printf '%s\n' '(gnome-shell:7): Gjs-Console-CRITICAL **: 10:00:01.000: resource-pulse: could not draw the cockpit layer: x'
+  printf '%s\n' 'JS ERROR: TypeError: this._layer is null'
+  printf '%s\n' '_onTick@file:///run/data/gnome-shell/extensions/resource-pulse@dotfiles/extension.js:12:3'
+  printf '%s\n' 'JS ERROR: Error: the panel is gone'
+  printf '%s\n' '@resource:///org/gnome/shell/ui/panel.js:1:1'
+  printf '%s\n' "(gnome-shell:7): Clutter-CRITICAL **: clutter_actor_add_child: assertion: the actor already has a parent"
+  printf '%s\n' 'Window manager warning: Buggy client sent a _NET_ACTIVE_WINDOW message with a timestamp of 0 for 0x1'
+  printf '%s\n' 'Window manager warning: last_user_time (9) is greater than comparison timestamp (0)'
+  printf '%s\n' "Window manager warning: last_user_time (9) of the probe is more recent than the focus window's"
+} >"$SHELL_FAULTS_LOG"
+shell_faults_offset_past_extension="$(head -n 6 "$SHELL_FAULTS_LOG" | wc -c)"
+# shell_fault_kinds_found <offset> <kinds> prints how many faults of each kind it reports, or its failure.
+shell_fault_kinds_found() {
+  local fault_report
+  fault_report="$(nested_call shell_log_faults "$SHELL_FAULTS_LOG" "$1" "$2")" || { printf 'failed'; return 0; }
+  printf 'extension:%s,clutter:%s,mutter:%s' "$(grep -c '^extension: ' <<<"$fault_report")" \
+    "$(grep -c '^clutter: ' <<<"$fault_report")" "$(grep -c '^mutter: ' <<<"$fault_report")"
+}
+shell_faults_summary="all=$(shell_fault_kinds_found 0 extension,clutter,mutter)"
+shell_faults_summary+=" mutter-only=$(shell_fault_kinds_found 0 mutter)"
+shell_faults_summary+=" past-offset=$(shell_fault_kinds_found "$shell_faults_offset_past_extension" extension,clutter)"
+shell_faults_summary+=" js-error-named=$(nested_call shell_log_faults "$SHELL_FAULTS_LOG" 0 extension | grep -c -x -F \
+  'extension: JS ERROR: TypeError: this._layer is null')"
+if nested_call shell_log_faults "$WIRING_TMP/no-such-shell.log" 0 extension >/dev/null 2>&1
+then shell_faults_summary+=" unreadable=passed"
+else shell_faults_summary+=" unreadable=failed"; fi
+shell_faults_summary+=" counted=$(nested_call count_log_lines_since "$SHELL_FAULTS_LOG" 0 'Window manager warning:')"
+check "nested: the check finds the extension's error lines and a JS ERROR naming it (not a warning, not another's JS ERROR), Clutter's reparenting and Mutter's activation warnings, each of the kinds asked for past the offset; an unreadable log fails" \
+  "$shell_faults_summary" \
+  "all=extension:2,clutter:1,mutter:3 mutter-only=extension:0,clutter:0,mutter:3 past-offset=extension:0,clutter:1,mutter:0 js-error-named=1 unreadable=failed counted=3"
+
+# probe-window.js, the window `window` opens, refuses before Gtk is even loaded
+# unless it runs in a nested run's own environment (the run named, its runtime
+# dir exactly <run>/run, the nested Wayland display), and a title that is not a
+# plain name. Each case runs under env -i with an empty runtime dir and no
+# display, so even a broken guard could open nothing. Each prints exit/refusal.
+PROBE_WINDOW_EMPTY_RUNTIME="$WIRING_TMP/probe-window-runtime"
+if ! mkdir -p "$PROBE_WINDOW_EMPTY_RUNTIME" || ! chmod 700 "$PROBE_WINDOW_EMPTY_RUNTIME"; then
+  fatal "cannot lay out $PROBE_WINDOW_EMPTY_RUNTIME"
+fi
+# probe_window_verdict <title or ''> <NAME=value...> prints exit/whether it said it refused.
+probe_window_verdict() {
+  local window_title="$1" probe_output
+  shift
+  probe_output="$(env -i "HOME=$WIRING_TMP" PATH=/usr/bin:/bin "XDG_RUNTIME_DIR=$PROBE_WINDOW_EMPTY_RUNTIME" "$@" \
+    timeout "$GLUE_PARSE_TIMEOUT_SECONDS" gjs -m "$NESTED_FILES/probe-window.js" ${window_title:+"$window_title"} 2>&1)"
+  printf '%s/%s' "$?" "$(grep -c -F 'probe-window: refusing: ' <<<"$probe_output")"
+}
+probe_window_summary="no-title=$(probe_window_verdict '')"
+probe_window_summary+=" bad-title=$(probe_window_verdict '../window')"
+probe_window_summary+=" outside-a-run=$(probe_window_verdict herdr-probe)"
+probe_window_summary+=" runtime-not-the-run's=$(probe_window_verdict herdr-probe "RESOURCE_PULSE_NESTED_DIR=$PREPARED_RUN")"
+probe_window_summary+=" live-display=$(probe_window_verdict herdr-probe "RESOURCE_PULSE_NESTED_DIR=$PREPARED_RUN" \
+  "XDG_RUNTIME_DIR=$PREPARED_RUN/run" WAYLAND_DISPLAY=wayland-0)"
+check "nested: probe-window.js refuses (exit 2) before loading Gtk outside a nested run's own environment (the run, its runtime dir, its Wayland display) and a title that is not a plain name" \
+  "$probe_window_summary" \
+  "no-title=2/1 bad-title=2/1 outside-a-run=2/1 runtime-not-the-run's=2/1 live-display=2/1"
+
+# window, pointer and check cockpit drive a live run's nested shell through the
+# requests of the in-shell files (each with its own plain-gjs rows,
+# gnome-shell/tests/cockpitCheck.test.js). Here a stand-in busctl answers each
+# request from a directory of answers (ok unless a case's file says otherwise)
+# and, for the Nth click, appends <answers>/click-N.log to the run's shell log,
+# as the extension's focus lines would be; a stand-in gjs stands in for the
+# window (it records how it was started and waits); the real jq rewrites the
+# run's fixture. A fake gnome-shell in this session makes the run live.
+CHECK_STUB_BIN="$WIRING_TMP/check-bin"
+CHECK_ANSWERS="$WIRING_TMP/check-answers"
+CHECK_CALLS="$WIRING_TMP/check-calls"
+CHECK_WINDOW_BLOCK="$WIRING_TMP/check-window-block"
+CHECK_WINDOW_LAUNCHES="$WIRING_TMP/check-window-launches"
+CHECK_WINDOW_ENV_NAMES="$WIRING_TMP/check-window-env-names"
+CHECK_RUN="$NESTED_BASE/rpn.CheckRn1"
+CHECK_RUN_FIXTURE="$CHECK_RUN/state/cockpit-fixture.json"
+CHECK_OK_ANSWER='{"verdict":"ok","detail":"as the stand-in answers"}'
+if ! mkdir -p "$CHECK_ANSWERS" || ! mkfifo "$CHECK_WINDOW_BLOCK"; then
+  fatal "cannot lay out the check's stand-ins"
+fi
+# The busctl stand-in's source; it reads where to answer from, record and append from its environment.
+read -r -d '' CHECK_BUSCTL_STAND_IN_SOURCE <<'STAND_IN'
+#!/bin/bash
+# Stands in for busctl in the check rows: answers each Eval of the in-shell files from $CHECK_STUB_ANSWERS.
+eval_code="${!#}"
+if [[ "$*" == *" Screenshot "* ]]; then
+  printf 'Screenshot\n' >>"$CHECK_STUB_CALLS"
+  printf '%s\n' '{"type":"bs","data":[true,"stand-in"]}'
+  exit 0
+fi
+call_line="$(printf '%s\n' "$eval_code" | tail -n 1)"
+function_name="${call_line%%(*}"
+request="${call_line#*\(\'}"
+request="${request%%\'*}"
+printf '%s %s\n' "$function_name" "$request" >>"$CHECK_STUB_CALLS"
+if [[ "$function_name" == resourcePulseNestedPointer && "$request" == click ]]; then
+  click_number="$(grep -c -x -F 'resourcePulseNestedPointer click' "$CHECK_STUB_CALLS")"
+  if [[ -f "$CHECK_STUB_ANSWERS/click-$click_number.log" ]]; then
+    cat "$CHECK_STUB_ANSWERS/click-$click_number.log" >>"$CHECK_STUB_SHELL_LOG"
+  fi
+fi
+answer_path="$CHECK_STUB_ANSWERS/$function_name.$request"
+[[ -f "$answer_path" ]] || answer_path="$CHECK_STUB_ANSWERS/default"
+jq -cn --rawfile answer "$answer_path" '{type: "bs", data: [true, ($answer | rtrimstr("\n"))]}'
+STAND_IN
+install_stub "$CHECK_STUB_BIN" busctl "$CHECK_BUSCTL_STAND_IN_SOURCE"
+# Under env -i no variable can name where to record: the paths are written into its source.
+# shellcheck disable=SC2016  # The stand-in's own source: its $* expands when it runs.
+install_stub "$CHECK_STUB_BIN" gjs "$(printf '#!/bin/bash\n# Stands in for the probe window: records how it was started, then waits until signalled.\nprintf "%%s\\n" "$*" >>%q\ncompgen -e | LC_ALL=C sort >%q\nread -r _ <>%q\n' \
+  "$CHECK_WINDOW_LAUNCHES" "$CHECK_WINDOW_ENV_NAMES" "$CHECK_WINDOW_BLOCK")"
+printf '%s\n' "$CHECK_OK_ANSWER" >"$CHECK_ANSWERS/default"
+printf '%s\n' '{"verdict":"ok","detail":"0 normal windows","count":0}' \
+  >"$CHECK_ANSWERS/resourcePulseCockpitCheck.window-count"
+printf '%s\n' '{"verdict":"ok","detail":"the first session row","x":1480,"y":132,"sessionId":"w1:p1","name":"alpha-sync","tooltipText":"alpha-sync"}' \
+  >"$CHECK_ANSWERS/resourcePulseCockpitCheck.session-row-point"
+# The focus lines the third click (candidates matching no window) and the fifth (not focused) provoke.
+printf '%s\n' '(gnome-shell:7): Gjs-Console-WARNING **: 10:00:02.000: resource-pulse: cockpit: focus: no window for pids [4194305]' \
+  >"$CHECK_ANSWERS/click-3.log"
+printf '%s\n' '(gnome-shell:7): Gjs-Console-WARNING **: 10:00:03.000: resource-pulse: cockpit: focus: herdr-unreachable' \
+  >"$CHECK_ANSWERS/click-5.log"
+# answers_with <name> <file name> <answer>... copies the healthy answers to a directory of its own, replaces those
+# named, and prints the directory.
+answers_with() {
+  local answers_dir="$WIRING_TMP/check-answers-$1"
+  if ! mkdir -p "$answers_dir" || ! cp "$CHECK_ANSWERS"/* "$answers_dir/"; then
+    fatal "cannot lay out $answers_dir"
+  fi
+  shift
+  while (( $# > 1 )); do
+    printf '%s\n' "$2" >"$answers_dir/$1"
+    shift 2
+  done
+  printf '%s' "$answers_dir"
+}
+"$FAKE_SHELL_DIR/gnome-shell" "$FAKE_SHELL_DIR/block" &
+check_fake_shell_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ "$(cat "/proc/$check_fake_shell_pid/comm" 2>/dev/null)" == gnome-shell ]] && break
+  sleep 0.2
+done
+# check_stub_sourced <answers dir> <function> <args...> sources the script and calls one of its functions against the
+# stand-ins, with its waits skipped (sleep does nothing), on CHECK_STUB_RUN_DIR; leaves CHECK_STUB_OUTPUT and
+# CHECK_STUB_EXIT.
+check_stub_sourced() {
+  local answers_dir="$1"
+  shift
+  : >"$CHECK_CALLS"
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  CHECK_STUB_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_STUB_RUN_DIR" \
+    PATH="$CHECK_STUB_BIN:$PATH" CHECK_STUB_ANSWERS="$answers_dir" CHECK_STUB_CALLS="$CHECK_CALLS" \
+    CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" bash -c '
+      source "$1" || exit 99
+      shift
+      sleep() { :; }
+      "$@"
+    ' check-sourced "$NESTED_SCRIPT" "$@" 2>&1)"
+  CHECK_STUB_EXIT=$?
+}
+# make_check_run <fixture: yes or no> [more run values...] lays out the live run the check rows act on.
+make_check_run() {
+  local with_fixture="$1"
+  shift
+  rm -rf "$CHECK_RUN"
+  make_run_dir "$CHECK_RUN" "supervisor=$$" "supervisor-starttime=$(starttime_of "$$")" "session=$test_session_id" \
+    "gnome-shell=$check_fake_shell_pid" "gnome-shell-starttime=$(starttime_of "$check_fake_shell_pid")" \
+    "cockpit=$$" "cockpit-starttime=$(starttime_of "$$")" "$@"
+  mkdir -p "$CHECK_RUN/log" "$CHECK_RUN/run" "$CHECK_RUN/shots" || fatal "cannot lay out $CHECK_RUN"
+  printf '%s\n' "unix:path=$CHECK_RUN/bus/session.sock,guid=0123456789abcdef" >"$CHECK_RUN/state/session.addr"
+  printf '%s\n' 'gnome-shell started' >"$CHECK_RUN/log/shell.log"
+  if [[ "$with_fixture" == yes ]]; then
+    nested_call write_run_cockpit_fixture "$CHECK_RUN" 3600 1800000000000000 || fatal "cannot write $CHECK_RUN's fixture"
+  fi
+  : >"$CHECK_WINDOW_LAUNCHES"
+}
+# check_stub_run <answers dir> <subcommand args...> runs the script against the stand-ins; leaves CHECK_STUB_OUTPUT and
+# CHECK_STUB_EXIT.
+check_stub_run() {
+  local answers_dir="$1"
+  shift
+  : >"$CHECK_CALLS"
+  CHECK_STUB_OUTPUT="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" \
+    ${CHECK_STUB_RUN_DIR:+RESOURCE_PULSE_NESTED_DIR="$CHECK_STUB_RUN_DIR"} PATH="$CHECK_STUB_BIN:$PATH" \
+    CHECK_STUB_ANSWERS="$answers_dir" CHECK_STUB_CALLS="$CHECK_CALLS" CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" \
+    RESOURCE_PULSE_NESTED_BASE="$NESTED_BASE" bash "$NESTED_SCRIPT" "$@" 2>&1)"
+  CHECK_STUB_EXIT=$?
+}
+check_stub_call_count() { grep -c "$1" "$CHECK_CALLS"; }
+
+check_stub_run "$CHECK_ANSWERS"
+usage_summary="window=$(grep -c -x -F '       scripts/resource-pulse-nested.sh window <title>' <<<"$CHECK_STUB_OUTPUT")"
+usage_summary+=" pointer=$(grep -c -x -F '       scripts/resource-pulse-nested.sh pointer <x> <y> [click]' <<<"$CHECK_STUB_OUTPUT")"
+usage_summary+=" check=$(grep -c -x -F '       scripts/resource-pulse-nested.sh check cockpit' <<<"$CHECK_STUB_OUTPUT")"
+check "nested: the usage lists window <title>, pointer <x> <y> [click] and check cockpit" "$usage_summary" \
+  "window=1 pointer=1 check=1"
+
+# Refusals, each before the stand-in gjs starts or busctl is asked anything it
+# acts with. Each prints exit/its own message/busctl calls/windows started.
+# check_refusal_verdict <needle> <fixture: yes, no or none (no run)> <args...> [-- run values...]
+check_refusal_verdict() {
+  local refusal_needle="$1" run_kind="$2"
+  shift 2
+  local -a script_args=() extra_run_values=()
+  while (( $# > 0 )) && [[ "$1" != -- ]]; do script_args+=("$1"); shift; done
+  [[ "${1:-}" == -- ]] && shift && extra_run_values=("$@")
+  : >"$CHECK_WINDOW_LAUNCHES"
+  if [[ "$run_kind" == none ]]; then
+    rm -rf "$CHECK_RUN"
+    CHECK_STUB_RUN_DIR=""
+  else
+    make_check_run "$run_kind" "${extra_run_values[@]}"
+    CHECK_STUB_RUN_DIR="$CHECK_RUN"
+  fi
+  check_stub_run "$CHECK_ANSWERS" "${script_args[@]}"
+  CHECK_STUB_RUN_DIR=""
+  printf '%s/%s/%s/%s' "$CHECK_STUB_EXIT" "$(grep -c -F "$refusal_needle" <<<"$CHECK_STUB_OUTPUT")" \
+    "$(check_stub_call_count '^resourcePulse')" "$(wc -l <"$CHECK_WINDOW_LAUNCHES")"
+}
+window_refusal_summary="bad-title=$(check_refusal_verdict 'a window title is a plain name' none window ../herdr)"
+window_refusal_summary+=" two-titles=$(check_refusal_verdict 'window takes one title' none window a b)"
+window_refusal_summary+=" no-run=$(check_refusal_verdict 'no live run' none window herdr-probe)"
+window_refusal_summary+=" no-fixture=$(check_refusal_verdict 'not started in fixture mode' no window herdr-probe)"
+check "nested: window refuses (exit 2) a title that is not a plain name or a second word (before looking for a run), no live run, and a run whose cockpit is not in fixture mode, asking the shell nothing and opening nothing" \
+  "$window_refusal_summary" "bad-title=2/1/0/0 two-titles=2/1/0/0 no-run=2/1/0/0 no-fixture=2/1/0/0"
+
+pointer_refusal_summary="no-y=$(check_refusal_verdict 'pointer takes x y' none pointer 10)"
+pointer_refusal_summary+=" negative=$(check_refusal_verdict 'a point is two numbers' none pointer -1 5)"
+pointer_refusal_summary+=" leading-zero=$(check_refusal_verdict 'a point is two numbers' none pointer 007 5)"
+pointer_refusal_summary+=" exponent=$(check_refusal_verdict 'a point is two numbers' none pointer 1e3 5)"
+pointer_refusal_summary+=" not-click=$(check_refusal_verdict 'pointer takes click after the point' none pointer 10 10 tap)"
+pointer_refusal_summary+=" no-run=$(check_refusal_verdict 'no live run' none pointer 10 10)"
+pointer_refusal_summary+=" click-no-fixture=$(check_refusal_verdict 'refusing to click' no pointer 10 10 click)"
+check "nested: pointer refuses (exit 2) words that are not a point or click (before looking for a run), no live run, and a click in a run whose cockpit is not in fixture mode, asking the shell nothing" \
+  "$pointer_refusal_summary" \
+  "no-y=2/1/0/0 negative=2/1/0/0 leading-zero=2/1/0/0 exponent=2/1/0/0 not-click=2/1/0/0 no-run=2/1/0/0 click-no-fixture=2/1/0/0"
+
+check_refusal_summary="alone=$(check_refusal_verdict 'check takes one word: cockpit' none check)"
+check_refusal_summary+=" other-word=$(check_refusal_verdict 'check takes one word: cockpit' none check perf)"
+check_refusal_summary+=" no-run=$(check_refusal_verdict 'no live run' none check cockpit)"
+check_refusal_summary+=" no-fixture=$(check_refusal_verdict 'not started in fixture mode' no check cockpit)"
+check_refusal_summary+=" cockpit-gone=$(check_refusal_verdict "cockpit service is not running" yes check cockpit -- \
+  "cockpit=$NEVER_RUNNING_PID")"
+two_windows_answers="$(answers_with two-windows resourcePulseCockpitCheck.window-count \
+  '{"verdict":"ok","detail":"2 normal windows","count":2}')"
+make_check_run yes
+CHECK_STUB_RUN_DIR="$CHECK_RUN"
+check_stub_run "$two_windows_answers" check cockpit
+CHECK_STUB_RUN_DIR=""
+check_refusal_summary+=" windows-open=$CHECK_STUB_EXIT/$(grep -c -F 'has 2 window(s) already' <<<"$CHECK_STUB_OUTPUT")"
+check_refusal_summary+="/$(check_stub_call_count '^resourcePulseCockpitCheck window-count$')/$(check_stub_call_count '^resourcePulse')"
+check "nested: check takes the one word cockpit, and refuses (exit 2) no live run, a run whose cockpit is not in fixture mode or not running, and a session with windows already, before it clicks anything" \
+  "$check_refusal_summary" \
+  "alone=2/1/0/0 other-word=2/1/0/0 no-run=2/1/0/0 no-fixture=2/1/0/0 cockpit-gone=2/1/0/0 windows-open=2/1/1/1"
+
+# window on a live fixture run: the stand-in started as probe-window.js with
+# the title, with only the run's environment plus its Wayland display, backend
+# and private bus; recorded by pid and start time; named as the fixture's one
+# candidate; its pid printed. A title open already is refused; one that never
+# appears is ended and forgotten.
+make_check_run yes
+CHECK_STUB_RUN_DIR="$CHECK_RUN"
+check_stub_run "$CHECK_ANSWERS" window herdr-probe
+window_open_exit=$CHECK_STUB_EXIT
+window_pid="$(tail -n 1 <<<"$CHECK_STUB_OUTPUT")"
+window_summary="exit=$window_open_exit pid=$([[ "$window_pid" =~ ^[1-9][0-9]*$ ]] && printf printed || printf "'%s'" "$window_pid")"
+window_summary+=" recorded=$([[ "$(cat "$CHECK_RUN/state/windows/herdr-probe.pid" 2>/dev/null)" == "$window_pid" ]] \
+  && printf pid || printf none)+$([[ "$(cat "$CHECK_RUN/state/windows/herdr-probe.starttime" 2>/dev/null)" == \
+  "$(starttime_of "$window_pid")" ]] && printf starttime || printf none)"
+window_summary+=" candidates=$([[ "$(jq -c '.focusReply.windowPidCandidates' "$CHECK_RUN_FIXTURE")" == "[$window_pid]" ]] \
+  && printf the-pid || printf other)/$(jq -c '.focusReply.focused' "$CHECK_RUN_FIXTURE")"
+window_summary+=" launched=[$(sed "s|$NESTED_FILES/||" "$CHECK_WINDOW_LAUNCHES")]"
+window_summary+=" asked=$(check_stub_call_count '^resourcePulseCockpitCheck window-shown$')"
+window_expected_names="$( { nested_call nested_environment_assignments "$CHECK_RUN" | cut -d= -f1
+  printf '%s\n' WAYLAND_DISPLAY GDK_BACKEND DBUS_SESSION_BUS_ADDRESS PWD SHLVL
+} | LC_ALL=C sort -u)"
+window_summary+=" env-unexpected=[$(LC_ALL=C comm -13 <(printf '%s\n' "$window_expected_names") "$CHECK_WINDOW_ENV_NAMES" \
+  | tr '\n' ' ')] env-missing=[$(LC_ALL=C comm -23 <(printf '%s\n' "$window_expected_names") "$CHECK_WINDOW_ENV_NAMES" \
+  | tr '\n' ' ')]"
+check_stub_run "$CHECK_ANSWERS" window herdr-probe
+window_summary+=" again=$CHECK_STUB_EXIT/$(grep -c -F 'is open already' <<<"$CHECK_STUB_OUTPUT")"
+nested_call end_recorded_windows "$CHECK_RUN"
+for _ in 1 2 3 4 5 6 7 8 9 10; do is_running "$window_pid" || break; sleep 0.1; done
+window_summary+=" ended=$(is_running "$window_pid" && printf no || printf yes)/$(find "$CHECK_RUN/state/windows" -type f | wc -l)"
+no_window_answers="$(answers_with no-window resourcePulseCockpitCheck.window-shown \
+  '{"verdict":"bad","detail":"no window of pid 1 yet"}')"
+: >"$CHECK_WINDOW_LAUNCHES"
+check_stub_sourced "$no_window_answers" window_subcommand herdr-probe
+CHECK_STUB_RUN_DIR=""
+window_summary+=" never-shown=$CHECK_STUB_EXIT/$(grep -c -F 'did not appear' <<<"$CHECK_STUB_OUTPUT")"
+window_summary+="/$(find "$CHECK_RUN/state/windows" -type f | wc -l)/$(wc -l <"$CHECK_WINDOW_LAUNCHES")"
+check "nested: window opens probe-window.js with its title as a client of the run alone (its environment plus the nested display, backend and bus), records it by pid and start time, names it the fixture's one candidate and prints its pid; a title open already is refused, and one that never appears is ended and forgotten" \
+  "$window_summary" \
+  "exit=0 pid=printed recorded=pid+starttime candidates=the-pid/true launched=[-m probe-window.js herdr-probe] asked=1 env-unexpected=[] env-missing=[] again=2/1 ended=yes/0 never-shown=2/1/0/1"
+
+# stop ends every window the run recorded, only while each is still the
+# process recorded (pid and start time): a recorded pid now another process's
+# is left alone. On a run whose session is gone, which stop only cleans up.
+STOP_WINDOWS_RUN="$NESTED_BASE/rpn.StopWin1"
+stop_window_id="$(start_sacrificial_session sleep 60)"
+stop_window_starttime="$(starttime_of "$stop_window_id")"
+reused_window_id="$(start_sacrificial_session sleep 60)"
+reused_window_starttime="$(starttime_of "$reused_window_id")"
+make_run_dir "$STOP_WINDOWS_RUN" "launcher=$NEVER_RUNNING_PID" "session=$NEVER_RUNNING_PID"
+mkdir -p "$STOP_WINDOWS_RUN/state/windows" || fatal "cannot lay out $STOP_WINDOWS_RUN"
+printf '%s\n' "$stop_window_id" >"$STOP_WINDOWS_RUN/state/windows/herdr-probe.pid"
+printf '%s\n' "$stop_window_starttime" >"$STOP_WINDOWS_RUN/state/windows/herdr-probe.starttime"
+printf '%s\n' "$reused_window_id" >"$STOP_WINDOWS_RUN/state/windows/rp-decoy.pid"
+printf '%s\n' "$((reused_window_starttime + 1))" >"$STOP_WINDOWS_RUN/state/windows/rp-decoy.starttime"
+NESTED_RUN_DIR="$STOP_WINDOWS_RUN" nested_run stop
+for _ in 1 2 3 4 5 6 7 8 9 10; do is_running "$stop_window_id" || break; sleep 0.1; done
+stop_windows_summary="exit=$NESTED_EXIT recorded=$(is_running "$stop_window_id" && printf left-running || printf ended)"
+stop_windows_summary+=" reused=$(is_running "$reused_window_id" && printf left-running || printf ended)"
+stop_windows_summary+=" records=$(find "$STOP_WINDOWS_RUN/state/windows" -type f | wc -l)"
+kill_sacrifice "$stop_window_id" sleep "$stop_window_starttime"
+kill_sacrifice "$reused_window_id" sleep "$reused_window_starttime"
+check "nested: stop ends each window the run recorded while it is still that process, leaves a reused pid alone, and forgets them all" \
+  "$stop_windows_summary" "exit=0 recorded=ended reused=left-running records=0"
+rm -rf "$STOP_WINDOWS_RUN"
+
+# pointer on a live fixture run: a move, or a click, through pointer.js, then
+# `at` until the shell moved it; one that never arrives is exit 2, naming the
+# headless backend.
+make_check_run yes
+CHECK_STUB_RUN_DIR="$CHECK_RUN"
+check_stub_run "$CHECK_ANSWERS" pointer 10.5 20 click
+pointer_summary="click=$CHECK_STUB_EXIT/$(grep -c -x -F 'pointer at (10.5, 20), clicked' <<<"$CHECK_STUB_OUTPUT")"
+pointer_summary+="/[$(tr '\n' ' ' <"$CHECK_CALLS")]"
+stuck_answers="$(answers_with stuck resourcePulseNestedPointer.at \
+  '{"verdict":"bad","detail":"the pointer is at (0, 0), not (10, 20)"}')"
+check_stub_sourced "$stuck_answers" pointer_subcommand 10 20
+CHECK_STUB_RUN_DIR=""
+pointer_summary+=" stuck=$CHECK_STUB_EXIT/$(grep -c -F 'the headless backend may not take a virtual pointer' <<<"$CHECK_STUB_OUTPUT")"
+pointer_summary+="/$(check_stub_call_count '^resourcePulseNestedPointer at$')"
+check "nested: pointer moves (and clicks) through pointer.js, then waits until the shell moved it; a pointer that never arrives is exit 2, naming the headless backend" \
+  "$pointer_summary" \
+  "click=0/1/[resourcePulseNestedPointer click resourcePulseNestedPointer at ] stuck=2/1/20"
+
+# check cockpit on a live fixture run, every step answered ok by the stand-in
+# (and perf, overridden here, passing; the waits skipped): one ok line per step
+# in the order task-12a-controller-notes.md gives, exit 0, the windows it
+# opened ended and the run's fixture put back. Then one bad answer (exit 1,
+# naming the step, every other step still run), one that could not be judged
+# (exit 2), both (exit 1), and a log without the provoked focus lines.
+# check_cockpit_stubbed <answers dir> runs `check cockpit` with sleep and perf stubbed; leaves CHECK_STUB_OUTPUT and
+# CHECK_STUB_EXIT.
+check_cockpit_stubbed() {
+  make_check_run yes gc-log=1 replay=1
+  : >"$CHECK_CALLS"
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  CHECK_STUB_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_RUN" \
+    PATH="$CHECK_STUB_BIN:$PATH" CHECK_STUB_ANSWERS="$1" CHECK_STUB_CALLS="$CHECK_CALLS" \
+    CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" bash -c '
+      source "$1" || exit 99
+      sleep() { :; }
+      run_perf_for_check_cockpit() {
+        printf "perf: PASS: every count within its budget\nperf: cockpit: PASS: as the stand-in judges\n"
+      }
+      check_cockpit_subcommand
+    ' check-cockpit "$NESTED_SCRIPT" 2>&1)"
+  CHECK_STUB_EXIT=$?
+}
+CHECK_STEP_NAMES="extension early-log layer grid interactive hover windows click click-log click-show-desktop"
+CHECK_STEP_NAMES+=" click-no-window click-no-window-again click-not-focused click-twice cover cover-holds-changes reveal"
+CHECK_STEP_NAMES+=" visible-change stale stale-recovers dropdown-order dropdown-open dropdown-tooltip dropdown-closed"
+CHECK_STEP_NAMES+=" dropdown-change dropdown-click lock-path screenshot log count-budgets"
+# check_steps_seen prints the step names of the output's step lines, in order.
+check_steps_seen() {
+  sed -n -E 's/^(ok|bad|could not judge) ([a-z-]+): .*/\2/p' <<<"$CHECK_STUB_OUTPUT" | tr '\n' ' '
+}
+check_cockpit_stubbed "$CHECK_ANSWERS"
+healthy_check_summary="exit=$CHECK_STUB_EXIT steps=[$(check_steps_seen)]"
+healthy_check_summary+=" ok=$(grep -c '^ok ' <<<"$CHECK_STUB_OUTPUT")"
+healthy_check_summary+=" summary=$(grep -c -x -F 'check cockpit: 30 ok, 0 bad, 0 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+healthy_check_summary+=" windows-opened=$(wc -l <"$CHECK_WINDOW_LAUNCHES")"
+healthy_check_summary+=" windows-left=$(find "$CHECK_RUN/state/windows" -type f 2>/dev/null | wc -l)"
+healthy_check_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+  && printf restored || printf changed)"
+healthy_check_summary+=" perf=$(grep -c -x -F 'perf: cockpit: PASS: as the stand-in judges' <<<"$CHECK_STUB_OUTPUT")"
+healthy_check_summary+=" lock-path=$(check_stub_call_count '^resourcePulseCockpitCheck lock-path$')"
+healthy_check_summary+=" clicks=$(check_stub_call_count '^resourcePulseNestedPointer click$')"
+check "nested: check cockpit, every request answered ok, prints one ok line per step in the notes' order and exits 0, ending its windows and putting the run's fixture back" \
+  "$healthy_check_summary" \
+  "exit=0 steps=[$CHECK_STEP_NAMES ] ok=30 summary=1 windows-opened=2 windows-left=0 fixture=restored perf=1 lock-path=1 clicks=7"
+
+BAD_GRID_DETAIL='the apps card is at 600x500+685+80, not its cell 600x500+680+80'
+UNJUDGED_STALE_DETAIL="cannot read the card's no-data line (_noDataLabel)"
+bad_grid_answers="$(answers_with bad-grid resourcePulseCockpitCheck.grid-geometry \
+  "{\"verdict\":\"bad\",\"detail\":\"$BAD_GRID_DETAIL\"}")"
+unjudged_stale_answers="$(answers_with unjudged-stale resourcePulseCockpitCheck.stale-card \
+  "{\"verdict\":\"could-not-judge\",\"detail\":\"$UNJUDGED_STALE_DETAIL\"}")"
+both_answers="$(answers_with both resourcePulseCockpitCheck.grid-geometry \
+  "{\"verdict\":\"bad\",\"detail\":\"$BAD_GRID_DETAIL\"}" resourcePulseCockpitCheck.stale-card \
+  "{\"verdict\":\"could-not-judge\",\"detail\":\"$UNJUDGED_STALE_DETAIL\"}")"
+check_cockpit_stubbed "$bad_grid_answers"
+faulted_check_summary="bad-grid=$CHECK_STUB_EXIT/$(grep -c -x -F "bad grid: $BAD_GRID_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
+faulted_check_summary+="/$(grep -c -x -F 'check cockpit: 29 ok, 1 bad, 0 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+check_cockpit_stubbed "$unjudged_stale_answers"
+faulted_check_summary+=" unjudged-stale=$CHECK_STUB_EXIT/$(grep -c -x -F "could not judge stale: $UNJUDGED_STALE_DETAIL" \
+  <<<"$CHECK_STUB_OUTPUT")/$(grep -c -x -F 'check cockpit: 28 ok, 0 bad, 2 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+check_cockpit_stubbed "$both_answers"
+faulted_check_summary+=" both=$CHECK_STUB_EXIT/$(grep -c -x -F 'check cockpit: 27 ok, 1 bad, 2 could not judge' \
+  <<<"$CHECK_STUB_OUTPUT")"
+silent_log_answers="$(answers_with silent-log)"
+rm -f "$silent_log_answers"/click-*.log
+check_cockpit_stubbed "$silent_log_answers"
+faulted_check_summary+=" silent-log=$CHECK_STUB_EXIT/$(grep -c -E '^bad click-(no-window|not-focused): ' <<<"$CHECK_STUB_OUTPUT")"
+faulted_check_summary+="/$(grep -c '^could not judge log: ' <<<"$CHECK_STUB_OUTPUT")"
+mutter_log_answers="$(answers_with mutter-log click-1.log \
+  'Window manager warning: Buggy client sent a _NET_ACTIVE_WINDOW message with a timestamp of 0 for 0x1')"
+check_cockpit_stubbed "$mutter_log_answers"
+faulted_check_summary+=" mutter-warning=$CHECK_STUB_EXIT/$(grep -c -E '^bad (click-log|log): ' <<<"$CHECK_STUB_OUTPUT")"
+check "nested: check cockpit runs every step whatever one answers: a bad step is exit 1 naming it, one that could not be judged exit 2, both exit 1; a log without the provoked focus lines fails the clicks and cannot judge the log, and a Mutter warning after a click is bad" \
+  "$faulted_check_summary" \
+  "bad-grid=1/1/1 unjudged-stale=2/1/1 both=1/1 silent-log=1/2/1 mutter-warning=1/2"
+nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
+kill "$check_fake_shell_pid" 2>/dev/null
+wait "$check_fake_shell_pid" 2>/dev/null
+rm -rf "$CHECK_RUN"
+
 printf '\nthe stub, never the real session, answered gsettings\n'
 run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
 check "the apply script called the stub gsettings to set enabled-extensions, behind the dead-bus barrier" \
@@ -5416,7 +5858,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1085
+EXPECTED_ROWS=1116
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
