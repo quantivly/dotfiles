@@ -17,14 +17,17 @@
 //   the service appearing on the bus ends the chain.
 // - The cockpit is optional, so a unit that is not there to run is "not configured", never a fault to retry (ruling
 //   D4). The client is SKIPPED (the chain ends, with one info line and no warning; the cached layout is kept; the next
-//   start(), the next enable, asks again, which is how a layout file created mid-session is picked up) in three
-//   cases, each a first-class reading of "not configured":
+//   start(), the next enable, asks again, which is how a layout file created mid-session is picked up) in four
+//   cases, each a first-class reading of "not configured". The info line is written at GLib's INFO level, which the
+//   journal shows only when G_MESSAGES_DEBUG names the domain: a colleague without the cockpit sees nothing.
 //   - (a) StartUnit is rejected with org.freedesktop.systemd1.NoSuchUnit: no unit file is linked (./install never
 //     ran);
 //   - after an accepted StartUnit with no service on the bus within START_CONFIRMATION_TIMEOUT_SECONDS, the unit read
 //     over systemd's D-Bus gives ConditionResult false, checked (ConditionTimestampMonotonic above 0, so by the job
 //     just asked for: a unit never started also reads false, ruling R17): the layout file is absent;
-//   - (b) in that same read, GetUnit answers NoSuchUnit after the accepted job: systemd has unloaded the skipped unit.
+//   - (b) in that same read, GetUnit answers NoSuchUnit after the accepted job: systemd has unloaded the skipped unit;
+//   - (c) StartUnit is rejected with org.freedesktop.systemd1.UnitMasked: the unit was masked (systemctl --user mask
+//     cockpit.service), which is how the cockpit is turned off.
 //   The client never depends on the unit staying loaded after a skipped job: loaded, its condition says skipped;
 //   unloaded, (b) says the same. How often (b) happens is unmeasured until the deploy: it is up to systemd's garbage
 //   collection, and the unit's PartOf=graphical-session.target points from the unit to the target, not the reverse.
@@ -38,9 +41,13 @@
 // - It follows the bus name's owner. An owner appearing is asked GetState, wanted subscription or not (the layout
 //   decides whether a cockpit layer exists at all, so the first read cannot wait for the layer to be seen), whose
 //   answer makes the client LIVE and replaces its layout, config error and sources; a wanted subscription is made
-//   first, and a wanted watch asserted again. An owner leaving makes it VANISHED and starts nothing: a service stopped
-//   on purpose stays stopped, and a crash is systemd's Restart=. Its sources are kept, so the cards keep their "no
-//   data since" times.
+//   first, and a wanted watch asserted again. A read the client asked for of itself that fails before any state came
+//   from this owner is asked again, once per failure, after the StartUnit chain's delays counted for this owner (5,
+//   30, 300 s, then every 300 s), by a one-shot timeout in the chain's slot: without it nothing would ask again (a
+//   Changed asks only while subscribed, a pull needs a stamped source, and the chain ended when the owner appeared),
+//   and a first enable would draw no cockpit. A vanish, destroy() and any state applied remove that retry. An owner
+//   leaving makes it VANISHED and starts nothing: a service stopped on purpose stays stopped, and a crash is systemd's
+//   Restart=. Its sources are kept, so the cards keep their "no data since" times.
 // - Wanting the subscription while an owner is there subscribes, then asks GetState: the state then covers every
 //   Changed missed while unsubscribed, a restart included, and every Changed sent after that answer is delivered
 //   (serviceLink.js's setSubscribed says why the order matters). Unwanting it unsubscribes; a GetState still on its
@@ -120,10 +127,18 @@ const MISSING_UNIT_CONDITION = Object.freeze({
 });
 /** The D-Bus error systemd answers StartUnit and GetUnit with for a unit it has no file for, or has not loaded. */
 const SYSTEMD_NO_SUCH_UNIT_ERROR_NAME = 'org.freedesktop.systemd1.NoSuchUnit';
+/** The D-Bus error systemd answers StartUnit with for a unit the user masked. */
+const SYSTEMD_UNIT_MASKED_ERROR_NAME = 'org.freedesktop.systemd1.UnitMasked';
 // Why a client is SKIPPED, for its info line: each completes "cockpit.service <reason>".
 const CONDITION_SKIP_REASON = 'was skipped by its start condition (no layout file)';
 const UNIT_NOT_FOUND_SKIP_REASON = 'is unknown to systemd (no unit file is linked)';
 const UNIT_UNLOADED_SKIP_REASON = 'is no longer loaded after its start job (systemd unloaded it once skipped)';
+const UNIT_MASKED_SKIP_REASON = 'is masked (systemctl --user mask turned the cockpit off)';
+/** The StartUnit rejections that mean "not configured" (ruling D4), each with its skip reason; any other is retried. */
+const SKIP_REASON_BY_START_UNIT_ERROR_NAME = new Map([
+    [SYSTEMD_NO_SUCH_UNIT_ERROR_NAME, UNIT_NOT_FOUND_SKIP_REASON],
+    [SYSTEMD_UNIT_MASKED_ERROR_NAME, UNIT_MASKED_SKIP_REASON],
+]);
 /** GetState → (s state); FocusSession(s sessionId) → (s reply). */
 const STATE_REPLY_SIGNATURE = '(s)';
 const FOCUS_SESSION_PARAMETERS_SIGNATURE = '(s)';
@@ -259,15 +274,37 @@ async function readUnitProperty(connection, unitObjectPath, property, cancellabl
 }
 
 /**
+ * The D-Bus error name a call failed with, read from the error's name, never from its text.
+ *
+ * @param {*} error - The failure.
+ * @returns {string|null} The remote error's name, such as org.freedesktop.systemd1.NoSuchUnit; null for a failure
+ *     that is not a remote D-Bus error.
+ */
+function remoteErrorNameOrNull(error) {
+    if (!(error instanceof GLib.Error) || !Gio.DBusError.is_remote_error(error))
+        return null;
+    return Gio.DBusError.get_remote_error(error);
+}
+
+/**
  * Says whether a D-Bus call failed because systemd has no such unit: the remote error
- * org.freedesktop.systemd1.NoSuchUnit, read from the error's name, never from its text.
+ * org.freedesktop.systemd1.NoSuchUnit.
  *
  * @param {*} error - The failure.
  * @returns {boolean} True for NoSuchUnit.
  */
 function isNoSuchUnitError(error) {
-    return error instanceof GLib.Error && Gio.DBusError.is_remote_error(error) &&
-        Gio.DBusError.get_remote_error(error) === SYSTEMD_NO_SUCH_UNIT_ERROR_NAME;
+    return remoteErrorNameOrNull(error) === SYSTEMD_NO_SUCH_UNIT_ERROR_NAME;
+}
+
+/**
+ * Why a StartUnit rejection means the cockpit is not configured (ruling D4): NoSuchUnit, or UnitMasked.
+ *
+ * @param {Error} error - StartUnit's failure.
+ * @returns {string|null} The skip reason for the info line; null for a failure to retry.
+ */
+function startUnitSkipReasonOrNull(error) {
+    return SKIP_REASON_BY_START_UNIT_ERROR_NAME.get(remoteErrorNameOrNull(error)) ?? null;
 }
 
 /**
@@ -420,8 +457,9 @@ export class CockpitClient {
      *     remove: (sourceId: number) => void}} [options.timeouts] - Adds and removes timeouts.
      * @param {RateLimitedLogger} [options.errorLog] - Where failures go. The extension passes one that outlives every
      *     client, so a lasting failure is logged once per 10 minutes, not once per enable.
-     * @param {(line: string) => void} [options.writeInfoLine] - Where the one info line of a skipped unit goes: the
-     *     journal at info level, never as a warning.
+     * @param {(line: string) => void} [options.writeInfoLine] - Where the one info line of a skipped unit goes, never
+     *     as a warning: console.info, which writes it at GLib's INFO level, so the journal shows it only when
+     *     G_MESSAGES_DEBUG names the domain.
      * @param {object|null} [options.cachedLayout] - The last layout an earlier client received (the extension keeps
      *     it across enables), so the grid can be built before this client's first answer.
      */
@@ -462,7 +500,9 @@ export class CockpitClient {
         // The unique name owning the service's bus name, as last seen; null while nobody does.
         this._nameOwner = null;
         // The StartUnit chain's pending timeout, at most one: a retry after a failure, or the wait for the service to
-        // appear after an accepted StartUnit. Every way the chain ends or restarts removes it.
+        // appear after an accepted StartUnit. Every way the chain ends or restarts removes it. While an owner is on the
+        // bus the chain has ended, and the slot holds instead the retry of a first read that failed
+        // (_scheduleFirstReadRetry).
         this._startChainSourceId = null;
         // The latest StartUnit sent: {attemptNumber}, counted from 1 by each start(). An answer to an older one, or a
         // unit read for one, is ignored, so two start() calls in a row cannot both schedule a retry.
@@ -471,6 +511,9 @@ export class CockpitClient {
         this._isServiceStartPending = false;
         // True once a GetState of the current owner was applied; until then a Changed asks for the state instead.
         this._hasStateFromOwner = false;
+        // How many of the current owner's first reads have failed: the retry after the latest waits
+        // nextStartRetryDelaySeconds of it. Counted from 0 again when an owner appears.
+        this._failedFirstReadCount = 0;
         // Each GetState sent takes the next number; only the answer to the latest one is applied.
         this._stateRequestNumber = 0;
         this._isStateRequestInFlight = false;
@@ -750,12 +793,14 @@ export class CockpitClient {
 
     /**
      * Starts a new StartUnit chain: removes a pending retry, counts attempts from 1 again, and sends the first now if
-     * the connection is up (else once it is).
+     * the connection is up (else once it is). With an owner on the bus the chain has ended and its slot holds only a
+     * first read's retry, which is kept: the StartUnit's answer is then ignored, so nothing else would read again.
      *
      * @returns {void}
      */
     _restartServiceStartAttempts() {
-        this._cancelStartChainStep();
+        if (this._nameOwner === null)
+            this._cancelStartChainStep();
         this._latestStartAttempt = null;
         this._isServiceStartPending = true;
         this._attemptServiceStartIfConnected();
@@ -779,9 +824,10 @@ export class CockpitClient {
 
     /**
      * Handles systemd's answer to the latest StartUnit (an answer to an older one, or to one the service appearing
-     * superseded, is ignored). A failure other than NoSuchUnit is logged. While the service is on the bus nothing
-     * follows. Otherwise NoSuchUnit (no unit file is linked) is SKIPPED, an accepted StartUnit waits for the service to
-     * appear, and any other failure is retried after nextStartRetryDelaySeconds.
+     * superseded, is ignored). A failure other than NoSuchUnit and UnitMasked is logged. While the service is on the
+     * bus nothing follows. Otherwise NoSuchUnit (no unit file is linked) and UnitMasked (the unit masked) are
+     * SKIPPED, an accepted StartUnit waits for the service to appear, and any other failure is retried after
+     * nextStartRetryDelaySeconds.
      *
      * @param {{attemptNumber: number}} startAttempt - The attempt answered.
      * @param {Error|null} error - Null when systemd accepted the start job.
@@ -790,15 +836,15 @@ export class CockpitClient {
     _onServiceStartAnswered(startAttempt, error) {
         if (this._isDestroyed || startAttempt !== this._latestStartAttempt)
             return;
-        const isUnitNotFound = error !== null && isNoSuchUnitError(error);
-        if (error !== null && !isUnitNotFound) {
+        const skipReason = error === null ? null : startUnitSkipReasonOrNull(error);
+        if (error !== null && skipReason === null) {
             const errorText = describeError(error);
             this._errorLog.log(`StartUnit ${COCKPIT_UNIT_NAME} failed: ${errorText}`, START_UNIT_FAILURE_LOG_KEY);
         }
         if (this._nameOwner !== null)
             return;
-        if (isUnitNotFound)
-            this._onUnitSkipped(UNIT_NOT_FOUND_SKIP_REASON);
+        if (skipReason !== null)
+            this._onUnitSkipped(skipReason);
         else if (error === null)
             this._awaitServiceAppearance(startAttempt);
         else
@@ -873,12 +919,13 @@ export class CockpitClient {
     }
 
     /**
-     * The unit is not there to run (skipped for its condition, or unknown to systemd): the cockpit is not configured.
-     * The chain ends with one info line (no warning: this is the normal state for anyone without the layout file), and
-     * the next start() asks again.
+     * The unit is not there to run (skipped for its condition, unknown to systemd, or masked): the cockpit is not
+     * configured. The chain ends with one info line (no warning: this is the normal state for anyone without the layout
+     * file; written at INFO, it shows in the journal only when G_MESSAGES_DEBUG names the domain), and the next start()
+     * asks again.
      *
      * @param {string} skipReason - Why, completing "cockpit.service <reason>": CONDITION_SKIP_REASON,
-     *     UNIT_NOT_FOUND_SKIP_REASON or UNIT_UNLOADED_SKIP_REASON.
+     *     UNIT_NOT_FOUND_SKIP_REASON, UNIT_UNLOADED_SKIP_REASON or UNIT_MASKED_SKIP_REASON.
      * @returns {void}
      */
     _onUnitSkipped(skipReason) {
@@ -995,14 +1042,17 @@ export class CockpitClient {
 
     /**
      * The service left the bus: VANISHED, its watch gone with it, its sources and their stamps kept (each reads stale
-     * on its next pull), and no StartUnit (a stop stays a stop until the next start()). The pulls waiting on it are
-     * completed as a failed GetState's are (ruling D6): their completion stamped and told as a sources event after the
-     * state event, so a suspect source reads stale now rather than one interval later; then they settle. A held
-     * subscription is kept: it is to the well-known name, so it carries on to the next owner.
+     * on its next pull), and no StartUnit (a stop stays a stop until the next start()). A first read's retry is
+     * removed: there is no owner left to ask. The pulls waiting on it are completed as a failed GetState's are (ruling
+     * D6): their completion stamped and told as a sources event after the state event, so a suspect source reads stale
+     * now rather than one interval later; then they settle. A held subscription is kept: it is to the well-known name,
+     * so it carries on to the next owner.
      *
      * @returns {void}
      */
     _onServiceVanished() {
+        // With an owner there, the chain's slot held only a first read's retry.
+        this._cancelStartChainStep();
         this._nameOwner = null;
         this._isWatchHeld = false;
         this._hasStateFromOwner = false;
@@ -1017,8 +1067,9 @@ export class CockpitClient {
 
     /**
      * A service is on the bus: it runs, so the StartUnit chain ends (its pending timeout removed, and a StartUnit or a
-     * unit read still on its way superseded); a wanted subscription is made, its state is read whether the
-     * subscription is wanted or not (in that order: serviceLink.js's setSubscribed), and a wanted watch asserted.
+     * unit read still on its way superseded), and its failed first reads are counted from 0; a wanted subscription is
+     * made, its state is read whether the subscription is wanted or not (in that order: serviceLink.js's
+     * setSubscribed), and a wanted watch asserted.
      *
      * @param {string} nameOwner - Its unique name.
      * @returns {void}
@@ -1027,6 +1078,7 @@ export class CockpitClient {
         this._nameOwner = nameOwner;
         this._cancelStartChainStep();
         this._latestStartAttempt = null;
+        this._failedFirstReadCount = 0;
         if (this._isSubscriptionWanted)
             this._link.setSubscribed(true);
         this._requestState(CockpitSourcesCause.READ);
@@ -1052,7 +1104,8 @@ export class CockpitClient {
 
     /**
      * Applies GetState's answer, if it answers the latest call, and settles the pulls that waited for it. A failure or
-     * an unreadable state is logged, completes those pulls (ruling D6) and changes nothing else.
+     * an unreadable state is logged, completes those pulls (ruling D6) and changes nothing else; when it was a read the
+     * client asked for of itself (CockpitSourcesCause.READ), it may arm a first read's retry (_scheduleFirstReadRetry).
      *
      * @param {number} stateRequestNumber - The call's number.
      * @param {string} cause - Why it was called: a CockpitSourcesCause, told with the sources the answer brings.
@@ -1067,11 +1120,47 @@ export class CockpitClient {
         const pendingPulls = this._takePendingPulls();
         const pulledSourceNames = pendingPulls.map(pendingPull => pendingPull.sourceName);
         const state = this._readStateReply(error, reply);
-        if (state === null)
+        if (state === null) {
             this._completeUnansweredPulls(pulledSourceNames);
-        else
+            if (cause === CockpitSourcesCause.READ)
+                this._scheduleFirstReadRetry();
+        } else {
             this._applyState(state, pulledSourceNames, cause);
+        }
         this._settlePulls(pendingPulls);
+    }
+
+    /**
+     * Arms the retry of a first read that failed: one one-shot timeout, in the StartUnit chain's slot (free while an
+     * owner is on the bus), after nextStartRetryDelaySeconds of this owner's failed first reads (5, 30, 300 s, then
+     * every 300 s). Only while the owner is still there and no state has come from it, and only one at a time: a
+     * further failure while one waits arms nothing more. A vanish, destroy() and any state applied remove it.
+     *
+     * @returns {void}
+     */
+    _scheduleFirstReadRetry() {
+        const isFirstReadPending = this._nameOwner !== null && !this._hasStateFromOwner;
+        if (this._isDestroyed || !isFirstReadPending || this._startChainSourceId !== null)
+            return;
+        this._failedFirstReadCount++;
+        const retryDelaySeconds = nextStartRetryDelaySeconds(this._failedFirstReadCount);
+        this._startChainSourceId = this._timeouts.addSeconds(retryDelaySeconds,
+            () => this._onFirstReadRetryTimeout());
+    }
+
+    /**
+     * Reads the owner's state again, unless it has gone or a state came from it since. Runs as a GLib timeout, so it
+     * never throws.
+     *
+     * @returns {boolean} GLib.SOURCE_REMOVE: the retry fires once; a failure arms the next.
+     */
+    _onFirstReadRetryTimeout() {
+        this._startChainSourceId = null;
+        this._runWithoutThrowing('read the cockpit\'s state again', () => {
+            if (this._nameOwner !== null && !this._hasStateFromOwner)
+                this._requestState(CockpitSourcesCause.READ);
+        });
+        return GLib.SOURCE_REMOVE;
     }
 
     /**
@@ -1137,8 +1226,8 @@ export class CockpitClient {
     /**
      * Takes a state whole: the layout, the config error and every source replace the client's (a source the answer
      * refreshed has both pull stamps cleared), the pulled sources' completion is stamped (except where that clearing
-     * ended the pull's cycle), and the client is LIVE. Then tells, in order, the state, the layout (if it changed) and
-     * the sources that changed or were pulled, with the call's cause.
+     * ended the pull's cycle), a first read's retry is removed, and the client is LIVE. Then tells, in order, the state,
+     * the layout (if it changed) and the sources that changed or were pulled, with the call's cause.
      *
      * @param {object} state - lib/cockpitProtocol.js parseCockpitStatePayload's result.
      * @param {string[]} pulledSourceNames - The sources whose pulls this answer completes.
@@ -1147,6 +1236,8 @@ export class CockpitClient {
      */
     _applyState(state, pulledSourceNames, cause) {
         this._hasStateFromOwner = true;
+        // An answer is applied only while its owner is there, so the chain's slot holds only a first read's retry.
+        this._cancelStartChainStep();
         const isLayoutChanged = this._storeLayout(state.layout, state.configError);
         const changedSourceNames = this._storeSources(state.sources);
         this._stampPullCompletions(pulledSourceNames);

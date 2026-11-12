@@ -57,6 +57,8 @@ const PULL = 'pull';
 const FOCUSABLE_SESSION_ID = 'wL:p1';
 /** The D-Bus error systemd answers for a unit it has not loaded, or has no file for. */
 const NO_SUCH_UNIT_ERROR_NAME = 'org.freedesktop.systemd1.NoSuchUnit';
+/** The D-Bus error systemd answers StartUnit with for a unit the user masked. */
+const UNIT_MASKED_ERROR_NAME = 'org.freedesktop.systemd1.UnitMasked';
 /** What focusSession resolves to whenever FocusSession gives no readable reply. */
 const INTERNAL_FOCUS_REPLY = {focused: false, windowPid: null, error: 'internal', windowPidCandidates: []};
 /** Array.at's index of the last element. */
@@ -366,6 +368,16 @@ class FakeServiceStarter {
         this.attempts.at(LATEST_INDEX).onAnswered(
             Gio.DBusError.new_for_dbus_error(NO_SUCH_UNIT_ERROR_NAME, 'Unit cockpit.service not found.'));
     }
+
+    /**
+     * Fails the latest attempt as systemd does for a unit the user masked: the remote error UnitMasked.
+     *
+     * @returns {void}
+     */
+    failWithUnitMasked() {
+        this.attempts.at(LATEST_INDEX).onAnswered(
+            Gio.DBusError.new_for_dbus_error(UNIT_MASKED_ERROR_NAME, 'Unit cockpit.service is masked.'));
+    }
 }
 
 /**
@@ -480,6 +492,16 @@ function answerState(link, {layout = LAYOUT, configError = null, sources = SOURC
         latestPublishedAtUsec: PUBLISHED_AT_USEC,
     });
     link.answer(GET_STATE, new GLib.Variant(SINGLE_STRING_SIGNATURE, [statePayload]));
+}
+
+/**
+ * Fails the oldest GetState as a call that got no answer within its timeout does.
+ *
+ * @param {FakeLink} link - The fixture's link.
+ * @returns {void}
+ */
+function failStateWithTimeout(link) {
+    link.fail(GET_STATE, new GLib.Error(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT, 'Timeout was reached'));
 }
 
 /**
@@ -684,6 +706,27 @@ test('cockpitClient: a StartUnit rejected with NoSuchUnit (the unit not linked) 
     });
 });
 
+test('cockpitClient: a StartUnit rejected with UnitMasked (the owner masked the unit to turn the cockpit off) is ' +
+    'SKIPPED at once: no unit read, no retry, the cached layout kept, one info line and no warning; start() asks ' +
+    'again', () => {
+    const {client, timeouts, serviceStarter, systemdUnit, events, logged, infoLines} =
+        makeClientFixture({nameOwner: null, cachedLayout: LAYOUT});
+    serviceStarter.failWithUnitMasked();
+    const skippedOutcome = {
+        state: client.state, pending: timeouts.pendingIntervalsSeconds(), layout: client.layout,
+        readCount: systemdUnit.reads.length, infoLineCount: infoLines.length,
+        namesTheMask: infoLines.every(line => line.includes('masked')), logged: [...logged],
+    };
+    client.start();
+    assertEqual({skippedOutcome, stateAfterStart: client.state, attemptCount: serviceStarter.attempts.length, events}, {
+        skippedOutcome: {
+            state: SKIPPED, pending: [], layout: LAYOUT, readCount: 0, infoLineCount: 1, namesTheMask: true, logged: [],
+        },
+        stateAfterStart: STARTING, attemptCount: 2,
+        events: [{type: 'state', state: SKIPPED}, {type: 'state', state: STARTING}],
+    });
+});
+
 test('cockpitClient: an accepted StartUnit with no name in 15 s whose unit read finds no unit (GetUnit answered ' +
     'NoSuchUnit: unloaded after a skipped job) is SKIPPED: no retry, the cached layout kept, one info line and no ' +
     'warning', async () => {
@@ -789,6 +832,124 @@ test('cockpitClient: a GetState that fails is logged and leaves it STARTING; the
     }, {
         stateAfterFailure: STARTING, eventsBeforeState: [], state: LIVE, stateCallCount: 2, stateLogLines: 1,
     });
+});
+
+test('cockpitClient: a first GetState that times out, or answers no readable state, with no subscription wanted, ' +
+    'is asked again once after 5 s (the start chain\'s first delay) by a one-shot timeout; that answer makes it LIVE ' +
+    'and leaves no timeout', () => {
+    const failFirstRead = {
+        timedOut: link => failStateWithTimeout(link),
+        unreadable: link => link.answer(GET_STATE, new GLib.Variant(SINGLE_STRING_SIGNATURE, ['not a state'])),
+    };
+    const outcomes = {};
+    for (const [failureName, failRead] of Object.entries(failFirstRead)) {
+        const {client, timeouts, link, events} = makeClientFixture();
+        failRead(link);
+        const stateAfterFailure = client.state;
+        const pendingAfterFailure = timeouts.pendingIntervalsSeconds();
+        const stateCallsBeforeRetry = link.callsOf(GET_STATE).length;
+        const retryTimeoutReturned = timeouts.fire(RETRY_DELAYS_SECONDS[0]);
+        const stateCallsAfterRetry = link.callsOf(GET_STATE).length;
+        answerState(link);
+        outcomes[failureName] = {
+            stateAfterFailure, pendingAfterFailure, stateCallsBeforeRetry, retryTimeoutReturned, stateCallsAfterRetry,
+            state: client.state, isSubscribed: link.isSubscribed, pending: timeouts.pendingIntervalsSeconds(),
+            sourcesCauses: events.filter(event => event.type === 'sources').map(event => event.cause),
+        };
+    }
+    const expectedOutcome = {
+        stateAfterFailure: STARTING, pendingAfterFailure: [RETRY_DELAYS_SECONDS[0]], stateCallsBeforeRetry: 1,
+        retryTimeoutReturned: GLib.SOURCE_REMOVE, stateCallsAfterRetry: 2, state: LIVE, isSubscribed: false,
+        pending: [], sourcesCauses: [READ],
+    };
+    assertEqual(outcomes, {timedOut: expectedOutcome, unreadable: expectedOutcome});
+});
+
+test('cockpitClient: each failed first read of an owner waits the start chain\'s next delay (5, 30, 300, then 300 s) ' +
+    'and asks nothing before it fires: never a busy loop, and the failure logged once per 10 minutes', () => {
+    const {client, timeouts, link, logged} = makeClientFixture();
+    const retryDelaysSeconds = [];
+    const stateCallsRightAfterEachFailure = [];
+    for (const _failedRead of RETRY_DELAYS_SECONDS) {
+        failStateWithTimeout(link);
+        stateCallsRightAfterEachFailure.push(link.callsOf(GET_STATE).length);
+        const pendingRetryDelaysSeconds = timeouts.pendingIntervalsSeconds();
+        retryDelaysSeconds.push(...pendingRetryDelaysSeconds);
+        timeouts.fire(pendingRetryDelaysSeconds[0]);
+    }
+    assertEqual({
+        retryDelaysSeconds, stateCallsRightAfterEachFailure, stateCalls: link.callsOf(GET_STATE).length,
+        state: client.state, stateLogLines: logged.filter(line => line.includes(GET_STATE)).length,
+    }, {
+        retryDelaysSeconds: RETRY_DELAYS_SECONDS, stateCallsRightAfterEachFailure: [1, 2, 3, 4], stateCalls: 5,
+        state: STARTING, stateLogLines: 1,
+    });
+});
+
+test('cockpitClient: destroy() while a failed first read\'s retry waits leaves no timeout behind', () => {
+    const {client, timeouts, link} = makeClientFixture();
+    failStateWithTimeout(link);
+    const pendingWhileWaiting = timeouts.pendingIntervalsSeconds();
+    client.destroy();
+    assertEqual({pendingWhileWaiting, pendingAfterDestroy: timeouts.pendingIntervalsSeconds()},
+        {pendingWhileWaiting: [RETRY_DELAYS_SECONDS[0]], pendingAfterDestroy: []});
+});
+
+test('cockpitClient: the owner leaving removes a failed first read\'s retry; a next owner\'s failed first read waits ' +
+    'the first delay again (counted per owner)', () => {
+    const {client, timeouts, link} = makeClientFixture();
+    failStateWithTimeout(link);
+    timeouts.fire(RETRY_DELAYS_SECONDS[0]);
+    failStateWithTimeout(link);
+    const pendingAfterSecondFailure = timeouts.pendingIntervalsSeconds();
+    link.setNameOwner(null);
+    const pendingAfterVanish = timeouts.pendingIntervalsSeconds();
+    const stateAfterVanish = client.state;
+    link.setNameOwner(NEXT_OWNER);
+    failStateWithTimeout(link);
+    assertEqual({
+        pendingAfterSecondFailure, pendingAfterVanish, stateAfterVanish,
+        pendingAfterNextOwnersFailure: timeouts.pendingIntervalsSeconds(),
+    }, {
+        pendingAfterSecondFailure: [RETRY_DELAYS_SECONDS[1]], pendingAfterVanish: [], stateAfterVanish: VANISHED,
+        pendingAfterNextOwnersFailure: [RETRY_DELAYS_SECONDS[0]],
+    });
+});
+
+test('cockpitClient: a state applied while a failed first read\'s retry waits (here the read of the subscription ' +
+    'becoming wanted) removes the retry', () => {
+    const {client, timeouts, link} = makeClientFixture();
+    failStateWithTimeout(link);
+    const pendingWhileWaiting = timeouts.pendingIntervalsSeconds();
+    client.setSubscriptionWanted(true);
+    answerState(link);
+    assertEqual({
+        pendingWhileWaiting, state: client.state, pending: timeouts.pendingIntervalsSeconds(),
+        stateCalls: link.callsOf(GET_STATE).length,
+    }, {pendingWhileWaiting: [RETRY_DELAYS_SECONDS[0]], state: LIVE, pending: [], stateCalls: 2});
+});
+
+test('cockpitClient: a read that fails once a state from this owner is held arms no retry: the client stays LIVE ' +
+    'with its state, and nothing is pending', () => {
+    const {client, timeouts, link} = makeLiveClientFixture();
+    client.setSubscriptionWanted(false);
+    client.setSubscriptionWanted(true);
+    failStateWithTimeout(link);
+    assertEqual({state: client.state, sourcesByName: client.sourcesByName, pending: timeouts.pendingIntervalsSeconds()},
+        {state: LIVE, sourcesByName: SOURCES, pending: []});
+});
+
+test('cockpitClient: start() while a failed first read\'s retry waits sends StartUnit and keeps the retry, which ' +
+    'still asks and makes it LIVE', () => {
+    const {client, timeouts, serviceStarter, link} = makeClientFixture();
+    failStateWithTimeout(link);
+    client.start();
+    serviceStarter.succeed();
+    const pendingAfterStart = timeouts.pendingIntervalsSeconds();
+    timeouts.fire(RETRY_DELAYS_SECONDS[0]);
+    answerState(link);
+    assertEqual({pendingAfterStart, attemptCount: serviceStarter.attempts.length, state: client.state},
+        {pendingAfterStart: [RETRY_DELAYS_SECONDS[0]], attemptCount: 2, state: LIVE});
 });
 
 test('cockpitClient: a sources event says what brought it (CockpitSourcesCause, frozen): read for a state the client ' +

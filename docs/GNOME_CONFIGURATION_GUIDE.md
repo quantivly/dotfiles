@@ -321,7 +321,8 @@ where they are.
 **Where.** The cockpit monitor is the one the config's `monitor` block names, its `vendor` and `product`
 both equal to what Mutter's DisplayConfig reports; else the only monitor; else the largest one that is not
 primary. It is chosen again whenever the monitors change, so an undock moves the grid to the monitor that is
-left. At a login's first enable the desktop card sits top right until the service's layout arrives, then the
+left. At a login's first enable the desktop card sits top right until the service's layout arrives (a first
+answer that fails or does not come in 2 s is asked for again after 5 s, then 30 s, then every 300 s), then the
 grid replaces it; from then on the extension keeps the last layout across disables, so an unlock or a blank
 draws the grid at once. A layout that names no `system` card draws no system card. The overview hides the
 grid as it hides the card. The lock screen draws none of it, since GNOME turns the extension off there: it
@@ -398,7 +399,9 @@ Turning ding off costs the desktop's right-click menu.
 
 **Without the file,** a colleague sees the previous release exactly: the card top right of the primary
 monitor, and the dropdown with its system card and **Open Resources**. systemd skips the unit at each
-enable, which ends the extension's asking until the next.
+enable, which ends the extension's asking until the next. Masking the unit
+(`systemctl --user mask cockpit.service`) turns the cockpit off the same way from the next login, the file
+kept: the extension takes the mask as it takes a missing file, with no retry and no warning.
 
 **When the grid cannot be drawn,** because a layout cannot be built, rebuilt or placed, the card stays top
 right, as without a cockpit, and the shell's journal holds one line saying so
@@ -699,7 +702,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1144 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1152 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's
