@@ -172,7 +172,10 @@ class FakeWindow {
         this.minimized = false;
         this.demands_attention = false;
         this.frame = {x: 1000, y: 700, ...WINDOW_SIZE};
-        this.maximizedFlags = null;
+        this.isMaximized = false;
+        /** The arguments of each maximize() call: Mutter 50.1's meta_window_maximize takes none (Meta-18.typelib). */
+        this.maximizeArgumentLists = [];
+        this.isMinimizable = true;
     }
 
     get_pid() {
@@ -196,6 +199,8 @@ class FakeWindow {
     }
 
     minimize() {
+        if (!this.isMinimizable)
+            return;
         this.minimized = true;
         if (this._display.focus_window === this)
             this._display.focus_window = null;
@@ -205,8 +210,9 @@ class FakeWindow {
         this.minimized = false;
     }
 
-    maximize(flags) {
-        this.maximizedFlags = flags;
+    maximize(...maximizeArguments) {
+        this.maximizeArgumentLists.push(maximizeArguments);
+        this.isMaximized = true;
     }
 }
 
@@ -324,7 +330,8 @@ function buildExtensionParts(shell) {
         layout: LAYOUT,
         _cardsById: cardsById,
         _captionLabels: CAPTIONS.map((caption, captionIndex) => layer.add_child(new FakeActor({
-            text: caption, rect: {x: 40 + captionIndex * 1280, y: 40, width: 120, height: 30},
+            styleClasses: ['rp-cockpit-caption'], text: caption,
+            rect: {x: 40 + captionIndex * 1280, y: 40, width: 120, height: 30},
         }))),
         _isInteractive: true,
         _frozenCardIds: new Set(),
@@ -359,6 +366,8 @@ function buildExtensionParts(shell) {
     const indicator = {
         menu, _sessionsItem: sessionsItem, _sessionsCard: dropdownSessionsCard, _dropdownCard: dropdownCard,
         _openResourcesItem: openResourcesItem, _sessionsTooltip: makeTooltip(shell.uiGroup),
+        // The top bar's own hover label, in the top chrome as indicator.js adds it.
+        _hoverLabel: shell.uiGroup.add_child(new FakeActor({styleClasses: ['resource-pulse-hover-label']})),
     };
     const pulseListeners = new FakeListeners();
     const pulseClient = {
@@ -376,16 +385,20 @@ function buildExtensionParts(shell) {
 }
 
 /**
- * Takes one enable's parts out of the shell, as disable() does.
+ * Takes one enable's parts out of the shell, as disable() does, but for the hover label when asked to leave it.
  *
  * @param {object} stateObj - The extension's object.
+ * @param {{leaveHoverLabelBehind?: boolean}} [faults] - What this disable leaves behind.
  * @returns {void}
  */
-function tearDownExtensionParts(stateObj) {
+function tearDownExtensionParts(stateObj, {leaveHoverLabelBehind = false} = {}) {
     const layer = stateObj._layer;
     layer?.get_parent()?.remove_child(layer);
     for (const tooltip of [layer?._tooltip, stateObj._indicator?._sessionsTooltip])
         tooltip?._label.get_parent()?.remove_child(tooltip._label);
+    const hoverLabel = stateObj._indicator?._hoverLabel;
+    if (!leaveHoverLabelBehind)
+        hoverLabel?.get_parent()?.remove_child(hoverLabel);
     const menuActor = stateObj._indicator?.menu.actor;
     menuActor?.get_parent()?.remove_child(menuActor);
     Object.assign(stateObj, {_layer: null, _card: null, _client: null, _cockpitClient: null, _indicator: null});
@@ -437,8 +450,8 @@ function makeHealthyShell() {
     display.windows.push(decoyWindow, probeWindow);
     display.stackOrder.push(decoyWindow, probeWindow);
     display.focus_window = probeWindow;
-    const lifecycle = {leaveActorBehind: false, buildLayerAfterActivation: false, reuseOldCard: false,
-        neverDeactivates: false};
+    const lifecycle = {leaveActorBehind: false, leaveHoverLabelBehind: false, leaveCaptionBehind: false,
+        buildLayerAfterActivation: false, reuseOldCard: false, neverDeactivates: false};
     const extensionManager = {
         lookup: uuid => (uuid === EXTENSION_UUID ? extension : undefined),
         connect: (_signalName, handler) => managerListeners.add(changed => handler(extensionManager, changed)),
@@ -447,7 +460,9 @@ function makeHealthyShell() {
             if (lifecycle.neverDeactivates)
                 return true;
             const keptLayer = stateObj._layer;
-            tearDownExtensionParts(stateObj);
+            if (lifecycle.leaveCaptionBehind)
+                backgroundGroup.add_child(keptLayer._captionLabels[0]);
+            tearDownExtensionParts(stateObj, lifecycle);
             if (lifecycle.leaveActorBehind)
                 backgroundGroup.add_child(keptLayer);
             extension.state = EXTENSION_STATE.INACTIVE;
@@ -628,8 +643,8 @@ test('cockpit check: layer-placement is ok for one layer on the only monitor, na
 });
 
 test('cockpit check: grid-geometry is ok for the known cards at their cells and the three captions; bad for a card ' +
-    'off its cell or not shown, an unknown card drawn, a known one missing, a cell off the work area, a caption ' +
-    'wrong or hidden; could-not-judge without its options', async () => {
+    'off its cell or not shown, an unknown card drawn, a known one missing, a known card with no cell (none at all ' +
+    'included), a cell off the work area, a caption wrong or hidden; could-not-judge without its options', async () => {
     assertEqual(await verdictsOfCases('grid-geometry', {
         healthy: {options: GRID_OPTIONS},
         'card-off-cell': {breakShell: shell => {
@@ -644,6 +659,14 @@ test('cockpit check: grid-geometry is ok for the known cards at their cells and 
         'known-missing': {breakShell: shell => {
             shell.stateObj._layer._cardsById.delete('apps');
         }, options: GRID_OPTIONS, needle: 'the layer draws connections, sessions, system, not apps,'},
+        'no-cells': {breakShell: shell => {
+            shell.stateObj._layer.cardRects = () => [];
+        }, options: GRID_OPTIONS, needle: 'the layer lays out cells for no card, not apps, connections, sessions, system'},
+        'cell-missing': {breakShell: shell => {
+            shell.stateObj._layer.cardRects = () => KNOWN_CARD_IDS.filter(cardId => cardId !== 'apps')
+                .map(cardId => ({cardId, rect: {...CELLS_BY_CARD_ID[cardId]}}));
+        }, options: GRID_OPTIONS,
+        needle: 'the layer lays out cells for connections, sessions, system, not apps, connections, sessions, system'},
         'cell-off-work-area': {breakShell: shell => {
             const sessionsCell = {x: 1320, y: 10, width: 600, height: 500};
             shell.stateObj._layer.cardRects = () => [{cardId: 'sessions', rect: sessionsCell}];
@@ -658,7 +681,8 @@ test('cockpit check: grid-geometry is ok for the known cards at their cells and 
         'no-options': {options: {}},
     }), {
         healthy: OK, 'card-off-cell': `${BAD}+needle`, 'card-not-shown': `${BAD}+needle`,
-        'unknown-drawn': `${BAD}+needle`, 'known-missing': `${BAD}+needle`, 'cell-off-work-area': `${BAD}+needle`,
+        'unknown-drawn': `${BAD}+needle`, 'known-missing': `${BAD}+needle`, 'no-cells': `${BAD}+needle`,
+        'cell-missing': `${BAD}+needle`, 'cell-off-work-area': `${BAD}+needle`,
         'caption-wrong': `${BAD}+needle`, 'caption-hidden': `${BAD}+needle`, 'no-options': COULD_NOT_JUDGE,
     });
 });
@@ -803,7 +827,9 @@ test('cockpit check: tooltip-shown is ok for the row\'s text drawn above the car
 });
 
 test('cockpit check: window-count counts normal windows; window-shown is ok for a window of the pid and bad until ' +
-    'there is one; place-window-clear moves it to the first corner clear of the card, bad when none is', async () => {
+    'there is one; place-window-clear moves it to the first corner clear of the card, and window-clear is pending ' +
+    'while it overlaps (the move may not have landed); no clear corner could not be judged: the harness\'s own setup',
+    async () => {
     const shell = makeHealthyShell();
     const count = check(shell, 'window-count');
     const shown = check(shell, 'window-shown', PROBE_OPTIONS);
@@ -824,7 +850,7 @@ test('cockpit check: window-count counts normal windows; window-shown is ok for 
         nowhere: [nowhere.verdict, nowhere.detail.includes('no corner of the work area')], noWindow: noWindow.verdict,
     }, {
         count: [OK, 2], shown: [OK, 'herdr-probe'], notYet: BAD, placed: [OK, 2752, 32], clear: OK,
-        overlapping: [BAD, true], nowhere: [BAD, true], noWindow: COULD_NOT_JUDGE,
+        overlapping: [PENDING, true], nowhere: [COULD_NOT_JUDGE, true], noWindow: COULD_NOT_JUDGE,
     });
 });
 
@@ -855,7 +881,8 @@ test('cockpit check: focused-window is ok once the window has the focus, unminim
     });
 });
 
-test('cockpit check: activate-window, minimize-all, maximize-window and minimize-window act on the windows; ' +
+test('cockpit check: activate-window, minimize-all, maximize-window (with no argument: Mutter 50.1 takes none) and ' +
+    'minimize-window act on the windows; a window minimize-all cannot minimize could not be judged; ' +
     'windows-unchanged is ok when nothing moved since remember-windows, bad naming what did, could-not-judge with ' +
     'nothing remembered', () => {
     const shell = makeHealthyShell();
@@ -868,22 +895,27 @@ test('cockpit check: activate-window, minimize-all, maximize-window and minimize
     const forgotten = check(shell, 'windows-unchanged').verdict;
     check(shell, 'remember-windows');
     check(shell, 'maximize-window', PROBE_OPTIONS);
-    const maximizedFlags = shell.probeWindow.maximizedFlags;
+    const maximizeArgumentLists = shell.probeWindow.maximizeArgumentLists;
     const unminimizedByMaximize = !shell.probeWindow.minimized;
     const moved = check(shell, 'windows-unchanged');
     check(shell, 'remember-windows');
     shell.scope.Main.activateWindow(shell.probeWindow);
     const focusMoved = check(shell, 'windows-unchanged');
     check(shell, 'minimize-window', PROBE_OPTIONS);
+    const stuckShell = makeHealthyShell();
+    stuckShell.probeWindow.isMinimizable = false;
+    const stuck = check(stuckShell, 'minimize-all');
     assertEqual({
         decoyFocused, minimized: [minimized.verdict, minimized.count], allMinimized, unchanged, forgotten,
-        maximizedFlags, unminimizedByMaximize,
+        maximizeArgumentLists, unminimizedByMaximize,
+        stuck: [stuck.verdict, stuck.detail.includes('1 windows did not minimize')],
         moved: [moved.verdict, moved.detail.includes('minimized were 4242,4343, now 4343')],
         focusMoved: [focusMoved.verdict, focusMoved.detail.includes('the focus moved from pid null to pid 4242')],
         minimizedAgain: shell.probeWindow.minimized,
     }, {
         decoyFocused: OK, minimized: [OK, 2], allMinimized: true, unchanged: OK, forgotten: COULD_NOT_JUDGE,
-        maximizedFlags: 3, unminimizedByMaximize: true, moved: [BAD, true], focusMoved: [BAD, true],
+        maximizeArgumentLists: [[]], unminimizedByMaximize: true, stuck: [COULD_NOT_JUDGE, true],
+        moved: [BAD, true], focusMoved: [BAD, true],
         minimizedAgain: true,
     });
 });
@@ -984,7 +1016,8 @@ function clientEvents(shell) {
 }
 
 test('cockpit check: draw-watch is ok for the name drawn on the first Sample after the change, bad drawn with the ' +
-    'change itself or a Sample late or not at all, pending until the change and a Sample came, and removes its ' +
+    'change itself or a Sample late or not at all, could-not-judge drawn with no Sample since the change (the ' +
+    'fallback drew it) or armed on a closed dropdown, pending until the change and a Sample came, and removes its ' +
     'handlers once final', () => {
     const newName = 'alpha-sync-2';
     const watchOptions = {surface: 'layer', name: newName};
@@ -992,7 +1025,7 @@ test('cockpit check: draw-watch is ok for the name drawn on the first Sample aft
      * Arms a watch on a fresh shell, plays a script of events, reads it once.
      *
      * @param {function(object, object, object): void} play - (events, nameLabel, shell).
-     * @returns {string} The verdict, with the detail for a bad.
+     * @returns {string} The verdict, with the detail for a bad or a could-not-judge.
      */
     const playAndRead = play => {
         const shell = makeHealthyShell();
@@ -1000,8 +1033,11 @@ test('cockpit check: draw-watch is ok for the name drawn on the first Sample aft
         check(shell, 'draw-watch-arm', watchOptions);
         play(clientEvents(shell), nameLabel, shell);
         const answer = check(shell, 'draw-watch-read');
-        return answer.verdict === BAD ? `${answer.verdict}: ${answer.detail}` : answer.verdict;
+        const hasDetail = answer.verdict === BAD || answer.verdict === COULD_NOT_JUDGE;
+        return hasDetail ? `${answer.verdict}: ${answer.detail}` : answer.verdict;
     };
+    const openDropdownShell = makeHealthyShell();
+    openDropdown(openDropdownShell);
     const handlerShell = makeHealthyShell();
     const handlerLabel = handlerShell.stateObj._layer._cardsById.get('sessions')._sessionRows[0].nameLabel;
     check(handlerShell, 'draw-watch-arm', watchOptions);
@@ -1037,8 +1073,16 @@ test('cockpit check: draw-watch is ok for the name drawn on the first Sample aft
             events.change();
             events.sample();
         }),
+        // The pacing's one-shot fallback drew it, with the sampler silent: not "on the next Sample".
+        drawnWithNoSample: playAndRead((events, nameLabel) => {
+            events.sample();
+            events.change();
+            nameLabel.text = newName;
+        }),
         noChangeYet: playAndRead(events => events.sample()),
         noSampleYet: playAndRead(events => events.change()),
+        closedDropdown: check(makeHealthyShell(), 'draw-watch-arm', {surface: 'dropdown', name: newName}).verdict,
+        openDropdown: check(openDropdownShell, 'draw-watch-arm', {surface: 'dropdown', name: newName}).verdict,
         alreadyShown: (() => {
             alreadyShell.stateObj._layer._cardsById.get('sessions')._sessionRows[0].nameLabel.text = newName;
             return check(alreadyShell, 'draw-watch-arm', watchOptions).verdict;
@@ -1050,8 +1094,45 @@ test('cockpit check: draw-watch is ok for the name drawn on the first Sample aft
         withTheChange: `${BAD}: alpha-sync-2 was drawn before the next Sample: with the change itself`,
         aSampleLate: `${BAD}: alpha-sync-2 was drawn 1 Sample(s) after the next one`,
         never: `${BAD}: the change came and the next Sample did not draw alpha-sync-2`,
-        noChangeYet: PENDING, noSampleYet: PENDING, alreadyShown: COULD_NOT_JUDGE, unarmed: COULD_NOT_JUDGE,
+        drawnWithNoSample: `${COULD_NOT_JUDGE}: alpha-sync-2 was drawn with no Sample since the change: the ` +
+            'pacing\'s fallback timeout drew it, so the sampler was silent',
+        noChangeYet: PENDING, noSampleYet: PENDING, closedDropdown: COULD_NOT_JUDGE, openDropdown: OK,
+        alreadyShown: COULD_NOT_JUDGE, unarmed: COULD_NOT_JUDGE,
         armedCounts: [1, 1, 1], finalCounts: [0, 0, 0],
+    });
+});
+
+test('cockpit check: draw-watch-read gives its final answer again on every read until the watch is armed again (an ' +
+    'arm that fails forgets it too), so a poll that asks again after a bad reads that bad, not "nothing is watched"',
+() => {
+    const newName = 'alpha-sync-2';
+    const watchOptions = {surface: 'layer', name: newName};
+    const shell = makeHealthyShell();
+    const nameLabel = shell.stateObj._layer._cardsById.get('sessions')._sessionRows[0].nameLabel;
+    const events = clientEvents(shell);
+    const readTwice = () => [check(shell, 'draw-watch-read'), check(shell, 'draw-watch-read')]
+        .map(({verdict, detail}) => `${verdict}: ${detail}`);
+    check(shell, 'draw-watch-arm', watchOptions);
+    nameLabel.text = newName;
+    events.change();
+    const badReads = readTwice();
+    check(shell, 'draw-watch-arm', {surface: 'dropdown', name: newName});
+    const afterFailedArm = check(shell, 'draw-watch-read');
+    nameLabel.text = SESSION_NAMES[0];
+    check(shell, 'draw-watch-arm', watchOptions);
+    const afterArmingAgain = check(shell, 'draw-watch-read').verdict;
+    events.sample();
+    events.change();
+    nameLabel.text = newName;
+    events.sample();
+    const okReads = readTwice();
+    const drawnOnTime = `${OK}: alpha-sync-2 was drawn on the next Sample after the change`;
+    const drawnWithTheChange = `${BAD}: alpha-sync-2 was drawn before the next Sample: with the change itself`;
+    assertEqual({badReads, afterFailedArm: `${afterFailedArm.verdict}: ${afterFailedArm.detail}`, afterArmingAgain,
+        okReads}, {
+        badReads: [drawnWithTheChange, drawnWithTheChange],
+        afterFailedArm: `${COULD_NOT_JUDGE}: nothing is watched: draw-watch-arm comes first`, afterArmingAgain: PENDING,
+        okReads: [drawnOnTime, drawnOnTime],
     });
 });
 
@@ -1103,9 +1184,10 @@ test('cockpit check: dropdown-order is ok for the sessions item second, under th
     });
 });
 
-test('cockpit check: dropdown-card is ok open (unfrozen, the names, the system card\'s width, bars wider than zero, ' +
-    'its own texture, in its item), bad for each fault, could-not-judge closed; dropdown-closed is ok closed with ' +
-    'the card frozen and its tooltip hidden', async () => {
+test('cockpit check: dropdown-open given names judges the rows at once, in the request that opens the menu; ' +
+    'dropdown-card is ok open (unfrozen, the names, the system card\'s width, bars wider than zero, its own texture, ' +
+    'in its item), bad for each fault, could-not-judge closed; dropdown-closed is ok closed with the card frozen and ' +
+    'its tooltip hidden', async () => {
     const open = shell => check(shell, 'dropdown-open');
     const cardOptions = {names: SESSION_NAMES};
     const dropdownCard = shell => shell.stateObj._indicator._sessionsCard;
@@ -1149,17 +1231,29 @@ test('cockpit check: dropdown-card is ok open (unfrozen, the names, the system c
     const shell = makeHealthyShell();
     assertEqual([check(shell, 'dropdown-open').verdict, shell.stateObj._indicator.menu.isOpen,
         check(shell, 'dropdown-close').verdict, shell.stateObj._indicator.menu.isOpen], [OK, true, OK, false]);
+    assertEqual(await verdictsOfCases('dropdown-open', {
+        'rows-at-once': {options: cardOptions},
+        'other-rows-at-once': {options: {names: ['alpha-sync']},
+            needle: 'at the open, the rows show alpha-sync, beta-docs, not alpha-sync'},
+        'names-not-a-list': {options: {names: 'alpha-sync'}},
+    }), {'rows-at-once': OK, 'other-rows-at-once': `${BAD}+needle`, 'names-not-a-list': COULD_NOT_JUDGE});
 });
 
 test('cockpit check: lock-path is ok when disable leaves nothing and enable brings new parts with the grid back at ' +
-    'once; bad for an actor left behind, no layer at the activation, or an old part kept; could-not-judge when the ' +
-    'extension never becomes INACTIVE', async () => {
+    'once; bad for an actor left behind (the layer, the top bar\'s hover label, a caption), no layer at the ' +
+    'activation, or an old part kept; could-not-judge when the extension never becomes INACTIVE', async () => {
     const timeoutOptions = {timeoutMs: SHORT_TIMEOUT_MS};
     assertEqual(await verdictsOfCases('lock-path', {
         healthy: {options: timeoutOptions},
         'left-behind': {breakShell: shell => {
             shell.lifecycle.leaveActorBehind = true;
         }, options: timeoutOptions, needle: 'actors of the extension are left in the stage'},
+        'hover-label-left': {breakShell: shell => {
+            shell.lifecycle.leaveHoverLabelBehind = true;
+        }, options: timeoutOptions, needle: 'after disable, 1 actors of the extension are left in the stage'},
+        'caption-left': {breakShell: shell => {
+            shell.lifecycle.leaveCaptionBehind = true;
+        }, options: timeoutOptions, needle: 'after disable, 1 actors of the extension are left in the stage'},
         'layer-later': {breakShell: shell => {
             shell.lifecycle.buildLayerAfterActivation = true;
         }, options: timeoutOptions, needle: 'the grid is not back at once'},
@@ -1170,7 +1264,8 @@ test('cockpit check: lock-path is ok when disable leaves nothing and enable brin
             shell.lifecycle.neverDeactivates = true;
         }, options: timeoutOptions},
     }), {
-        healthy: OK, 'left-behind': `${BAD}+needle`, 'layer-later': `${BAD}+needle`, 'old-card-kept': `${BAD}+needle`,
+        healthy: OK, 'left-behind': `${BAD}+needle`, 'hover-label-left': `${BAD}+needle`,
+        'caption-left': `${BAD}+needle`, 'layer-later': `${BAD}+needle`, 'old-card-kept': `${BAD}+needle`,
         'never-inactive': COULD_NOT_JUDGE,
     });
 });

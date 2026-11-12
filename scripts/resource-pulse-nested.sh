@@ -331,10 +331,12 @@ readonly PERF_ENABLE_EXTENSION_JS="(() => {
     Main.extensionManager.enableExtension('$EXTENSION_UUID');
     return 'enabled';
 })()"
+# Mutter 50.1's meta_window_maximize takes no flags (its Meta-18.typelib records no argument): one passed would only
+# make GJS log "Too many arguments" into the shell's log.
 readonly PERF_COVER_CARD_JS="(() => {
     const coveringWindow = $PERF_ONE_WINDOW_JS;
     coveringWindow.unminimize();
-    coveringWindow.maximize(Meta.MaximizeFlags.BOTH);
+    coveringWindow.maximize();
     return 'covered';
 })()"
 readonly PERF_UNCOVER_CARD_JS="(() => { $PERF_ONE_WINDOW_JS.minimize(); return 'uncovered'; })()"
@@ -3593,16 +3595,17 @@ check_cockpit_stale_steps() {
 # while open, and a row's click closing the menu and focusing the probe.
 #######################################
 check_cockpit_dropdown_steps() {
-    local names_json first_name dropdown_name
+    local names_json names_options first_name dropdown_name
     names_json="$(jq -c "$SESSION_NAMES_JQ" "$CHECK_RUN_DIR/$COCKPIT_FIXTURE_START_RELATIVE_PATH")"
     first_name="$(jq -r "$FIRST_SESSION_NAME_JQ" "$CHECK_RUN_DIR/$COCKPIT_FIXTURE_START_RELATIVE_PATH")"
     dropdown_name="$first_name$DROPDOWN_NAME_SUFFIX"
+    names_options="$(jq -cn --argjson names "$names_json" '{names: $names}')"
     check_step_of_request dropdown-order 1 dropdown-order
     begin_check_step
-    ask_check dropdown-open
+    # The rows at once: judged by the request that opens the menu; the widths, which need an allocation, are polled.
+    ask_check dropdown-open "$names_options"
     note_answer
-    poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check dropdown-card "$(jq -cn --argjson names "$names_json" \
-        '{names: $names}')"
+    poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check dropdown-card "$names_options"
     note_answer
     end_check_step dropdown-open "open, the card showed the fixture's rows at once, as wide as the system card"
     begin_check_step
@@ -3621,9 +3624,13 @@ check_cockpit_dropdown_steps() {
     note_answer
     end_check_step dropdown-closed "closed, the card froze and its tooltip went"
     begin_check_step
+    # The dropdown's card draws only while its menu is open: the watch is armed only once the open is ok.
     ask_check dropdown-open
-    ask_check draw-watch-arm "$(jq -cn --arg name "$dropdown_name" '{surface: "dropdown", name: $name}')"
     note_answer
+    if [[ "$CHECK_VERDICT" == "$CHECK_OK_VERDICT" ]]; then
+        ask_check draw-watch-arm "$(jq -cn --arg name "$dropdown_name" '{surface: "dropdown", name: $name}')"
+        note_answer
+    fi
     if [[ "$CHECK_VERDICT" == "$CHECK_OK_VERDICT" ]] &&
         rewrite_check_fixture "$SESSION_RENAME_JQ" --arg name "$dropdown_name"; then
         poll_nested "$DRAW_WATCH_ATTEMPTS" ask_check draw-watch-read

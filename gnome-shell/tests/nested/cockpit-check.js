@@ -7,18 +7,22 @@
 // opened, the extension disabled and enabled) and judges what it read:
 //   {verdict: 'ok', detail, ...data}      what the step asks for holds; data carries what the harness needs next
 //   {verdict: 'bad', detail}              it does not; detail names every fault found
-//   {verdict: 'pending', detail}          draw-watch-read only: what it waits for has not happened yet
+//   {verdict: 'pending', detail}          draw-watch-read and window-clear only: what it waits for has not happened
+//                                         yet (the harness asks again, and one still pending at the end is
+//                                         could-not-judge)
 //   {verdict: 'could-not-judge', detail}  a part it reads is not there, or not of the shape it reads (the extension
 //                                         or the shell changed shape), or a precondition of the step does not hold:
 //                                         never ok and never bad, and the harness makes it exit 2
 // It reads the extension's private fields, as the perf probe does. A field that is not there at all (undefined) is a
 // could-not-judge, since reading on would judge nothing; a part that is null where the step needs one (no layer, no
-// sessions item) is bad: the extension is not drawing what it should.
+// sessions item) is bad: the extension is not drawing what it should. A failure of the harness's own setup (a window
+// it cannot place clear of the card, or minimize) is could-not-judge too: it is no fault of the extension.
 //
 // GNOME 50.1's Eval awaits the value its code evaluates to (shellDBus.js EvalAsync), so lock-path answers with a
 // Promise and waits inside the shell. Every other request answers at once; the harness does the waiting between
 // requests. Its state outlives each Eval in globalThis.__resourcePulseCockpitCheck (a remembered window snapshot, a
-// FocusSession count, a draw watch), and each handler it connects is removed when its answer is final.
+// FocusSession count, a draw watch and its final answer), and each handler it connects is removed when its answer is
+// final.
 //
 // Requests (options in braces):
 //   extension-active                    the extension is ACTIVE
@@ -37,23 +41,28 @@
 //   window-count                        how many normal windows the nested session has
 //   window-shown {pid}                  a normal window of that pid exists
 //   place-window-clear {pid, cardId}    moves that window to the first corner of the work area where it does not
-//                                       overlap the card; window-clear {pid, cardId} judges that it does not
+//                                       overlap the card; window-clear {pid, cardId} judges that it does not, pending
+//                                       while it does (the move may not have landed yet)
 //   activate-window {pid}               activates that window (Main.activateWindow), as the harness's own step
 //   focused-window {pid}                that window has the focus, is not minimized, is the topmost normal window and
 //                                       does not only demand attention
-//   minimize-all, maximize-window {pid}, minimize-window {pid}
+//   minimize-all, maximize-window {pid}, minimize-window {pid}   (maximize as Mutter 50.1 declares it: no argument)
 //   remember-windows, windows-unchanged the focus and the minimized windows now, then judged unchanged since
 //   focus-calls-arm, focus-calls-read   counts the extension's FocusSession calls between the two (the client's
 //     {expectedCount}                   method wrapped on its object, then put back)
 //   cover-state {expect}                'covered': no card visible, every drawn card frozen, both subscriptions
 //                                       dropped; 'visible': every drawn card visible, none frozen, both wanted
 //   row-name {surface, name}            the first session row of that surface shows that name
-//   draw-watch-arm {surface, name},     watches for that name drawn on that surface: drawn on the first Sample after
-//     draw-watch-read                   the sessions' change came is ok, at the change itself or later is bad
+//   draw-watch-arm {surface, name},     watches for that name drawn on that surface (the dropdown's only while its
+//     draw-watch-read                   menu is open): drawn on the first Sample after the sessions' change came is ok,
+//                                       at the change itself or later is bad, with no Sample at all (the pacing's
+//                                       fallback drew it) could-not-judge; a final answer is given again on every read
+//                                       until the watch is armed again
 //   stale-card {cardId, expect}         'stale': the card shows "no data since ..."; 'fresh': its rows, no such line
 //   dropdown-order                      the sessions item is the menu's second item, under the card's and above
 //                                       "Open Resources", shown, with the cockpit LIVE
-//   dropdown-open, dropdown-close       opens or closes the top bar dropdown, with no animation
+//   dropdown-open {names?},             opens or closes the top bar dropdown, with no animation; given names, the
+//     dropdown-close                    open also judges that the sessions card shows them at once, in this request
 //   dropdown-card {names}               open: the sessions card unfrozen, showing those names, as wide as the system
 //                                       card, its bars wider than zero, drawn through its own texture in its item
 //   dropdown-closed                     closed: the menu closed, the sessions card frozen, its tooltip not shown
@@ -72,8 +81,12 @@ function resourcePulseCockpitCheck(request, options = {}) {
     const CHECK_STATE_KEY = '__resourcePulseCockpitCheck';
     const LAYER_STYLE_CLASS = 'rp-cockpit-layer';
     const V2_CARD_STYLE_CLASS = 'resource-pulse-card';
-    /** The style classes of everything the extension adds to the shell: none may be left after disable(). */
-    const LEFT_BEHIND_STYLE_CLASSES = [LAYER_STYLE_CLASS, 'rp-cockpit-tooltip', 'rp-cockpit-cell', V2_CARD_STYLE_CLASS];
+    /**
+     * The style classes of everything the extension adds to the shell: none may be left after disable(). The top bar's
+     * hover label is in the top chrome, as the tooltips are; the captions are the layer's own.
+     */
+    const LEFT_BEHIND_STYLE_CLASSES = [LAYER_STYLE_CLASS, 'rp-cockpit-tooltip', 'rp-cockpit-cell', 'rp-cockpit-caption',
+        V2_CARD_STYLE_CLASS, 'resource-pulse-hover-label'];
     const SYSTEM_CARD_ID = 'system';
     const SESSIONS_CARD_ID = 'sessions';
     const LAYER_SURFACE = 'layer';
@@ -107,11 +120,15 @@ function resourcePulseCockpitCheck(request, options = {}) {
     /** Thrown when a part the step needs is missing from what the extension draws; the answer is bad. */
     class MissingPartError extends Error {}
 
-    globalThis[CHECK_STATE_KEY] ??= {rememberedWindows: null, focusCount: null, drawWatch: null};
+    // A state made by an earlier version of this file (a pass of the same run before a fix) may lack a newer field:
+    // each such field is read with `?? null`.
+    globalThis[CHECK_STATE_KEY] ??= {rememberedWindows: null, focusCount: null, drawWatch: null, drawWatchAnswer: null};
     const checkState = globalThis[CHECK_STATE_KEY];
 
     const okAnswer = (detail, data = {}) => ({verdict: OK_VERDICT, detail, ...data});
     const badAnswer = faults => ({verdict: BAD_VERDICT, detail: faults.join('; ')});
+    const pendingAnswer = detail => ({verdict: PENDING_VERDICT, detail});
+    const couldNotJudgeAnswer = detail => ({verdict: COULD_NOT_JUDGE_VERDICT, detail});
     const judged = (faults, okDetail, data = {}) => (faults.length === 0 ? okAnswer(okDetail, data) : badAnswer(faults));
 
     /**
@@ -420,13 +437,21 @@ function resourcePulseCockpitCheck(request, options = {}) {
         const drawnUnknownIds = unknownCardIds.filter(cardId => cardsById.has(cardId));
         if (drawnUnknownIds.length > 0)
             faults.push(`the layer draws a card for the unknown ${drawnUnknownIds.join(', ')}`);
+        // Every expected card is judged, at the cell the layer laid out for it: a card with no cell (a placement the
+        // layer skipped) is a fault, never a card left out of the loop. A missing cell or card is named above or here.
+        const cellsByCardId = new Map(layer.cardRects().map(({cardId, rect}) => [cardId, rect]));
+        const cellCardIds = [...cellsByCardId.keys()].sort();
+        const sortedExpectedCardIds = [...expectedCardIds].sort();
+        if (JSON.stringify(cellCardIds) !== JSON.stringify(sortedExpectedCardIds)) {
+            const laidOutText = cellCardIds.length === 0 ? 'no card' : cellCardIds.join(', ');
+            faults.push(`the layer lays out cells for ${laidOutText}, not ${sortedExpectedCardIds.join(', ')}`);
+        }
         const workArea = Main.layoutManager.getWorkAreaForMonitor(ONLY_MONITOR_INDEX);
-        for (const {cardId, rect} of layer.cardRects()) {
+        for (const cardId of expectedCardIds) {
+            const rect = cellsByCardId.get(cardId);
             const card = cardsById.get(cardId);
-            if (!card) {
-                faults.push(`the ${cardId} cell has no card`);
+            if (!rect || !card)
                 continue;
-            }
             const cardRect = stageRect(card);
             if (!card.mapped)
                 faults.push(`the ${cardId} card is not on screen`);
@@ -558,22 +583,27 @@ function resourcePulseCockpitCheck(request, options = {}) {
         const bottomY = workArea.y + workArea.height - height;
         const corners = [[workArea.x, workArea.y], [rightX, workArea.y], [workArea.x, bottomY], [rightX, bottomY]];
         const clearCorner = corners.find(([x, y]) => !doRectsOverlap({x, y, width, height}, cardRect));
-        if (!clearCorner)
-            return badAnswer([`no corner of the work area keeps a ${width}x${height} window clear of the ${cardId} card`]);
+        if (!clearCorner) {
+            throw new CouldNotJudgeError(
+                `no corner of the work area keeps a ${width}x${height} window clear of the ${cardId} card`);
+        }
         const [x, y] = clearCorner;
         window.move_frame(true, x, y);
         return okAnswer(`moved to ${x},${y}`, {x, y});
     }
 
     /**
+     * Whether the harness's window is clear of a card: pending while it overlaps, since place-window-clear's move may
+     * not have landed yet (the harness asks again; still overlapping at the end is could-not-judge, its own setup).
+     *
      * @param {{pid: number, cardId: string}} target - The window's process, and the card.
-     * @returns {object} window-clear's answer.
+     * @returns {object} window-clear's answer: ok or pending.
      */
     function judgeWindowClear({pid, cardId}) {
         const frameRect = windowOfPid(pid).get_frame_rect();
-        const isOverlapping = doRectsOverlap(frameRect, layerCardRect(cardId));
-        const fault = `the window of pid ${pid} at ${describeRect(frameRect)} overlaps the ${cardId} card`;
-        return judged(isOverlapping ? [fault] : [], `the window of pid ${pid} is clear of the ${cardId} card`);
+        if (doRectsOverlap(frameRect, layerCardRect(cardId)))
+            return pendingAnswer(`the window of pid ${pid} at ${describeRect(frameRect)} overlaps the ${cardId} card`);
+        return okAnswer(`the window of pid ${pid} is clear of the ${cardId} card`);
     }
 
     /**
@@ -598,13 +628,19 @@ function resourcePulseCockpitCheck(request, options = {}) {
         return judged(faults, `pid ${pid}'s window has the focus, unminimized and on top`);
     }
 
-    /** @returns {object} minimize-all's answer. */
+    /**
+     * Minimizes every normal window: the harness's own setup, so a window that did not minimize could not be judged.
+     *
+     * @returns {object} minimize-all's answer, with the count of windows.
+     * @throws {CouldNotJudgeError} When a window did not minimize.
+     */
     function minimizeAll() {
         const windows = normalWindows();
         windows.forEach(window => window.minimize());
         const stillShown = windows.filter(window => !window.minimized).length;
-        return judged(stillShown > 0 ? [`${stillShown} windows did not minimize`] : [],
-            `${windows.length} windows minimized`, {count: windows.length});
+        if (stillShown > 0)
+            throw new CouldNotJudgeError(`${stillShown} windows did not minimize`);
+        return okAnswer(`${windows.length} windows minimized`, {count: windows.length});
     }
 
     /**
@@ -734,12 +770,19 @@ function resourcePulseCockpitCheck(request, options = {}) {
      * sessions' change comes (a cockpit listener added after theirs), and notes, when a row's name becomes the name,
      * the Sample count and whether the change had come.
      *
+     * Arming forgets the previous watch's final answer. The dropdown's card draws only while its menu is open, so a
+     * closed menu could not be judged: the next Sample would draw nothing, and that would read as the pacing's fault.
+     *
      * @param {{surface: string, name: string}} target - Which card, and the name to watch for.
      * @returns {object} draw-watch-arm's answer.
+     * @throws {CouldNotJudgeError} When the name is shown already, or the dropdown's menu is not open.
      */
     function armDrawWatch({surface, name}) {
         disarmDrawWatch();
+        checkState.drawWatchAnswer = null;
         const stateObj = extensionObject();
+        if (surface === DROPDOWN_SURFACE && !topBarIndicator(stateObj).menu.isOpen)
+            throw new CouldNotJudgeError('the dropdown is not open: its card is frozen and draws nothing');
         const rows = sessionRowsOf(sessionsCard(stateObj, surface));
         if (rows.some(row => row.actor.visible && row.nameLabel.text === name))
             throw new CouldNotJudgeError(`the ${surface}'s card already shows ${name}: nothing to watch`);
@@ -767,27 +810,56 @@ function resourcePulseCockpitCheck(request, options = {}) {
         return okAnswer(`watching the ${surface}'s card for ${name}`);
     }
 
-    /** @returns {object} draw-watch-read's answer: ok, bad, or pending until the change and a Sample came. */
-    function readDrawWatch() {
-        const watch = checkState.drawWatch;
-        if (watch === null)
-            throw new CouldNotJudgeError('nothing is watched: draw-watch-arm comes first');
+    /**
+     * A watch's final answer, once what it watches for has settled; null while it waits. Drawn with the change, or
+     * after the Sample that followed it, is bad; drawn with no Sample counted since (the extension draws in its own
+     * history listener, before the watch counts that Sample) means the pacing's one-shot fallback drew it, with the
+     * sampler silent: that is no Sample's draw, so it could not be judged.
+     *
+     * @param {object} watch - The armed watch.
+     * @returns {object|null} ok, bad or could-not-judge; null while it waits.
+     */
+    function finalDrawWatchAnswer(watch) {
         if (watch.drawn !== null) {
-            disarmDrawWatch();
             if (!watch.drawn.hadChangeCome)
                 return badAnswer([`${watch.name} was drawn before the next Sample: with the change itself`]);
             const samplesLate = watch.drawn.sampleCount - watch.changeSampleCount;
             if (samplesLate > 0)
                 return badAnswer([`${watch.name} was drawn ${samplesLate} Sample(s) after the next one`]);
+            if (watch.sampleCount === watch.drawn.sampleCount) {
+                return couldNotJudgeAnswer(`${watch.name} was drawn with no Sample since the change: the pacing's ` +
+                    'fallback timeout drew it, so the sampler was silent');
+            }
             return okAnswer(`${watch.name} was drawn on the next Sample after the change`);
         }
-        if (watch.changeSampleCount === null)
-            return {verdict: PENDING_VERDICT, detail: 'no change to the sessions has come yet'};
-        if (watch.sampleCount > watch.changeSampleCount) {
-            disarmDrawWatch();
+        if (watch.changeSampleCount !== null && watch.sampleCount > watch.changeSampleCount)
             return badAnswer([`the change came and the next Sample did not draw ${watch.name}`]);
+        return null;
+    }
+
+    /**
+     * Reads the draw watch. Its final answer disarms it and is kept, and given again on every read until the watch is
+     * armed again: the harness asks again after a bad.
+     *
+     * @returns {object} draw-watch-read's answer: ok, bad, could-not-judge, or pending until the change and a Sample
+     *     came.
+     */
+    function readDrawWatch() {
+        const watch = checkState.drawWatch;
+        if (watch === null) {
+            const keptAnswer = checkState.drawWatchAnswer ?? null;
+            if (keptAnswer === null)
+                throw new CouldNotJudgeError('nothing is watched: draw-watch-arm comes first');
+            return keptAnswer;
         }
-        return {verdict: PENDING_VERDICT, detail: 'the change came; no Sample since'};
+        const finalAnswer = finalDrawWatchAnswer(watch);
+        if (finalAnswer === null) {
+            return pendingAnswer(watch.changeSampleCount === null ? 'no change to the sessions has come yet'
+                : 'the change came; no Sample since');
+        }
+        disarmDrawWatch();
+        checkState.drawWatchAnswer = finalAnswer;
+        return finalAnswer;
     }
 
     /**
@@ -836,17 +908,32 @@ function resourcePulseCockpitCheck(request, options = {}) {
     }
 
     /**
+     * Opens or closes the dropdown. Opening with names also judges, in this same request, that the sessions card shows
+     * them at once: the open draws the card synchronously, so "the rows at once" is read before anything else runs.
+     *
      * @param {boolean} isOpening - True to open the dropdown, false to close it.
+     * @param {{names?: string[]}} [expectation] - The names the open card's rows must show at once, in order.
      * @returns {object} dropdown-open's or dropdown-close's answer.
+     * @throws {CouldNotJudgeError} When names is given and is not a list.
      */
-    function setDropdownOpen(isOpening) {
-        const menu = topBarIndicator(extensionObject()).menu;
+    function setDropdownOpen(isOpening, {names} = {}) {
+        if (names !== undefined && !Array.isArray(names))
+            throw new CouldNotJudgeError('dropdown-open takes names as a list');
+        const stateObj = extensionObject();
+        const menu = topBarIndicator(stateObj).menu;
         if (isOpening)
             menu.open(false);
         else
             menu.close(false);
         const wantedState = isOpening ? 'open' : 'closed';
-        return judged(menu.isOpen === isOpening ? [] : [`the dropdown is not ${wantedState}`], `the dropdown is ${wantedState}`);
+        const faults = menu.isOpen === isOpening ? [] : [`the dropdown is not ${wantedState}`];
+        if (isOpening && names !== undefined) {
+            const shownNames = sessionRowsOf(sessionsCard(stateObj, DROPDOWN_SURFACE)).filter(row => row.actor.visible)
+                .map(row => row.nameLabel.text);
+            if (JSON.stringify(shownNames) !== JSON.stringify(names))
+                faults.push(`at the open, the rows show ${shownNames.join(', ')}, not ${names.join(', ')}`);
+        }
+        return judged(faults, `the dropdown is ${wantedState}`);
     }
 
     /**
@@ -1001,7 +1088,9 @@ function resourcePulseCockpitCheck(request, options = {}) {
         'maximize-window': ({pid}) => {
             const window = windowOfPid(pid);
             window.unminimize();
-            window.maximize(Meta.MaximizeFlags.BOTH);
+            // Mutter 50.1's meta_window_maximize takes no flags (Meta-18.typelib): an argument would only make GJS log
+            // "Too many arguments" into the log the check judges.
+            window.maximize();
             return okAnswer(`maximized pid ${pid}'s window`);
         },
         'minimize-window': ({pid}) => {
@@ -1021,7 +1110,7 @@ function resourcePulseCockpitCheck(request, options = {}) {
         'draw-watch-read': readDrawWatch,
         'stale-card': judgeStaleCard,
         'dropdown-order': judgeDropdownOrder,
-        'dropdown-open': () => setDropdownOpen(true),
+        'dropdown-open': expectation => setDropdownOpen(true, expectation),
         'dropdown-close': () => setDropdownOpen(false),
         'dropdown-card': judgeDropdownCard,
         'dropdown-closed': judgeDropdownClosed,

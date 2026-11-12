@@ -5121,6 +5121,34 @@ nested_constant() {
   [[ "$constant_value" =~ ^[0-9]+$ ]] || fatal "cannot read $1 from $NESTED_SCRIPT"
   printf '%s' "$constant_value"
 }
+# perf's cover step, run under plain gjs against a window that records the
+# arguments of each maximize() call: Mutter 50.1's meta_window_maximize takes
+# none (its Meta-18.typelib records no argument), and GJS logs "Too many
+# arguments" into the shell's log for one passed.
+PERF_COVER_PROBE="$WIRING_TMP/perf-cover-probe.js"
+cat >"$PERF_COVER_PROBE" <<'PROBE'
+// Runs perf's cover step (PERF_COVER_CARD_JS) against one fake window, and prints its answer and maximize's arguments.
+import GLib from 'gi://GLib';
+
+const NORMAL_WINDOW_TYPE = 0;
+const maximizeArgumentCounts = [];
+const coveredWindow = {
+    get_window_type: () => NORMAL_WINDOW_TYPE,
+    unminimize: () => {},
+    maximize: (...maximizeArguments) => maximizeArgumentCounts.push(maximizeArguments.length),
+};
+const fakeGlobal = {display: {list_all_windows: () => [coveredWindow]}};
+// Mutter 50.1 still has the flags type; only maximize() stopped taking it.
+const fakeMeta = {WindowType: {NORMAL: NORMAL_WINDOW_TYPE}, MaximizeFlags: {BOTH: 3}};
+// eslint-disable-next-line no-new-func
+const evaluateInShellScope = new Function('global', 'Meta', 'code', "'use strict'; return eval(code);");
+const coverAnswer = evaluateInShellScope(fakeGlobal, fakeMeta, GLib.getenv('PERF_COVER_CARD_JS'));
+print(`${coverAnswer} maximize-argument-counts=[${maximizeArgumentCounts.join(',')}]`);
+PROBE
+check "nested: perf's cover step maximizes its window with no argument, as Mutter 50.1 declares meta_window_maximize" \
+  "$(env "${LIVE_SETTINGS_BARRIER[@]}" PERF_COVER_CARD_JS="$(nested_constant_text PERF_COVER_CARD_JS)" \
+    gjs -m "$PERF_COVER_PROBE" 2>&1)" "covered maximize-argument-counts=[0]"
+
 NESTED_SERVICE_START_TIMEOUT_SECONDS="$(nested_constant SERVICE_START_TIMEOUT_SECONDS)" || exit 2
 NESTED_STOP_GRACE_SECONDS="$(nested_constant STOP_GRACE_SECONDS)" || exit 2
 # shellcheck disable=SC2016  # The stubs' own source: their variables expand when they run.
@@ -5497,6 +5525,9 @@ check "nested: probe-window.js refuses (exit 2) before loading Gtk outside a nes
 CHECK_STUB_BIN="$WIRING_TMP/check-bin"
 CHECK_ANSWERS="$WIRING_TMP/check-answers"
 CHECK_CALLS="$WIRING_TMP/check-calls"
+# Each in-shell request with its options as one JSON object, one per line: "<function> <request> <options>". The
+# stand-in writes it beside CHECK_CALLS, whose path it is given.
+CHECK_CALL_OPTIONS="$CHECK_CALLS.options"
 CHECK_WINDOW_BLOCK="$WIRING_TMP/check-window-block"
 CHECK_WINDOW_LAUNCHES="$WIRING_TMP/check-window-launches"
 CHECK_WINDOW_ENV_NAMES="$WIRING_TMP/check-window-env-names"
@@ -5521,6 +5552,9 @@ function_name="${call_line%%(*}"
 request="${call_line#*\(\'}"
 request="${request%%\'*}"
 printf '%s %s\n' "$function_name" "$request" >>"$CHECK_STUB_CALLS"
+call_options="${call_line#*\', }"
+call_options="${call_options%);}"
+printf '%s %s %s\n' "$function_name" "$request" "$call_options" >>"$CHECK_STUB_CALLS.options"
 if [[ "$function_name" == resourcePulseNestedPointer && "$request" == click ]]; then
   click_number="$(grep -c -x -F 'resourcePulseNestedPointer click' "$CHECK_STUB_CALLS")"
   if [[ -f "$CHECK_STUB_ANSWERS/click-$click_number.log" ]]; then
@@ -5573,6 +5607,7 @@ check_stub_sourced() {
   local answers_dir="$1"
   shift
   : >"$CHECK_CALLS"
+  : >"$CHECK_CALL_OPTIONS"
   # shellcheck disable=SC2016  # Expanded by the child bash.
   CHECK_STUB_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_STUB_RUN_DIR" \
     PATH="$CHECK_STUB_BIN:$PATH" CHECK_STUB_ANSWERS="$answers_dir" CHECK_STUB_CALLS="$CHECK_CALLS" \
@@ -5606,6 +5641,7 @@ check_stub_run() {
   local answers_dir="$1"
   shift
   : >"$CHECK_CALLS"
+  : >"$CHECK_CALL_OPTIONS"
   CHECK_STUB_OUTPUT="$(env -u RESOURCE_PULSE_NESTED_DIR "${LIVE_SETTINGS_BARRIER[@]}" \
     ${CHECK_STUB_RUN_DIR:+RESOURCE_PULSE_NESTED_DIR="$CHECK_STUB_RUN_DIR"} PATH="$CHECK_STUB_BIN:$PATH" \
     CHECK_STUB_ANSWERS="$answers_dir" CHECK_STUB_CALLS="$CHECK_CALLS" CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" \
@@ -5773,6 +5809,7 @@ check "nested: pointer moves (and clicks) through pointer.js, then waits until t
 check_cockpit_stubbed() {
   make_check_run yes gc-log=1 replay=1
   : >"$CHECK_CALLS"
+  : >"$CHECK_CALL_OPTIONS"
   # shellcheck disable=SC2016  # Expanded by the child bash.
   CHECK_STUB_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_RUN" \
     PATH="$CHECK_STUB_BIN:$PATH" CHECK_STUB_ANSWERS="$1" CHECK_STUB_CALLS="$CHECK_CALLS" \
@@ -5846,6 +5883,25 @@ faulted_check_summary+=" mutter-warning=$CHECK_STUB_EXIT/$(grep -c -E '^bad (cli
 check "nested: check cockpit runs every step whatever one answers: a bad step is exit 1 naming it, one that could not be judged exit 2, both exit 1, a step with a bad part bad whatever else in it could not be judged; a log without the provoked focus lines fails the clicks and cannot judge the log, and a Mutter warning after a click is bad" \
   "$faulted_check_summary" \
   "bad-grid=1/1/1 unjudged-stale=2/1/1 both=1/1 silent-log=1/2/1 mixed-step=1/1 mutter-warning=1/2"
+# check cockpit opens the dropdown asking for the fixture's session names, so
+# that the request that opens the menu judges the rows at once (only the
+# widths, which need an allocation, are polled after it); and it arms the
+# dropdown's draw watch only once that open is ok: a closed menu's card draws
+# nothing, which would read as the pacing's fault. Each request's options are
+# read from what the stand-in recorded.
+FIXTURE_SESSION_NAMES_JSON="$(jq -c '[.state.sources.sessions.rows[].name]' "$COCKPIT_NESTED_FIXTURE")"
+check_cockpit_stubbed "$CHECK_ANSWERS"
+dropdown_sequencing_summary="open-with-names=$(grep -c -x -F \
+  "resourcePulseCockpitCheck dropdown-open {\"names\":$FIXTURE_SESSION_NAMES_JSON}" "$CHECK_CALL_OPTIONS")"
+CLOSED_DROPDOWN_DETAIL='the dropdown did not open'
+closed_dropdown_answers="$(answers_with closed-dropdown resourcePulseCockpitCheck.dropdown-open \
+  "{\"verdict\":\"could-not-judge\",\"detail\":\"$CLOSED_DROPDOWN_DETAIL\"}")"
+check_cockpit_stubbed "$closed_dropdown_answers"
+dropdown_sequencing_summary+=" closed-arms=$(check_stub_call_count '^resourcePulseCockpitCheck draw-watch-arm$')"
+dropdown_sequencing_summary+=" closed-change=$(grep -c -x -F "could not judge dropdown-change: $CLOSED_DROPDOWN_DETAIL" \
+  <<<"$CHECK_STUB_OUTPUT")"
+check "nested: check cockpit opens the dropdown with the fixture's session names, so the open itself judges the rows at once, and arms the dropdown's draw watch only once the open is ok (the visible step's watch is the one other arm)" \
+  "$dropdown_sequencing_summary" "open-with-names=1 closed-arms=1 closed-change=1"
 nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
 kill "$check_fake_shell_pid" 2>/dev/null
 wait "$check_fake_shell_pid" 2>/dev/null
@@ -5865,7 +5921,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1117
+EXPECTED_ROWS=1120
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
