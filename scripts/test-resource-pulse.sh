@@ -3831,6 +3831,8 @@ mkdir -p "$FAKE_SHELL_DIR" && mkfifo "$FAKE_SHELL_DIR/block"
 printf '#!/bin/bash\n# Stands in for a running gnome-shell; blocks until signalled, for $2 seconds at most.\n%s\n' \
   'read -r -t "$2" _ <>"$1"' >"$FAKE_SHELL_DIR/gnome-shell"
 chmod +x "$FAKE_SHELL_DIR/gnome-shell"
+# The script's path as a stand-in's script descriptor names it (stand_in_fate), resolved while it exists.
+FAKE_SHELL_SCRIPT_PATH="$(readlink -f -- "$FAKE_SHELL_DIR/gnome-shell")" || fatal "cannot resolve the fake gnome-shell"
 "$FAKE_SHELL_DIR/gnome-shell" "$FAKE_SHELL_DIR/block" "$STAND_IN_LIFETIME_SECONDS" &
 fake_shell_pid=$!
 register_stand_in "$fake_shell_pid" "$FAKE_SHELL_DIR/gnome-shell" "$$"
@@ -4615,9 +4617,12 @@ other_session_process_starttime="$(starttime_of "$other_session_process_id")"
 perf_cleanup_summary+=" not-a-child: $(perf_cleanup_verdict "$other_session_process_id")"
 kill_sacrifice "$other_session_process_id" sleep "$other_session_process_starttime"
 perf_cleanup_summary+=" installed=$(grep -c -x -F '    trap end_perf_run EXIT' "$NESTED_SCRIPT")"
-check "nested: perf's exit ends its window (by pid when its start time is unknown, only if it is perf's child) and its measurement job, then asks to enable the extension and show the top bar, each step despite a failed one" \
+# The line above sits in install_perf_exit_traps: perf_subcommand must call it (no other row runs perf that far).
+perf_cleanup_summary+=" called-by-perf=$(awk '/^perf_subcommand\(\) \{/,/^}/' "$NESTED_SCRIPT" \
+  | grep -c -x -F '    install_perf_exit_traps')"
+check "nested: perf's exit ends its window (by pid when its start time is unknown, only if it is perf's child) and its measurement job, then asks to enable the extension and show the top bar, each step despite a failed one; perf installs it" \
   "$perf_cleanup_summary" \
-  "own-child: window=ended cost-job=ended status=0 busctl=2 enable=1 show=1 not-a-child: window=left-running cost-job=ended status=0 installed=1"
+  "own-child: window=ended cost-job=ended status=0 busctl=2 enable=1 show=1 not-a-child: window=left-running cost-job=ended status=0 installed=1 called-by-perf=1"
 
 # `stop` signals a session only while its leader is this run's recorded
 # launcher, `timeout`: a session id is a pid, and once a run's processes are all
@@ -5669,6 +5674,52 @@ check_window_stand_in_source() {
 }
 install_stub "$CHECK_STUB_BIN" gjs "$(check_window_stand_in_source "$CHECK_WINDOW_LAUNCHES" "$CHECK_WINDOW_ENV_NAMES" \
   "$CHECK_WINDOW_ENV_VALUES" "$CHECK_WINDOW_BLOCK" "$STAND_IN_LIFETIME_SECONDS" "$TABLE_STAND_IN_REGISTRY")"
+# A row that runs check cockpit in a session of its own (a TERM to it, or to its process group, during its perf pass)
+# bounds that session, and the windows its check opens, to CHECK_SESSION_LIFETIME_SECONDS: above the row's own waits
+# (30 s for the check to reach its perf pass, 10 s for it to end), so that one a stopped table leaves behind (the row's
+# own ending never reached, a KILL included) is gone within it. Its windows are the window stand-in's with that lifetime
+# (CHECK_SESSION_BIN first on the session's PATH). The session's bound is a watchdog in its process group, detached
+# from the check's shell (so no wait of the check waits for it) and deaf to the signals the rows send, which KILLs the
+# whole group once the lifetime is up; while it runs the group cannot be gone, so the row's KILL of the group at its end
+# never reaches another's.
+CHECK_SESSION_LIFETIME_SECONDS=60
+CHECK_SESSION_BIN="$WIRING_TMP/check-session-bin"
+CHECK_SESSION_WINDOW_RECORDS="$WIRING_TMP/check-session-window"
+install_stub "$CHECK_SESSION_BIN" gjs "$(check_window_stand_in_source "$CHECK_SESSION_WINDOW_RECORDS.launches" \
+  "$CHECK_SESSION_WINDOW_RECORDS.env-names" "$CHECK_SESSION_WINDOW_RECORDS.env-values" "$CHECK_WINDOW_BLOCK" \
+  "$CHECK_SESSION_LIFETIME_SECONDS" "$TABLE_STAND_IN_REGISTRY")"
+CHECK_SESSION_WINDOW_SCRIPT_PATH="$(readlink -f -- "$CHECK_SESSION_BIN/gjs")" || fatal "cannot resolve $CHECK_SESSION_BIN/gjs"
+# shellcheck disable=SC2016  # Expanded by the session's own bash.
+CHECK_SESSION_WATCHDOG='( ( trap "" TERM INT HUP; command sleep "$CHECK_SESSION_LIFETIME_SECONDS"; kill -KILL 0 ) & )'
+# Assignments start_check_session adds to the session's environment, for one row.
+CHECK_SESSION_EXTRA_ENV=()
+# start_check_session <output file> <bash source> <$0> [args...] runs the source in a new session (setsid) with the
+# stubbed check's environment, CHECK_SESSION_EXTRA_ENV and the watchdog first, its output to the file; sets
+# CHECK_SESSION_PID: its bash, the session's leader, whose pid is the session's and its process group's id.
+start_check_session() {
+  local output_path="$1" session_source="$2"
+  shift 2
+  setsid env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_RUN" \
+    PATH="$CHECK_SESSION_BIN:$CHECK_STUB_BIN:$PATH" CHECK_STUB_ANSWERS="$CHECK_ANSWERS" CHECK_STUB_CALLS="$CHECK_CALLS" \
+    CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" CHECK_SESSION_LIFETIME_SECONDS="$CHECK_SESSION_LIFETIME_SECONDS" \
+    "${CHECK_SESSION_EXTRA_ENV[@]}" bash -c "$CHECK_SESSION_WATCHDOG"$'\n'"$session_source" "$@" \
+    </dev/null >"$output_path" 2>&1 &
+  CHECK_SESSION_PID=$!
+}
+# A row's own stand-ins end by their own lifetimes even when none of their row's endings reaches them: one of each kind
+# is abandoned (a check session, a window its check opens, and below, the exit row's fake shell), ended by nothing but
+# its lifetime, and the row at the table's end, once each lifetime has passed, finds each gone (the table's exit still
+# ends the window and the fake shell if it stops before then; the session ends by its own bound in any case).
+# The session's own command outlasts every wait of the table, so only its bound can end it in time.
+# shellcheck disable=SC2016  # Expanded by the session's own bash.
+start_check_session "$WIRING_TMP/abandoned-session.output" 'command sleep "$((CHECK_SESSION_LIFETIME_SECONDS * 10))"' \
+  abandoned-session
+abandoned_session_pid=$CHECK_SESSION_PID
+abandoned_session_starttime="$(starttime_of "$abandoned_session_pid")"
+printf -v abandoned_session_started_at '%(%s)T' -1
+"$CHECK_SESSION_BIN/gjs" -m probe-window.js abandoned-probe </dev/null >/dev/null 2>&1 &
+abandoned_window_pid=$!
+printf -v abandoned_window_started_at '%(%s)T' -1
 # Each of the table's stand-ins bounds its own life, for a KILL of the table
 # alone, which runs no trap: a fake gnome-shell and a probe window's stand-in,
 # started here with a lifetime of a second, must each be gone within a few, by
@@ -5684,8 +5735,22 @@ fi
 install_stub "$STAND_IN_BOUND_DIR/bin" gjs "$(check_window_stand_in_source "$STAND_IN_BOUND_DIR/launches" \
   "$STAND_IN_BOUND_DIR/env-names" "$STAND_IN_BOUND_DIR/env-values" "$STAND_IN_BOUND_DIR/window-block" \
   "$STAND_IN_BOUND_LIFETIME_SECONDS" "$STAND_IN_BOUND_DIR/registry")"
-# stand_in_fate <pid> <script> prints ended once that stand-in is gone within STAND_IN_GONE_WAIT_TENTHS; else
-# left-running, and ends it while its bash still runs that script.
+STAND_IN_BOUND_WINDOW_SCRIPT_PATH="$(readlink -f -- "$STAND_IN_BOUND_DIR/bin/gjs")" \
+  || fatal "cannot resolve $STAND_IN_BOUND_DIR/bin/gjs"
+# The bash every stand-in's #! line names, as /proc/<pid>/exe reads it.
+STAND_IN_INTERPRETER_PATH="$(readlink -f -- /bin/bash)" || fatal "cannot resolve /bin/bash"
+# is_row_stand_in <pid> <script's canonical path> succeeds while that pid is still a stand-in running that script: its
+# executable is bash, and bash's script descriptor (fd 255) names the script, or the script deleted (a stopped table
+# removes its directory, and the kernel then reads the descriptor as "<path> (deleted)"). Never by name.
+is_row_stand_in() {
+  local script_descriptor_target
+  [[ "$(readlink "/proc/$1/exe" 2>/dev/null)" == "$STAND_IN_INTERPRETER_PATH" ]] || return 1
+  script_descriptor_target="$(readlink "/proc/$1/fd/255" 2>/dev/null)" || return 1
+  [[ "$script_descriptor_target" == "$2" || "$script_descriptor_target" == "$2 (deleted)" ]]
+}
+# stand_in_fate <pid> <script's canonical path> prints ended once that stand-in is gone within
+# STAND_IN_GONE_WAIT_TENTHS; else ends it while it is still that stand-in (is_row_stand_in) and prints left-running, or
+# prints left-running-not-ended when it cannot tell it is.
 stand_in_fate() {
   local gone_tenth
   [[ "$1" =~ ^[0-9]+$ ]] || { printf no-stand-in; return 0; }
@@ -5693,8 +5758,12 @@ stand_in_fate() {
     is_running "$1" || { printf ended; return 0; }
     sleep 0.1
   done
-  [[ "$(readlink "/proc/$1/fd/255" 2>/dev/null)" == "$(readlink -f -- "$2")" ]] && kill -TERM "$1" 2>/dev/null
-  printf left-running
+  if is_row_stand_in "$1" "$2"; then
+    kill -TERM "$1" 2>/dev/null
+    printf left-running
+    return 0
+  fi
+  printf left-running-not-ended
 }
 "$FAKE_SHELL_DIR/gnome-shell" "$STAND_IN_BOUND_DIR/shell-block" "$STAND_IN_BOUND_LIFETIME_SECONDS" &
 bound_shell_pid=$!
@@ -5702,8 +5771,8 @@ register_stand_in "$bound_shell_pid" "$FAKE_SHELL_DIR/gnome-shell" "$$"
 "$STAND_IN_BOUND_DIR/bin/gjs" -m probe-window.js bound-probe </dev/null >/dev/null 2>&1 &
 bound_window_pid=$!
 register_stand_in "$bound_window_pid" "$STAND_IN_BOUND_DIR/bin/gjs" "$$"
-stand_in_bound_summary="gnome-shell=$(stand_in_fate "$bound_shell_pid" "$FAKE_SHELL_DIR/gnome-shell")"
-stand_in_bound_summary+=" gjs=$(stand_in_fate "$bound_window_pid" "$STAND_IN_BOUND_DIR/bin/gjs")"
+stand_in_bound_summary="gnome-shell=$(stand_in_fate "$bound_shell_pid" "$FAKE_SHELL_SCRIPT_PATH")"
+stand_in_bound_summary+=" gjs=$(stand_in_fate "$bound_window_pid" "$STAND_IN_BOUND_WINDOW_SCRIPT_PATH")"
 wait "$bound_shell_pid" "$bound_window_pid" 2>/dev/null
 read -r bound_registered_pid bound_registered_script _ 2>/dev/null <"$STAND_IN_BOUND_DIR/registry"
 stand_in_bound_summary+=" registered-itself=$([[ "${bound_registered_pid:-}" == "$bound_window_pid" &&
@@ -5719,20 +5788,38 @@ check "the table's stand-ins (a fake gnome-shell, a probe window's gjs) end by t
 # table's own have for minutes when it stops, then leaves by that path (INT
 # reaching it as a terminal's would: a background job ignores it). The
 # stand-in must be gone at once; one still running is ended here.
+# Each case's stand-in runs a copy of the fake shell's script, with a lifetime
+# of its own (STAND_IN_EXIT_CASE_LIFETIME_SECONDS: far above the 5 s the row
+# waits, so ended can still only be the trap's). A table stopped during this
+# row removes its directory, the case's registry and script with it, and its
+# child's trap then finds nothing to end: the row itself ends what it started,
+# by the pid it read as soon as it was written and that process's executable
+# and script, deleted or not (removed: the row removes the case's directory
+# first, as such a stop would). One no ending reaches (a KILL of the table
+# and the row together) is gone within that lifetime (abandoned: judged at
+# the table's end).
+STAND_IN_EXIT_CASE_LIFETIME_SECONDS=30
 STAND_IN_EXIT_DEFINITIONS="$(declare -f fatal register_stand_in end_table_stand_ins install_table_exit_trap)"
-# stand_in_exit_case <fatal, exit, TERM, INT or HUP> prints what became of that case's stand-in.
+# stand_in_exit_case <fatal, exit, TERM, INT, HUP, removed or abandoned> prints what became of that case's stand-in
+# (abandoned: nothing; it is recorded in ABANDONED_EXIT_CASE_RECORD for the row at the table's end).
+ABANDONED_EXIT_CASE_RECORD="$WIRING_TMP/abandoned-exit-case"
 stand_in_exit_case() {
   local exit_path="$1" case_dir="$WIRING_TMP/stand-in-exit-$1" case_child_pid case_stand_in_pid="" gone_tenth
-  if ! mkdir -p "$case_dir/tmp" || ! mkfifo "$case_dir/block" "$case_dir/tmp/hold"; then
+  local case_script_path child_exit_path="$1" abandoned_started_at
+  if ! mkdir -p "$case_dir/tmp" || ! mkfifo "$case_dir/block" "$case_dir/tmp/hold" ||
+    ! cp -- "$FAKE_SHELL_DIR/gnome-shell" "$case_dir/gnome-shell" ||
+    ! case_script_path="$(readlink -f -- "$case_dir/gnome-shell")"; then
     fatal "cannot lay out $case_dir"
   fi
+  # removed and abandoned leave as TERM does, once the row took the child's registry away.
+  [[ "$exit_path" == removed || "$exit_path" == abandoned ]] && child_exit_path=TERM
   # shellcheck disable=SC2016  # Expanded by the child bash.
-  env --default-signal=INT STAND_IN_LIFETIME_SECONDS="$STAND_IN_LIFETIME_SECONDS" bash -c '
+  env --default-signal=INT CASE_STAND_IN_LIFETIME_SECONDS="$STAND_IN_EXIT_CASE_LIFETIME_SECONDS" bash -c '
     eval "$1"
     WIRING_TMP="$2"
     TABLE_STAND_IN_REGISTRY="$WIRING_TMP/stand-ins"
     install_table_exit_trap
-    "$3" "$6" "$STAND_IN_LIFETIME_SECONDS" &
+    "$3" "$6" "$CASE_STAND_IN_LIFETIME_SECONDS" &
     register_stand_in "$!" "$3" "$$"
     for (( started_tenth = 0; started_tenth < 50; started_tenth++ )); do
       [[ "$(readlink "/proc/$!/fd/255")" == "$(readlink -f -- "$3")" ]] && break
@@ -5744,26 +5831,38 @@ stand_in_exit_case() {
       exit) exit 2 ;;
       *) read -r -t 30 _ <>"$WIRING_TMP/hold" ;;
     esac
-  ' stand-in-exit "$STAND_IN_EXIT_DEFINITIONS" "$case_dir/tmp" "$FAKE_SHELL_DIR/gnome-shell" "$case_dir/stand-in.pid" \
-    "$exit_path" "$case_dir/block" </dev/null >/dev/null 2>&1 &
+  ' stand-in-exit "$STAND_IN_EXIT_DEFINITIONS" "$case_dir/tmp" "$case_dir/gnome-shell" "$case_dir/stand-in.pid" \
+    "$child_exit_path" "$case_dir/block" </dev/null >/dev/null 2>&1 &
   case_child_pid=$!
+  # Read as soon as it is written: a stopped table removes the file.
   for (( gone_tenth = 0; gone_tenth < STAND_IN_GONE_WAIT_TENTHS; gone_tenth++ )); do
-    [[ -s "$case_dir/stand-in.pid" ]] && break
+    read -r case_stand_in_pid 2>/dev/null <"$case_dir/stand-in.pid" && [[ "$case_stand_in_pid" =~ ^[0-9]+$ ]] && break
     sleep 0.1
   done
   case "$exit_path" in
-    TERM | INT | HUP) kill "-$exit_path" "$case_child_pid" 2>/dev/null ;;
+    removed) rm -rf -- "$case_dir" ;;
+    abandoned) rm -f -- "$case_dir/tmp/stand-ins" ;;
+  esac
+  case "$child_exit_path" in
+    TERM | INT | HUP) kill "-$child_exit_path" "$case_child_pid" 2>/dev/null ;;
   esac
   wait "$case_child_pid" 2>/dev/null
-  read -r case_stand_in_pid 2>/dev/null <"$case_dir/stand-in.pid"
-  stand_in_fate "$case_stand_in_pid" "$FAKE_SHELL_DIR/gnome-shell"
+  if [[ "$exit_path" == abandoned ]]; then
+    printf -v abandoned_started_at '%(%s)T' -1
+    printf '%s %s %s\n' "$case_stand_in_pid" "$case_script_path" "$abandoned_started_at" >"$ABANDONED_EXIT_CASE_RECORD"
+    # Its script stays, so the table's own exit still ends it if the table stops before the row at its end.
+    register_stand_in "$case_stand_in_pid" "$case_dir/gnome-shell"
+    return 0
+  fi
+  stand_in_fate "$case_stand_in_pid" "$case_script_path"
 }
 stand_in_exit_summary=""
-for stand_in_exit_path in fatal exit TERM INT HUP; do
+for stand_in_exit_path in fatal exit TERM INT HUP removed; do
   stand_in_exit_summary+="$stand_in_exit_path=$(stand_in_exit_case "$stand_in_exit_path") "
 done
-check "the table's exit ends every stand-in it registered and still runs, whether it stops at a fatal, an exit, a TERM, an INT or a HUP" \
-  "$stand_in_exit_summary" "fatal=ended exit=ended TERM=ended INT=ended HUP=ended "
+check "the table's exit ends every stand-in it registered and still runs, whether it stops at a fatal, an exit, a TERM, an INT or a HUP; one whose registry and script a stopped table removed under the row, the row ends itself" \
+  "$stand_in_exit_summary" "fatal=ended exit=ended TERM=ended INT=ended HUP=ended removed=left-running "
+stand_in_exit_case abandoned
 printf '%s\n' "$CHECK_OK_ANSWER" >"$CHECK_ANSWERS/default"
 printf '%s\n' '{"verdict":"ok","detail":"0 normal windows","count":0}' \
   >"$CHECK_ANSWERS/resourcePulseCockpitCheck.window-count"
@@ -6283,9 +6382,16 @@ rmdir "$STATE_READER_RUN/state/run.values" || fatal "cannot lay out $STATE_READE
 unreadable_state_summary+=" missing=$(state_reader_case)"
 printf '%s\n' check-cockpit-pass=1 gc-log=1 check-cockpit-pass=2 >"$STATE_READER_RUN/state/run.values"
 unreadable_state_summary+=" readable=$(state_reader_case)"
-check "nested: check cockpit takes a run's state it cannot read for unknown, never for its first pass: the log steps, the limiter's two steps and the screenshot could not be judged, saying so, with no screenshot taken and no pass recorded; the reader fails on a run.values it cannot read or that is not there, and the writer on one it cannot write" \
+# A recorded pass number that is not a whole number (a torn write, a hand edit) tells no pass either.
+make_check_run yes gc-log=1 replay=1
+printf '%s\n' check-cockpit-pass=x >>"$CHECK_RUN/state/run.values"
+check_cockpit_stubbed "$CHECK_ANSWERS" again
+unreadable_state_summary+=" not-a-number=[$(check_step_verdicts early-log screenshot log)]"
+unreadable_state_summary+=" screenshots=$(check_stub_call_count '^Screenshot ')"
+unreadable_state_summary+=" named=$(grep -c -F "the run's state holds 'x' as the last pass's number" <<<"$CHECK_STUB_OUTPUT")"
+check "nested: check cockpit takes a run's state it cannot read, or a pass number recorded there that is not one, for unknown, never for its first pass: the log steps, the limiter's two steps and the screenshot could not be judged, saying so, with no screenshot taken and no pass recorded; the reader fails on a run.values it cannot read or that is not there, and the writer on one it cannot write" \
   "$unreadable_state_summary" \
-  "exit=2 [early-log:unjudged click-no-window:unjudged click-not-focused:unjudged screenshot:unjudged log:unjudged] screenshots=0 passes=0 log-offsets=0 limiter-times=2 named=3/2 summary=1 reader: unreadable=1: unwritable=1 missing=1: readable=0:2"
+  "exit=2 [early-log:unjudged click-no-window:unjudged click-not-focused:unjudged screenshot:unjudged log:unjudged] screenshots=0 passes=0 log-offsets=0 limiter-times=2 named=3/2 summary=1 reader: unreadable=1: unwritable=1 missing=1: readable=0:2 not-a-number=[early-log:unjudged screenshot:unjudged log:unjudged] screenshots=0 named=3"
 
 # check cockpit says so when it cannot record a value of the run's state a
 # later pass needs, and does nothing that would mislead that pass: a pass
@@ -6428,16 +6534,15 @@ chmod +x "$CHECK_TERM_PERF_STAND_IN" || fatal "cannot make $CHECK_TERM_PERF_STAN
 make_check_run yes gc-log=1 replay=1
 : >"$CHECK_CALLS"
 rm -f "$CHECK_TERM_PERF_STARTED"
-# shellcheck disable=SC2016  # Expanded by the child bash.
-setsid env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_RUN" PATH="$CHECK_STUB_BIN:$PATH" \
-  CHECK_STUB_ANSWERS="$CHECK_ANSWERS" CHECK_STUB_CALLS="$CHECK_CALLS" CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" \
-  CHECK_TERM_PERF_STAND_IN="$CHECK_TERM_PERF_STAND_IN" bash -c '
+CHECK_SESSION_EXTRA_ENV=(CHECK_TERM_PERF_STAND_IN="$CHECK_TERM_PERF_STAND_IN")
+# shellcheck disable=SC2016  # Expanded by the session's bash.
+start_check_session "$CHECK_TERM_OUTPUT" '
     source "$1" || exit 99
     sleep() { :; }
     run_perf_for_check_cockpit() { exec "$CHECK_TERM_PERF_STAND_IN"; }
     check_cockpit_subcommand
-  ' check-term "$NESTED_SCRIPT" >"$CHECK_TERM_OUTPUT" 2>&1 &
-check_term_pid=$!
+  ' check-term "$NESTED_SCRIPT"
+check_term_pid=$CHECK_SESSION_PID
 for (( check_term_tenth = 0; check_term_tenth < CHECK_TERM_START_LIMIT_TENTHS; check_term_tenth++ )); do
   [[ -e "$CHECK_TERM_PERF_STARTED" ]] && break
   sleep 0.1
@@ -6459,6 +6564,8 @@ fi
 check_term_summary+=" perf-put-back=$(grep -c -x -F 'perf put the run back after its TERM' "$CHECK_CALLS")"
 check_term_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
   && printf restored || printf changed)"
+kill -KILL -- "-$check_term_pid" 2>/dev/null
+nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
 check "nested: a TERM to check cockpit during its perf pass is taken at once: perf is sent TERM and waited for while it puts the run back, the run's fixture put back, exit 143" \
   "$check_term_summary" "perf-ran=yes ended=143 perf-put-back=1 fixture=restored"
 
@@ -6501,22 +6608,27 @@ sleep $CHECK_PERF_STAND_IN_WAIT_SECONDS &
 wait "\$!"
 STAND_IN
 chmod +x "$CHECK_PUT_BACK_PERF_STAND_IN" || fatal "cannot make $CHECK_PUT_BACK_PERF_STAND_IN executable"
+# The lines check cockpit and perf print to stderr as a signal stops them, saying what they wait for.
+CHECK_STOPPING_FOR_PERF_NEEDLE='check cockpit is stopping: waiting for perf to put the run back'
+PERF_STOPPING_NEEDLE='perf is stopping: putting the run back first'
 # check_put_back_run <group or twice> starts check cockpit on a fresh run with the stand-in as its perf pass, sends,
 # once the stand-in runs, one TERM to the check's process group (group, the check's own TERM to perf then sent
 # CHECK_TERM_TO_PERF_DELAY_SECONDS late) or two to the check alone in quick succession (twice), waits for the check to
 # end, and prints ended=<status> put-back-at-exit=[<the steps perf had recorded when the check ended>]
-# fixture=<restored or changed>. Whatever is left of the row's session then ends with it.
+# fixture=<restored or changed> windows-launched=<by the session's window stand-in, bounded as the session is>/<by the
+# table's> said=<the check's stop lines>/<perf's>. Whatever is left of the row's session then ends with it.
 check_put_back_run() {
   local term_plan="$1" check_pid put_back_tenth put_back_summary perf_term_delay_seconds=""
   [[ "$term_plan" == group ]] && perf_term_delay_seconds="$CHECK_TERM_TO_PERF_DELAY_SECONDS"
   make_check_run yes gc-log=1 replay=1
   : >"$CHECK_CALLS"
+  : >"$CHECK_SESSION_WINDOW_RECORDS.launches"
+  : >"$CHECK_WINDOW_LAUNCHES"
   rm -f "$CHECK_PUT_BACK_PERF_STARTED"
-  # shellcheck disable=SC2016  # Expanded by the child bash.
-  setsid env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_RUN" PATH="$CHECK_STUB_BIN:$PATH" \
-    CHECK_STUB_ANSWERS="$CHECK_ANSWERS" CHECK_STUB_CALLS="$CHECK_CALLS" CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" \
-    CHECK_PUT_BACK_PERF_STAND_IN="$CHECK_PUT_BACK_PERF_STAND_IN" PERF_TERM_DELAY_SECONDS="$perf_term_delay_seconds" \
-    bash -c '
+  CHECK_SESSION_EXTRA_ENV=(CHECK_PUT_BACK_PERF_STAND_IN="$CHECK_PUT_BACK_PERF_STAND_IN"
+    PERF_TERM_DELAY_SECONDS="$perf_term_delay_seconds")
+  # shellcheck disable=SC2016  # Expanded by the session's bash.
+  start_check_session "$CHECK_PUT_BACK_OUTPUT" '
       source "$1" || exit 99
       sleep() { :; }
       run_perf_for_check_cockpit() { exec "$CHECK_PUT_BACK_PERF_STAND_IN"; }
@@ -6525,8 +6637,8 @@ check_put_back_run() {
         end_check_perf() { command sleep "$PERF_TERM_DELAY_SECONDS"; script_end_check_perf; }
       fi
       check_cockpit_subcommand
-    ' check-put-back "$NESTED_SCRIPT" >"$CHECK_PUT_BACK_OUTPUT" 2>&1 &
-  check_pid=$!
+    ' check-put-back "$NESTED_SCRIPT"
+  check_pid=$CHECK_SESSION_PID
   for (( put_back_tenth = 0; put_back_tenth < CHECK_TERM_START_LIMIT_TENTHS; put_back_tenth++ )); do
     [[ -e "$CHECK_PUT_BACK_PERF_STARTED" ]] && break
     sleep 0.1
@@ -6553,14 +6665,20 @@ check_put_back_run() {
   put_back_summary+=" put-back-at-exit=[$(sed -n 's/^perf put back: //p' "$CHECK_CALLS" | tr '\n' ' ')]"
   put_back_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
     && printf restored || printf changed)"
+  put_back_summary+=" windows-launched=$(wc -l <"$CHECK_SESSION_WINDOW_RECORDS.launches")"
+  put_back_summary+="/$(wc -l <"$CHECK_WINDOW_LAUNCHES")"
+  put_back_summary+=" said=$(grep -c -F "$CHECK_STOPPING_FOR_PERF_NEEDLE" "$CHECK_PUT_BACK_OUTPUT")"
+  put_back_summary+="/$(grep -c -F "$PERF_STOPPING_NEEDLE" "$CHECK_PUT_BACK_OUTPUT")"
   kill -KILL -- "-$check_pid" 2>/dev/null
   nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
   printf '%s' "$put_back_summary"
 }
-check "nested: a TERM to check cockpit's process group during its perf pass reaches perf too, and the check's own TERM to perf, landing once perf's put-back has begun, cuts no step of it: the check waits for every step, puts the run's fixture back and exits 143" \
-  "$(check_put_back_run group)" "ended=143 put-back-at-exit=[window cost-job extension ] fixture=restored"
-check "nested: a second TERM to check cockpit in quick succession cuts its exit short nowhere: it still waits for every step of perf's put-back, then puts the run's fixture back, and exits 143" \
-  "$(check_put_back_run twice)" "ended=143 put-back-at-exit=[window cost-job extension ] fixture=restored"
+check "nested: a TERM to check cockpit's process group during its perf pass reaches perf too, and the check's own TERM to perf, landing once perf's put-back has begun, cuts no step of it: the check waits for every step, puts the run's fixture back and exits 143; each says once on stderr what it waits for; the session's windows are bounded as it is" \
+  "$(check_put_back_run group)" \
+  "ended=143 put-back-at-exit=[window cost-job extension ] fixture=restored windows-launched=2/0 said=1/1"
+check "nested: a second TERM to check cockpit in quick succession cuts its exit short nowhere: it still waits for every step of perf's put-back, then puts the run's fixture back, and exits 143; each says once on stderr what it waits for; the session's windows are bounded as it is" \
+  "$(check_put_back_run twice)" \
+  "ended=143 put-back-at-exit=[window cost-job extension ] fixture=restored windows-launched=2/0 said=1/1"
 
 # A TERM can also land where no row above can time it: after a first TERM
 # began an exit, before the exit handler's own first statement (the gap); or
@@ -6625,6 +6743,43 @@ kill "$check_fake_shell_pid" 2>/dev/null
 wait "$check_fake_shell_pid" 2>/dev/null
 rm -rf "$CHECK_RUN"
 
+# The stand-ins abandoned above (a check session, a window its check opens, an
+# exit case's fake shell) end by their own lifetimes: once the longest has
+# passed, with a margin (the rows between take minutes, so this seldom waits),
+# none still runs as itself. One that does is ended here.
+STAND_IN_LIFETIME_MARGIN_SECONDS=5
+read -r abandoned_exit_case_pid abandoned_exit_case_script abandoned_exit_case_started_at 2>/dev/null \
+  <"$ABANDONED_EXIT_CASE_RECORD"
+abandoned_exit_case_started_at="${abandoned_exit_case_started_at:-0}"
+abandoned_wait_until=$((abandoned_exit_case_started_at + STAND_IN_EXIT_CASE_LIFETIME_SECONDS))
+for abandoned_ends_at in $((abandoned_session_started_at + CHECK_SESSION_LIFETIME_SECONDS)) \
+  $((abandoned_window_started_at + CHECK_SESSION_LIFETIME_SECONDS)); do
+  (( abandoned_ends_at > abandoned_wait_until )) && abandoned_wait_until=$abandoned_ends_at
+done
+abandoned_wait_until=$((abandoned_wait_until + STAND_IN_LIFETIME_MARGIN_SECONDS))
+while printf -v abandoned_now '%(%s)T' -1 && (( abandoned_now < abandoned_wait_until )); do
+  sleep 1
+done
+# abandoned_stand_in_fate <pid> <script's canonical path> prints ended, or ends a stand-in still running and prints
+# still-running.
+abandoned_stand_in_fate() {
+  [[ "$1" =~ ^[0-9]+$ ]] || { printf no-stand-in; return 0; }
+  is_row_stand_in "$1" "$2" || { printf ended; return 0; }
+  kill -TERM "$1" 2>/dev/null
+  printf still-running
+}
+abandoned_summary="exit-case=$(abandoned_stand_in_fate "${abandoned_exit_case_pid:-}" "${abandoned_exit_case_script:-}")"
+abandoned_summary+=" session-window=$(abandoned_stand_in_fate "$abandoned_window_pid" "$CHECK_SESSION_WINDOW_SCRIPT_PATH")"
+if [[ -n "$abandoned_session_starttime" && "$(starttime_of "$abandoned_session_pid")" == "$abandoned_session_starttime" ]] &&
+  is_running "$abandoned_session_pid"; then
+  abandoned_summary+=" session=still-running"
+  kill -KILL -- "-$abandoned_session_pid" 2>/dev/null
+else
+  abandoned_summary+=" session=ended"
+fi
+check "a row's own stand-ins none of its endings reached end by their own lifetimes: an exit case's fake shell ($STAND_IN_EXIT_CASE_LIFETIME_SECONDS s), a check session and a window its check opens ($CHECK_SESSION_LIFETIME_SECONDS s)" \
+  "$abandoned_summary" "exit-case=ended session-window=ended session=ended"
+
 printf '\nthe stub, never the real session, answered gsettings\n'
 run_apply_against_stub '@as []' '@as []' false "$SHELL_SCHEMA"
 check "the apply script called the stub gsettings to set enabled-extensions, behind the dead-bus barrier" \
@@ -6639,7 +6794,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1140
+EXPECTED_ROWS=1141
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

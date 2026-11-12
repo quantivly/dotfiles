@@ -132,8 +132,13 @@
 #       stops it there, with exit 2.
 #       Every exit once it acts on the run (a breach, a failure or a signal too)
 #       puts the run back: its window and its background measurement ended, the
-#       extension enabled and the top bar shown again; a second TERM or interrupt
-#       cannot cut that short
+#       extension enabled and the top bar shown again. A TERM or an interrupt is
+#       taken once perf's current wait ends (up to a minute); perf then says on
+#       stderr that it is putting the run back, and ignores every signal but KILL
+#       until it has: seconds while the nested shell answers, up to about two
+#       minutes more when it does not (two requests of up to a minute each), so up
+#       to about three from the stop. A KILL ends it sooner and leaves the run
+#       changed
 #   scripts/resource-pulse-nested.sh window <title>
 #       open a small Gtk 4 window titled <title> (a plain name) in a live run whose
 #       cockpit serves the run's fixture, as a client of the nested shell only (see
@@ -163,10 +168,16 @@
 #       one log line the extension's limiter (10 minutes, kept across disable and
 #       enable) still holds from an earlier pass, naming how long is left. It
 #       rewrites only the run's copy of the fixture, and puts it back and closes its
-#       windows on every exit. A TERM or an interrupt during its perf pass ends that
-#       pass too: perf puts the run back once its current wait ends (up to a minute),
-#       and the check waits for it; a second one, to the check or to perf, cuts
-#       neither put-back short.
+#       windows on every exit. A TERM or an interrupt is taken at once during its
+#       perf pass, else once its current request ends (up to a minute); the check
+#       then says on stderr what it is putting back (during its perf pass: that it
+#       is waiting for perf to put the run back, which perf does once its own
+#       current wait ends), and ignores every signal but KILL until it has: about a
+#       minute while the nested shell answers, up to about four minutes when it
+#       does not (perf's wait and two requests, then the check's own request to
+#       close the dropdown, each up to a minute). A second TERM or interrupt, to the
+#       check or to perf, cuts neither put-back short; a KILL ends it sooner and
+#       leaves the run changed.
 #       Exit 1 when a step is bad, else 2 when one could not be judged
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services, the windows `window` opened and
@@ -668,11 +679,15 @@ die() {
 # signal can cut that put-back short, however soon after the first it comes
 # (one landing before the EXIT trap's own first statement included: bash runs
 # a pending trap before each command, and its `exit` would end the EXIT trap).
+# Then, when given, a function says on stderr what the put-back waits for, so
+# that a wait of minutes is not taken for a hang and ended with KILL.
 # Arguments:
 #   $1 - exit status
+#   $2 - optional: the function that says so (it runs with both ignored)
 #######################################
 exit_with_signals_ignored() {
     trap '' TERM INT
+    [[ -n "${2:-}" ]] && "$2"
     exit "$1"
 }
 
@@ -2540,15 +2555,26 @@ end_perf_run() {
 }
 
 #######################################
+# Say on stderr, as a signal stops perf, that it is putting the run back and
+# how long that can take (its two requests to the nested shell, up to
+# EVAL_TIMEOUT_SECONDS each).
+#######################################
+note_perf_stopping() {
+    note "perf is stopping: putting the run back first (its window and measurement ended, the extension enabled," \
+        "the top bar shown): seconds while the nested shell answers, up to about two minutes when it does not;" \
+        "until then it ignores every signal but KILL, which would leave the run changed"
+}
+
+#######################################
 # From here perf acts on the run: install its exit (end_perf_run, the EXIT
 # trap), which every exit runs, a failure, a breach or a signal included; a
 # signal's exit ignores further ones first (a TERM to check cockpit's process
-# group reaches perf, and the check's exit sends it one more).
+# group reaches perf, and the check's exit sends it one more), then says so.
 #######################################
 install_perf_exit_traps() {
     trap end_perf_run EXIT
-    trap 'exit_with_signals_ignored 143' TERM
-    trap 'exit_with_signals_ignored 130' INT
+    trap 'exit_with_signals_ignored 143 note_perf_stopping' TERM
+    trap 'exit_with_signals_ignored 130 note_perf_stopping' INT
 }
 
 #######################################
@@ -3827,7 +3853,7 @@ check_cockpit_click_steps() {
     if [[ -n "$is_no_window_clicked" ]]; then
         click_and_expect_nothing_activated "$NO_WINDOW_LOG_NEEDLE" 0
     else
-        note_unjudged "click-no-window made no click, so this one would be the first of its kind"
+        note_unjudged "click-no-window's click was not made or not confirmed, so this one may be the first of its kind"
     fi
     end_check_step click-no-window-again "a second such click activated nothing and logged nothing more"
     begin_check_step
@@ -4122,6 +4148,24 @@ check_cockpit_count_budgets_step() {
 }
 
 #######################################
+# Say on stderr, as a signal stops check cockpit, what its exit puts back and
+# how long that can take: during its perf pass, perf's own put-back first (its
+# current wait, then two requests to the nested shell), then the check's
+# request to close the dropdown, each up to EVAL_TIMEOUT_SECONDS.
+#######################################
+note_check_cockpit_stopping() {
+    if [[ -n "$CHECK_PERF_PID" ]]; then
+        note "check cockpit is stopping: waiting for perf to put the run back, then ending its windows, putting" \
+            "the fixture back and closing the dropdown: about a minute while the nested shell answers, up to about" \
+            "four when it does not; until then it ignores every signal but KILL, which would leave the run changed"
+        return 0
+    fi
+    note "check cockpit is stopping: ending its windows, putting the fixture back and closing the dropdown first:" \
+        "seconds while the nested shell answers, up to about a minute when it does not; until then it ignores" \
+        "every signal but KILL, which would leave the run changed"
+}
+
+#######################################
 # check cockpit's exit, on every path: its perf pass ended and waited for, the
 # check's windows ended, the run's fixture put back, the dropdown closed. Each
 # step guarded. No TERM or INT can cut it short: on a signal's path they are
@@ -4173,8 +4217,8 @@ check_cockpit_subcommand() {
     (( window_count == 0 )) \
         || die "refusing: the nested session has $window_count window(s) already; the check opens its own"
     trap end_check_cockpit EXIT
-    trap 'exit_with_signals_ignored 143' TERM
-    trap 'exit_with_signals_ignored 130' INT
+    trap 'exit_with_signals_ignored 143 note_check_cockpit_stopping' TERM
+    trap 'exit_with_signals_ignored 130 note_check_cockpit_stopping' INT
     begin_check_pass
     check_cockpit_layout_steps
     check_cockpit_hover_steps
