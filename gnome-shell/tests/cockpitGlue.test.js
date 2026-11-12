@@ -421,20 +421,14 @@ test('cockpitCards.js: setInteractive sets reactive on the card and on every row
         '}',
     ]));
 
-test('cockpitCards.js: no St.DrawingArea or cairo: the bar is a widget whose width is its fraction of the track, ' +
-    'whose width is a share of the cell\'s; the bar is set only when its width changed', () => {
+test('cockpitCards.js: no St.DrawingArea or cairo: the bar is a widget whose width is its fraction of the track; ' +
+    'the bar is set only when its width changed', () => {
     const source = codeOf(CARDS_SOURCE_FILE);
-    const setCellSizeBody = cardMethodBody('CockpitCardBase', 'setCellSize(');
     assertEqual({
         drawingAreas: occurrenceCount(source, 'DrawingArea'),
         cairoContexts: occurrenceCount(source, 'get_context('),
         bar: occurrenceCount(cardMethodBody('CockpitCardBase', '_buildRow('), 'bar: new St.Widget({'),
         showRowBar: statementsOf(cardMethodBody('CockpitCardBase', '_showRowBar(')),
-        trackFromTheCell: occurrenceCount(setCellSizeBody,
-            'const barTrackWidthPx = Math.round(widthPx * COCKPIT_ROW_BAR_TRACK_SHARE_OF_CELL_WIDTH);'),
-        cellSized: occurrenceCount(setCellSizeBody, 'this.set_size(widthPx, heightPx);'),
-        tracksResized: occurrenceCount(setCellSizeBody, 'row.barTrack.set_width(barTrackWidthPx);'),
-        barsRedrawn: occurrenceCount(setCellSizeBody, 'this._showRowBar(row);'),
     }, {
         drawingAreas: 0, cairoContexts: 0, bar: 1,
         showRowBar: [
@@ -446,9 +440,34 @@ test('cockpitCards.js: no St.DrawingArea or cairo: the bar is a widget whose wid
             'row.barWidthPx = barWidthPx;',
             '}',
         ],
-        trackFromTheCell: 1, cellSized: 1, tracksResized: 1, barsRedrawn: 1,
     });
 });
+
+test('cockpitCards.js: a card\'s width gives its rows\' bars their track (ruling D29): setCardWidth sets the card\'s ' +
+    'width and every row\'s track to its share of that width, redrawing each bar, and nothing more when the track\'s ' +
+    'width is unchanged; it sets no height (the dropdown gives a card only a width), and setCellSize goes through ' +
+    'it, then sets the height', () =>
+    assertEqual({
+        setCardWidth: statementsOf(cardMethodBody('CockpitCardBase', 'setCardWidth(')),
+        setCellSize: statementsOf(cardMethodBody('CockpitCardBase', 'setCellSize(')),
+    }, {
+        setCardWidth: [
+            'setCardWidth(widthPx) {',
+            'this.set_width(widthPx);',
+            'const barTrackWidthPx = Math.round(widthPx * COCKPIT_ROW_BAR_TRACK_SHARE_OF_CELL_WIDTH);',
+            'if (barTrackWidthPx === this._barTrackWidthPx)',
+            'return;',
+            'this._barTrackWidthPx = barTrackWidthPx;',
+            'for (const row of this._rows) {',
+            'row.barTrack.set_width(barTrackWidthPx);',
+            'this._showRowBar(row);',
+            '}',
+            '}',
+        ],
+        setCellSize: [
+            'setCellSize(widthPx, heightPx) {', 'this.setCardWidth(widthPx);', 'this.set_height(heightPx);', '}',
+        ],
+    }));
 
 test('cockpitCards.js: a handler is either on the card itself or tied to it by connectObject(..., this), and ' +
     'destroying a card hides the shared tooltip', () => {
@@ -1455,6 +1474,9 @@ function indicatorMethodStatements(declarationLine) {
     return statementsOf(methodBody(readExtensionFile(INDICATOR_SOURCE_FILE), declarationLine)).slice(1, -1);
 }
 
+/** The open step's statement that gives the sessions card the system card's width (ruling D29). */
+const SIZE_TO_SYSTEM_CARD_STATEMENT = 'this._sizeSessionsCardToSystemCard();';
+
 test('indicator.js: takes the pulse client, then one options object (the cockpit client, the shared error log and ' +
     'the session activation), and sets every new field _onDestroy reads before anything can throw', () => {
     const initStatements = indicatorMethodStatements('_init(client, {cockpitClient, errorLog, onSessionActivated}) {');
@@ -1565,7 +1587,9 @@ test('indicator.js: opening the menu draws the sessions card from what the cockp
     assertEqual({
         followsTheSystemCard: openStateStatements.slice(0, 2),
         follow: indicatorMethodStatements('_followMenuWithSessionsCard(isOpen) {'),
-        open: indicatorMethodStatements('_showLatestSessions() {'),
+        // The card's width (SIZE_TO_SYSTEM_CARD_STATEMENT) is the next row's.
+        open: indicatorMethodStatements('_showLatestSessions() {')
+            .filter(statement => statement !== SIZE_TO_SYSTEM_CARD_STATEMENT),
         close: indicatorMethodStatements('_freezeSessionsCard() {'),
         draw: indicatorMethodStatements('_drawSessionsCard() {'),
     }, {
@@ -1587,6 +1611,29 @@ test('indicator.js: opening the menu draws the sessions card from what the cockp
             'cardId: COCKPIT_SESSIONS_CARD_ID, card: this._sessionsCard, cockpitClient: this._cockpitClient,',
             '});',
         ],
+    });
+});
+
+test('indicator.js: as the menu opens, before the sessions card is drawn, it takes the system card\'s preferred ' +
+    '(natural) width, which the stylesheet gives it (ruling D29: the cards line up, a long name ellipsizes at that ' +
+    'width, the rows\' bars get a track), not its allocated width, which the opening menu has not laid out yet; a ' +
+    'width only (setCardWidth): nothing in the indicator sets a cockpit card\'s height or size', () => {
+    const indicatorCode = codeOf(INDICATOR_SOURCE_FILE);
+    const openStatements = indicatorMethodStatements('_showLatestSessions() {');
+    const sizeIndex = openStatements.indexOf(SIZE_TO_SYSTEM_CARD_STATEMENT);
+    assertEqual({
+        sizedBeforeTheDraw: sizeIndex >= 0 && sizeIndex < openStatements.indexOf('this._drawSessionsCard();'),
+        size: indicatorMethodStatements('_sizeSessionsCardToSystemCard() {'),
+        unconstrainedHeight: occurrenceCount(indicatorCode, 'const UNCONSTRAINED_HEIGHT = -1;'),
+        heightOrSizeSet: ['set_height(', 'set_size(', 'setCellSize('].filter(needle => indicatorCode.includes(needle)),
+    }, {
+        sizedBeforeTheDraw: true,
+        size: [
+            'const [, systemCardNaturalWidthPx] = this._dropdownCard.get_preferred_width(UNCONSTRAINED_HEIGHT);',
+            'this._sessionsCard.setCardWidth(systemCardNaturalWidthPx);',
+        ],
+        unconstrainedHeight: 1,
+        heightOrSizeSet: [],
     });
 });
 

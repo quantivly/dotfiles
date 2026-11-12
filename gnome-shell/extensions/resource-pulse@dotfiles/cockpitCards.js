@@ -309,15 +309,29 @@ class CockpitCardBase extends St.BoxLayout {
     }
 
     /**
-     * Sizes the card to its cell, and every row's bar track to its share of the cell's width (redrawing each bar to
-     * the new track). A frozen card is resized too: its place on the grid is not data.
+     * Sizes the card to its cell: its width, with every row's bar track (setCardWidth), then its height. A frozen card
+     * is resized too: its place on the grid is not data.
      *
      * @param {number} widthPx - The cell's width.
      * @param {number} heightPx - The cell's height.
      * @returns {void}
      */
     setCellSize(widthPx, heightPx) {
-        this.set_size(widthPx, heightPx);
+        this.setCardWidth(widthPx);
+        this.set_height(heightPx);
+    }
+
+    /**
+     * Sets the card's width, and every row's bar track to its share of that width (redrawing each bar to the new
+     * track); nothing more when the track's width is unchanged. Only the width: the dropdown gives its card the system
+     * card's width and leaves the height to the card's content (ruling D29), and the grid sets the height as well
+     * (setCellSize). A frozen card is resized too: its size is not data.
+     *
+     * @param {number} widthPx - The card's width.
+     * @returns {void}
+     */
+    setCardWidth(widthPx) {
+        this.set_width(widthPx);
         const barTrackWidthPx = Math.round(widthPx * COCKPIT_ROW_BAR_TRACK_SHARE_OF_CELL_WIDTH);
         if (barTrackWidthPx === this._barTrackWidthPx)
             return;

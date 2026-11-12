@@ -2,8 +2,8 @@
 // below it once the pointer has rested on it for HOVER_LABEL_DELAY_MS (never while the menu is open). A click opens a
 // dropdown: a second card (card.js), unfrozen exactly while the menu is open; under it, once the cockpit has answered
 // (ruling D23), a second copy of the cockpit's sessions card (cockpitCards.js), live exactly while the menu is open,
-// whose row click closes the menu and takes the user to the session; and an "Open Resources" item (cockpitCards.js
-// finds and opens the app, as the cockpit's system card does).
+// whose row click closes the menu and takes the user to the session, as wide as the card above it (ruling D29); and an
+// "Open Resources" item (cockpitCards.js finds and opens the app, as the cockpit's system card does).
 //
 // The sessions card is paced as the cockpit layer's own copy is, by the one CockpitSourcePacing and data-card drawing
 // they share (cockpitSourceDrawing.js, ruling D22): opening the menu draws it at once from what the cockpit client
@@ -80,7 +80,10 @@ const GRAPH_HEIGHT_STYLE = `height: ${TOPBAR_GRAPH_HEIGHT_PX}px;`;
 const GRAPH_SIZE_STYLE = `${GRAPH_WIDTH_STYLE} ${GRAPH_HEIGHT_STYLE}`;
 const TRANSPARENT_OPACITY = 0;
 const OPAQUE_OPACITY = 255;
-/** Clutter's for_height of -1: the label's width for its own height, with no height constraint. */
+/**
+ * Clutter's for_height of -1: an actor's width for its own height, with no height constraint (the hover label's, and
+ * the dropdown's system card's).
+ */
 const UNCONSTRAINED_HEIGHT = -1;
 /** The stage's left edge, for the fallback when the indicator is on no monitor. */
 const STAGE_LEFT_EDGE_PX = 0;
@@ -301,16 +304,30 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
-     * Draws the sessions card from what the cockpit client holds now, while it is still frozen (so it only records
-     * it), then unfreezes it, which draws that record: the latest at once, drawn once, waiting for no event (the
-     * layer's reveal, setCardFrozen, does the same). The read the open dropdown's subscription asks for is drawn when
-     * it comes.
+     * Gives the sessions card the system card's width (_sizeSessionsCardToSystemCard), then draws it from what the
+     * cockpit client holds now, while it is still frozen (so it only records it), then unfreezes it, which draws that
+     * record: the latest at once, drawn once, waiting for no event (the layer's reveal, setCardFrozen, does the same).
+     * The read the open dropdown's subscription asks for is drawn when it comes.
      *
      * @returns {void}
      */
     _showLatestSessions() {
+        this._sizeSessionsCardToSystemCard();
         this._drawSessionsCard();
         this._sessionsCard.setFrozen(false);
+    }
+
+    /**
+     * Gives the sessions card the system card's width (ruling D29), so the two cards line up, a long session name
+     * ellipsizes at that width rather than widen the menu, and the rows' bars get their track. The system card's width
+     * comes from the stylesheet, so its preferred (natural) width is known as the menu opens; its allocated width is
+     * not, until the open menu is laid out on the next frame. Only the width: the card's height stays its content's.
+     *
+     * @returns {void}
+     */
+    _sizeSessionsCardToSystemCard() {
+        const [, systemCardNaturalWidthPx] = this._dropdownCard.get_preferred_width(UNCONSTRAINED_HEIGHT);
+        this._sessionsCard.setCardWidth(systemCardNaturalWidthPx);
     }
 
     /**
