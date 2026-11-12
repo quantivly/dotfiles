@@ -384,3 +384,200 @@ test('perf probe: a read before any attach, and an unknown request, are refused'
     assertEqual({readFirst: typeof readFirst.refused, unknownRequest: typeof unknownRequest.refused},
         {readFirst: 'string', unknownRequest: 'string'});
 });
+
+/** The grid's card ids as the nested fixture's layout draws them, in the layer's order. */
+const GRID_CARD_IDS = ['system', 'apps', 'connections', 'sessions'];
+/** Clutter's offscreen redirect of none, which the layer and the system cell's wrapper keep (ruling D12). */
+const NO_REDIRECT = 0;
+
+/**
+ * A fake cockpit layer drawing the given cards, each with the redirect ruling D12 wants unless told otherwise, its
+ * pacing's fallback timeout not armed.
+ *
+ * @param {string[]} cardIds - The drawn card ids, in the layer's order.
+ * @returns {{layer: object, cardsById: Map<string, object>}} The layer, and its cards by id.
+ */
+function makeFakeLayer(cardIds) {
+    const redirectFor = cardId => (cardId === 'system' ? NO_REDIRECT : OFFSCREEN_REDIRECT.ALWAYS);
+    const cardsById = new Map(cardIds.map(cardId => [cardId, {
+        redirect: redirectFor(cardId),
+        get_offscreen_redirect() {
+            return this.redirect;
+        },
+    }]));
+    const layer = {
+        redirect: NO_REDIRECT,
+        get_offscreen_redirect() {
+            return this.redirect;
+        },
+        get drawnCardIds() {
+            return [...cardsById.keys()];
+        },
+        _cardsById: cardsById,
+        _pacing: {_fallbackSourceId: null},
+    };
+    return {layer, cardsById};
+}
+
+/**
+ * Gives a fake shell's extension the cockpit fields read-cockpit reads: a layer (or none), the visible card ids, no
+ * cover fallback armed, and a dropdown pacing with no fallback armed.
+ *
+ * @param {object} shell - From makeFakeShell.
+ * @param {object} parts - Its parts.
+ * @param {object|null} layer - From makeFakeLayer, or null for no layer.
+ * @param {string[]} visibleCardIds - The extension's _visibleCardIds.
+ * @returns {void}
+ */
+function addFakeCockpit(shell, parts, layer, visibleCardIds) {
+    shell.extension._layer = layer;
+    shell.extension._visibleCardIds = visibleCardIds;
+    shell.extension._coverFallbackSourceId = null;
+    parts.indicator._sessionsPacing = {_fallbackSourceId: null};
+}
+
+test('perf probe: read-cockpit answers the grid\'s visible and drawn card ids sorted, each part\'s redirect and no ' +
+    'armed fallback, as they are at the end of the window', () => {
+    const parts = makeExtensionParts();
+    const shell = makeFakeShell(parts);
+    const {layer} = makeFakeLayer(GRID_CARD_IDS);
+    addFakeCockpit(shell, parts, layer, ['sessions', 'apps', 'system', 'connections']);
+    runProbe(shell.scope, 'attach-enabled');
+    const visibleAnswer = runProbe(shell.scope, 'read-cockpit');
+    // Covered after the attach, as the covered states are: the answer reads the ids as they are now.
+    shell.extension._visibleCardIds = [];
+    const coveredAnswer = runProbe(shell.scope, 'read-cockpit');
+    const expectedRedirects = {layer: 'NONE', system: 'NONE', apps: 'ALWAYS', connections: 'ALWAYS', sessions: 'ALWAYS'};
+    const expectedAnswer = visibleCardIds => ({
+        mode: 'enabled', visibleCardIds, layerCardIds: ['apps', 'connections', 'sessions', 'system'],
+        cockpitRedirects: expectedRedirects, armedCockpitTimers: [],
+    });
+    assertEqual({visibleAnswer, coveredAnswer}, {
+        visibleAnswer: expectedAnswer(['apps', 'connections', 'sessions', 'system']),
+        coveredAnswer: expectedAnswer([]),
+    });
+});
+
+test('perf probe: read-cockpit names each armed fallback timeout (the cover check\'s, the layer\'s pacing\'s, the ' +
+    'dropdown\'s) and a redirect that is neither ALWAYS nor none by its number', () => {
+    const parts = makeExtensionParts();
+    const shell = makeFakeShell(parts);
+    const {layer, cardsById} = makeFakeLayer(GRID_CARD_IDS);
+    addFakeCockpit(shell, parts, layer, GRID_CARD_IDS);
+    runProbe(shell.scope, 'attach-enabled');
+    const armedOneAtATime = {};
+    const armers = {
+        'cover-fallback': () => {
+            shell.extension._coverFallbackSourceId = 41;
+        },
+        'layer-pacing-fallback': () => {
+            layer._pacing._fallbackSourceId = 42;
+        },
+        'dropdown-pacing-fallback': () => {
+            parts.indicator._sessionsPacing._fallbackSourceId = 43;
+        },
+    };
+    for (const [timerName, arm] of Object.entries(armers)) {
+        shell.extension._coverFallbackSourceId = null;
+        layer._pacing._fallbackSourceId = null;
+        parts.indicator._sessionsPacing._fallbackSourceId = null;
+        arm();
+        armedOneAtATime[timerName] = runProbe(shell.scope, 'read-cockpit').armedCockpitTimers;
+    }
+    Object.values(armers).forEach(arm => arm());
+    cardsById.get('apps').redirect = OFFSCREEN_REDIRECT.AUTOMATIC_FOR_OPACITY;
+    layer.redirect = OFFSCREEN_REDIRECT.ALWAYS;
+    const allArmedAnswer = runProbe(shell.scope, 'read-cockpit');
+    assertEqual({
+        armedOneAtATime,
+        allArmed: allArmedAnswer.armedCockpitTimers,
+        redirects: allArmedAnswer.cockpitRedirects,
+    }, {
+        armedOneAtATime: {
+            'cover-fallback': ['cover-fallback'],
+            'layer-pacing-fallback': ['layer-pacing-fallback'],
+            'dropdown-pacing-fallback': ['dropdown-pacing-fallback'],
+        },
+        allArmed: ['cover-fallback', 'layer-pacing-fallback', 'dropdown-pacing-fallback'],
+        redirects: {layer: 'ALWAYS', system: 'NONE', apps: '1', connections: 'ALWAYS', sessions: 'ALWAYS'},
+    });
+});
+
+test('perf probe: read-cockpit with no layer (the v2 card top right) answers null drawn ids and redirects, and with ' +
+    'no sessions item no dropdown timer', () => {
+    const parts = makeExtensionParts();
+    const shell = makeFakeShell(parts);
+    addFakeCockpit(shell, parts, null, ['system']);
+    parts.indicator._sessionsPacing = null;
+    runProbe(shell.scope, 'attach-enabled');
+    assertEqual(runProbe(shell.scope, 'read-cockpit'), {
+        mode: 'enabled', visibleCardIds: ['system'], layerCardIds: null, cockpitRedirects: null,
+        armedCockpitTimers: [],
+    });
+});
+
+test('perf probe: read-cockpit refuses with nothing attached, in the disabled mode, after the parts changed, and when ' +
+    'a field it reads is not there, naming each', () => {
+    /** @type {Object<string, (shell: object, parts: object, layer: object) => void>} How each case breaks a field. */
+    const removals = {
+        extensionLayer: shell => {
+            delete shell.extension._layer;
+        },
+        extensionVisibleCardIds: shell => {
+            shell.extension._visibleCardIds = 'apps';
+        },
+        extensionCoverFallback: shell => {
+            delete shell.extension._coverFallbackSourceId;
+        },
+        layerCards: (_shell, _parts, layer) => {
+            delete layer._cardsById;
+        },
+        layerRedirect: (_shell, _parts, layer) => {
+            delete layer.get_offscreen_redirect;
+        },
+        layerPacing: (_shell, _parts, layer) => {
+            layer._pacing = {};
+        },
+        dropdownPacing: (_shell, parts) => {
+            delete parts.indicator._sessionsPacing;
+        },
+        dropdownPacingTimer: (_shell, parts) => {
+            parts.indicator._sessionsPacing = {};
+        },
+    };
+    const refusalOf = answer => ({refused: typeof answer.refused, missing: answer.missing});
+    const outcomes = {};
+    for (const [caseName, removeField] of Object.entries(removals)) {
+        const parts = makeExtensionParts();
+        const shell = makeFakeShell(parts);
+        const {layer} = makeFakeLayer(GRID_CARD_IDS);
+        addFakeCockpit(shell, parts, layer, GRID_CARD_IDS);
+        runProbe(shell.scope, 'attach-enabled');
+        removeField(shell, parts, layer);
+        outcomes[caseName] = refusalOf(runProbe(shell.scope, 'read-cockpit'));
+    }
+    const freshParts = makeExtensionParts();
+    const freshShell = makeFakeShell(freshParts);
+    addFakeCockpit(freshShell, freshParts, makeFakeLayer(GRID_CARD_IDS).layer, GRID_CARD_IDS);
+    outcomes.nothingAttached = refusalOf(runProbe(freshShell.scope, 'read-cockpit'));
+    const disabledShell = makeFakeShell(null);
+    runProbe(disabledShell.scope, 'attach-disabled');
+    outcomes.disabledMode = refusalOf(runProbe(disabledShell.scope, 'read-cockpit'));
+    runProbe(freshShell.scope, 'attach-enabled');
+    freshShell.extension._card = makeExtensionParts().card;
+    outcomes.partsChanged = refusalOf(runProbe(freshShell.scope, 'read-cockpit'));
+    const missingField = fieldKey => ({refused: 'string', missing: [fieldKey]});
+    assertEqual(outcomes, {
+        extensionLayer: missingField('extensionLayer'),
+        extensionVisibleCardIds: missingField('extensionVisibleCardIds'),
+        extensionCoverFallback: missingField('extensionCoverFallback'),
+        layerCards: missingField('layerCards'),
+        layerRedirect: missingField('layerRedirect'),
+        layerPacing: missingField('layerPacing'),
+        dropdownPacing: missingField('dropdownPacing'),
+        dropdownPacingTimer: missingField('dropdownPacing'),
+        nothingAttached: {refused: 'string'},
+        disabledMode: {refused: 'string'},
+        partsChanged: {refused: 'string'},
+    });
+});

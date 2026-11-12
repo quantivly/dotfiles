@@ -4290,6 +4290,202 @@ expected_perf_setup_summary+=" indicator-unmapped-while-shown: 2/1/0 2/1/0 2/1/0
 check "nested: perf takes an enabled state's counts only when the probe shows it set up as named (the card covered in the covered states and visible in visible-busy, the indicator unmapped only in topbar-hidden-covered); a mismatch, or a fact that is not true or false, is exit 2 naming the state and what was expected (needs jq)" \
   "$perf_setup_summary" "$expected_perf_setup_summary"
 
+# Every nested run draws the cockpit's grid, so after each enabled state's read
+# perf asks the probe's read-cockpit for the grid's facts at the end of the
+# window: the card ids that can be seen, the ids the layer draws (null with no
+# layer), each part's offscreen redirect, and the fallback timeouts armed. Its
+# answer is taken for done like a read's: the enabled mode, and no refusal.
+# This row runs the real jq.
+PERF_COCKPIT_DESIGNED_REDIRECTS_JSON='{"layer":"NONE","system":"NONE","apps":"ALWAYS","connections":"ALWAYS","sessions":"ALWAYS"}'
+PERF_GRID_CARD_IDS_JSON='["apps","connections","sessions","system"]'
+PERF_READ_COCKPIT_ANSWER="{\"mode\":\"enabled\",\"visibleCardIds\":[],\"layerCardIds\":$PERF_GRID_CARD_IDS_JSON,"
+PERF_READ_COCKPIT_ANSWER+="\"cockpitRedirects\":$PERF_COCKPIT_DESIGNED_REDIRECTS_JSON,\"armedCockpitTimers\":[]}"
+perf_cockpit_answer_summary="read-cockpit=$(perf_probe_answer_status read-cockpit enabled "$PERF_READ_COCKPIT_ANSWER")"
+perf_cockpit_answer_summary+=" attach-sign=$(perf_probe_answer_status read-cockpit enabled '{"attached":"enabled"}')"
+perf_cockpit_answer_summary+=" disabled-mode=$(perf_probe_answer_status read-cockpit enabled '{"mode":"disabled","frames":1}')"
+perf_cockpit_answer_summary+=" refused=$(perf_probe_answer_status read-cockpit enabled \
+  '{"refused":"cannot read the cockpit facts","missing":["layerPacing"]}')"
+check "nested: perf takes a read-cockpit answer for done only when it shows the enabled mode; an attach's sign, another mode or a refusal fails at once (needs jq)" \
+  "$perf_cockpit_answer_summary" "read-cockpit=0 attach-sign=1 disabled-mode=1 refused=1"
+
+# With the grid drawn, an enabled state is set up as named only when no card of
+# the grid can be seen in the covered states, and every card it draws can be
+# seen in visible-busy; with no layer, the v2 card alone is the grid (its id,
+# system). A mismatch, or facts that are not of their types, is exit 2 naming the
+# state and what was expected, with no grid line: never a pass and never a
+# breach. Each case prints exit/its needle's count/the state's grid lines, from
+# record_perf_cockpit_state. This row runs the real jq.
+# perf_cockpit_setup_verdict <state> <visibleCardIds JSON> <layerCardIds JSON> <needle> prints the case.
+perf_cockpit_setup_verdict() {
+  local setup_redirects_json="$PERF_COCKPIT_DESIGNED_REDIRECTS_JSON" setup_answer setup_output setup_exit
+  [[ "$3" == null ]] && setup_redirects_json=null
+  setup_answer="{\"mode\":\"enabled\",\"visibleCardIds\":$2,\"layerCardIds\":$3,"
+  setup_answer+="\"cockpitRedirects\":$setup_redirects_json,\"armedCockpitTimers\":[]}"
+  setup_output="$(nested_call record_perf_cockpit_state "$1" "$setup_answer" 2>&1)"
+  setup_exit=$?
+  printf '%s/%s/%s' "$setup_exit" "$(grep -c -F "$4" <<<"$setup_output")" "$(grep -c -F "$1: grid " <<<"$setup_output")"
+}
+PERF_COCKPIT_SETUP_NOT_SET_UP='it was not set up as named:'
+PERF_COCKPIT_GRID_SEEN_WHILE_COVERED="perf: could not measure covered-busy: it was not set up as named: expected no card"
+PERF_COCKPIT_GRID_SEEN_WHILE_COVERED+=" of the grid visible, and sessions can be seen"
+PERF_COCKPIT_GRID_PART_COVERED="perf: could not measure visible-busy: it was not set up as named: expected every card"
+PERF_COCKPIT_GRID_PART_COVERED+=" it draws visible (apps,connections,sessions,system), and only apps,system can be seen"
+PERF_COCKPIT_V2_COVERED="perf: could not measure visible-busy: it was not set up as named: expected every card it"
+PERF_COCKPIT_V2_COVERED+=" draws visible (system), and none can be seen"
+PERF_COCKPIT_NOT_OF_TYPES="perf: could not measure covered-busy: the probe's cockpit facts are not of their types"
+perf_cockpit_setup_summary="set-up:"
+perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict covered-idle '[]' "$PERF_GRID_CARD_IDS_JSON" \
+  "$PERF_COCKPIT_SETUP_NOT_SET_UP")"
+perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict covered-busy '[]' "$PERF_GRID_CARD_IDS_JSON" \
+  "$PERF_COCKPIT_SETUP_NOT_SET_UP")"
+perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict topbar-hidden-covered '[]' "$PERF_GRID_CARD_IDS_JSON" \
+  "$PERF_COCKPIT_SETUP_NOT_SET_UP")"
+perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict visible-busy "$PERF_GRID_CARD_IDS_JSON" \
+  "$PERF_GRID_CARD_IDS_JSON" "$PERF_COCKPIT_SETUP_NOT_SET_UP")"
+perf_cockpit_setup_summary+=" grid-seen-while-covered: $(perf_cockpit_setup_verdict covered-busy '["sessions"]' \
+  "$PERF_GRID_CARD_IDS_JSON" "$PERF_COCKPIT_GRID_SEEN_WHILE_COVERED")"
+perf_cockpit_setup_summary+=" grid-partly-covered: $(perf_cockpit_setup_verdict visible-busy '["apps","system"]' \
+  "$PERF_GRID_CARD_IDS_JSON" "$PERF_COCKPIT_GRID_PART_COVERED")"
+perf_cockpit_setup_summary+=" no-grid: $(perf_cockpit_setup_verdict covered-idle '[]' null "$PERF_COCKPIT_SETUP_NOT_SET_UP")"
+perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict visible-busy '["system"]' null "$PERF_COCKPIT_SETUP_NOT_SET_UP")"
+perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict visible-busy '[]' null "$PERF_COCKPIT_V2_COVERED")"
+perf_cockpit_setup_summary+=" not-of-types: $(perf_cockpit_setup_verdict covered-busy '"none"' \
+  "$PERF_GRID_CARD_IDS_JSON" "$PERF_COCKPIT_NOT_OF_TYPES")"
+perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict covered-busy '[]' '"apps"' "$PERF_COCKPIT_NOT_OF_TYPES")"
+check "nested: perf takes an enabled state's grid as set up only when no card of it can be seen in the covered states and every card it draws in visible-busy (the v2 card alone with no layer); a mismatch, or facts not of their types, is exit 2 naming the state and what was expected (needs jq)" \
+  "$perf_cockpit_setup_summary" \
+  "set-up: 0/0/1 0/0/1 0/0/1 0/0/1 grid-seen-while-covered: 2/1/0 grid-partly-covered: 2/1/0 no-grid: 0/0/1 0/0/1 2/1/0 not-of-types: 2/1/0 2/1/0"
+
+# perf's cockpit verdict, a pure function of each enabled state's record
+# "<redirects> <armed fallbacks>": the layer and the system cell's wrapper draw
+# through no texture of their own, each data card through its own (ruling D12),
+# and no fallback timeout is armed while Samples flow (each is one-shot, armed
+# only with the sampler silent). Records in perf's order: covered-idle,
+# covered-busy, topbar-hidden-covered, visible-busy.
+PERF_COCKPIT_DESIGNED_REDIRECTS='layer:NONE,system:NONE,apps:ALWAYS,connections:ALWAYS,sessions:ALWAYS'
+PERF_COCKPIT_DESIGNED_RECORDS=("$PERF_COCKPIT_DESIGNED_REDIRECTS none" "$PERF_COCKPIT_DESIGNED_REDIRECTS none"
+  "$PERF_COCKPIT_DESIGNED_REDIRECTS none" "$PERF_COCKPIT_DESIGNED_REDIRECTS none")
+# perf_cockpit_verdict_case <state index> <record> <needle> runs the verdict with one state's record replaced, and
+# prints exit/needle count/whether the line names exactly one broken budget.
+perf_cockpit_verdict_case() {
+  local -a case_records=("${PERF_COCKPIT_DESIGNED_RECORDS[@]}")
+  local case_output case_exit
+  case_records[$1]="$2"
+  case_output="$(nested_call perf_cockpit_verdict "${case_records[@]}" 2>&1)"
+  case_exit=$?
+  printf '%s/%s/%s' "$case_exit" "$(grep -c -F "$3" <<<"$case_output")" \
+    "$(grep -c -F 'perf: cockpit: FAIL: 1 cockpit budget broken: ' <<<"$case_output")"
+}
+perf_cockpit_pass_output="$(nested_call perf_cockpit_verdict "${PERF_COCKPIT_DESIGNED_RECORDS[@]}" 2>&1)"
+perf_cockpit_verdict_summary="designed=$?/$(wc -l <<<"$perf_cockpit_pass_output")/$(grep -c -F 'perf: cockpit: PASS: ' \
+  <<<"$perf_cockpit_pass_output")"
+perf_cockpit_verdict_summary+=" no-grid=$(nested_call perf_cockpit_verdict 'no-grid none' 'no-grid none' 'no-grid none' \
+  'no-grid none' >/dev/null 2>&1; printf '%s' "$?")"
+perf_cockpit_verdict_summary+=" data-card=$(perf_cockpit_verdict_case 1 \
+  'layer:NONE,system:NONE,apps:1,connections:ALWAYS,sessions:ALWAYS none' \
+  "cockpit-redirect: covered-busy found apps's offscreen redirect 1, not ALWAYS")"
+perf_cockpit_verdict_summary+=" system-wrapper=$(perf_cockpit_verdict_case 3 \
+  'layer:NONE,system:ALWAYS,apps:ALWAYS,connections:ALWAYS,sessions:ALWAYS none' \
+  "cockpit-redirect: visible-busy found system's offscreen redirect ALWAYS, not NONE")"
+perf_cockpit_verdict_summary+=" layer=$(perf_cockpit_verdict_case 0 \
+  'layer:ALWAYS,system:NONE,apps:ALWAYS,connections:ALWAYS,sessions:ALWAYS none' \
+  "cockpit-redirect: covered-idle found layer's offscreen redirect ALWAYS, not NONE")"
+perf_cockpit_verdict_summary+=" armed=$(perf_cockpit_verdict_case 3 "$PERF_COCKPIT_DESIGNED_REDIRECTS layer-pacing-fallback" \
+  'fallback-timers: visible-busy found layer-pacing-fallback armed while Samples flowed')"
+perf_cockpit_verdict_summary+=" armed-with-no-grid=$(perf_cockpit_verdict_case 2 'no-grid cover-fallback' \
+  'fallback-timers: topbar-hidden-covered found cover-fallback armed while Samples flowed')"
+# perf_cockpit_unjudgeable <records...> prints exit/whether it said it could not judge.
+perf_cockpit_unjudgeable() {
+  local unjudgeable_output
+  unjudgeable_output="$(nested_call perf_cockpit_verdict "$@" 2>&1)"
+  printf '%s/%s' "$?" "$(grep -c -F 'perf: could not judge the cockpit: ' <<<"$unjudgeable_output")"
+}
+PERF_COCKPIT_OTHER_RECORDS=("${PERF_COCKPIT_DESIGNED_RECORDS[@]:1}")
+perf_cockpit_verdict_summary+=" state-missing=$(perf_cockpit_unjudgeable "${PERF_COCKPIT_DESIGNED_RECORDS[@]:0:3}")"
+perf_cockpit_verdict_summary+=" one-word=$(perf_cockpit_unjudgeable "$PERF_COCKPIT_DESIGNED_REDIRECTS" \
+  "${PERF_COCKPIT_OTHER_RECORDS[@]}")"
+perf_cockpit_verdict_summary+=" unknown-part=$(perf_cockpit_unjudgeable \
+  'layer:NONE,system:NONE,health:ALWAYS none' "${PERF_COCKPIT_OTHER_RECORDS[@]}")"
+perf_cockpit_verdict_summary+=" not-a-pair=$(perf_cockpit_unjudgeable 'layer:NONE,system none' \
+  "${PERF_COCKPIT_OTHER_RECORDS[@]}")"
+check "nested: perf's cockpit verdict passes (exit 0, one line) the grid's redirects as ruling D12 wants and no armed fallback, and fails (exit 1) a data card not drawn through its texture, a wrapper or layer drawn through one, or an armed fallback, naming it; a record it cannot read is exit 2" \
+  "$perf_cockpit_verdict_summary" \
+  "designed=0/1/1 no-grid=0 data-card=1/1/1 system-wrapper=1/1/1 layer=1/1/1 armed=1/1/1 armed-with-no-grid=1/1/1 state-missing=2/1 one-word=2/1 unknown-part=2/1 not-a-pair=2/1"
+
+# perf ends with both verdicts, each its own line, and the worse status: a
+# broken budget (1) before a count or a record it could not judge (2), and
+# either before a pass (0). Run on the readings' globals as perf leaves them.
+# perf_run_judgement <count records: "edge" or "breach" or "unjudgeable"> <cockpit records: "designed" or "armed" or
+# "unjudgeable"> prints exit/its lines.
+perf_run_judgement() {
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  bash -c '
+    source "$1" || exit 99
+    PERF_DISABLED_MAJOR_COLLECTIONS=4
+    PERF_DISABLED_FRAMES=2
+    case "$2" in
+      edge) PERF_ENABLED_STATE_RECORDS=("5 5 30 0 ALWAYS" "5 34 30 30 ALWAYS" "5 34 30 0 ALWAYS" "5 34 30 60 ALWAYS") ;;
+      breach) PERF_ENABLED_STATE_RECORDS=("5 5 30 0 ALWAYS" "6 34 30 30 ALWAYS" "5 34 30 0 ALWAYS" "5 34 30 60 ALWAYS") ;;
+      unjudgeable) PERF_ENABLED_STATE_RECORDS=("5 5 30 0 ALWAYS") ;;
+    esac
+    designed="layer:NONE,system:NONE,apps:ALWAYS,connections:ALWAYS,sessions:ALWAYS"
+    case "$3" in
+      designed) PERF_COCKPIT_STATE_RECORDS=("$designed none" "$designed none" "$designed none" "$designed none") ;;
+      armed) PERF_COCKPIT_STATE_RECORDS=("$designed none" "$designed none" "$designed none" "$designed cover-fallback") ;;
+      unjudgeable) PERF_COCKPIT_STATE_RECORDS=("$designed none") ;;
+    esac
+    judgement_output="$(judge_perf_run)"
+    judgement_exit=$?
+    printf "%s/%s" "$judgement_exit" "$(grep -c -E "^perf: (PASS|FAIL|could not judge the counts)" <<<"$judgement_output")"
+    printf "+%s" "$(grep -c -E "^perf: (cockpit: (PASS|FAIL)|could not judge the cockpit)" <<<"$judgement_output")"
+  ' perf-judgement "$NESTED_SCRIPT" "$1" "$2"
+}
+perf_judgement_summary="both-pass=$(perf_run_judgement edge designed)"
+perf_judgement_summary+=" counts-breach=$(perf_run_judgement breach designed)"
+perf_judgement_summary+=" cockpit-breach=$(perf_run_judgement edge armed)"
+perf_judgement_summary+=" breach-and-unjudgeable=$(perf_run_judgement breach unjudgeable)"
+perf_judgement_summary+=" unjudgeable-and-breach=$(perf_run_judgement unjudgeable armed)"
+perf_judgement_summary+=" unjudgeable-counts=$(perf_run_judgement unjudgeable designed)"
+perf_judgement_summary+=" unjudgeable-cockpit=$(perf_run_judgement edge unjudgeable)"
+check "nested: perf prints its count verdict and its cockpit verdict and exits with the worse: a broken budget (1) before a verdict it could not judge (2), either before a pass (0)" \
+  "$perf_judgement_summary" \
+  "both-pass=0/1+1 counts-breach=1/1+1 cockpit-breach=1/1+1 breach-and-unjudgeable=1/1+1 unjudgeable-and-breach=1/1+1 unjudgeable-counts=2/1+1 unjudgeable-cockpit=2/1+1"
+
+# Each enabled state's grid facts are read after its counts, at the end of the
+# window, with no eval during it; the disabled state has no grid to read. One
+# state measured with every step stubbed: the probe's requests in order, and
+# how many grid records each state left.
+# perf_measure_requests <state> <scenario> prints the probe's requests, then the number of grid records.
+PERF_MEASURE_REQUESTS="$WIRING_TMP/perf-measure-requests"
+perf_measure_requests() {
+  : >"$PERF_MEASURE_REQUESTS"
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  bash -c '
+    source "$1" || exit 99
+    requests_path="$2"
+    read_cockpit_answer="$4"
+    request_perf_scenario() { :; }
+    run_perf_step() { :; }
+    sleep() { :; }
+    measure_perf_window() { PERF_WINDOW_CPU_PERCENT=1.000; PERF_WINDOW_TICK_MEDIAN_MS=1.000; PERF_WINDOW_MAJOR_COLLECTIONS=1; }
+    run_perf_probe() {
+      printf "%s " "$2" >>"$requests_path"
+      case "$2" in
+        attach-disabled) printf "%s\n" "{\"attached\":\"disabled\"}" ;;
+        attach-enabled) printf "%s\n" "{\"attached\":\"enabled\",\"reattached\":true}" ;;
+        read) printf "%s\n" "{\"mode\":\"$3\",\"frames\":3,\"samples\":30,\"topbarPaints\":30,\"cardRedirect\":\"ALWAYS\",\"isCardVisible\":false,\"isIndicatorMapped\":true}" ;;
+        read-cockpit) printf "%s\n" "$read_cockpit_answer" ;;
+      esac
+    }
+    measure_perf_state /nonexistent-run unix:path=/nonexistent 1 "$3" busy >/dev/null 2>&1
+    printf "%s" "$(<"$requests_path")"
+    printf "records=%s" "${#PERF_COCKPIT_STATE_RECORDS[@]}"
+  ' perf-measure "$NESTED_SCRIPT" "$PERF_MEASURE_REQUESTS" "$1" "$PERF_READ_COCKPIT_ANSWER"
+}
+check "nested: perf reads each enabled state's grid (read-cockpit) after its counts, and the disabled state's not at all" \
+  "covered-busy=[$(perf_measure_requests covered-busy)] disabled=[$(perf_measure_requests disabled)]" \
+  "covered-busy=[attach-enabled read read-cockpit records=1] disabled=[attach-disabled read records=0]"
+
 # perf's exit (end_perf_run, its EXIT trap) on a fixture, from inside one bash
 # that plays perf: two children of it stand in for the window (recorded with
 # no start time, as when it could not be read) and the background measurement
@@ -5131,7 +5327,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1074
+EXPECTED_ROWS=1083
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

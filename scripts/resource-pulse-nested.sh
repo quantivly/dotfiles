@@ -103,9 +103,16 @@
 #       state's plus three; a top-bar paint while the top bar is hidden; the card
 #       not drawn through its offscreen texture; and the disabled state's own
 #       major collections more than four (a defect that outlives disable()).
-#       An enabled state the probe does not find set up as it is named (the card
-#       covered in the covered states and visible in visible-busy, the top bar
-#       hidden only in topbar-hidden-covered) stops it there, with exit 2.
+#       Every nested run draws the cockpit's grid, so after each enabled state's
+#       counts it reads the grid (a line per state), and a second verdict line
+#       names each broken cockpit budget (exit 1): a data card not drawn
+#       through its own texture, the layer or the system cell's wrapper drawn
+#       through one (ruling D12), and a fallback timeout armed while Samples
+#       flow. An enabled state the probe does not find set up as it is named
+#       (the card covered in the covered states and visible in visible-busy, no
+#       card of the grid visible in the covered states and every one in
+#       visible-busy, the top bar hidden only in topbar-hidden-covered) stops
+#       it there, with exit 2.
 #       Every exit once it acts on the run (a breach, a failure or a signal too)
 #       puts the run back: its window and its background measurement ended, the
 #       extension enabled and the top bar shown again
@@ -173,6 +180,8 @@ readonly PERF_PROBE_FUNCTION_NAME='resourcePulsePerfProbe'
 readonly PERF_PROBE_ATTACH_DISABLED_REQUEST='attach-disabled'
 readonly PERF_PROBE_ATTACH_ENABLED_REQUEST='attach-enabled'
 readonly PERF_PROBE_READ_REQUEST='read'
+# The probe's fourth request: the cockpit grid's facts at the end of an enabled state's window, after its read.
+readonly PERF_PROBE_READ_COCKPIT_REQUEST='read-cockpit'
 # The probe's two modes, and where an answer shows which one it ran in: .attached after an attach, .mode after a read.
 readonly PERF_PROBE_DISABLED_MODE='disabled'
 readonly PERF_PROBE_ENABLED_MODE='enabled'
@@ -226,6 +235,38 @@ readonly PERF_INDICATOR_MAPPED_FIELD='isIndicatorMapped'
 readonly PERF_FACT_PATTERN='^(true|false)$'
 # A count as perf's readings write it: no leading zero, which bash arithmetic would read as octal.
 readonly PERF_COUNT_PATTERN='^(0|[1-9][0-9]*)$'
+# The cockpit's grid, drawn in every nested run (read-cockpit): each enabled state's facts as words, and its record
+# for perf_cockpit_verdict, "<redirects> <armed fallbacks>". A list of ids or names is one word, joined with commas,
+# or PERF_NONE_WORD when empty; the drawn ids and the redirects are PERF_NO_GRID_WORD with no layer; a redirect is
+# "<part>:<name>". The jq program prints the four words (visible ids, drawn ids, redirects, armed fallbacks), or
+# nothing when a fact is not of its type or a name is not one plain word.
+readonly PERF_NONE_WORD='none'
+readonly PERF_NO_GRID_WORD='no-grid'
+readonly PERF_COCKPIT_RECORD_WORD_COUNT=2
+readonly PERF_COCKPIT_WORDS_JQ='
+    def is_word_list: type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9_-]+$"));
+    def word: if length == 0 then "none" else join(",") end;
+    if (.visibleCardIds | is_word_list) and (.armedCockpitTimers | is_word_list)
+        and ((.layerCardIds == null and .cockpitRedirects == null)
+            or ((.layerCardIds | is_word_list) and (.cockpitRedirects | type) == "object"
+                and (.cockpitRedirects | keys_unsorted | is_word_list)
+                and ([.cockpitRedirects[]] | is_word_list)))
+    then [(.visibleCardIds | word),
+        (if .layerCardIds == null then "no-grid" else (.layerCardIds | word) end),
+        (if .cockpitRedirects == null then "no-grid"
+            else (.cockpitRedirects | to_entries | map("\(.key):\(.value)") | join(",")) end),
+        (.armedCockpitTimers | word)] | join(" ")
+    else empty end'
+# With no layer the v2 card is the grid, checked under the system card's id.
+readonly PERF_V2_CARD_ID='system'
+# Ruling D12: the layer and the system cell's wrapper draw through no texture of their own (the v2 card the wrapper
+# adopts keeps its own, which the cardRedirect budget checks); each data card draws through its own.
+readonly PERF_LAYER_REDIRECT_PART='layer'
+readonly PERF_WANTED_LAYER_REDIRECT='NONE'
+readonly PERF_WANTED_SYSTEM_WRAPPER_REDIRECT='NONE'
+readonly PERF_WANTED_DATA_CARD_REDIRECT='ALWAYS'
+readonly -a PERF_DATA_CARD_IDS=(apps connections sessions)
+readonly PERF_REDIRECT_PAIR_PATTERN='^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$'
 # SpiderMonkey's collection lines in the shell's log (`start --gc-log`): the line's first column, then its pid.
 readonly MAJOR_COLLECTION_LINE_PREFIX='MajorGC:'
 readonly MINOR_COLLECTION_LINE_PREFIX='MinorGC:'
@@ -380,6 +421,8 @@ PERF_DISABLED_FRAMES=""
 PERF_DISABLED_CPU_PERCENT=""
 # Each enabled state's record for perf_count_verdict, in PERF_ENABLED_STATE_NAMES's order.
 PERF_ENABLED_STATE_RECORDS=()
+# Each enabled state's grid record for perf_cockpit_verdict, "<redirects> <armed fallbacks>", in the same order.
+PERF_COCKPIT_STATE_RECORDS=()
 
 #######################################
 # Print a message to stderr.
@@ -1959,20 +2002,23 @@ run_perf_step() {
 #######################################
 # Succeed only when the probe's answer shows that the request ran: a JSON
 # object, no refusal, and the mode it attached in (attach-disabled,
-# attach-enabled: .attached) or read in (read: .mode) the one expected. An
-# empty answer, null, an object without that sign or with another mode (a
-# completion value lost on the way, or a probe that did not run as asked) is
-# not taken for success, so it fails here and not nine minutes later at the
-# verdict. Says why on stderr.
+# attach-enabled: .attached) or read in (read, read-cockpit: .mode) the one
+# expected. An empty answer, null, an object without that sign or with another
+# mode (a completion value lost on the way, or a probe that did not run as
+# asked) is not taken for success, so it fails here and not nine minutes later
+# at the verdict. Says why on stderr.
 # Arguments:
-#   $1 - request (attach-disabled, attach-enabled, read)
+#   $1 - request (attach-disabled, attach-enabled, read, read-cockpit)
 #   $2 - the mode the answer must show (disabled, enabled)
 #   $3 - the probe's answer
 #######################################
 is_successful_perf_probe_answer() {
     local probe_request="$1" expected_mode="$2" probe_answer="$3" probe_refusal answered_mode
     local success_key="$PERF_PROBE_ATTACHED_KEY"
-    [[ "$probe_request" == "$PERF_PROBE_READ_REQUEST" ]] && success_key="$PERF_PROBE_MODE_KEY"
+    if [[ "$probe_request" == "$PERF_PROBE_READ_REQUEST" || "$probe_request" == "$PERF_PROBE_READ_COCKPIT_REQUEST" ]]
+    then
+        success_key="$PERF_PROBE_MODE_KEY"
+    fi
     if ! probe_refusal="$(jq -r '.refused // empty' <<<"$probe_answer" 2>/dev/null)"; then
         note "the in-shell probe's answer to $probe_request is not a JSON object: '$probe_answer'"
         return 1
@@ -2229,10 +2275,228 @@ record_perf_state() {
 }
 
 #######################################
+# Succeed when an enabled state's grid was set up as it is named, from the
+# probe's read-cockpit words: in the covered states no card of the grid can be
+# seen; in visible-busy every card the layer draws can be (with no layer, the v2
+# card, under PERF_V2_CARD_ID). Otherwise print why, naming the state and what
+# was expected, and return 2, as check_perf_state_setup does. Pure.
+# Arguments:
+#   $1 - state name (one of PERF_ENABLED_STATE_NAMES)
+#   $2 - the ids that can be seen, as one word (PERF_NONE_WORD for none)
+#   $3 - the ids the layer draws, as one word, or PERF_NO_GRID_WORD
+# Returns:
+#   0 set up as named; 2 not, or a name that is not an enabled state's
+#######################################
+check_perf_cockpit_setup() {
+    local state_name="$1" visible_word="$2" grid_word="$3" expected_visible_word mismatch
+    local not_set_up_lead="perf: could not measure $state_name: it was not set up as named:"
+    case "$state_name" in
+        "$PERF_COVERED_IDLE_STATE" | "$PERF_COVERED_BUSY_STATE" | "$PERF_TOPBAR_HIDDEN_STATE" | \
+            "$PERF_VISIBLE_BUSY_STATE") ;;
+        *)
+            printf "perf: could not measure '%s': not an enabled state\n" "$state_name"
+            return "$EXIT_REFUSED" ;;
+    esac
+    if [[ "$state_name" != "$PERF_VISIBLE_BUSY_STATE" ]]; then
+        # The covered states: perf's window, maximized over the work area the grid fills, covers every card.
+        [[ "$visible_word" == "$PERF_NONE_WORD" ]] && return 0
+        mismatch="expected no card of the grid visible, and $visible_word can be seen"
+    else
+        expected_visible_word="$grid_word"
+        [[ "$grid_word" == "$PERF_NO_GRID_WORD" ]] && expected_visible_word="$PERF_V2_CARD_ID"
+        [[ "$visible_word" == "$expected_visible_word" ]] && return 0
+        mismatch="expected every card it draws visible ($expected_visible_word), and"
+        if [[ "$visible_word" == "$PERF_NONE_WORD" ]]; then
+            mismatch+=" none can be seen"
+        else
+            mismatch+=" only $visible_word can be seen"
+        fi
+    fi
+    printf '%s %s\n' "$not_set_up_lead" "$mismatch"
+    return "$EXIT_REFUSED"
+}
+
+#######################################
+# Keep and print one enabled state's grid facts, from the probe's read-cockpit
+# answer, once they show the grid set up as the state is named
+# (check_perf_cockpit_setup): its record is appended to
+# PERF_COCKPIT_STATE_RECORDS. Exit 2 when the facts are not of their types (or
+# a name is not one plain word), or the grid was not set up as named, with
+# nothing kept or printed under the state's name.
+# Arguments:
+#   $1 - state name (one of PERF_ENABLED_STATE_NAMES)
+#   $2 - the probe's read-cockpit answer
+#######################################
+record_perf_cockpit_state() {
+    local state_name="$1" probe_answer="$2" cockpit_words visible_word grid_word redirects_word timers_word
+    cockpit_words="$(jq -r "$PERF_COCKPIT_WORDS_JQ" <<<"$probe_answer" 2>/dev/null)" || cockpit_words=""
+    read -r visible_word grid_word redirects_word timers_word <<<"$cockpit_words"
+    if [[ -z "$timers_word" ]]; then
+        printf "perf: could not measure %s: the probe's cockpit facts are not of their types: '%s'\n" \
+            "$state_name" "$probe_answer"
+        exit "$EXIT_REFUSED"
+    fi
+    check_perf_cockpit_setup "$state_name" "$visible_word" "$grid_word" || exit "$EXIT_REFUSED"
+    PERF_COCKPIT_STATE_RECORDS+=("$redirects_word $timers_word")
+    printf '%s: grid visible-cards=%s drawn-cards=%s redirects=%s armed-fallbacks=%s\n' "$state_name" \
+        "$visible_word" "$grid_word" "$redirects_word" "$timers_word"
+}
+
+#######################################
+# Print the offscreen redirect ruling D12 wants for one part of the grid: none
+# on the layer and the system cell's wrapper, ALWAYS on each data card; fail
+# for a part it does not know.
+# Arguments:
+#   $1 - part (PERF_LAYER_REDIRECT_PART, or a card id)
+#######################################
+wanted_cockpit_redirect() {
+    local part_name="$1" data_card_id
+    case "$part_name" in
+        "$PERF_LAYER_REDIRECT_PART") printf '%s' "$PERF_WANTED_LAYER_REDIRECT"; return 0 ;;
+        "$PERF_V2_CARD_ID") printf '%s' "$PERF_WANTED_SYSTEM_WRAPPER_REDIRECT"; return 0 ;;
+    esac
+    for data_card_id in "${PERF_DATA_CARD_IDS[@]}"; do
+        [[ "$part_name" == "$data_card_id" ]] && { printf '%s' "$PERF_WANTED_DATA_CARD_REDIRECT"; return 0; }
+    done
+    return 1
+}
+
+#######################################
+# Print the line perf_cockpit_verdict prints for records it cannot judge.
+# Arguments:
+#   $1 - why
+#######################################
+print_unjudgeable_cockpit() {
+    printf 'perf: could not judge the cockpit: %s\n' "$1"
+}
+
+#######################################
+# Succeed when an enabled state's grid record can be judged: two words, the
+# redirects either PERF_NO_GRID_WORD or "<part>:<name>" pairs of known parts.
+# Otherwise print why (print_unjudgeable_cockpit) and fail.
+# Arguments:
+#   $1 - state name
+#   $2 - its record
+#######################################
+is_judgeable_cockpit_record() {
+    local state_name="$1" cockpit_record="$2" redirect_pair
+    local -a record_words redirect_pairs
+    read -r -a record_words <<<"$cockpit_record"
+    if (( ${#record_words[@]} != PERF_COCKPIT_RECORD_WORD_COUNT )); then
+        print_unjudgeable_cockpit "$state_name's record is not the redirects and the armed fallbacks: '$cockpit_record'"
+        return 1
+    fi
+    [[ "${record_words[0]}" == "$PERF_NO_GRID_WORD" ]] && return 0
+    IFS=, read -r -a redirect_pairs <<<"${record_words[0]}"
+    for redirect_pair in "${redirect_pairs[@]}"; do
+        if [[ ! "$redirect_pair" =~ $PERF_REDIRECT_PAIR_PATTERN ]] ||
+            ! wanted_cockpit_redirect "${redirect_pair%%:*}" >/dev/null; then
+            print_unjudgeable_cockpit "$state_name's redirect '$redirect_pair' is not a known part and its redirect"
+            return 1
+        fi
+    done
+}
+
+#######################################
+# Judge a perf run's grid records and print one line: the pass, each broken
+# budget by name, or why the records cannot be judged. Pure. In every enabled
+# state the layer and the system cell's wrapper draw through no texture of
+# their own and each data card through its own (ruling D12: a texture per cell,
+# none nested), and no fallback timeout is armed: each is one-shot, armed only
+# while a Changed waits with the sampler silent, or every card is covered with
+# the service silent, and perf's Samples flow in every state.
+# Arguments:
+#   $@ - each enabled state's record, in PERF_ENABLED_STATE_NAMES's order:
+#        "<redirects> <armed fallbacks>"
+# Returns:
+#   0 every budget held; 1 a budget broken; 2 the records cannot be judged: a
+#   state missing, or a record it cannot read
+#######################################
+perf_cockpit_verdict() {
+    local expected_record_count=${#PERF_ENABLED_STATE_NAMES[@]} state_index state_name redirects_word timers_word
+    local redirect_pair part_name redirect_name wanted_redirect breach joined_breaches listed_breach budget_noun
+    local -a cockpit_records=("$@") redirect_pairs breaches=()
+    if (( $# != expected_record_count )); then
+        print_unjudgeable_cockpit "wanted a grid record per enabled state ($expected_record_count), got $#"
+        return "$EXIT_REFUSED"
+    fi
+    # Every record is checked before any is judged, as perf_count_verdict does.
+    for state_index in "${!PERF_ENABLED_STATE_NAMES[@]}"; do
+        is_judgeable_cockpit_record "${PERF_ENABLED_STATE_NAMES[state_index]}" "${cockpit_records[state_index]}" \
+            || return "$EXIT_REFUSED"
+    done
+    for state_index in "${!PERF_ENABLED_STATE_NAMES[@]}"; do
+        state_name="${PERF_ENABLED_STATE_NAMES[state_index]}"
+        read -r redirects_word timers_word <<<"${cockpit_records[state_index]}"
+        redirect_pairs=()
+        [[ "$redirects_word" == "$PERF_NO_GRID_WORD" ]] || IFS=, read -r -a redirect_pairs <<<"$redirects_word"
+        for redirect_pair in "${redirect_pairs[@]}"; do
+            part_name="${redirect_pair%%:*}"
+            redirect_name="${redirect_pair#*:}"
+            wanted_redirect="$(wanted_cockpit_redirect "$part_name")"
+            if [[ "$redirect_name" != "$wanted_redirect" ]]; then
+                breach="cockpit-redirect: $state_name found $part_name's offscreen redirect $redirect_name,"
+                breach+=" not $wanted_redirect"
+                breaches+=("$breach")
+            fi
+        done
+        if [[ "$timers_word" != "$PERF_NONE_WORD" ]]; then
+            breach="fallback-timers: $state_name found $timers_word armed while Samples flowed: each is one-shot,"
+            breach+=" armed only with the sampler silent"
+            breaches+=("$breach")
+        fi
+    done
+    if (( ${#breaches[@]} == 0 )); then
+        printf "perf: cockpit: PASS: the grid's offscreen redirects as ruling D12 wants, and no fallback armed\n"
+        return 0
+    fi
+    joined_breaches="${breaches[0]}"
+    for listed_breach in "${breaches[@]:1}"; do
+        joined_breaches+="; $listed_breach"
+    done
+    budget_noun='budgets'
+    (( ${#breaches[@]} == 1 )) && budget_noun='budget'
+    printf 'perf: cockpit: FAIL: %s cockpit %s broken: %s\n' "${#breaches[@]}" "$budget_noun" "$joined_breaches"
+    return "$EXIT_REQUEST_FAILED"
+}
+
+#######################################
+# Print the worse of two verdicts' statuses: a broken budget (1) before a
+# verdict that could not judge (2), either before a pass (0). A breach found is
+# a breach, whatever else could not be judged.
+# Arguments:
+#   $1 - one verdict's status
+#   $2 - the other's
+#######################################
+worse_verdict_status() {
+    if (( $1 == EXIT_REQUEST_FAILED || $2 == EXIT_REQUEST_FAILED )); then
+        printf '%s' "$EXIT_REQUEST_FAILED"
+    elif (( $1 != 0 || $2 != 0 )); then
+        printf '%s' "$EXIT_REFUSED"
+    else
+        printf '0'
+    fi
+}
+
+#######################################
+# perf's end: the count verdict, then the cockpit verdict, each its own line,
+# from the readings perf kept; returns the worse status (worse_verdict_status).
+#######################################
+judge_perf_run() {
+    local count_status cockpit_status
+    perf_count_verdict "$PERF_DISABLED_MAJOR_COLLECTIONS" "$PERF_DISABLED_FRAMES" "${PERF_ENABLED_STATE_RECORDS[@]}"
+    count_status=$?
+    perf_cockpit_verdict "${PERF_COCKPIT_STATE_RECORDS[@]}"
+    cockpit_status=$?
+    return "$(worse_verdict_status "$count_status" "$cockpit_status")"
+}
+
+#######################################
 # Measure one state: request its scenario (so every run sees the same input),
 # run its setup steps, wait PERF_WARM_UP_SECONDS, attach or reset the probe for
 # it, measure one window with no eval running, read the probe, then keep and
-# print the readings.
+# print the readings; for an enabled state, then read and keep the grid's
+# facts too (read-cockpit), still after the window.
 # Arguments:
 #   $1 - run directory
 #   $2 - verified private bus address
@@ -2242,7 +2506,7 @@ record_perf_state() {
 #   $@ - its setup steps' JavaScript, in order
 #######################################
 measure_perf_state() {
-    local run_dir="$1" address="$2" shell_pid="$3" state_name="$4" scenario_name="$5" setup_js
+    local run_dir="$1" address="$2" shell_pid="$3" state_name="$4" scenario_name="$5" setup_js cockpit_answer
     local attach_request="$PERF_PROBE_ATTACH_ENABLED_REQUEST" probe_mode="$PERF_PROBE_ENABLED_MODE" probe_answer
     local settling_note="$scenario_name input, $PERF_WARM_UP_SECONDS s to settle, then a $PERF_WINDOW_SECONDS s window"
     shift 5
@@ -2260,6 +2524,10 @@ measure_perf_state() {
     measure_perf_window "$run_dir" "$shell_pid"
     probe_answer="$(run_perf_probe "$address" "$PERF_PROBE_READ_REQUEST" "$probe_mode")" || exit "$EXIT_REFUSED"
     record_perf_state "$state_name" "$probe_answer"
+    [[ "$state_name" == "$PERF_DISABLED_STATE" ]] && return 0
+    cockpit_answer="$(run_perf_probe "$address" "$PERF_PROBE_READ_COCKPIT_REQUEST" "$probe_mode")" \
+        || exit "$EXIT_REFUSED"
+    record_perf_cockpit_state "$state_name" "$cockpit_answer"
 }
 
 #######################################
@@ -2268,9 +2536,10 @@ measure_perf_state() {
 # shell unless the run is a verified, live run of this script started with
 # both options, its replay service runs, gnome-calculator is on PATH and the
 # shell's log holds a collection line of the recorded gnome-shell. Exits 2 at
-# an enabled state the probe does not find set up as it is named. Returns
-# perf_count_verdict's status: 0 within every budget, 1 a budget broken, 2 the
-# counts cannot be judged.
+# an enabled state the probe does not find set up as it is named, the grid's
+# included. Returns judge_perf_run's status, the worse of the count verdict's
+# and the cockpit verdict's: 0 within every budget, 1 a budget broken, 2 what
+# could not be judged.
 #######################################
 perf_subcommand() {
     local run_dir address shell_pid window_command_path window_count verdict_status header_line
@@ -2320,7 +2589,7 @@ perf_subcommand() {
         "$PERF_HIDE_TOPBAR_JS"
     measure_perf_state "$run_dir" "$address" "$shell_pid" "$PERF_VISIBLE_BUSY_STATE" "$BUSY_SCENARIO_NAME" \
         "$PERF_SHOW_TOPBAR_JS" "$PERF_UNCOVER_CARD_JS"
-    perf_count_verdict "$PERF_DISABLED_MAJOR_COLLECTIONS" "$PERF_DISABLED_FRAMES" "${PERF_ENABLED_STATE_RECORDS[@]}"
+    judge_perf_run
     verdict_status=$?
     return "$verdict_status"
 }
