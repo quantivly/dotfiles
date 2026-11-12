@@ -56,8 +56,9 @@
 //   draw-watch-arm {surface, name},     watches for that name drawn on that surface (the dropdown's only while its
 //     draw-watch-read                   menu is open): drawn on the first Sample after the sessions' change came is ok,
 //                                       at the change itself or later is bad, with no Sample at all (the pacing's
-//                                       fallback drew it) could-not-judge; a final answer is given again on every read
-//                                       until the watch is armed again
+//                                       fallback drew it) could-not-judge, unless sooner than that fallback can fire
+//                                       (bad); a final answer is given again on every read until the watch is armed
+//                                       again
 //   stale-card {cardId, expect}         'stale': the card shows "no data since ..."; 'fresh': its rows, no such line
 //   dropdown-order                      the sessions item is the menu's second item, under the card's and above
 //                                       "Open Resources", shown, with the cockpit LIVE
@@ -111,6 +112,20 @@ function resourcePulseCockpitCheck(request, options = {}) {
     /** How often lock-path looks at the extension's state while it waits, and how long it waits by default. */
     const STATE_POLL_INTERVAL_MS = 50;
     const DEFAULT_LOCK_PATH_TIMEOUT_MS = 10000;
+    /**
+     * lib/constants.js COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS: a surface's pacing arms its one-shot fallback at a
+     * cockpit event that finds none armed, and the fallback draws what is pending when no Sample came within it.
+     */
+    const COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS = 3;
+    /**
+     * How much sooner than its interval the fallback can fire: GLib.timeout_add_seconds lands on a whole second of its
+     * own phase, up to a quarter second before the interval is up (gmain.c g_timeout_set_expiration; a 3 s one, armed
+     * at forty phases under plain gjs, fired 2754 ms after it was armed at the earliest), and as much again is left for
+     * the dispatch.
+     */
+    const FALLBACK_EARLIEST_MARGIN_MS = 500;
+    const MS_PER_SECOND = 1000;
+    const USEC_PER_MS = 1000;
     const OK_VERDICT = 'ok';
     const BAD_VERDICT = 'bad';
     const PENDING_VERDICT = 'pending';
@@ -767,10 +782,26 @@ function resourcePulseCockpitCheck(request, options = {}) {
     }
 
     /**
+     * Whether a surface's pacing has its one-shot fallback armed now: the layer's (_pacing) or the dropdown's
+     * (_sessionsPacing on the top bar indicator).
+     *
+     * @param {object} stateObj - The extension's object.
+     * @param {string} surface - LAYER_SURFACE or DROPDOWN_SURFACE.
+     * @returns {boolean|null} Armed or not; null when the pacing or its fallback's id cannot be read.
+     */
+    function isSurfaceFallbackArmed(stateObj, surface) {
+        const pacing = surface === DROPDOWN_SURFACE ? topBarIndicator(stateObj)._sessionsPacing
+            : cockpitLayer(stateObj)._pacing;
+        const fallbackSourceId = pacing?._fallbackSourceId;
+        return fallbackSourceId === undefined ? null : fallbackSourceId !== null;
+    }
+
+    /**
      * Watches for a name drawn on a surface's sessions card: counts the Samples (a history listener added after the
      * extension's and the indicator's, so for one Sample theirs run first), notes the Sample count when the
      * sessions' change comes (a cockpit listener added after theirs), and notes, when a row's name becomes the name,
-     * the Sample count and whether the change had come.
+     * the Sample count and whether the change had come. It notes the shell's monotonic time of the first cockpit event
+     * it sees, of the change and of the draw, and whether the surface's pacing had its fallback armed when it was armed.
      *
      * Arming forgets the previous watch's final answer. The dropdown's card draws only while its menu is open, so a
      * closed menu could not be judged: the next Sample would draw nothing, and that would read as the pacing's fault.
@@ -792,19 +823,26 @@ function resourcePulseCockpitCheck(request, options = {}) {
         const cockpitClient = readField(stateObj, '_cockpitClient', "the extension's cockpit client");
         const watch = {
             name, pulseClient, cockpitClient, sampleCount: 0, changeSampleCount: null, drawn: null, labelHandlers: [],
+            isFallbackArmedAtArm: isSurfaceFallbackArmed(stateObj, surface), firstEventUsec: null, changeUsec: null,
         };
         watch.historyListenerId = pulseClient.addHistoryListener(() => {
             watch.sampleCount++;
         });
         watch.cockpitListenerId = cockpitClient.addListener(event => {
+            const eventUsec = GLib.get_monotonic_time();
+            watch.firstEventUsec ??= eventUsec;
             const isSessionsChange = event?.type === SOURCES_EVENT_TYPE && event.names?.includes(SESSIONS_SOURCE_NAME);
-            if (isSessionsChange && watch.changeSampleCount === null)
+            if (isSessionsChange && watch.changeSampleCount === null) {
                 watch.changeSampleCount = watch.sampleCount;
+                watch.changeUsec = eventUsec;
+            }
         });
         for (const row of rows) {
             const handlerId = row.nameLabel.connect('notify::text', nameLabel => {
-                if (nameLabel.text === name && watch.drawn === null)
-                    watch.drawn = {sampleCount: watch.sampleCount, hadChangeCome: watch.changeSampleCount !== null};
+                if (nameLabel.text === name && watch.drawn === null) {
+                    watch.drawn = {sampleCount: watch.sampleCount, hadChangeCome: watch.changeSampleCount !== null,
+                        drawnUsec: GLib.get_monotonic_time()};
+                }
             });
             watch.labelHandlers.push([row.nameLabel, handlerId]);
         }
@@ -813,10 +851,31 @@ function resourcePulseCockpitCheck(request, options = {}) {
     }
 
     /**
+     * A name drawn after the change with no Sample counted since (the extension draws in its own history listener,
+     * before the watch counts that Sample): no Sample's draw. Sooner than the pacing's fallback can fire, counted from
+     * the first cockpit event the watch saw (an event arms the fallback in the extension's listener, which runs before
+     * the watch's), with none armed when the watch was armed, nothing the pacing has drew it: bad, naming the
+     * milliseconds. Otherwise the fallback drew it, with the sampler silent: it could not be judged.
+     *
+     * @param {object} watch - The armed watch, drawn after the change.
+     * @returns {object} bad or could-not-judge.
+     */
+    function judgeDrawnWithNoSample(watch) {
+        const earliestFallbackMs = COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS * MS_PER_SECOND - FALLBACK_EARLIEST_MARGIN_MS;
+        const sinceFirstEventMs = (watch.drawn.drawnUsec - watch.firstEventUsec) / USEC_PER_MS;
+        if (watch.isFallbackArmedAtArm === false && sinceFirstEventMs < earliestFallbackMs) {
+            const sinceChangeMs = Math.round((watch.drawn.drawnUsec - watch.changeUsec) / USEC_PER_MS);
+            return badAnswer([`${watch.name} was drawn ${sinceChangeMs} ms after the change with no Sample since: ` +
+                `sooner than the pacing's fallback can fire (${earliestFallbackMs} ms at the earliest), so the ` +
+                'pacing did not draw it']);
+        }
+        return couldNotJudgeAnswer(`${watch.name} was drawn with no Sample since the change: the pacing's fallback ` +
+            'timeout drew it, so the sampler was silent');
+    }
+
+    /**
      * A watch's final answer, once what it watches for has settled; null while it waits. Drawn with the change, or
-     * after the Sample that followed it, is bad; drawn with no Sample counted since (the extension draws in its own
-     * history listener, before the watch counts that Sample) means the pacing's one-shot fallback drew it, with the
-     * sampler silent: that is no Sample's draw, so it could not be judged.
+     * after the Sample that followed it, is bad; drawn with no Sample counted since is judgeDrawnWithNoSample's.
      *
      * @param {object} watch - The armed watch.
      * @returns {object|null} ok, bad or could-not-judge; null while it waits.
@@ -828,10 +887,8 @@ function resourcePulseCockpitCheck(request, options = {}) {
             const samplesLate = watch.drawn.sampleCount - watch.changeSampleCount;
             if (samplesLate > 0)
                 return badAnswer([`${watch.name} was drawn ${samplesLate} Sample(s) after the next one`]);
-            if (watch.sampleCount === watch.drawn.sampleCount) {
-                return couldNotJudgeAnswer(`${watch.name} was drawn with no Sample since the change: the pacing's ` +
-                    'fallback timeout drew it, so the sampler was silent');
-            }
+            if (watch.sampleCount === watch.drawn.sampleCount)
+                return judgeDrawnWithNoSample(watch);
             return okAnswer(`${watch.name} was drawn on the next Sample after the change`);
         }
         if (watch.changeSampleCount !== null && watch.sampleCount > watch.changeSampleCount)

@@ -158,14 +158,15 @@
 #       dropdown; the lock path (disable, enable); shots/cockpit-<pass>.png; the log;
 #       and the count budgets through perf (about nine minutes more). It may run
 #       again in the same run: each pass is numbered in state/run.values, judges the
-#       log only from where it began (the first pass from the run's start), keeps its
-#       own screenshot, and cannot judge the two clicks whose one log line the
-#       extension's limiter (10 minutes, kept across disable and enable) still holds
-#       from an earlier pass, naming how long is left. It rewrites only the run's copy
-#       of the fixture, and puts it back and closes its windows on every exit. A TERM
-#       or an interrupt during its perf pass ends that pass too: perf puts the run
-#       back once its current wait ends (up to a minute), and the check waits for it;
-#       a second one, to the check or to perf, cuts neither put-back short.
+#       log from where the last pass's log step read to (the first pass from the
+#       run's start), keeps its own screenshot, and cannot judge the two clicks whose
+#       one log line the extension's limiter (10 minutes, kept across disable and
+#       enable) still holds from an earlier pass, naming how long is left. It
+#       rewrites only the run's copy of the fixture, and puts it back and closes its
+#       windows on every exit. A TERM or an interrupt during its perf pass ends that
+#       pass too: perf puts the run back once its current wait ends (up to a minute),
+#       and the check waits for it; a second one, to the check or to perf, cuts
+#       neither put-back short.
 #       Exit 1 when a step is bad, else 2 when one could not be judged
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services, the windows `window` opened and
@@ -483,6 +484,10 @@ readonly FIRST_SESSION_NAME_JQ='.state.sources.sessions.rows[0].name'
 readonly CHECK_SCREENSHOT_NAME_PREFIX='cockpit-'
 # check cockpit's passes in a run, counted in state/run.values (the last value is the latest pass's number).
 readonly CHECK_PASS_RUN_VALUE_NAME='check-cockpit-pass'
+# Where a pass's log step read the shell log to (the log's size just before that read): the next pass's log steps
+# judge from there, so that what is logged after it (that pass's own perf run, a perf run alone, the time between
+# passes) is judged by the next pass, at worst twice, never by none. With none recorded, from the log's start.
+readonly CHECK_LOG_READ_OFFSET_RUN_VALUE_NAME='check-log-read-offset'
 # The extension's log limiter (lib/errorLog.js, lib/constants.js ERROR_LOG_REPEAT_INTERVAL_USEC): one line per reason
 # at most once per interval, by the nested shell's monotonic clock, kept across disable() and enable(); it restarts
 # only when it lets a line through. click-no-window and click-not-focused each wait for one such line: a pass about
@@ -607,9 +612,12 @@ CHECK_UNJUDGED_STEP_COUNT=0
 STEP_BAD_DETAILS=()
 STEP_UNJUDGED_DETAILS=()
 # This pass of check cockpit in its run (begin_check_pass): its number, and the shell log's byte offset its log steps
-# judge from.
-CHECK_PASS_NUMBER=0
-CHECK_LOG_START_OFFSET=0
+# judge from; both empty when the run's state could not tell them (CHECK_PASS_STATE_NOTE says why, and the steps that
+# need them could not be judged). CHECK_PASS_NUMBER_NOTE says why the number could not be recorded, when it could not.
+CHECK_PASS_NUMBER=""
+CHECK_LOG_START_OFFSET=""
+CHECK_PASS_STATE_NOTE=""
+CHECK_PASS_NUMBER_NOTE=""
 # Set when the run's fixture could not be put back: the next step (or the one under way) could not be judged.
 CHECK_FIXTURE_NOT_RESTORED_NOTE=""
 # check cockpit's perf pass while it runs in the background (end_check_perf ends it on a signal).
@@ -872,7 +880,8 @@ is_session_empty() {
 }
 
 #######################################
-# Append name=value to the run's record of what it started.
+# Append name=value to the run's record of what it started; fails when it
+# cannot be written.
 # Arguments:
 #   $1 - run directory
 #   $2 - name
@@ -910,6 +919,25 @@ recorded_run_value() {
     while IFS= read -r values_line; do
         [[ "$values_line" == "$2="* ]] && recorded_value="${values_line#"$2="}"
     done <"$values_path"
+    printf '%s' "$recorded_value"
+}
+
+#######################################
+# Print the last value recorded under a name, or nothing when none was; fail
+# when the run's state/run.values cannot be read, so that a state it could not
+# read is never taken for one where nothing was recorded (check cockpit's pass
+# number, log offset and limiter times).
+# Arguments:
+#   $1 - run directory
+#   $2 - name
+#######################################
+read_recorded_run_value() {
+    local values_text values_line recorded_value=""
+    # cat, not $(<…): bash reads a directory there as empty, with status 0.
+    values_text="$(cat -- "$1/state/run.values" 2>/dev/null)" || return 1
+    while IFS= read -r values_line; do
+        [[ "$values_line" == "$2="* ]] && recorded_value="${values_line#"$2="}"
+    done <<<"$values_text"
     printf '%s' "$recorded_value"
 }
 
@@ -3255,7 +3283,7 @@ print_unjudged_steps() {
 #######################################
 # Note each fault of the shell log past an offset, of the kinds asked for, as a
 # bad part of the step (the first SHOWN_LOG_FAULTS_LIMIT, then how many more);
-# a log it cannot read could not be judged.
+# a log it cannot read could not be judged, and it then fails.
 # Arguments:
 #   $1 - the byte offset to read from
 #   $2 - the kinds, comma-separated
@@ -3266,11 +3294,26 @@ note_shell_log_faults() {
     # Captured with its status: a read that failed (the log unreadable, tail or awk failing) is never "no faults".
     if ! fault_text="$(shell_log_faults "$CHECK_RUN_DIR/log/shell.log" "$1" "$2")"; then
         note_unjudged "cannot read $CHECK_RUN_DIR/log/shell.log past byte $1"
-        return 0
+        return 1
     fi
     [[ -n "$fault_text" ]] || return 0
     mapfile -t fault_lines <<<"$fault_text"
     note_bad "${#fault_lines[@]} line(s) in log/shell.log: $(printf '%s | ' "${fault_lines[@]:0:SHOWN_LOG_FAULTS_LIMIT}")"
+}
+
+#######################################
+# Note the shell log's faults of some kinds since where this pass's log steps
+# judge from (note_shell_log_faults); could not be judged when the run's state
+# could not tell where that is. Fails when it read nothing.
+# Arguments:
+#   $1 - the kinds, comma-separated
+#######################################
+note_pass_log_faults() {
+    if [[ -z "$CHECK_LOG_START_OFFSET" ]]; then
+        note_unjudged "$CHECK_PASS_STATE_NOTE"
+        return 1
+    fi
+    note_shell_log_faults "$CHECK_LOG_START_OFFSET" "$1"
 }
 
 #######################################
@@ -3513,19 +3556,39 @@ restore_check_fixture() {
 
 #######################################
 # Begin this pass of check cockpit in its run: its number (one more than the
-# run's last recorded pass), recorded; and the shell log's offset its log
-# steps judge from: 0 for the run's first pass (the enable's reparenting is at
-# the run's start), else the log's size now, so that a fault an earlier pass
-# found is not found again.
+# run's last recorded pass, 1 with none recorded), recorded; and the shell
+# log's offset its log steps judge from: where the last pass's log step read
+# to (CHECK_LOG_READ_OFFSET_RUN_VALUE_NAME), 0 with none recorded (the enable's
+# reparenting is at the run's start). A state that cannot be read, or holds no
+# number where one is recorded, tells neither: never "the first pass"
+# (CHECK_PASS_STATE_NOTE). A number that cannot be recorded is noted
+# (CHECK_PASS_NUMBER_NOTE): a later pass could take it again.
 #######################################
 begin_check_pass() {
-    local previous_pass_number
-    previous_pass_number="$(recorded_run_value "$CHECK_RUN_DIR" "$CHECK_PASS_RUN_VALUE_NAME")"
-    [[ "$previous_pass_number" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || previous_pass_number=0
+    local previous_pass_number="" log_read_offset=""
+    CHECK_PASS_NUMBER=""
+    CHECK_LOG_START_OFFSET=""
+    CHECK_PASS_STATE_NOTE=""
+    CHECK_PASS_NUMBER_NOTE=""
+    if ! previous_pass_number="$(read_recorded_run_value "$CHECK_RUN_DIR" "$CHECK_PASS_RUN_VALUE_NAME")" ||
+        ! log_read_offset="$(read_recorded_run_value "$CHECK_RUN_DIR" "$CHECK_LOG_READ_OFFSET_RUN_VALUE_NAME")"; then
+        CHECK_PASS_STATE_NOTE="cannot read the run's state ($CHECK_RUN_DIR/state/run.values): which pass of the run"
+        CHECK_PASS_STATE_NOTE+=" this is, and where an earlier pass's log step read the shell log to, cannot be told"
+        return 0
+    fi
+    # Never recorded: the run's first pass, and no pass's log step has read the log yet.
+    : "${previous_pass_number:=0}" "${log_read_offset:=0}"
+    if [[ ! "$previous_pass_number" =~ $WHOLE_NUMBER_PATTERN || ! "$log_read_offset" =~ $WHOLE_NUMBER_PATTERN ]]; then
+        CHECK_PASS_STATE_NOTE="the run's state holds '$previous_pass_number' as the last pass's number and"
+        CHECK_PASS_STATE_NOTE+=" '$log_read_offset' as where its log step read to: which pass this is cannot be told"
+        return 0
+    fi
     CHECK_PASS_NUMBER=$((previous_pass_number + 1))
-    CHECK_LOG_START_OFFSET=0
-    (( CHECK_PASS_NUMBER > 1 )) && CHECK_LOG_START_OFFSET="$(check_shell_log_offset)"
-    record_run_value "$CHECK_RUN_DIR" "$CHECK_PASS_RUN_VALUE_NAME" "$CHECK_PASS_NUMBER"
+    CHECK_LOG_START_OFFSET="$log_read_offset"
+    if ! record_run_value "$CHECK_RUN_DIR" "$CHECK_PASS_RUN_VALUE_NAME" "$CHECK_PASS_NUMBER"; then
+        CHECK_PASS_NUMBER_NOTE="cannot record this pass's number ($CHECK_PASS_NUMBER) in the run's state: a later"
+        CHECK_PASS_NUMBER_NOTE+=" pass would take it again"
+    fi
 }
 
 #######################################
@@ -3552,7 +3615,11 @@ nested_monotonic_usec() {
 #######################################
 limiter_closed_reason() {
     local logged_usec now_usec reopen_usec left_seconds interval_seconds
-    logged_usec="$(recorded_run_value "$CHECK_RUN_DIR" "$1")"
+    if ! logged_usec="$(read_recorded_run_value "$CHECK_RUN_DIR" "$1")"; then
+        printf "cannot tell whether the extension's log limiter has let this line through again since an earlier pass"
+        printf " of this run: the run's state (%s) cannot be read" "$CHECK_RUN_DIR/state/run.values"
+        return 0
+    fi
     [[ -n "$logged_usec" ]] || return 0
     if [[ ! "$logged_usec" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || ! now_usec="$(nested_monotonic_usec)"; then
         printf "cannot tell whether the extension's log limiter has let this line through again since an earlier pass"
@@ -3573,7 +3640,8 @@ limiter_closed_reason() {
 # been logged: the nested shell's clock now plus NO_ACTIVATION_WAIT_SECONDS,
 # the step's wait. Recorded before the click, so that a pass ended in the
 # middle of the step still holds a later pass to the limiter;
-# UNKNOWN_TIME_WORD when the clock cannot be read.
+# UNKNOWN_TIME_WORD when the clock cannot be read. Fails when it cannot be
+# recorded.
 # Arguments:
 #   $1 - the run value
 #######################################
@@ -3592,8 +3660,8 @@ check_cockpit_layout_steps() {
     local grid_options
     check_step_of_request extension 1 extension-active
     begin_check_step
-    note_shell_log_faults "$CHECK_LOG_START_OFFSET" "$EXTENSION_LOG_FAULT_KIND,$CLUTTER_LOG_FAULT_KIND"
-    end_check_step early-log "the shell log since this pass began (the first pass: since the run began) holds no error of the extension and no reparenting warning"
+    note_pass_log_faults "$EXTENSION_LOG_FAULT_KIND,$CLUTTER_LOG_FAULT_KIND"
+    end_check_step early-log "the shell log since the last pass's log step read it (the first pass: since the run began) holds no error of the extension and no reparenting warning"
     check_step_of_request layer 1 layer-placement
     begin_check_step
     if grid_options="$(jq -c --argjson known "$COCKPIT_KNOWN_CARD_IDS_JSON" "$GRID_OPTIONS_JQ" \
@@ -3658,6 +3726,15 @@ open_check_windows() {
 }
 
 #######################################
+# Minimize every window of the nested session: the harness's own setup, so a
+# window that did not minimize makes the step under way could not be judged.
+#######################################
+minimize_check_windows() {
+    ask_check minimize-all
+    note_setup_answer
+}
+
+#######################################
 # Click the layer's first session row a number of times, then wait until the
 # probe window has the focus (or the wait ends): its answer is noted.
 # Arguments:
@@ -3677,25 +3754,32 @@ click_and_expect_probe_focused() {
 # whether the windows are unchanged and the shell log gained a text a number
 # of times. Given the run value of a reason the extension's log limiter holds,
 # the line count could not be judged while an earlier pass of the run had that
-# line logged within the limiter's interval (limiter_closed_reason); to be
-# judged, the time is recorded first, for a later pass.
+# line logged within the limiter's interval (limiter_closed_reason), and the
+# time is recorded before every click, for a later pass: a click whose time
+# cannot be recorded is not made (its line would hold the limiter unrecorded,
+# and a later pass would judge inside it).
 # Arguments:
 #   $1 - the text the click's log line holds
 #   $2 - how many such lines it must add
 #   $3 - optional: the run value of the limiter's reason
+# Returns:
+#   0 once the click was made and the pointer was at the row; 1 otherwise
 #######################################
 click_and_expect_nothing_activated() {
     local log_needle="$1" wanted_line_count="$2" limiter_run_value_name="${3:-}" log_offset limiter_reason=""
     if [[ -n "$limiter_run_value_name" ]]; then
         limiter_reason="$(limiter_closed_reason "$limiter_run_value_name")"
-        [[ -z "$limiter_reason" ]] && record_limited_line_time "$limiter_run_value_name"
+        if ! record_limited_line_time "$limiter_run_value_name"; then
+            note_unjudged "cannot record in the run's state by when this click's line is logged, which a later pass needs to tell whether the extension's log limiter still holds it: not clicked"
+            return 1
+        fi
     fi
     ask_check remember-windows
     note_answer
     log_offset="$(check_shell_log_offset)"
     point_at_session_row "$LAYER_SURFACE" 1
     note_answer
-    [[ "$CHECK_VERDICT" == "$CHECK_OK_VERDICT" ]] || return 0
+    [[ "$CHECK_VERDICT" == "$CHECK_OK_VERDICT" ]] || return 1
     sleep "$NO_ACTIVATION_WAIT_SECONDS"
     ask_check windows-unchanged
     note_answer
@@ -3714,7 +3798,7 @@ click_and_expect_nothing_activated() {
 # FocusSession.
 #######################################
 check_cockpit_click_steps() {
-    local log_offset
+    local log_offset is_no_window_clicked=""
     if ! open_check_windows; then
         print_unjudged_steps "the check's windows could not be set up (see the windows step)" click click-log \
             click-show-desktop click-no-window click-no-window-again click-not-focused click-twice
@@ -3728,18 +3812,23 @@ check_cockpit_click_steps() {
     note_shell_log_faults "$log_offset" "$MUTTER_LOG_FAULT_KIND"
     end_check_step click-log "the activation logged no Mutter warning (no timestamp, focus or user-time line)"
     begin_check_step
-    ask_check minimize-all
-    note_answer
+    minimize_check_windows
     click_and_expect_probe_focused 1
     end_check_step click-show-desktop "with every window minimized, the click unminimized and focused the probe"
     begin_check_step
     if rewrite_check_fixture "$WINDOW_FOCUS_REPLY_JQ" --argjson pid "$NO_WINDOW_PID"; then
-        ask_check minimize-all
-        click_and_expect_nothing_activated "$NO_WINDOW_LOG_NEEDLE" 1 "$NO_WINDOW_LOGGED_RUN_VALUE_NAME"
+        minimize_check_windows
+        click_and_expect_nothing_activated "$NO_WINDOW_LOG_NEEDLE" 1 "$NO_WINDOW_LOGGED_RUN_VALUE_NAME" &&
+            is_no_window_clicked=1
     fi
     end_check_step click-no-window "candidates matching no window activated nothing and logged one line"
     begin_check_step
-    click_and_expect_nothing_activated "$NO_WINDOW_LOG_NEEDLE" 0
+    # Its line count is 0 only once click-no-window's click had the line logged (or the limiter holds it already).
+    if [[ -n "$is_no_window_clicked" ]]; then
+        click_and_expect_nothing_activated "$NO_WINDOW_LOG_NEEDLE" 0
+    else
+        note_unjudged "click-no-window made no click, so this one would be the first of its kind"
+    fi
     end_check_step click-no-window-again "a second such click activated nothing and logged nothing more"
     begin_check_step
     if rewrite_check_fixture "$NOT_FOCUSED_REPLY_JQ" --arg code "$HERDR_UNREACHABLE_CODE"; then
@@ -3748,7 +3837,7 @@ check_cockpit_click_steps() {
     end_check_step click-not-focused "focused: false activated nothing and logged its code at once"
     begin_check_step
     if rewrite_check_fixture "$WINDOW_FOCUS_REPLY_JQ" --argjson pid "$CHECK_PROBE_PID"; then
-        ask_check minimize-all
+        minimize_check_windows
         ask_check focus-calls-arm
         note_answer
         click_and_expect_probe_focused 2
@@ -3774,7 +3863,7 @@ check_cockpit_cover_steps() {
     covered_name="$first_name$COVERED_NAME_SUFFIX"
     visible_name="$first_name$VISIBLE_NAME_SUFFIX"
     begin_check_step
-    ask_check minimize-all
+    minimize_check_windows
     ask_check maximize-window "$(pid_options_json "$CHECK_PROBE_PID")"
     note_answer
     poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check cover-state '{"expect": "covered"}'
@@ -3883,7 +3972,7 @@ check_cockpit_dropdown_steps() {
         ! rewrite_check_fixture "$WINDOW_FOCUS_REPLY_JQ" --argjson pid "$CHECK_PROBE_PID"; then
         note_unjudged 'no probe window to focus'
     else
-        ask_check minimize-all
+        minimize_check_windows
         ask_check dropdown-open
         note_answer
         point_at_session_row "$DROPDOWN_SURFACE" 1
@@ -3905,6 +3994,12 @@ check_cockpit_lock_and_screenshot_steps() {
     check_step_of_request lock-path 1 lock-path "{\"timeoutMs\": $LOCK_PATH_TIMEOUT_MS}"
     close_check_windows
     begin_check_step
+    # Named by the pass's number: one that cannot be told, or recorded, could name an earlier or a later pass's shot.
+    if [[ -z "$CHECK_PASS_NUMBER" || -n "$CHECK_PASS_NUMBER_NOTE" ]]; then
+        note_unjudged "${CHECK_PASS_NUMBER_NOTE:-$CHECK_PASS_STATE_NOTE}: no screenshot taken, so none of another pass is replaced"
+        end_check_step screenshot ''
+        return 0
+    fi
     shot_path="$(screenshot_subcommand "$CHECK_SCREENSHOT_NAME_PREFIX$CHECK_PASS_NUMBER$PNG_SUFFIX")"
     shot_status=$?
     case "$shot_status" in
@@ -3931,24 +4026,44 @@ close_check_windows() {
 }
 
 #######################################
-# The shell log since this pass began (CHECK_LOG_START_OFFSET: the whole log
-# for the run's first pass): no error of the extension, no reparenting
-# warning, no activation warning. It could not be judged when the whole log
-# holds none of the focus lines the click steps provoke: then it may hold none
-# of the extension's lines at all. That positive control reads the whole log,
-# since a later pass within the limiter's interval provokes none of its own.
+# The shell log since the last pass's log step read it (CHECK_LOG_START_OFFSET:
+# the whole log for the run's first pass): no error of the extension, no
+# reparenting warning, no activation warning. The log's size just before this
+# read is recorded for the next pass, whose log steps start there. It could
+# not be judged when the whole log holds none of the focus lines the click
+# steps provoke: then it may hold none of the extension's lines at all. That
+# positive control reads the whole log, since a later pass within the
+# limiter's interval provokes none of its own.
 #######################################
 check_cockpit_log_step() {
-    local provoked_line_count
+    local provoked_line_count log_read_offset
     begin_check_step
-    note_shell_log_faults "$CHECK_LOG_START_OFFSET" \
-        "$EXTENSION_LOG_FAULT_KIND,$CLUTTER_LOG_FAULT_KIND,$MUTTER_LOG_FAULT_KIND"
+    # Taken before the read: what is logged after it is the next pass's to judge (twice at worst, never by none).
+    log_read_offset="$(stat -c %s "$CHECK_RUN_DIR/log/shell.log" 2>/dev/null)" || log_read_offset=""
+    if note_pass_log_faults "$EXTENSION_LOG_FAULT_KIND,$CLUTTER_LOG_FAULT_KIND,$MUTTER_LOG_FAULT_KIND"; then
+        record_log_read_offset "$log_read_offset"
+    fi
     provoked_line_count="$(count_log_lines_since "$CHECK_RUN_DIR/log/shell.log" 0 "$FOCUS_LOG_PREFIX")" ||
         provoked_line_count=0
     if (( provoked_line_count == 0 )); then
         note_unjudged "log/shell.log holds none of the focus lines the clicks provoked: it may hold no line of the extension"
     fi
-    end_check_step log "no error of the extension, Clutter or Mutter warning in log/shell.log since this pass began ($provoked_line_count provoked line(s) found in the whole log)"
+    end_check_step log "no error of the extension, Clutter or Mutter warning in log/shell.log since the last pass's log step read it ($provoked_line_count provoked line(s) found in the whole log)"
+}
+
+#######################################
+# Record where this pass's log step read the shell log to, for the next pass;
+# one that cannot be recorded is a part of the step that could not be judged:
+# the next pass will judge that part of the log again.
+# Arguments:
+#   $1 - the log's size just before the read, in bytes (empty when unknown)
+#######################################
+record_log_read_offset() {
+    if [[ "$1" =~ $WHOLE_NUMBER_PATTERN ]] &&
+        record_run_value "$CHECK_RUN_DIR" "$CHECK_LOG_READ_OFFSET_RUN_VALUE_NAME" "$1"; then
+        return 0
+    fi
+    note_unjudged "cannot record in the run's state where this step read log/shell.log to (byte '$1'): the next pass will judge this part of it again"
 }
 
 #######################################

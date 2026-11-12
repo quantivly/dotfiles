@@ -5553,8 +5553,8 @@ check "nested: probe-window.js refuses (exit 2) before loading Gtk outside a nes
 # window, pointer and check cockpit drive a live run's nested shell through the
 # requests of the in-shell files (each with its own plain-gjs rows,
 # gnome-shell/tests/cockpitCheck.test.js). Here a stand-in busctl answers each
-# request from a directory of answers (ok unless a case's file says otherwise)
-# and, for the Nth click, appends <answers>/click-N.log to the run's shell log,
+# request from a directory of answers (ok unless a case's file says otherwise,
+# for the request or for its Nth call) and, for the Nth click, appends <answers>/click-N.log to the run's shell log,
 # as the extension's focus lines would be; a stand-in gjs stands in for the
 # window (it records how it was started and waits); the real jq rewrites the
 # run's fixture. A fake gnome-shell in this session makes the run live.
@@ -5602,7 +5602,13 @@ if [[ "$function_name" == resourcePulseNestedPointer && "$request" == click ]]; 
   fi
 fi
 answer_path="$CHECK_STUB_ANSWERS/$function_name.$request"
-[[ -f "$answer_path" ]] || answer_path="$CHECK_STUB_ANSWERS/default"
+# The Nth call of a request may have an answer of its own: <function>.<request>.<N>.
+request_number="$(grep -c -x -F "$function_name $request" "$CHECK_STUB_CALLS")"
+if [[ -f "$answer_path.$request_number" ]]; then
+  answer_path+=".$request_number"
+elif [[ ! -f "$answer_path" ]]; then
+  answer_path="$CHECK_STUB_ANSWERS/default"
+fi
 jq -cn --rawfile answer "$answer_path" '{type: "bs", data: [true, ($answer | rtrimstr("\n"))]}'
 STAND_IN
 install_stub "$CHECK_STUB_BIN" busctl "$CHECK_BUSCTL_STAND_IN_SOURCE"
@@ -5990,6 +5996,21 @@ dropdown_sequencing_summary+=" closed-change=$(grep -c -x -F "could not judge dr
   <<<"$CHECK_STUB_OUTPUT")"
 check "nested: check cockpit opens the dropdown with the fixture's session names, so the open itself judges the rows at once, and arms the dropdown's draw watch only once the open is ok (the visible step's watch is the one other arm)" \
   "$dropdown_sequencing_summary" "open-with-names=1 closed-arms=1 closed-change=1"
+# minimize-all is the harness's own setup at every place check cockpit asks
+# it (before click-show-desktop, click-no-window and click-twice, the cover,
+# the dropdown's click): a window that did not minimize makes that step could
+# not judge, never ok. The stand-in answers the fourth call (the cover step's)
+# so; every call goes through the same function, minimize_check_windows.
+UNMINIMIZED_DETAIL='1 windows did not minimize'
+unminimized_answers="$(answers_with unminimized resourcePulseCockpitCheck.minimize-all.4 \
+  "{\"verdict\":\"could-not-judge\",\"detail\":\"$UNMINIMIZED_DETAIL\"}")"
+check_cockpit_stubbed "$unminimized_answers"
+unminimized_summary="exit=$CHECK_STUB_EXIT $(check_step_verdicts cover)"
+unminimized_summary+=" named=$(grep -c -x -F "could not judge cover: $UNMINIMIZED_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
+unminimized_summary+=" summary=$(grep -c -x -F 'check cockpit: 29 ok, 0 bad, 1 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+unminimized_summary+=" asked=$(check_stub_call_count '^resourcePulseCockpitCheck minimize-all$')"
+check "nested: check cockpit takes a minimize-all that could not be judged (a window that did not minimize) for its step's own setup: that step could not be judged, never ok" \
+  "$unminimized_summary" "exit=2 cover:unjudged named=1 summary=1 asked=5"
 # check cockpit run again in the same run (the one run may need a second pass
 # after a fix to the harness's own files): each pass is numbered, judges the
 # shell log only from where it began (the run's first pass from the run's
@@ -6048,6 +6069,112 @@ check "nested: a pass of check cockpit cannot judge click-no-window and click-no
 check "nested: each pass of check cockpit in a run is numbered in state/run.values and keeps its own screenshot, shots/cockpit-<pass>.png" \
   "$pass_screenshot_summary" \
   "first=[cockpit-1.png] second=[cockpit-2.png] third=[cockpit-3.png] ok-line=1 passes=3"
+# A pass's log steps start where the last pass's log step read to (the run's
+# state records it), so that what is logged after that step is judged by the
+# next pass: the last pass's own perf run (five disable and enable cycles), a
+# perf run alone, the time between passes. Four passes on one run: the first
+# with a perf run that logs an extension error (after its log step); the
+# second at once; then an error logged between passes; the third; the fourth.
+# Each pass's two log steps, and how many lines name each error.
+CHECK_PERF_FAULT_LINE='(gnome-shell:7): Gjs-CRITICAL **: 10:05:00.000: resource-pulse: the cockpit failed as perf enabled it'
+CHECK_BETWEEN_PASSES_FAULT_LINE='(gnome-shell:7): Gjs-CRITICAL **: 10:15:00.000: resource-pulse: the cockpit failed between passes'
+# The perf pass, as check_cockpit_stubbed's, logging the error first; the check's bash evaluates it.
+CHECK_PERF_LOGS_FAULT_OVERRIDES="run_perf_for_check_cockpit() {
+  printf '%s\n' $(printf '%q' "$CHECK_PERF_FAULT_LINE") >>\"\$CHECK_STUB_SHELL_LOG\"
+  printf 'perf: PASS: every count within its budget\nperf: cockpit: PASS: as the stand-in judges\n'
+}"
+# later_log_verdicts prints the last pass's two log steps and how many lines name each error.
+later_log_verdicts() {
+  printf '[%s perf-error=%s between-error=%s]' "$(check_step_verdicts early-log log)" \
+    "$(grep -c -F "$CHECK_PERF_FAULT_LINE" <<<"$CHECK_STUB_OUTPUT")" \
+    "$(grep -c -F "$CHECK_BETWEEN_PASSES_FAULT_LINE" <<<"$CHECK_STUB_OUTPUT")"
+}
+CHECK_STUB_OVERRIDES="$CHECK_PERF_LOGS_FAULT_OVERRIDES" check_cockpit_stubbed "$CHECK_ANSWERS"
+later_log_summary="first=$(later_log_verdicts)"
+check_cockpit_stubbed "$CHECK_ANSWERS" again
+later_log_summary+=" second=$(later_log_verdicts)"
+printf '%s\n' "$CHECK_BETWEEN_PASSES_FAULT_LINE" >>"$CHECK_RUN/log/shell.log"
+check_cockpit_stubbed "$CHECK_ANSWERS" again
+later_log_summary+=" third=$(later_log_verdicts)"
+check_cockpit_stubbed "$CHECK_ANSWERS" again
+later_log_summary+=" fourth=$(later_log_verdicts)"
+check "nested: a pass of check cockpit judges the shell log from where the last pass's log step read it to, so a fault logged after that step (in that pass's own perf run, or between passes) is the next pass's bad, and only that pass's" \
+  "$later_log_summary" \
+  "first=[early-log:ok log:ok perf-error=0 between-error=0] second=[early-log:bad log:bad perf-error=2 between-error=0] third=[early-log:bad log:bad perf-error=0 between-error=2] fourth=[early-log:ok log:ok perf-error=0 between-error=0]"
+
+# check cockpit never takes a run's state it cannot read for one where nothing
+# was recorded (the run's first pass: its log judged from the start, its
+# screenshot named as an earlier pass's, the limiter taken for open). Every
+# read of the state fails here (read_recorded_run_value, replaced): the steps
+# that need it could not be judged, saying so, and the pass takes no
+# screenshot and records no pass or log offset (the limiter's two times it
+# records still, as before every such click). The reader itself fails on a
+# run.values it cannot read (a directory in its place) or that is not there,
+# and reads the last value of a name otherwise.
+# shellcheck disable=SC2016  # Evaluated by the check's bash.
+CHECK_STUB_OVERRIDES='read_recorded_run_value() { return 1; }' check_cockpit_stubbed "$CHECK_ANSWERS"
+unreadable_state_summary="exit=$CHECK_STUB_EXIT [$(check_step_verdicts early-log click-no-window click-not-focused \
+  screenshot log)] screenshots=$(check_stub_call_count '^Screenshot ')"
+unreadable_state_summary+=" passes=$(grep -c '^check-cockpit-pass=' "$CHECK_RUN/state/run.values")"
+unreadable_state_summary+=" log-offsets=$(grep -c '^check-log-read-offset=' "$CHECK_RUN/state/run.values")"
+# Recorded before each limited click even when it cannot be judged: a later pass then waits for that click's line too.
+unreadable_state_summary+=" limiter-times=$(grep -c -E '^check-(no-window|not-focused)-logged-usec=' \
+  "$CHECK_RUN/state/run.values")"
+unreadable_state_summary+=" named=$(grep -c -F "cannot read the run's state ($CHECK_RUN/state/run.values)" \
+  <<<"$CHECK_STUB_OUTPUT")/$(grep -c -F "the run's state ($CHECK_RUN/state/run.values) cannot be read" \
+  <<<"$CHECK_STUB_OUTPUT")"
+unreadable_state_summary+=" summary=$(grep -c -x -F 'check cockpit: 25 ok, 0 bad, 5 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+STATE_READER_RUN="$WIRING_TMP/state-reader-run"
+mkdir -p "$STATE_READER_RUN/state/run.values" || fatal "cannot lay out $STATE_READER_RUN"
+# state_reader_case prints read_recorded_run_value's status and what it printed, for the check's pass number.
+state_reader_case() {
+  local reader_output reader_status
+  reader_output="$(nested_call read_recorded_run_value "$STATE_READER_RUN" check-cockpit-pass 2>/dev/null)"
+  reader_status=$?
+  printf '%s:%s' "$reader_status" "$reader_output"
+}
+unreadable_state_summary+=" reader: unreadable=$(state_reader_case)"
+unreadable_state_summary+=" unwritable=$(nested_call record_run_value "$STATE_READER_RUN" check-cockpit-pass 1 \
+  >/dev/null 2>&1; printf '%s' "$?")"
+rmdir "$STATE_READER_RUN/state/run.values" || fatal "cannot lay out $STATE_READER_RUN"
+unreadable_state_summary+=" missing=$(state_reader_case)"
+printf '%s\n' check-cockpit-pass=1 gc-log=1 check-cockpit-pass=2 >"$STATE_READER_RUN/state/run.values"
+unreadable_state_summary+=" readable=$(state_reader_case)"
+check "nested: check cockpit takes a run's state it cannot read for unknown, never for its first pass: the log steps, the limiter's two steps and the screenshot could not be judged, saying so, with no screenshot taken and no pass recorded; the reader fails on a run.values it cannot read or that is not there, and the writer on one it cannot write" \
+  "$unreadable_state_summary" \
+  "exit=2 [early-log:unjudged click-no-window:unjudged click-not-focused:unjudged screenshot:unjudged log:unjudged] screenshots=0 passes=0 log-offsets=0 limiter-times=2 named=3/2 summary=1 reader: unreadable=1: unwritable=1 missing=1: readable=0:2"
+
+# check cockpit says so when it cannot record a value of the run's state a
+# later pass needs, and does nothing that would mislead that pass: a pass
+# number it cannot record takes no screenshot (a later pass would take the same
+# name); a limiter time it cannot record makes no click (its line would hold
+# the extension's limiter unrecorded), nor the click that counts on that one; a
+# log offset it cannot record leaves its log step could not judge (the next
+# pass judges that part again). Each case fails one name's writes
+# (record_run_value, wrapped) on a fresh run, and prints the exit, the steps
+# that could not be judged, the clicks and the screenshots.
+# unrecordable_value_case <run value name> [answers dir] runs that case.
+unrecordable_value_case() {
+  # shellcheck disable=SC2016  # Evaluated by the check's bash.
+  CHECK_STUB_OVERRIDES="$(printf '%s\n' 'eval "script_$(declare -f record_run_value)"' \
+    "record_run_value() { [[ \"\$2\" == $1 ]] && return 1; script_record_run_value \"\$@\"; }")" \
+    check_cockpit_stubbed "${2:-$CHECK_ANSWERS}"
+  printf '%s/[%s]/%s/%s' "$CHECK_STUB_EXIT" \
+    "$(sed -n -E 's/^could not judge ([a-z-]+): .*/\1/p' <<<"$CHECK_STUB_OUTPUT" | tr '\n' ' ')" \
+    "$(check_stub_call_count '^resourcePulseNestedPointer click$')" "$(check_stub_call_count '^Screenshot ')"
+}
+unrecordable_value_summary="pass=$(unrecordable_value_case check-cockpit-pass)"
+# With click-no-window's two clicks not made, click-not-focused's is the third: it logs its line there.
+unclicked_no_window_answers="$(answers_with unclicked-no-window click-3.log \
+  '(gnome-shell:7): Gjs-Console-WARNING **: 10:00:03.000: resource-pulse: cockpit: focus: herdr-unreachable')"
+rm -f "$unclicked_no_window_answers/click-5.log"
+unrecordable_value_summary+=" no-window=$(unrecordable_value_case check-no-window-logged-usec \
+  "$unclicked_no_window_answers")"
+unrecordable_value_summary+=" not-focused=$(unrecordable_value_case check-not-focused-logged-usec)"
+unrecordable_value_summary+=" log-offset=$(unrecordable_value_case check-log-read-offset)"
+check "nested: check cockpit, unable to record a value of the run's state a later pass needs, says so in the step that needed it and does nothing that would mislead that pass: no screenshot under an unrecorded pass number, no click with an unrecorded limiter time (nor the click counting on it), a log step whose read-to point is unrecorded could not be judged" \
+  "$unrecordable_value_summary" \
+  "pass=2/[screenshot ]/7/0 no-window=2/[click-no-window click-no-window-again ]/5/1 not-focused=2/[click-not-focused ]/6/1 log-offset=2/[log ]/7/1"
 
 # A shell log that cannot be read past its offset (a directory stands where it
 # should be: it passes the readable test, and tail fails on it) is could not
@@ -6369,7 +6496,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1132
+EXPECTED_ROWS=1137
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

@@ -7,6 +7,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
+import {COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const NESTED_DIR_URI = GLib.uri_resolve_relative(import.meta.url, './nested/', GLib.UriFlags.NONE);
 const CHECK_FUNCTION_NAME = 'resourcePulseCockpitCheck';
@@ -49,6 +50,17 @@ const WINDOW_SIZE = Object.freeze({width: 320, height: 200});
 const DROPDOWN_CARD_WIDTH_PX = 400;
 /** A wait short enough for the rows, long enough for the fake's timeouts to look a few times. */
 const SHORT_TIMEOUT_MS = 200;
+/** Where the fake shell's monotonic clock starts, in µs; a row moves it. */
+const FAKE_CLOCK_START_USEC = 1000;
+const USEC_PER_MS = 1000;
+const MS_PER_SECOND = 1000;
+/**
+ * cockpit-check.js FALLBACK_EARLIEST_MARGIN_MS: how much sooner than its interval the pacing's fallback can fire, so
+ * that a draw with no Sample since the change, sooner than the interval less this, is no fallback's.
+ */
+const FALLBACK_EARLIEST_MARGIN_MS = 500;
+/** The fake pacing's fallback id while one is armed (GLib's are positive). */
+const ARMED_FALLBACK_SOURCE_ID = 7;
 
 /**
  * A file of nested/, read when a row runs.
@@ -334,6 +346,8 @@ function buildExtensionParts(shell) {
             rect: {x: 40 + captionIndex * 1280, y: 40, width: 120, height: 30},
         }))),
         _isInteractive: true,
+        // The layer's pacing: its one-shot fallback's id, null while none is armed (cockpitSourceDrawing.js).
+        _pacing: {_fallbackSourceId: null},
         _frozenCardIds: new Set(),
         _tooltip: makeTooltip(shell.uiGroup),
         cardRects: () => KNOWN_CARD_IDS.map(cardId => ({cardId, rect: {...CELLS_BY_CARD_ID[cardId]}})),
@@ -365,6 +379,7 @@ function buildExtensionParts(shell) {
     };
     const indicator = {
         menu, _sessionsItem: sessionsItem, _sessionsCard: dropdownSessionsCard, _dropdownCard: dropdownCard,
+        _sessionsPacing: {_fallbackSourceId: null},
         _openResourcesItem: openResourcesItem, _sessionsTooltip: makeTooltip(shell.uiGroup),
         // The top bar's own hover label, in the top chrome as indicator.js adds it.
         _hoverLabel: shell.uiGroup.add_child(new FakeActor({styleClasses: ['resource-pulse-hover-label']})),
@@ -405,16 +420,18 @@ function tearDownExtensionParts(stateObj, {leaveHoverLabelBehind = false} = {}) 
 }
 
 /**
- * Timeouts that run on the microtask queue, so a row's async request settles without a main loop.
+ * Timeouts that run on the microtask queue, so a row's async request settles without a main loop; a monotonic clock
+ * that stands still until a row moves it.
  *
+ * @param {{usec: number}} clock - The clock the fake reads, in µs.
  * @returns {object} The GLib names the checks use.
  */
-function makeFakeGLib() {
+function makeFakeGLib(clock) {
     return {
         PRIORITY_DEFAULT: 0,
         SOURCE_REMOVE,
         SOURCE_CONTINUE,
-        get_monotonic_time: () => 1000,
+        get_monotonic_time: () => clock.usec,
         timeout_add(_priority, _intervalMs, callback) {
             const runOnce = () => {
                 if (callback() === SOURCE_CONTINUE)
@@ -498,8 +515,9 @@ function makeHealthyShell() {
         },
     };
     const pointerPosition = {x: 0, y: 0};
+    const clock = {usec: FAKE_CLOCK_START_USEC};
     Object.assign(shell, {
-        stateObj, extension, display, decoyWindow, probeWindow, lifecycle, devices, seat, pointerPosition,
+        stateObj, extension, display, decoyWindow, probeWindow, lifecycle, devices, seat, pointerPosition, clock,
         managerListeners,
         scope: {
             Main: {
@@ -524,7 +542,7 @@ function makeHealthyShell() {
             }}},
             globalThis: {},
             Meta: {WindowType: WINDOW_TYPE, MaximizeFlags: {BOTH: 3}},
-            GLib: makeFakeGLib(),
+            GLib: makeFakeGLib(clock),
             ExtensionUtils: {ExtensionState: EXTENSION_STATE},
         },
     });
@@ -1073,10 +1091,12 @@ test('cockpit check: draw-watch is ok for the name drawn on the first Sample aft
             events.change();
             events.sample();
         }),
-        // The pacing's one-shot fallback drew it, with the sampler silent: not "on the next Sample".
-        drawnWithNoSample: playAndRead((events, nameLabel) => {
+        // The pacing's one-shot fallback drew it, its interval after the change, with the sampler silent: not "on the
+        // next Sample".
+        drawnWithNoSample: playAndRead((events, nameLabel, shell) => {
             events.sample();
             events.change();
+            shell.clock.usec += COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS * MS_PER_SECOND * USEC_PER_MS;
             nameLabel.text = newName;
         }),
         noChangeYet: playAndRead(events => events.sample()),
@@ -1099,6 +1119,79 @@ test('cockpit check: draw-watch is ok for the name drawn on the first Sample aft
         noChangeYet: PENDING, noSampleYet: PENDING, closedDropdown: COULD_NOT_JUDGE, openDropdown: OK,
         alreadyShown: COULD_NOT_JUDGE, unarmed: COULD_NOT_JUDGE,
         armedCounts: [1, 1, 1], finalCounts: [0, 0, 0],
+    });
+});
+
+test('cockpit check: draw-watch takes a name drawn with no Sample since the change, sooner than the pacing\'s ' +
+    'fallback can fire (lib/constants.js COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS less the check\'s margin, counted from ' +
+    'the first cockpit event the watch saw), for bad, naming the milliseconds; at that bound or later, after a ' +
+    'fallback armed before the watch was, or with a pacing it cannot read, the fallback may have drawn it: ' +
+    'could-not-judge; the dropdown\'s watch reads the dropdown\'s pacing', () => {
+    const newName = 'alpha-sync-2';
+    const earliestFallbackMs = COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS * MS_PER_SECOND - FALLBACK_EARLIEST_MARGIN_MS;
+    /**
+     * Arms a watch on a fresh shell (after `prepare`), counts one Sample, lets the cockpit events come (another
+     * source's change at 0 ms, when asked, then the sessions' change at changeAtMs), draws the name at drawnAtMs with
+     * no Sample since, and reads the watch once.
+     *
+     * @param {object} script - What happens, and when, in ms of the fake's clock.
+     * @param {number} script.drawnAtMs - When the name is drawn.
+     * @param {number} [script.changeAtMs] - When the sessions' change comes.
+     * @param {boolean} [script.isOtherEventFirst] - Another source's change comes first, at 0 ms.
+     * @param {string} [script.surface] - 'layer' or 'dropdown' (opened).
+     * @param {function(object): void} [script.prepare] - Readies the shell before the arm.
+     * @returns {string} The verdict, with the detail for a bad or a could-not-judge.
+     */
+    const drawnWithNoSampleAt = ({drawnAtMs, changeAtMs = 0, isOtherEventFirst = false, surface = 'layer',
+        prepare = () => {}}) => {
+        const shell = makeHealthyShell();
+        if (surface === 'dropdown')
+            openDropdown(shell);
+        prepare(shell);
+        const card = surface === 'dropdown' ? shell.stateObj._indicator._sessionsCard
+            : shell.stateObj._layer._cardsById.get('sessions');
+        const events = clientEvents(shell);
+        check(shell, 'draw-watch-arm', {surface, name: newName});
+        events.sample();
+        const startUsec = shell.clock.usec;
+        if (isOtherEventFirst)
+            shell.stateObj._cockpitClient.listeners.tell({type: 'sources', names: ['network'], cause: 'changed'});
+        shell.clock.usec = startUsec + changeAtMs * USEC_PER_MS;
+        events.change();
+        shell.clock.usec = startUsec + drawnAtMs * USEC_PER_MS;
+        card._sessionRows[0].nameLabel.text = newName;
+        const answer = check(shell, 'draw-watch-read');
+        return answer.verdict === OK ? OK : `${answer.verdict}: ${answer.detail}`;
+    };
+    const armLayerFallback = shell => {
+        shell.stateObj._layer._pacing._fallbackSourceId = ARMED_FALLBACK_SOURCE_ID;
+    };
+    const fallbackDrewIt = `${COULD_NOT_JUDGE}: alpha-sync-2 was drawn with no Sample since the change: the pacing's ` +
+        'fallback timeout drew it, so the sampler was silent';
+    const drawnTooSoon = drawnMs => `${BAD}: alpha-sync-2 was drawn ${drawnMs} ms after the change with no Sample ` +
+        `since: sooner than the pacing's fallback can fire (${earliestFallbackMs} ms at the earliest), so the pacing ` +
+        'did not draw it';
+    assertEqual({
+        justBeforeTheBound: drawnWithNoSampleAt({drawnAtMs: earliestFallbackMs - 1}),
+        atTheBound: drawnWithNoSampleAt({drawnAtMs: earliestFallbackMs}),
+        fallbackArmedBeforeTheWatch: drawnWithNoSampleAt({drawnAtMs: 100, prepare: armLayerFallback}),
+        pacingUnreadable: drawnWithNoSampleAt({drawnAtMs: 100, prepare: shell => {
+            delete shell.stateObj._layer._pacing;
+        }}),
+        // 600 ms after the sessions' change, but the other source's change, 2000 ms before it, could have armed it.
+        anEarlierEventFirst: drawnWithNoSampleAt({drawnAtMs: 2600, changeAtMs: 2000, isOtherEventFirst: true}),
+        dropdownTooSoon: drawnWithNoSampleAt({drawnAtMs: 100, surface: 'dropdown', prepare: armLayerFallback}),
+        dropdownFallbackArmed: drawnWithNoSampleAt({drawnAtMs: 100, surface: 'dropdown', prepare: shell => {
+            shell.stateObj._indicator._sessionsPacing._fallbackSourceId = ARMED_FALLBACK_SOURCE_ID;
+        }}),
+    }, {
+        justBeforeTheBound: drawnTooSoon(earliestFallbackMs - 1),
+        atTheBound: fallbackDrewIt,
+        fallbackArmedBeforeTheWatch: fallbackDrewIt,
+        pacingUnreadable: fallbackDrewIt,
+        anEarlierEventFirst: fallbackDrewIt,
+        dropdownTooSoon: drawnTooSoon(100),
+        dropdownFallbackArmed: fallbackDrewIt,
     });
 });
 
