@@ -34,7 +34,8 @@
 // A click on a session row (the layer's sessions card or the dropdown's) does one safe thing or nothing, one click at
 // a time: it asks the cockpit service to focus the session's herdr pane (FocusSession), and when it answers,
 // activates the window that shows herdr, as a dock click does (Main.activateWindow, the shell's one action). No
-// matching window, no action: one journal line, at most once per 10 minutes. An answer after disable() does nothing.
+// matching window, no action: one journal line, at most once per 10 minutes for each reason. An answer after
+// disable() does nothing.
 //
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
@@ -117,12 +118,6 @@ const COCKPIT_LAYER_FAILURE_LOG_KEY = 'could not draw the cockpit layer';
 const ACTIVATABLE_WINDOW_TYPES = new Set([Meta.WindowType.NORMAL, Meta.WindowType.DIALOG]);
 /** The template key of the journal line for an activation that failed (lib/errorLog.js). */
 const SESSION_ACTIVATION_FAILURE_LOG_KEY = 'could not activate a session';
-/**
- * The template key of the journal line for a session focus that brought no window forward (lib/cockpitInteraction.js
- * focusSessionOutcome's line): one key whatever the reason, so such a line comes at most once per
- * ERROR_LOG_REPEAT_INTERVAL_USEC (10 minutes) however often rows are clicked (Review Focus 3: at most one a minute).
- */
-const SESSION_FOCUS_OUTCOME_LOG_KEY = 'a session focus brought no window forward';
 
 /**
  * The index in its panel box of the system menu (quick settings), so an indicator inserted there sits just left
@@ -1180,9 +1175,10 @@ export default class ResourcePulseExtension extends Extension {
      * candidate pids and focusSessionOutcome decide, then activates the picked window as a dock click does
      * (Main.activateWindow: it switches to the window's workspace, unminimizes and raises it, which ends show-desktop,
      * and closes the overview), or logs the outcome's line, which names only the reply's error code or its candidate
-     * pids, as a warning at most once per ERROR_LOG_REPEAT_INTERVAL_USEC whatever the reason. No match, no action:
-     * herdr inside tmux, or in a terminal whose process is none of the candidates, has its pane focused and nothing
-     * more.
+     * pids, as a warning under the template key the outcome gives, one per reason: so a line comes at most once per
+     * ERROR_LOG_REPEAT_INTERVAL_USEC (10 minutes) for each reason however often rows are clicked (Review Focus 3: at
+     * most one a minute), and a new reason is logged at once (ruling D32). No match, no action: herdr inside tmux, or
+     * in a terminal whose process is none of the candidates, has its pane focused and nothing more.
      *
      * @param {{focused: boolean|null, error: string|null, windowPidCandidates: number[]}} focusReply - The cockpit
      *     client's FocusSession reply.
@@ -1195,7 +1191,7 @@ export default class ResourcePulseExtension extends Extension {
         if (focusOutcome.activateWindow)
             Main.activateWindow(metaWindows[pickedStackIndex]);
         else
-            this._clientLog.log(focusOutcome.logLine, SESSION_FOCUS_OUTCOME_LOG_KEY);
+            this._clientLog.log(focusOutcome.logLine, focusOutcome.logTemplateKey);
     }
 
     /**

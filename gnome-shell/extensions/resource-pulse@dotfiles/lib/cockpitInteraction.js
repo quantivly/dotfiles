@@ -1,11 +1,16 @@
 // The cockpit's interaction rules, pure: when the WatchCockpit watch is wanted, whether the desktop may be clicked,
 // which window a FocusSession reply activates, and what to do with the reply. The glue (client, layer, click handler)
 // reads the shell into the plain inputs below; nothing here imports Gio, GLib or Shell.
+import {COCKPIT_FOCUS_ERROR_CODES} from './cockpitProtocol.js';
 import {COCKPIT_LOG_PREFIX} from './constants.js';
 
 /** The type name the glue gives a Meta.WindowType.DESKTOP window (a desktop-icons extension's), for the rule below. */
 export const DESKTOP_WINDOW_TYPE = 'desktop';
 const FOCUS_LOG_PREFIX = `${COCKPIT_LOG_PREFIX} focus:`;
+/** The reason logged for a reply herdr did not focus that names no code COCKPIT_FOCUS_ERROR_CODES holds. */
+const NOT_FOCUSED_REASON = 'not focused';
+/** The reason logged for a focused reply whose candidate pids no window has; the line adds the pids. */
+const NO_WINDOW_REASON = 'no window';
 
 /**
  * Whether the shell should hold the WatchCockpit watch: while a cockpit card is visible outside the overview, or
@@ -57,20 +62,28 @@ export function pickWindowToActivate({windows, candidatePids}) {
 }
 
 /**
- * What to do with a FocusSession reply once a window has (or has not) been picked.
+ * What to do with a FocusSession reply once a window has (or has not) been picked. A line comes with the template key
+ * it is limited by (lib/errorLog.js), one per reason, so a line for one reason never silences another's (ruling D32).
+ * The reasons are bounded: each code of COCKPIT_FOCUS_ERROR_CODES, "not focused" (a reply herdr did not focus that
+ * names no code, or names one this protocol does not know, whose text is never written out), and "no window"
+ * (whatever the pids, which only the line names).
  *
  * @param {object} input
  * @param {{focused: boolean, error: string|null, windowPidCandidates: number[]}} input.reply The parsed reply.
  * @param {number|null} input.pickedStackIndex What pickWindowToActivate returned.
- * @returns {{activateWindow: boolean, logLine: string|null}} Activate, or a log line; never both.
+ * @returns {{activateWindow: boolean, logLine: string|null, logTemplateKey: string|null}} Activate, or a log line
+ *     and its template key; never both.
  */
 export function focusSessionOutcome({reply, pickedStackIndex}) {
     if (!reply.focused) {
-        const reason = reply.error ?? 'not focused';
-        return {activateWindow: false, logLine: `${FOCUS_LOG_PREFIX} ${reason}`};
+        const isKnownError = COCKPIT_FOCUS_ERROR_CODES.includes(reply.error);
+        const reason = isKnownError ? reply.error : NOT_FOCUSED_REASON;
+        const logLine = `${FOCUS_LOG_PREFIX} ${reason}`;
+        return {activateWindow: false, logLine, logTemplateKey: logLine};
     }
     if (typeof pickedStackIndex === 'number')
-        return {activateWindow: true, logLine: null};
+        return {activateWindow: true, logLine: null, logTemplateKey: null};
+    const logTemplateKey = `${FOCUS_LOG_PREFIX} ${NO_WINDOW_REASON}`;
     const candidateList = `[${(reply.windowPidCandidates ?? []).join(', ')}]`;
-    return {activateWindow: false, logLine: `${FOCUS_LOG_PREFIX} no window for pids ${candidateList}`};
+    return {activateWindow: false, logLine: `${logTemplateKey} for pids ${candidateList}`, logTemplateKey};
 }

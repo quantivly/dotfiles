@@ -1474,8 +1474,6 @@ const ACTIVATABLE_WINDOWS_DECLARATION = 'function activatableWindowsByStacking()
 const FOCUS_SESSION_AWAIT_STATEMENT = 'const focusReply = await cockpitClient.focusSession(sessionId);';
 /** The call whose first statement reads the windows. */
 const WINDOWS_READ_CALL_STATEMENT = 'this._activateWindowForFocusReply(focusReply);';
-/** The answer's name, in every statement that uses it. */
-const FOCUS_REPLY_NAME = 'focusReply';
 /** The try statement around the answer, and its catch and finally, as they open their lines. */
 const TRY_OPENING_LINE = 'try {';
 const CATCH_OPENING_LINE = '} catch (error) {';
@@ -1483,11 +1481,13 @@ const FINALLY_OPENING_LINE = '} finally {';
 /** What a statement line that closes a block starts with. */
 const BLOCK_CLOSING_PREFIX = '}';
 /**
- * Calls that would bring a window forward on the shell side: the shell's own activation, Mutter's, and a window's
- * focus, raise and unminimize.
+ * Calls that would bring a window forward on the shell side: the shell's own activation (Main.activateWindow), a
+ * workspace's (activate_with_focus), an app's for one of its windows (Shell.App.activate_window), Mutter's own
+ * (Meta.Window.activate, which Main.activateWindow calls; the same needle matches Shell.App.activate, whose one use is
+ * cockpitCards.js openResourcesApp's), and a window's focus, raise and unminimize.
  */
 const WINDOW_ACTIVATION_CALL_NEEDLES = [
-    'activateWindow(', 'activate_with_focus(', '.unminimize(', '.raise(', '.focus(',
+    'activateWindow(', 'activate_with_focus(', 'activate_window(', '.activate(', '.unminimize(', '.raise(', '.focus(',
 ];
 /** The shell side's directory beside the top level (service/ is the services'). */
 const LIB_DIRECTORY_NAME = 'lib';
@@ -1564,22 +1564,20 @@ test('extension.js: one activation at a time: a click while one is in flight doe
     });
 });
 
-test('extension.js: the activation awaits FocusSession from the cockpit client it was started with as the first ' +
-    'statement of its try, so the answer and everything done with it are inside the try', () => {
+// The activation's body is pinned whole by four rows, so the answer is used inside the try only: before the try and
+// the try's first statement (this row), the rest of the try (the stale-answer row), the catch (the failure row), and
+// the finally to the end (the one-at-a-time row).
+test('extension.js: the activation\'s one statement before its try captures the cockpit client it is started with, ' +
+    'and the try\'s first statement awaits FocusSession from that client', () => {
     const statements = activationStatements();
     const tryIndex = statements.indexOf(TRY_OPENING_LINE);
-    const catchIndex = statements.indexOf(CATCH_OPENING_LINE);
-    const isTryFound = tryIndex >= 0 && catchIndex > tryIndex;
-    const answerUsesOutsideTheTry = statements.filter((statement, statementIndex) =>
-        statement.includes(FOCUS_REPLY_NAME) && (statementIndex <= tryIndex || statementIndex >= catchIndex));
+    const isTryFound = tryIndex >= 0;
     assertEqual({
         beforeTheTry: isTryFound ? statements.slice(0, tryIndex) : null,
         firstInTheTry: isTryFound ? statements[tryIndex + 1] : null,
-        answerUsesOutsideTheTry: isTryFound ? answerUsesOutsideTheTry : null,
     }, {
         beforeTheTry: ['const cockpitClient = this._cockpitClient;'],
         firstInTheTry: FOCUS_SESSION_AWAIT_STATEMENT,
-        answerUsesOutsideTheTry: [],
     });
 });
 
@@ -1603,15 +1601,18 @@ test('extension.js: a failure in the activation is one journal line on the error
     });
 });
 
-test('extension.js: an answer that comes after disable(), or after a later enable(), does nothing: between the ' +
-    'await and the call that reads the windows, the activation returns unless the cockpit client it asked is still ' +
-    'the extension\'s', () => {
+test('extension.js: an answer that comes after disable(), or after a later enable(), does nothing, and an answer is ' +
+    'used only to bring its window forward: from the await to the try\'s end, the activation returns unless the ' +
+    'cockpit client it asked is still the extension\'s, then hands the answer to the call that reads the windows, ' +
+    'and does nothing more', () => {
     const statements = activationStatements();
     const answerIndex = statements.indexOf(FOCUS_SESSION_AWAIT_STATEMENT);
-    const windowsReadIndex = statements.indexOf(WINDOWS_READ_CALL_STATEMENT);
-    const isOrdered = answerIndex >= 0 && windowsReadIndex > answerIndex;
-    assertEqual(isOrdered ? statements.slice(answerIndex + 1, windowsReadIndex) : null,
-        ['if (cockpitClient !== this._cockpitClient)', 'return;']);
+    // The try's block ends at the next line that closes a block: the catch's opening, or the finally's without one.
+    const tryEndIndex = statements.findIndex((statement, statementIndex) =>
+        statementIndex > answerIndex && statement.startsWith(BLOCK_CLOSING_PREFIX));
+    const isOrdered = answerIndex >= 0 && tryEndIndex > answerIndex;
+    assertEqual(isOrdered ? statements.slice(answerIndex + 1, tryEndIndex) : null,
+        ['if (cockpitClient !== this._cockpitClient)', 'return;', WINDOWS_READ_CALL_STATEMENT]);
 });
 
 test('extension.js: the answer goes through lib/cockpitInteraction.js as it is: the windows read first, then ' +
@@ -1624,21 +1625,14 @@ test('extension.js: the answer goes through lib/cockpitInteraction.js as it is: 
 
 test('extension.js: the outcome is acted on as given: the picked window brought forward by Main.activateWindow ' +
     '(it switches to the window\'s workspace, unminimizes and raises it, ending show-desktop), else the outcome\'s ' +
-    'line logged as a warning under one template key, whatever its reason', () =>
-    assertEqual({
-        act: extensionMethodStatements(ACTIVATE_WINDOW_DECLARATION).slice(3),
-        outcomeLogKey: occurrenceCount(codeOf(EXTENSION_SOURCE_FILE),
-            "const SESSION_FOCUS_OUTCOME_LOG_KEY = 'a session focus brought no window forward';"),
-    }, {
-        act: [
-            'if (focusOutcome.activateWindow)', 'Main.activateWindow(metaWindows[pickedStackIndex]);', 'else',
-            'this._clientLog.log(focusOutcome.logLine, SESSION_FOCUS_OUTCOME_LOG_KEY);',
-        ],
-        outcomeLogKey: 1,
-    }));
+    'line logged as a warning under the template key the outcome gave, one per reason (ruling D32)', () =>
+    assertEqual(extensionMethodStatements(ACTIVATE_WINDOW_DECLARATION).slice(3), [
+        'if (focusOutcome.activateWindow)', 'Main.activateWindow(metaWindows[pickedStackIndex]);', 'else',
+        'this._clientLog.log(focusOutcome.logLine, focusOutcome.logTemplateKey);',
+    ]));
 
-test('lib/constants.js: the outcome\'s one template key gives at most one line a minute (Review Focus 3): ' +
-    'ERROR_LOG_REPEAT_INTERVAL_USEC is at least a minute', () =>
+test('lib/constants.js: each of the outcome\'s template keys gives at most one line a minute (Review Focus 3, per ' +
+    'reason): ERROR_LOG_REPEAT_INTERVAL_USEC is at least a minute', () =>
     assertEqual(ERROR_LOG_REPEAT_INTERVAL_USEC >= MICROSECONDS_PER_MINUTE, true));
 
 test('extension.js: the windows are read as pickWindowToActivate takes them: the display\'s normal and dialog ' +
@@ -1667,8 +1661,12 @@ test('extension.js: the windows are read as pickWindowToActivate takes them: the
         windowTypes: 1,
     }));
 
+// The one .activate( this row allows in cockpitCards.js is openResourcesApp's: visibility.test.js's "Open Resources"
+// row pins resourcesApp.activate() in openResourcesApp's body (launchActivates), and this row allows no second one.
 test('extension.js: Main.activateWindow is the shell side\'s one call that brings a window forward: exactly one, ' +
-    'in extension.js, and no file outside service/ otherwise activates, focuses, raises or unminimizes one', () => {
+    'in extension.js, and no file outside service/ otherwise activates (Meta.Window.activate included), focuses, ' +
+    'raises or unminimizes one; the one other activation is cockpitCards.js openResourcesApp\'s ' +
+    'resourcesApp.activate(), which launches or raises the Resources app', () => {
     const activationCallsByFile = {};
     for (const fileName of shellSideFileNames()) {
         const code = codeOf(fileName);
@@ -1678,7 +1676,7 @@ test('extension.js: Main.activateWindow is the shell side\'s one call that bring
         if (callCounts.length > 0)
             activationCallsByFile[fileName] = Object.fromEntries(callCounts);
     }
-    assertEqual(activationCallsByFile, {'extension.js': {'activateWindow(': 1}});
+    assertEqual(activationCallsByFile, {'cockpitCards.js': {'.activate(': 1}, 'extension.js': {'activateWindow(': 1}});
 });
 
 test('extension.js: a click asks the cockpit service for FocusSession and nothing else: the activation uses no ' +
