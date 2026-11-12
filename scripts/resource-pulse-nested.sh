@@ -87,8 +87,11 @@
 #   scripts/resource-pulse-nested.sh start [--gc-log] [--replay]
 #       start a nested shell with the checkout's Resource Pulse enabled, and its
 #       sampler and cockpit services on the same private bus; print that bus's
-#       address on stdout and the run directory on stderr. Each option at most
-#       once, in either order, recorded in state/run.values (gc-log=1, replay=1):
+#       address on stdout and the run directory on stderr. start installs no
+#       trap: stopped while it waits for the shell, it leaves running a run that
+#       was never confirmed or announced, and stop still finds it. Each option
+#       at most once, in either order, recorded in state/run.values (gc-log=1,
+#       replay=1):
 #         --gc-log  SpiderMonkey logs every collection to log/shell.log
 #         --replay  the replay service publishes fixed, synthetic input in place of
 #                   the sampler's (busy until a scenario is asked for)
@@ -134,11 +137,14 @@
 #       puts the run back: its window and its background measurement ended, the
 #       extension enabled and the top bar shown again. A TERM or an interrupt is
 #       taken once perf's current wait ends (up to a minute); perf then says on
-#       stderr that it is putting the run back, and ignores every signal but KILL
-#       until it has: seconds while the nested shell answers, up to about two
-#       minutes more when it does not (two requests of up to a minute each), so up
-#       to about three from the stop. A KILL ends it sooner and leaves the run
-#       changed
+#       stderr that it is putting the run back, and ignores TERM and INT until it
+#       has (a HUP or a QUIT still ends it, so start it under `nohup`): seconds
+#       while the nested shell answers, up to about two minutes more when it does
+#       not (two requests of up to a minute each), so up to about three from the
+#       stop. A KILL ends it sooner and leaves the run changed. Send its output
+#       to a file. With stderr on a pipe whose reader has gone (`| tee`, then
+#       Ctrl-C) the stop line raises SIGPIPE: the status is 141, and a note
+#       printed during the put-back ends it
 #   scripts/resource-pulse-nested.sh window <title>
 #       open a small Gtk 4 window titled <title> (a plain name) in a live run whose
 #       cockpit serves the run's fixture, as a client of the nested shell only (see
@@ -172,12 +178,15 @@
 #       perf pass, else once its current request ends (up to a minute); the check
 #       then says on stderr what it is putting back (during its perf pass: that it
 #       is waiting for perf to put the run back, which perf does once its own
-#       current wait ends), and ignores every signal but KILL until it has: about a
-#       minute while the nested shell answers, up to about four minutes when it
-#       does not (perf's wait and two requests, then the check's own request to
-#       close the dropdown, each up to a minute). A second TERM or interrupt, to the
-#       check or to perf, cuts neither put-back short; a KILL ends it sooner and
-#       leaves the run changed.
+#       current wait ends), and ignores TERM and INT until it has (a HUP or a QUIT
+#       still ends it, so start it under `nohup`): about a minute while the
+#       nested shell answers, up to about four minutes when it does not (perf's
+#       wait and two requests, then the check's own request to close the
+#       dropdown, each up to a minute). A second TERM or interrupt, to the check
+#       or to perf, cuts neither put-back short; a KILL ends it sooner and leaves
+#       the run changed. Send its output to a file. With stderr on a pipe whose
+#       reader has gone (`| tee`, then Ctrl-C) the stop line raises SIGPIPE: the
+#       status is 141, and a note printed during the put-back ends it.
 #       Exit 1 when a step is bad, else 2 when one could not be judged
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services, the windows `window` opened and
@@ -438,6 +447,10 @@ readonly WINDOW_FOCUS_REPLY_JQ='.focusReply = {focused: true, windowPid: null, e
 # pointer: a coordinate in stage pixels (written as JSON writes a number: no leading zero), and the word for a click.
 readonly POINTER_COORDINATE_PATTERN='^(0|[1-9][0-9]*)([.][0-9]+)?$'
 readonly POINTER_CLICK_WORD='click'
+# Where check cockpit rests the pointer before its screenshot, in stage pixels: the canary's point, off the grid (left
+# of it on the nested monitor at either scale), so that no hover or tooltip an earlier step left is in the picture.
+readonly POINTER_REST_X_PX=20
+readonly POINTER_REST_Y_PX=600
 readonly CHECK_COCKPIT_WORD='cockpit'
 # The verdicts the in-shell answers carry.
 readonly CHECK_OK_VERDICT='ok'
@@ -2567,7 +2580,8 @@ end_perf_run() {
 note_perf_stopping() {
     note "perf is stopping: putting the run back first (its window and measurement ended, the extension enabled," \
         "the top bar shown): seconds while the nested shell answers, up to about two minutes when it does not;" \
-        "until then it ignores every signal but KILL, which would leave the run changed"
+        "until then it ignores TERM and INT (a HUP or a QUIT still ends it, so start it under nohup), and a KILL" \
+        "would leave the run changed"
 }
 
 #######################################
@@ -4083,7 +4097,8 @@ check_cockpit_dropdown_steps() {
 
 #######################################
 # Steps 9 and 10: the lock path (disable, then enable again), then, with the
-# check's windows closed, a screenshot of the stage.
+# check's windows closed and the pointer off the grid, a screenshot of the
+# stage.
 #######################################
 check_cockpit_lock_and_screenshot_steps() {
     local shot_path shot_status
@@ -4096,6 +4111,7 @@ check_cockpit_lock_and_screenshot_steps() {
         end_check_step screenshot ''
         return 0
     fi
+    rest_pointer_off_the_grid
     shot_path="$(screenshot_subcommand "$CHECK_SCREENSHOT_NAME_PREFIX$CHECK_PASS_NUMBER$PNG_SUFFIX")"
     shot_status=$?
     case "$shot_status" in
@@ -4104,6 +4120,20 @@ check_cockpit_lock_and_screenshot_steps() {
         *) note_unjudged 'the Screenshot call did not run' ;;
     esac
     end_check_step screenshot "$shot_path"
+}
+
+#######################################
+# Move the nested pointer off the grid, to POINTER_REST_X_PX, POINTER_REST_Y_PX
+# (the canary's point), and wait for it there, so that no hover or tooltip an
+# earlier step left is in the screenshot. A pointer that does not get there is
+# said on stderr; it judges nothing (with no virtual pointer at all, no hover
+# was ever shown).
+#######################################
+rest_pointer_off_the_grid() {
+    local rest_point_text="($POINTER_REST_X_PX, $POINTER_REST_Y_PX)"
+    drive_nested_pointer "$POINTER_REST_X_PX" "$POINTER_REST_Y_PX" 0
+    [[ "$CHECK_VERDICT" == "$CHECK_OK_VERDICT" ]] && return 0
+    note "the pointer did not reach $rest_point_text before the screenshot, so a tooltip may be in it: $CHECK_DETAIL"
 }
 
 #######################################
@@ -4173,13 +4203,16 @@ run_perf_for_check_cockpit() {
 }
 
 #######################################
-# End check cockpit's perf pass, if it runs: a TERM, on which perf puts the run
-# back (its window ended, the extension enabled, the top bar shown) once its
-# current wait ends, then wait for it.
+# End check cockpit's perf pass, if it runs: a TERM, only while it is still the
+# check's own child (is_own_child_process, as end_perf_window and
+# end_perf_cost_job do), on which perf puts the run back (its window ended,
+# the extension enabled, the top bar shown) once its current wait ends, then
+# wait for it.
 #######################################
 end_check_perf() {
     [[ -n "$CHECK_PERF_PID" ]] || return 0
-    kill -TERM "$CHECK_PERF_PID" 2>/dev/null
+    # Only while it is still the check's own child: once the check's wait has reaped perf, the pid may be another's.
+    is_own_child_process "$CHECK_PERF_PID" && kill -TERM "$CHECK_PERF_PID" 2>/dev/null
     wait "$CHECK_PERF_PID" 2>/dev/null
     CHECK_PERF_PID=""
 }
@@ -4227,12 +4260,14 @@ note_check_cockpit_stopping() {
     if [[ -n "$CHECK_PERF_PID" ]]; then
         note "check cockpit is stopping: waiting for perf to put the run back, then ending its windows, putting" \
             "the fixture back and closing the dropdown: about a minute while the nested shell answers, up to about" \
-            "four when it does not; until then it ignores every signal but KILL, which would leave the run changed"
+            "four when it does not; until then it ignores TERM and INT (a HUP or a QUIT still ends it, so start it" \
+            "under nohup), and a KILL would leave the run changed"
         return 0
     fi
     note "check cockpit is stopping: ending its windows, putting the fixture back and closing the dropdown first:" \
         "seconds while the nested shell answers, up to about a minute when it does not; until then it ignores" \
-        "every signal but KILL, which would leave the run changed"
+        "TERM and INT (a HUP or a QUIT still ends it, so start it under nohup), and a KILL would leave the run" \
+        "changed"
 }
 
 #######################################

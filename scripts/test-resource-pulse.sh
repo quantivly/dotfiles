@@ -5784,9 +5784,13 @@ install_stub "$CHECK_STUB_BIN" gjs "$(check_window_stand_in_source "$CHECK_WINDO
 # own ending never reached, a KILL included) is gone within it. Its windows are the window stand-in's with that lifetime
 # (CHECK_SESSION_BIN first on the session's PATH). The session's bound is a watchdog in its process group, detached
 # from the check's shell (so no wait of the check waits for it) and deaf to the signals the rows send, which KILLs the
-# whole group once the lifetime is up; while it runs the group cannot be gone, so the row's KILL of the group at its end
-# never reaches another's.
+# whole group once the lifetime is up; while it runs the group cannot be gone. Once the row's wait has reaped the
+# session's leader, only the watchdog holds the group's id, so the row's KILL of the group at its end goes out only
+# while the watchdog can still be running (kill_check_session_group): within the lifetime less
+# CHECK_SESSION_KILL_MARGIN_SECONDS of uptime since the session started. Uptime counts suspended time and the
+# watchdog's sleep does not, so the guard can only stop early, never late; what it skips the watchdog ends.
 CHECK_SESSION_LIFETIME_SECONDS=60
+CHECK_SESSION_KILL_MARGIN_SECONDS=2
 CHECK_SESSION_BIN="$WIRING_TMP/check-session-bin"
 CHECK_SESSION_WINDOW_RECORDS="$WIRING_TMP/check-session-window"
 install_stub "$CHECK_SESSION_BIN" gjs "$(check_window_stand_in_source "$CHECK_SESSION_WINDOW_RECORDS.launches" \
@@ -5797,12 +5801,33 @@ CHECK_SESSION_WINDOW_SCRIPT_PATH="$(readlink -f -- "$CHECK_SESSION_BIN/gjs")" ||
 CHECK_SESSION_WATCHDOG='( ( trap "" TERM INT HUP; command sleep "$CHECK_SESSION_LIFETIME_SECONDS"; kill -KILL 0 ) & )'
 # Assignments start_check_session adds to the session's environment, for one row.
 CHECK_SESSION_EXTRA_ENV=()
+# whole_uptime_seconds prints the whole seconds of /proc/uptime (time since boot, suspended time included).
+whole_uptime_seconds() {
+  local uptime_text
+  read -r uptime_text _ 2>/dev/null </proc/uptime || return 1
+  [[ "${uptime_text%%.*}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${uptime_text%%.*}"
+}
+# kill_check_session_group <process group id> <uptime the session started at> sends KILL to a check session's process
+# group only while fewer than CHECK_SESSION_LIFETIME_SECONDS less CHECK_SESSION_KILL_MARGIN_SECONDS seconds of uptime
+# have passed since it started: after that its watchdog may have fired, and the group's id may be another's. An uptime
+# it cannot read, or a start it was not given, sends nothing.
+kill_check_session_group() {
+  local now_uptime
+  [[ "$2" =~ ^[0-9]+$ ]] || return 0
+  now_uptime="$(whole_uptime_seconds)" || return 0
+  (( now_uptime - $2 < CHECK_SESSION_LIFETIME_SECONDS - CHECK_SESSION_KILL_MARGIN_SECONDS )) || return 0
+  kill -KILL -- "-$1" 2>/dev/null
+}
 # start_check_session <output file> <bash source> <$0> [args...] runs the source in a new session (setsid) with the
 # stubbed check's environment, CHECK_SESSION_EXTRA_ENV and the watchdog first, its output to the file; sets
-# CHECK_SESSION_PID: its bash, the session's leader, whose pid is the session's and its process group's id.
+# CHECK_SESSION_PID: its bash, the session's leader, whose pid is the session's and its process group's id; and
+# CHECK_SESSION_STARTED_UPTIME: the uptime just before it started (empty when unreadable), for
+# kill_check_session_group.
 start_check_session() {
   local output_path="$1" session_source="$2"
   shift 2
+  CHECK_SESSION_STARTED_UPTIME="$(whole_uptime_seconds)" || CHECK_SESSION_STARTED_UPTIME=""
   setsid env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_RUN" \
     PATH="$CHECK_SESSION_BIN:$CHECK_STUB_BIN:$PATH" CHECK_STUB_ANSWERS="$CHECK_ANSWERS" CHECK_STUB_CALLS="$CHECK_CALLS" \
     CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" CHECK_SESSION_LIFETIME_SECONDS="$CHECK_SESSION_LIFETIME_SECONDS" \
@@ -5810,6 +5835,31 @@ start_check_session() {
     </dev/null >"$output_path" 2>&1 &
   CHECK_SESSION_PID=$!
 }
+# kill_check_session_group's guard: a stand-in session of this row's own (a sacrificial sleep leading a session and a
+# process group of its own, never a real group) told it started now gets the KILL; told it started inside the margin
+# before the session lifetime, or the whole lifetime ago, it gets nothing.
+GUARDED_KILL_FATE_WAIT_TENTHS=10
+# guarded_kill_fate <seconds since the session started, as told> prints ended, or running (then ends it by identity).
+guarded_kill_fate() {
+  local stand_in_pid stand_in_starttime now_uptime fate_tenth stand_in_fate=running
+  stand_in_pid="$(start_sacrificial_session sleep "$CHECK_SESSION_LIFETIME_SECONDS")"
+  [[ "$stand_in_pid" =~ ^[0-9]+$ ]] || { printf no-stand-in; return 0; }
+  stand_in_starttime="$(starttime_of "$stand_in_pid")"
+  if now_uptime="$(whole_uptime_seconds)"; then
+    kill_check_session_group "$stand_in_pid" "$(( now_uptime - $1 ))"
+  fi
+  for (( fate_tenth = 0; fate_tenth < GUARDED_KILL_FATE_WAIT_TENTHS; fate_tenth++ )); do
+    is_running "$stand_in_pid" || { stand_in_fate=ended; break; }
+    sleep 0.1
+  done
+  [[ "$stand_in_fate" == running ]] && kill_sacrifice "$stand_in_pid" sleep "$stand_in_starttime"
+  printf '%s' "$stand_in_fate"
+}
+guarded_kill_summary="started-now=$(guarded_kill_fate 0)"
+guarded_kill_summary+=" inside-the-margin=$(guarded_kill_fate $(( CHECK_SESSION_LIFETIME_SECONDS - 1 )))"
+guarded_kill_summary+=" lifetime-passed=$(guarded_kill_fate "$CHECK_SESSION_LIFETIME_SECONDS")"
+check "a check session's process group is sent its KILL after the row's wait only within the session's lifetime less a margin (its watchdog may since have freed the group's id): a stand-in session of the row's own told it started now is ended, told it started inside the margin or a lifetime ago is left alone" \
+  "$guarded_kill_summary" "started-now=ended inside-the-margin=running lifetime-passed=running"
 # A row's own stand-ins end by their own lifetimes even when none of their row's endings reaches them: one of each kind
 # is abandoned (a check session, a window its check opens, and below, the exit row's fake shell), ended by nothing but
 # its lifetime, and the row at the table's end, once each lifetime has passed, finds each gone (the table's exit still
@@ -6280,6 +6330,15 @@ healthy_check_summary+=" clicks=$(check_stub_call_count '^resourcePulseNestedPoi
 check "nested: check cockpit, every request answered ok, prints one ok line per step in the notes' order and exits 0, ending its windows and putting the run's fixture back" \
   "$healthy_check_summary" \
   "exit=0 steps=[$CHECK_STEP_NAMES ] ok=30 summary=1 windows-opened=2 windows-left=0 fixture=restored perf=1 lock-path=1 clicks=7"
+# Before its screenshot the check moves the pointer off the grid, to the canary's point (20, 600 in stage pixels: left
+# of the grid on the nested monitor at either scale), and waits for it there, so that no hover or tooltip an earlier
+# step left is in the picture: the two requests right before the Screenshot call are that move and its arrival.
+screenshot_pointer_summary="before-screenshot=[$(grep -B 2 -x -F 'Screenshot cockpit-1.png' "$CHECK_CALLS" | head -n 2 \
+  | tr '\n' ' ')]"
+screenshot_pointer_summary+=" last-move=$(grep -F 'resourcePulseNestedPointer move ' "$CHECK_CALL_OPTIONS" | tail -n 1)"
+check "nested: check cockpit moves the pointer off the grid, to the canary's point, and waits for it there before its screenshot, so that no hover an earlier step left is in the picture" \
+  "$screenshot_pointer_summary" \
+  'before-screenshot=[resourcePulseNestedPointer move resourcePulseNestedPointer at ] last-move=resourcePulseNestedPointer move {"x":20,"y":600,"clickCount":0}'
 
 BAD_GRID_DETAIL='the apps card is at 600x500+685+80, not its cell 600x500+680+80'
 UNJUDGED_STALE_DETAIL="cannot read the card's no-data line (_noDataLabel)"
@@ -6611,6 +6670,40 @@ check "nested: check cockpit makes the step that ran on a fixture it could not p
   "$restore_failed_summary" \
   "exit=2 stale:unjudged stale-recovers:unjudged dropdown-click:unjudged named=3 summary=1"
 
+# end_check_perf signals CHECK_PERF_PID only while it is the check's own child
+# (is_own_child_process, as end_perf_window and end_perf_cost_job do): between
+# the check's wait reaping perf and the variable's clearing, the pid can be
+# another's. Its own child (a sleep the check's shell started) is ended and
+# waited for; a pid that is no child of it (a sacrificial sleep of this row,
+# leading a session of its own) is left running. The variable is cleared in
+# both.
+check_perf_sacrifice_pid="$(start_sacrificial_session sleep 60)"
+check_perf_sacrifice_starttime="$(starttime_of "$check_perf_sacrifice_pid")"
+# shellcheck disable=SC2016  # Expanded by the child bash.
+end_check_perf_summary="$(bash -c '
+  source "$1" || exit 99
+  command sleep 60 &
+  own_child_pid=$!
+  CHECK_PERF_PID=$own_child_pid
+  end_check_perf
+  own_fate=running
+  [[ -e "/proc/$own_child_pid" ]] || own_fate=ended
+  printf "own-child=%s/%s" "$own_fate" "${CHECK_PERF_PID:-cleared}"
+  CHECK_PERF_PID=$2
+  end_check_perf
+  printf " not-a-child-forgotten=%s" "${CHECK_PERF_PID:-cleared}"
+' end-check-perf "$NESTED_SCRIPT" "$check_perf_sacrifice_pid" 2>/dev/null)"
+# A TERM let through to the sacrifice ends it within a moment (its parent, not this row, reaps it).
+END_CHECK_PERF_FATE_WAIT_TENTHS=20
+for (( check_perf_fate_tenth = 0; check_perf_fate_tenth < END_CHECK_PERF_FATE_WAIT_TENTHS; check_perf_fate_tenth++ )); do
+  is_running "$check_perf_sacrifice_pid" || break
+  sleep 0.1
+done
+end_check_perf_summary+=" not-a-child=$(is_running "$check_perf_sacrifice_pid" && printf running || printf ended)"
+kill_sacrifice "$check_perf_sacrifice_pid" sleep "$check_perf_sacrifice_starttime"
+check "nested: check cockpit's exit signals its perf pass only while it is the check's own child: its own is ended and waited for, a pid that is no child of the check is left alone, and the pid is forgotten in both" \
+  "$end_check_perf_summary" "own-child=ended/cleared not-a-child-forgotten=cleared not-a-child=running"
+
 # A TERM sent to check cockpit while its perf pass runs is taken at once: the
 # check ends that pass (perf puts the run back on its own TERM) and waits for
 # it, rather than for the pass's nine minutes. A stand-in perf marks that it
@@ -6647,6 +6740,7 @@ start_check_session "$CHECK_TERM_OUTPUT" '
     check_cockpit_subcommand
   ' check-term "$NESTED_SCRIPT"
 check_term_pid=$CHECK_SESSION_PID
+check_term_started_uptime=$CHECK_SESSION_STARTED_UPTIME
 for (( check_term_tenth = 0; check_term_tenth < CHECK_TERM_START_LIMIT_TENTHS; check_term_tenth++ )); do
   [[ -e "$CHECK_TERM_PERF_STARTED" ]] && break
   sleep 0.1
@@ -6668,7 +6762,7 @@ fi
 check_term_summary+=" perf-put-back=$(grep -c -x -F 'perf put the run back after its TERM' "$CHECK_CALLS")"
 check_term_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
   && printf restored || printf changed)"
-kill -KILL -- "-$check_term_pid" 2>/dev/null
+kill_check_session_group "$check_term_pid" "$check_term_started_uptime"
 nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
 check "nested: a TERM to check cockpit during its perf pass is taken at once: perf is sent TERM and waited for while it puts the run back, the run's fixture put back, exit 143" \
   "$check_term_summary" "perf-ran=yes ended=143 perf-put-back=1 fixture=restored"
@@ -6722,7 +6816,7 @@ PERF_STOPPING_NEEDLE='perf is stopping: putting the run back first'
 # fixture=<restored or changed> windows-launched=<by the session's window stand-in, bounded as the session is>/<by the
 # table's> said=<the check's stop lines>/<perf's>. Whatever is left of the row's session then ends with it.
 check_put_back_run() {
-  local term_plan="$1" check_pid put_back_tenth put_back_summary perf_term_delay_seconds=""
+  local term_plan="$1" check_pid check_started_uptime put_back_tenth put_back_summary perf_term_delay_seconds=""
   [[ "$term_plan" == group ]] && perf_term_delay_seconds="$CHECK_TERM_TO_PERF_DELAY_SECONDS"
   make_check_run yes gc-log=1 replay=1
   : >"$CHECK_CALLS"
@@ -6743,6 +6837,7 @@ check_put_back_run() {
       check_cockpit_subcommand
     ' check-put-back "$NESTED_SCRIPT"
   check_pid=$CHECK_SESSION_PID
+  check_started_uptime=$CHECK_SESSION_STARTED_UPTIME
   for (( put_back_tenth = 0; put_back_tenth < CHECK_TERM_START_LIMIT_TENTHS; put_back_tenth++ )); do
     [[ -e "$CHECK_PUT_BACK_PERF_STARTED" ]] && break
     sleep 0.1
@@ -6773,7 +6868,7 @@ check_put_back_run() {
   put_back_summary+="/$(wc -l <"$CHECK_WINDOW_LAUNCHES")"
   put_back_summary+=" said=$(grep -c -F "$CHECK_STOPPING_FOR_PERF_NEEDLE" "$CHECK_PUT_BACK_OUTPUT")"
   put_back_summary+="/$(grep -c -F "$PERF_STOPPING_NEEDLE" "$CHECK_PUT_BACK_OUTPUT")"
-  kill -KILL -- "-$check_pid" 2>/dev/null
+  kill_check_session_group "$check_pid" "$check_started_uptime"
   nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
   printf '%s' "$put_back_summary"
 }
@@ -6898,7 +6993,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1185
+EXPECTED_ROWS=1188
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

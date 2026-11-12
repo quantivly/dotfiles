@@ -559,7 +559,7 @@ scripts/resource-pulse-nested.sh start --gc-log --replay   # or: collections log
 scripts/resource-pulse-nested.sh eval 'Main.extensionManager.lookup("resource-pulse@dotfiles").state'
 scripts/resource-pulse-nested.sh screenshot card.png 2600 40 470 200   # x y width height, optional
 scripts/resource-pulse-nested.sh scenario idle   # with --replay: idle, light or busy (busy until asked)
-scripts/resource-pulse-nested.sh check cockpit >check.txt 2>&1   # with --gc-log --replay and no window yet
+nohup scripts/resource-pulse-nested.sh check cockpit >check.txt 2>&1   # with --gc-log --replay and no window yet
 scripts/resource-pulse-nested.sh window herdr-probe   # a small window, the cockpit's one window candidate
 scripts/resource-pulse-nested.sh pointer 1200 400 click   # the nested pointer to x y (stage pixels), and a click
 scripts/resource-pulse-nested.sh stop         # logs and screenshots stay in the run directory
@@ -613,9 +613,10 @@ rows are in the suite below.
 
 **Stopping a `check cockpit` or a `perf`.** A stopped one first puts the run back: its windows closed, the
 extension enabled, the top bar shown, the fixture restored. That takes about a minute, and up to a few
-minutes when the nested shell does not answer; it says so on stderr. Leave it to finish: a `KILL` leaves
-the run changed. Send either one's output to a file, as above, never through a pipe such as `| tee`: a
-pipe whose reader has gone can cut the put-back short.
+minutes when the nested shell does not answer; it says so on stderr. Leave it to finish: it ignores
+`TERM` and `INT` until then, but a `HUP` or a `QUIT` (a closed terminal) still ends it, and a `KILL`
+leaves the run changed. So start either one under `nohup`, with its output sent to a file, as above,
+never through a pipe such as `| tee`: a pipe whose reader has gone can cut the put-back short.
 
 ### What it costs
 
@@ -737,7 +738,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1185 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1188 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's

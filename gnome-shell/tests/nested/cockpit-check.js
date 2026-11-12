@@ -68,7 +68,8 @@
 //                                       card, its bars wider than zero, drawn through its own texture in its item
 //   dropdown-closed                     closed: the menu closed, the sessions card frozen, its tooltip not shown
 //   lock-path {timeoutMs}               disables the extension: nothing of it left in the shell; enables it: new
-//                                       parts, and the grid back at once, from the kept layout
+//                                       parts, and the grid back at once, from the kept layout (an enable() that
+//                                       throws: bad at once, naming the extension's error)
 //   monotonic-time                      the shell's monotonic clock in µs (GLib.get_monotonic_time, the clock the
 //                                       extension's log limiter keeps time by), as monotonicUsec
 
@@ -894,7 +895,8 @@ function resourcePulseCockpitCheck(request, options = {}) {
         const sinceChangeMs = Math.round((drawnUsec - watch.changeUsec) / USEC_PER_MS);
         let beforeNextSample = '';
         if (nextSampleUsec !== null) {
-            const beforeNextSampleMs = Math.round((nextSampleUsec - drawnUsec) / USEC_PER_MS);
+            // Rounded up: a gap a fraction over SAMPLE_OWN_DRAW_MAX_GAP_MS never prints as the bound it exceeds.
+            const beforeNextSampleMs = Math.ceil((nextSampleUsec - drawnUsec) / USEC_PER_MS);
             beforeNextSample = `, ${beforeNextSampleMs} ms before the next Sample (more than ` +
                 `${SAMPLE_OWN_DRAW_MAX_GAP_MS} ms, so not that Sample's draw)`;
         }
@@ -1137,7 +1139,8 @@ function resourcePulseCockpitCheck(request, options = {}) {
     /**
      * The lock path: disables the extension, then judges that nothing of it is left in the shell; enables it, and
      * judges at the moment it becomes ACTIVE (inside the state-changed signal, before any D-Bus answer can be read)
-     * that the grid is already back, from the layout kept at disable(), and that its parts are new objects.
+     * that the grid is already back, from the layout kept at disable(), and that its parts are new objects. An
+     * enable() that throws (the extension ERROR) is bad at once, naming the extension's error.
      *
      * @param {{timeoutMs?: number}} limits - How long each wait may take.
      * @returns {Promise<object>} lock-path's answer.
@@ -1162,17 +1165,25 @@ function resourcePulseCockpitCheck(request, options = {}) {
         if (stateObj._layer !== null)
             faults.push('after disable, the extension still holds a layer');
         let activation = null;
+        // An enable() that throws puts the extension in ERROR (logExtensionError), with its error kept.
+        let enableErrorText = null;
         const stateChangedId = Main.extensionManager.connect('extension-state-changed', (_manager, changed) => {
-            if (changed.uuid === EXTENSION_UUID && changed.state === extensionStates.ACTIVE && activation === null)
+            if (changed.uuid !== EXTENSION_UUID || activation !== null || enableErrorText !== null)
+                return;
+            if (changed.state === extensionStates.ACTIVE)
                 activation = {layer: stateObj._layer, drawnCardIds: stateObj._layer?.drawnCardIds ?? null};
+            else if (changed.state === extensionStates.ERROR)
+                enableErrorText = String(changed.error ?? '');
         });
         try {
             Main.extensionManager.enableExtension(EXTENSION_UUID);
-            if (!await waitUntil(() => activation !== null, timeoutMs))
+            if (!await waitUntil(() => activation !== null || enableErrorText !== null, timeoutMs))
                 throw new CouldNotJudgeError(`the extension did not become ACTIVE within ${timeoutMs} ms`);
         } finally {
             Main.extensionManager.disconnect(stateChangedId);
         }
+        if (enableErrorText !== null)
+            return badAnswer([...faults, `enable() failed: the extension is ERROR: ${enableErrorText}`]);
         if (activation.layer === null)
             faults.push('the grid is not back at once: no layer when the extension became ACTIVE');
         else if (JSON.stringify([...activation.drawnCardIds].sort()) !== JSON.stringify(oldDrawnCardIds))

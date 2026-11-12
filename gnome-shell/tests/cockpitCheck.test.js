@@ -66,6 +66,8 @@ const FALLBACK_EARLIEST_MARGIN_MS = 500;
 const SAMPLE_OWN_DRAW_MAX_GAP_MS = 250;
 /** The fake pacing's fallback id while one is armed (GLib's are positive). */
 const ARMED_FALLBACK_SOURCE_ID = 7;
+/** The error the fake shell keeps for an extension whose enable() threw (GNOME 50.1's extension.error). */
+const ENABLE_THROWS_ERROR_TEXT = 'TypeError: this._layout is undefined';
 
 /**
  * A file of nested/, read when a row runs.
@@ -473,7 +475,7 @@ function makeHealthyShell() {
     display.stackOrder.push(decoyWindow, probeWindow);
     display.focus_window = probeWindow;
     const lifecycle = {leaveActorBehind: false, leaveHoverLabelBehind: false, leaveCaptionBehind: false,
-        buildLayerAfterActivation: false, reuseOldCard: false, neverDeactivates: false};
+        buildLayerAfterActivation: false, reuseOldCard: false, neverDeactivates: false, enableThrows: false};
     const extensionManager = {
         lookup: uuid => (uuid === EXTENSION_UUID ? extension : undefined),
         connect: (_signalName, handler) => managerListeners.add(changed => handler(extensionManager, changed)),
@@ -491,6 +493,14 @@ function makeHealthyShell() {
             return true;
         },
         enableExtension() {
+            // GNOME 50.1's _callExtensionEnable: an enable() that throws goes through logExtensionError, which sets
+            // the extension's error and state ERROR, then emits extension-state-changed.
+            if (lifecycle.enableThrows) {
+                extension.error = ENABLE_THROWS_ERROR_TEXT;
+                extension.state = EXTENSION_STATE.ERROR;
+                managerListeners.tell(extension);
+                return true;
+            }
             const oldCard = shell.oldCard;
             const newParts = buildExtensionParts(shell);
             if (lifecycle.reuseOldCard)
@@ -1215,12 +1225,14 @@ test('cockpit check: draw-watch takes a name drawn with no Sample since the chan
 test('cockpit check: draw-watch takes a name drawn more than SAMPLE_OWN_DRAW_MAX_GAP_MS before the Sample counted ' +
     'after it (by a later, an idle, any route but that Sample) as drawn with no Sample since: bad sooner than the ' +
     'pacing\'s fallback can fire, naming the milliseconds after the change and before that Sample, could-not-judge ' +
-    'at the fallback\'s time, never ok; drawn within the gap is that Sample\'s draw, ok; a second read gives the ' +
-    'same answer', () => {
+    'at the fallback\'s time, never ok; drawn within the gap is that Sample\'s draw, ok; a gap a fraction of a ' +
+    'millisecond over the bound prints rounded up; a second read gives the same answer', () => {
     const newName = 'alpha-sync-2';
     const earliestFallbackMs = COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS * MS_PER_SECOND - FALLBACK_EARLIEST_MARGIN_MS;
     const fallbackIntervalMs = COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS * MS_PER_SECOND;
     const strayDrawAtMs = 100;
+    // 250.2 ms between the draw and the Sample: over the bound by less than a millisecond.
+    const fractionOverTheGapMs = 0.2;
     /**
      * Arms a layer watch on a fresh shell, counts one Sample, lets the sessions' change come at 0 ms, draws the name at
      * drawnAtMs, counts the next Sample at sampleAtMs (the watch's listener runs after the extension's, so a Sample's
@@ -1260,6 +1272,8 @@ test('cockpit check: draw-watch takes a name drawn more than SAMPLE_OWN_DRAW_MAX
             sampleAtMs: strayDrawAtMs + SAMPLE_OWN_DRAW_MAX_GAP_MS}),
         justOverTheGap: drawnThenSampledAt({drawnAtMs: strayDrawAtMs,
             sampleAtMs: strayDrawAtMs + SAMPLE_OWN_DRAW_MAX_GAP_MS + 1}),
+        aFractionOverTheGap: drawnThenSampledAt({drawnAtMs: strayDrawAtMs,
+            sampleAtMs: strayDrawAtMs + SAMPLE_OWN_DRAW_MAX_GAP_MS + fractionOverTheGapMs}),
         atTheFallbacksTimeThenASample: drawnThenSampledAt({drawnAtMs: fallbackIntervalMs,
             sampleAtMs: fallbackIntervalMs + 500}),
     }, {
@@ -1268,6 +1282,8 @@ test('cockpit check: draw-watch takes a name drawn more than SAMPLE_OWN_DRAW_MAX
         justUnderTheGap: twice(OK),
         atTheGap: twice(OK),
         justOverTheGap: twice(drawnBeforeTheSample(strayDrawAtMs, SAMPLE_OWN_DRAW_MAX_GAP_MS + 1)),
+        // Rounded up: a gap a fraction over the bound never prints as the bound itself ("250 ms ... more than 250").
+        aFractionOverTheGap: twice(drawnBeforeTheSample(strayDrawAtMs, SAMPLE_OWN_DRAW_MAX_GAP_MS + 1)),
         atTheFallbacksTimeThenASample: twice(fallbackDrewIt),
     });
 });
@@ -1411,7 +1427,8 @@ test('cockpit check: dropdown-open given names judges the rows at once, in the r
 
 test('cockpit check: lock-path is ok when disable leaves nothing and enable brings new parts with the grid back at ' +
     'once; bad for an actor left behind (the layer, the top bar\'s hover label, a caption), no layer at the ' +
-    'activation, or an old part kept; could-not-judge when the extension never becomes INACTIVE', async () => {
+    'activation, an old part kept, or an enable() that throws (the extension ERROR, its error named, at once); ' +
+    'could-not-judge when the extension never becomes INACTIVE', async () => {
     const timeoutOptions = {timeoutMs: SHORT_TIMEOUT_MS};
     assertEqual(await verdictsOfCases('lock-path', {
         healthy: {options: timeoutOptions},
@@ -1433,10 +1450,13 @@ test('cockpit check: lock-path is ok when disable leaves nothing and enable brin
         'never-inactive': {breakShell: shell => {
             shell.lifecycle.neverDeactivates = true;
         }, options: timeoutOptions},
+        'enable-throws': {breakShell: shell => {
+            shell.lifecycle.enableThrows = true;
+        }, options: timeoutOptions, needle: `enable() failed: the extension is ERROR: ${ENABLE_THROWS_ERROR_TEXT}`},
     }), {
         healthy: OK, 'left-behind': `${BAD}+needle`, 'hover-label-left': `${BAD}+needle`,
         'caption-left': `${BAD}+needle`, 'layer-later': `${BAD}+needle`, 'old-card-kept': `${BAD}+needle`,
-        'never-inactive': COULD_NOT_JUDGE,
+        'never-inactive': COULD_NOT_JUDGE, 'enable-throws': `${BAD}+needle`,
     });
 });
 
