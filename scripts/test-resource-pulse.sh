@@ -5832,13 +5832,20 @@ rm -f "$silent_log_answers"/click-*.log
 check_cockpit_stubbed "$silent_log_answers"
 faulted_check_summary+=" silent-log=$CHECK_STUB_EXIT/$(grep -c -E '^bad click-(no-window|not-focused): ' <<<"$CHECK_STUB_OUTPUT")"
 faulted_check_summary+="/$(grep -c '^could not judge log: ' <<<"$CHECK_STUB_OUTPUT")"
+# One step with a bad part and a part that could not be judged (the count armed unjudged, read bad): the step is bad.
+mixed_step_answers="$(answers_with mixed-step resourcePulseCockpitCheck.focus-calls-arm \
+  '{"verdict":"could-not-judge","detail":"the cockpit client has no focusSession"}' \
+  resourcePulseCockpitCheck.focus-calls-read '{"verdict":"bad","detail":"2 FocusSession calls, not 1"}')"
+check_cockpit_stubbed "$mixed_step_answers"
+faulted_check_summary+=" mixed-step=$CHECK_STUB_EXIT/$(grep -c -x -F 'bad click-twice: 2 FocusSession calls, not 1' \
+  <<<"$CHECK_STUB_OUTPUT")"
 mutter_log_answers="$(answers_with mutter-log click-1.log \
   'Window manager warning: Buggy client sent a _NET_ACTIVE_WINDOW message with a timestamp of 0 for 0x1')"
 check_cockpit_stubbed "$mutter_log_answers"
 faulted_check_summary+=" mutter-warning=$CHECK_STUB_EXIT/$(grep -c -E '^bad (click-log|log): ' <<<"$CHECK_STUB_OUTPUT")"
-check "nested: check cockpit runs every step whatever one answers: a bad step is exit 1 naming it, one that could not be judged exit 2, both exit 1; a log without the provoked focus lines fails the clicks and cannot judge the log, and a Mutter warning after a click is bad" \
+check "nested: check cockpit runs every step whatever one answers: a bad step is exit 1 naming it, one that could not be judged exit 2, both exit 1, a step with a bad part bad whatever else in it could not be judged; a log without the provoked focus lines fails the clicks and cannot judge the log, and a Mutter warning after a click is bad" \
   "$faulted_check_summary" \
-  "bad-grid=1/1/1 unjudged-stale=2/1/1 both=1/1 silent-log=1/2/1 mutter-warning=1/2"
+  "bad-grid=1/1/1 unjudged-stale=2/1/1 both=1/1 silent-log=1/2/1 mixed-step=1/1 mutter-warning=1/2"
 nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
 kill "$check_fake_shell_pid" 2>/dev/null
 wait "$check_fake_shell_pid" 2>/dev/null
