@@ -1,7 +1,7 @@
 // Journal lines for failures, shared by the services and the extension: each message at most once per
 // ERROR_LOG_REPEAT_INTERVAL_USEC for its template key (its own text unless a caller names one), with the journal
 // prefix (LOG_PREFIX unless a caller names another). Pure: the clock and the writer are injected, so it runs under
-// plain gjs.
+// plain gjs. Also runLoggingFailure, a step run under its own guard whose failure is such a line.
 import {ERROR_LOG_REPEAT_INTERVAL_USEC, LOG_PREFIX} from './constants.js';
 
 /**
@@ -66,4 +66,27 @@ export class RateLimitedLogger {
         this._lastLoggedUsecByTemplateKey.set(templateKey, nowUsec);
         this._write(`${this._prefix} ${message}`);
     }
+}
+
+/**
+ * Runs one step under its own guard, for a caller that runs several in a row (the cockpit layer, one per card): a step
+ * that throws is logged on a rate-limited logger with its error and stack, under its context, which is also the line's
+ * template key, so one step failing again with another error text is still written once per interval; nothing is
+ * thrown, so the steps after it still run.
+ *
+ * @param {object} options - The step and where its failure goes.
+ * @param {function(): void} options.run - The step.
+ * @param {RateLimitedLogger} options.errorLog - The logger.
+ * @param {string} options.context - What failed, without the error: the line's start and its template key.
+ * @returns {boolean} True when the step ran to its end, false when it threw.
+ */
+export function runLoggingFailure({run, errorLog, context}) {
+    try {
+        run();
+    } catch (error) {
+        const errorText = describeErrorWithStack(error);
+        errorLog.log(`${context}: ${errorText}`, context);
+        return false;
+    }
+    return true;
 }

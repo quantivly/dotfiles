@@ -199,6 +199,26 @@ test('cockpitWiring: the grid may be drawn on its monitor\'s work area when it f
     }, {settledAndTooSmall: false, settledAndFits: true, unsettledAndTooSmall: true, noMonitor: true});
 });
 
+test('cockpitWiring: a layout event that carries a config error and no layout (cockpit.json missing or not valid, ' +
+    'a half-typed save too) gives one journal line naming the error, so the card is drawn top right; any other ' +
+    'event gives none', () => {
+    const line = event => wiring.cockpitConfigErrorLine(event);
+    const layoutEvent = (layout, configError) => ({type: LAYOUT_EVENT, layout, configError});
+    assertEqual({
+        malformed: line(layoutEvent(null, 'config: malformed JSON')),
+        missing: line(layoutEvent(null, 'missing')),
+        readable: line(layoutEvent(LAYOUT, null)),
+        neither: line(layoutEvent(null, null)),
+        aLayoutBesideAnError: line(layoutEvent(LAYOUT, 'config: malformed JSON')),
+        sources: line({type: SOURCES_EVENT, names: ['sessions'], cause: READ}),
+        state: line({type: STATE_EVENT, state: LIVE}),
+    }, {
+        malformed: 'could not read the cockpit layout (config: malformed JSON), so the card is drawn top right',
+        missing: 'could not read the cockpit layout (missing), so the card is drawn top right',
+        readable: null, neither: null, aLayoutBesideAnError: null, sources: null, state: null,
+    });
+});
+
 test('cockpitWiring: the v2 card is held hidden (not drawn, kept frozen) only while the layer is shown and draws no ' +
     'system card (ruling D21); in the system cell or top right it is not', () => {
     const isHidden = (isCockpitLayerShown, drawnCardIds) =>

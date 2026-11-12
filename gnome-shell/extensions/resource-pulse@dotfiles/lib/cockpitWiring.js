@@ -14,7 +14,8 @@
 //
 // Nor is the layer drawn on a cockpit monitor whose work area is too small for the cards' content (ruling D36,
 // lib/cockpitGrid.js isCockpitGridDrawable): the v2 card stays top right, as with no layout, until the work area is
-// large enough again, which the extension asks on every placement (a dock brings the grid back).
+// large enough again, which the extension asks on every placement (a dock brings the grid back). A layout the service
+// could not read is one journal line (cockpitConfigErrorLine).
 import {
     COCKPIT_SNAPSHOT_CARD_IDS, COCKPIT_SOURCE_NAMES_BY_CARD_ID, COCKPIT_SYSTEM_CARD_ID, CockpitClientEventType,
     CockpitClientState, CockpitSourcesCause,
@@ -155,6 +156,23 @@ export function isCockpitGridHeldBack({clientState, layout, failedLayout, isGrid
  */
 export function isCockpitGridDrawableNow({workArea, isMonitorChoiceSettled}) {
     return workArea === null || !isMonitorChoiceSettled || isCockpitGridDrawable(workArea);
+}
+
+/**
+ * The journal line for a cockpit client event that says the layout could not be read: a layout event with a config
+ * error and no layout (cockpit.json missing or not valid, a half-typed save too), after which the grid goes and the
+ * v2 card is drawn top right. The error is the service's config parser's, which names the field and passes any value
+ * of the file through the display-name guard (lib/cockpitConfig.js), or 'missing', so it is safe to print.
+ *
+ * @param {object} event - The client's event: {type, names, cause}, {type, state} or {type, layout, configError}.
+ * @returns {string|null} The line, without the logger's prefix; null for any other event.
+ */
+export function cockpitConfigErrorLine(event) {
+    const isUnreadableLayout = event.type === CockpitClientEventType.LAYOUT && event.layout === null &&
+        typeof event.configError === 'string';
+    if (!isUnreadableLayout)
+        return null;
+    return `could not read the cockpit layout (${event.configError}), so the card is drawn top right`;
 }
 
 /**

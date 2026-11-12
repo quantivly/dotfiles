@@ -1094,9 +1094,9 @@ test('cockpitLayer.js: a card revealed is first drawn from what the clients hold
             'this._frozenCardIds.delete(cardId);',
             'if (isRevealed)',
             'this._drawCard(cardId);',
-            'card.setFrozen(isFrozen);',
+            'this._guardCardDraw(() => card.setFrozen(isFrozen));',
         ],
-        repaint: ['this._drawCard(cardId);', 'card.repaintFrozen();'],
+        repaint: ['this._drawCard(cardId);', 'this._guardCardDraw(() => card.repaintFrozen());'],
     });
 });
 
@@ -1120,11 +1120,13 @@ test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snap
             'const card = this._cardsById.get(cardId);',
             'const drawSnapshotCard = SNAPSHOT_CARD_DRAWERS_BY_ID[cardId];',
             'if (drawSnapshotCard)',
-            'drawSnapshotCard(card, this._pulseClient);',
+            'this._guardCardDraw(() => drawSnapshotCard(card, this._pulseClient));',
             'else',
-            'drawCockpitDataCard({cardId, card, cockpitClient: this._cockpitClient});',
+            'this._guardCardDraw(() => drawCockpitDataCard({cardId, card, cockpitClient: this._cockpitClient}));',
         ],
-        onSnapshot: ['this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null);'],
+        onSnapshot: [
+            'this._guardCardDraw(() => this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null));',
+        ],
         snapshotDrawers: [1, 1], ownDataCardDrawing: [],
     });
 });
@@ -1161,6 +1163,24 @@ test('cockpitLayer.js: destroy removes both client listeners and destroys the pa
             "{name: 'destroy the tooltip', run: () => this._tooltip?.destroy()},",
         ],
         listenersAdded: 2, listenersRemoved: [true, true], everyCardDestroyed: 1,
+    });
+});
+
+test('cockpitLayer.js: each card\'s draw runs under its own guard (runLoggingFailure, the layer\'s error log, one ' +
+    'context for every card), so a card that throws holds up neither the other cards nor the cover check that ' +
+    'called the layer (ruling D25, per card)', () => {
+    const source = codeOf(LAYER_SOURCE_FILE);
+    assertEqual({
+        guard: layerMethodStatements('_guardCardDraw('),
+        context: occurrenceCount(source, "const CARD_DRAW_FAILURE_CONTEXT = 'cockpit layer could not draw a card';"),
+        imported: importedNames(readExtensionFile(LAYER_SOURCE_FILE), './lib/errorLog.js'),
+        guardedSteps: occurrenceCount(source, 'this._guardCardDraw(() => '),
+    }, {
+        guard: ['runLoggingFailure({run: drawStep, errorLog: this._errorLog, context: CARD_DRAW_FAILURE_CONTEXT});'],
+        context: 1,
+        imported: ['describeErrorWithStack', 'runLoggingFailure'],
+        // The two draws of _drawCard, the reveal's unfreeze, the frozen repaint and the apps card's snapshot.
+        guardedSteps: 5,
     });
 });
 
@@ -1216,6 +1236,8 @@ test('extension.js: a cockpit client event adds, removes or rebuilds the layer a
     'the layer holds it, and is put back top right, following it again, when the layer goes', () =>
     assertEqual({
         onEvent: extensionMethodStatements('_onCockpitClientEvent(event) {'),
+        configErrorLogKey: occurrenceCount(codeOf(EXTENSION_SOURCE_FILE),
+            "const COCKPIT_CONFIG_ERROR_LOG_KEY = 'could not read the cockpit layout';"),
         sync: extensionMethodStatements('_syncCockpitLayer(isLayoutEvent) {'),
         holdHidden: extensionMethodStatements('_holdHiddenPulseCardFrozen() {'),
         addStopsFollowingTheWidthFirst: extensionMethodStatements('_addCockpitLayer() {')[0],
@@ -1225,7 +1247,13 @@ test('extension.js: a cockpit client event adds, removes or rebuilds the layer a
         remove: extensionMethodStatements('_removeCockpitLayer() {'),
         putTopRight: extensionMethodStatements('_putCardTopRight() {'),
     }, {
-        onEvent: ['this._syncCockpitLayer(event.type === CockpitClientEventType.LAYOUT);'],
+        onEvent: [
+            'const configErrorLine = cockpitConfigErrorLine(event);',
+            'if (configErrorLine !== null)',
+            'this._clientLog.log(configErrorLine, COCKPIT_CONFIG_ERROR_LOG_KEY);',
+            'this._syncCockpitLayer(event.type === CockpitClientEventType.LAYOUT);',
+        ],
+        configErrorLogKey: 1,
         sync: [
             'const layerChange = this._cockpitLayerChangeNow(isLayoutEvent);',
             'if (layerChange === CockpitLayerChange.REMOVE) {',
@@ -1275,7 +1303,7 @@ test('extension.js: a layer that cannot be built or rebuilt never takes the exte
             'try {',
             'if (layerChange === CockpitLayerChange.ADD)',
             'this._addCockpitLayer();',
-            'else',
+            'else if (layerChange === CockpitLayerChange.REBUILD)',
             'this._layer.setLayout(this._cockpitClient.layout);',
         ],
         catchFallsBackFirst: 'this._fallBackToTopRightCard(error);',
@@ -1411,12 +1439,28 @@ test('extension.js: the layer is decided with the grid\'s fit on its monitor (ru
 
 test('extension.js: every placement the monitors, a work area, DisplayConfig\'s answer or the v2 card\'s width ' +
     'queue decides the layer again first (ruling D36: a dock brings the grid back, an undock puts the card top ' +
-    'right), and places what is drawn itself only when that changed nothing', () =>
-    assertEqual(extensionMethodStatements('_placeCardsAgain() {'), [
-        'const layerChange = this._syncCockpitLayer(false);',
-        'if (layerChange === CockpitLayerChange.NONE)',
-        'this._placeCard();',
-    ]));
+    'right); when that changed nothing, a shown layer is placed inside the build\'s guard, so a placement that ' +
+    'throws at any time is ruling D25\'s fallback, and the v2 card top right is placed as it always was', () => {
+    const extensionCode = codeOf(EXTENSION_SOURCE_FILE);
+    assertEqual({
+        placeAgain: extensionMethodStatements('_placeCardsAgain() {'),
+        placeCardCallers: occurrenceCount(extensionCode, 'this._placeCard();'),
+        layerPlacements: occurrenceCount(extensionCode, 'this._placeCockpitLayer();'),
+    }, {
+        placeAgain: [
+            'const layerChange = this._syncCockpitLayer(false);',
+            'if (layerChange !== CockpitLayerChange.NONE)',
+            'return;',
+            'if (this._layer === null)',
+            'this._placeCard();',
+            'else',
+            'this._drawCockpitLayer(CockpitLayerChange.NONE);',
+        ],
+        // _addCard (no layer yet), _placeAfterLayerChange (inside the guard, or after a removal) and the line above.
+        placeCardCallers: 3,
+        layerPlacements: 1,
+    });
+});
 
 test('extension.js: whether the grid is held back by its work area is kept across enables, as the layout is, so its ' +
     'line is not written again at each unlock while it lasts: set in the constructor and by the note alone, never ' +

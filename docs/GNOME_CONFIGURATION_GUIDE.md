@@ -514,6 +514,9 @@ journal:
 - `resource-pulse: the cockpit grid needs a larger work area than <width>x<height> (at least 1802x1014), so the
   card is drawn top right`: the cockpit monitor's work area is too small for the cards, written once as that
   begins.
+- `resource-pulse: could not read the cockpit layout (<error>), so the card is drawn top right`: the service
+  could not read `cockpit.json` (`missing`, or the first field it found wrong, as `gnome-status` says it), a
+  half-typed save included; the grid goes until the file reads again.
 - `resource-pulse: cockpit: focus: <reason>`: a session row's click brought no window forward. The reason is
   one of `FocusSession`'s five error codes ([The cockpit service](#the-cockpit-service); `internal` also when
   the call itself failed or got no answer in 2 s), `not focused`, or `no window for pids [<pids>]` when herdr
@@ -714,7 +717,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1175 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1178 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's

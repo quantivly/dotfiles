@@ -22,6 +22,8 @@
 //   given what the clients hold now, so the reveal draws the latest at once; each Sample while the cockpit is seen
 //   pulls its suspect sources (pullIfSuspicious, ruling R14).
 // - It draws through no texture of its own (each card draws through its own) and paints nothing itself.
+// - Each card's draw runs under its own guard (_guardCardDraw): a card that throws is logged, rate-limited, and holds
+//   up neither the other cards nor the extension's cover check that called the layer (ruling D25, per card).
 //
 // destroy() removes everything the layer added outside itself, each step guarded: both client listeners and the
 // pacing (its fallback timeout) first, so nothing runs against a half-destroyed card; then the cards (the system card
@@ -36,13 +38,15 @@ import {CockpitSourcePacing, drawCockpitDataCard} from './cockpitSourceDrawing.j
 import {CockpitTooltip} from './cockpitTooltip.js';
 import {COCKPIT_APPS_CARD_ID} from './lib/constants.js';
 import {cockpitGridGeometry, drawnCockpitCardIds, drawnCockpitCells} from './lib/cockpitGrid.js';
-import {describeErrorWithStack} from './lib/errorLog.js';
+import {describeErrorWithStack, runLoggingFailure} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
 
 const LAYER_STYLE_CLASS = 'rp-cockpit-layer';
 const CAPTION_STYLE_CLASS = 'rp-cockpit-caption';
 /** The layer, as its pacing's journal line names it (cockpitSourceDrawing.js). */
 const PACING_SURFACE_NAME = 'the cockpit layer';
+/** The context of the journal line for a card whose draw threw: one template key for every card (lib/errorLog.js). */
+const CARD_DRAW_FAILURE_CONTEXT = 'cockpit layer could not draw a card';
 
 /** Makes each card this release draws (lib/constants.js COCKPIT_DRAWN_CARD_IDS), by its id. */
 const CARD_MAKERS_BY_ID = Object.freeze({
@@ -211,7 +215,8 @@ class CockpitLayer extends St.Widget {
     /**
      * Freezes one card while a window covers it, or unfreezes it on its reveal, which first draws it from what the
      * clients hold now (still frozen, so only recorded), so the reveal draws the latest at once rather than what it
-     * knew when it was covered (ruling D20). A card the layer does not draw is ignored.
+     * knew when it was covered (ruling D20). A card the layer does not draw is ignored. The frozen state is recorded
+     * first and each draw is guarded (_guardCardDraw), so this never throws for a card's draw.
      *
      * @param {string} cardId - The card's id.
      * @param {boolean} isFrozen - True while covered.
@@ -228,13 +233,13 @@ class CockpitLayer extends St.Widget {
             this._frozenCardIds.delete(cardId);
         if (isRevealed)
             this._drawCard(cardId);
-        card.setFrozen(isFrozen);
+        this._guardCardDraw(() => card.setFrozen(isFrozen));
     }
 
     /**
      * A frozen card's dimmed repaint (ruling D18): draws it from what the clients hold now, then repaints it, still
-     * dimmed. The extension decides when (lib/cockpitWiring.js frozenCardsDueRepaint). A card the layer does not draw
-     * is ignored.
+     * dimmed, each draw guarded (_guardCardDraw). The extension decides when (lib/cockpitWiring.js
+     * frozenCardsDueRepaint). A card the layer does not draw is ignored.
      *
      * @param {string} cardId - The card's id.
      * @returns {void}
@@ -244,7 +249,7 @@ class CockpitLayer extends St.Widget {
         if (card === undefined)
             return;
         this._drawCard(cardId);
-        card.repaintFrozen();
+        this._guardCardDraw(() => card.repaintFrozen());
     }
 
     /**
@@ -318,9 +323,9 @@ class CockpitLayer extends St.Widget {
     }
 
     /**
-     * Draws one card from what the clients hold now: a card of the sampler's snapshot from the pulse client's latest, a
-     * data card from the cockpit client's sources (cockpitSourceDrawing.js drawCockpitDataCard). A frozen card only
-     * records it.
+     * Draws one card from what the clients hold now, guarded (_guardCardDraw): a card of the sampler's snapshot from
+     * the pulse client's latest, a data card from the cockpit client's sources (cockpitSourceDrawing.js
+     * drawCockpitDataCard). A frozen card only records it.
      *
      * @param {string} cardId - A drawn card's id.
      * @returns {void}
@@ -329,20 +334,34 @@ class CockpitLayer extends St.Widget {
         const card = this._cardsById.get(cardId);
         const drawSnapshotCard = SNAPSHOT_CARD_DRAWERS_BY_ID[cardId];
         if (drawSnapshotCard)
-            drawSnapshotCard(card, this._pulseClient);
+            this._guardCardDraw(() => drawSnapshotCard(card, this._pulseClient));
         else
-            drawCockpitDataCard({cardId, card, cockpitClient: this._cockpitClient});
+            this._guardCardDraw(() => drawCockpitDataCard({cardId, card, cockpitClient: this._cockpitClient}));
     }
 
     /**
-     * Gives the apps card a pulse snapshot's apps (the client tells snapshot listeners only while the detail watch is
-     * wanted, and the latest once when it becomes wanted).
+     * Gives the apps card a pulse snapshot's apps, guarded (_guardCardDraw; the client tells snapshot listeners only
+     * while the detail watch is wanted, and the latest once when it becomes wanted).
      *
      * @param {import('./pulseClient.js').Snapshot|null} snapshot - The latest snapshot.
      * @returns {void}
      */
     _onSnapshot(snapshot) {
-        this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null);
+        this._guardCardDraw(() => this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null));
+    }
+
+    /**
+     * Runs one card's draw under its own guard (lib/errorLog.js runLoggingFailure): a card whose draw, unfreeze or
+     * frozen repaint throws holds up neither the other cards nor what called the layer, such as the extension's cover
+     * check, which records what is visible, updates the watches and follows the covering windows after it (ruling D25,
+     * per card). The failure is the layer's own, logged on its error log under one context for every card, so once per
+     * interval however often it repeats.
+     *
+     * @param {function(): void} drawStep - The draw.
+     * @returns {void}
+     */
+    _guardCardDraw(drawStep) {
+        runLoggingFailure({run: drawStep, errorLog: this._errorLog, context: CARD_DRAW_FAILURE_CONTEXT});
     }
 
     /**
