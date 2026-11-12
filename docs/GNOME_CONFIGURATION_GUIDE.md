@@ -659,7 +659,7 @@ desktop:
 
 ```bash
 scripts/resource-pulse-nested.sh start --gc-log --replay
-scripts/resource-pulse-nested.sh perf   # about 9 minutes; exit 1 names every count budget it found broken
+nohup scripts/resource-pulse-nested.sh perf >perf.txt 2>&1   # about 9 minutes; exit 1 names every count budget it found broken
 scripts/resource-pulse-nested.sh stop
 ```
 
