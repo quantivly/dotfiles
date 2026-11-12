@@ -162,9 +162,9 @@ top bar is shown. The card is drawn through an offscreen texture, so a window dr
 repaint it. Whether the card is covered is checked again on window changes, on the covering window's own
 moves, and on a sample: every one while the card is visible, every fifteenth while it is covered. Only
 while the service is silent and the card covered (with the cockpit, every card of the grid) does a
-10-second check run. The cockpit adds no repeating timer; when it draws a change is under "Freshness" in
-[Drawing the cockpit](#drawing-the-cockpit). The budgets, and the request that checks them:
-[What it costs](#what-it-costs).
+10-second check run. The cockpit adds no repeating timer; "Freshness" in
+[Drawing the cockpit](#drawing-the-cockpit) says when a change is drawn. The budgets, and the request that
+checks them: [What it costs](#what-it-costs).
 
 **The dropdown.** Clicking the top-bar graphs opens a dropdown holding a second card, live while it is
 open; under it, once the cockpit service has answered, the cockpit's sessions card
@@ -321,14 +321,17 @@ where they are.
 
 **Turning it on**, in this order:
 
-1. Fast-forward the checkout: `git -C ~/.dotfiles fetch origin main`, then
-   `git -C ~/.dotfiles merge --ff-only origin/main`.
+1. Fast-forward the checkout: `git -C ~/.dotfiles fetch origin main`; then
+   `git -C ~/.dotfiles diff --name-only HEAD..origin/main`, which must name no file that
+   `git -C ~/.dotfiles status` shows as changed; then `git -C ~/.dotfiles merge --ff-only origin/main`.
 2. `bash ~/.dotfiles/install`. It links the cockpit's unit and restarts each running service whose code
    changed, the sampler too when a module it imports changed ([The cockpit service](#the-cockpit-service)).
 3. Make the config from the template: `mkdir -p ~/.config/resource-pulse`, then
    `cp ~/.dotfiles/examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json`.
-4. In `~/.gnome-settings.local`, uncomment the template's "Cockpit" block: `gdisable_extension
-   ding@rastersoft.com` and the background `gset` lines.
+4. Add to `~/.gnome-settings.local` the lines of the "Cockpit" block of
+   `~/.dotfiles/examples/gnome-settings.local.template`, uncommented: `gdisable_extension ding@rastersoft.com`
+   and the four background `gset` lines. A file made from an earlier template lacks the ding line, and
+   `gnome-init` never overwrites one that exists, so copy the lines rather than look for them to uncomment.
 5. `gnome-apply`. ding goes and the background turns solid at this step, not at the login; until the login
    the desktop card stays top right.
 6. Log out and in.
@@ -538,8 +541,9 @@ shell's journal:
   card is drawn top right`: the cockpit monitor's work area is too small for the cards, written once as that
   begins.
 - `resource-pulse: could not read the cockpit layout (<error>), so the card is drawn top right`: the service
-  could not read `cockpit.json` (`missing`, or the first field it found wrong, as `gnome-status` says it), a
-  half-typed save included; the grid goes until the file reads again.
+  could not read `cockpit.json`, as `gnome-status` says it: `missing` with no file, `config: malformed JSON`
+  for text that is not JSON (a half-typed save included), or the first field it found wrong, such as
+  `groups[1].caption: expected a non-empty string`; the grid goes until the file reads again.
 - `resource-pulse: cockpit: focus: <reason>`: a session row's click brought no window forward. The reason is
   one of `FocusSession`'s five error codes ([The cockpit service](#the-cockpit-service); `internal` also when
   the call itself failed or got no answer in 2 s), `not focused`, or `no window for pids [<pids>]` when herdr

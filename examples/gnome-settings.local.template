@@ -59,7 +59,8 @@ gset org.gnome.shell favorite-apps "['firefox_firefox.desktop', 'alacritty_alacr
 # ---------------------------------------------------------------------------
 # A plain near-black background with a prussian tint, on the desktop and the lock screen, behind the cockpit.
 # The cockpit's steps, in order: docs/GNOME_CONFIGURATION_GUIDE.md, "Drawing the cockpit".
-# The cockpit itself is opt-in by file: cp examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json
+# The cockpit itself is opt-in by file: mkdir -p ~/.config/resource-pulse, then
+#   cp ~/.dotfiles/examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json
 # (or into $XDG_CONFIG_HOME/resource-pulse/ when XDG_CONFIG_HOME is set).
 # gset org.gnome.desktop.background  picture-options "'none'"
 # gset org.gnome.desktop.background  primary-color   "'#121a1a'"
