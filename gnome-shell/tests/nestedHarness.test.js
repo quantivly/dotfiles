@@ -4,14 +4,32 @@
 //   and only calls it.
 // - the replay service's generator and scenario requests (replayGenerator.js), which has no gi import: the input
 //   every `start --replay` run publishes, the same in every run of every version of the extension, and when a
-//   `scenario` request restarts it.
+//   `scenario` request restarts it; and the apps its snapshots carry, read as the extension reads them.
 import {test, assertEqual} from './harness.js';
 import {isNestedRunRuntimeDir} from './nested/resource-pulse-nested-unsafe-mode@local/nestedRun.js';
 import {
     REPLAY_SCENARIO_NAMES, ReplayGenerator, isNewScenarioRequest, parseScenarioRequest,
 } from './nested/replayGenerator.js';
+// Read through the namespace, so that a missing export fails its own rows rather than every row of the run.
+import * as replayGeneratorModule from './nested/replayGenerator.js';
+import {APPS_CARD_ROW_LIMIT, BYTES_PER_GIBIBYTE} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
+import {buildStatePayload, parseStatePayload} from '../extensions/resource-pulse@dotfiles/lib/protocol.js';
 
 const RUN_DIR = '/run/user/1000/rpn.Abc12345';
+/** The CPU busy percents the apps rows read the replay's rankings at: idle's lowest, busy's highest, and one between. */
+const IDLE_CPU_BUSY_PERCENT = 1;
+const BUSY_CPU_BUSY_PERCENT = 90;
+const TEN_CPU_BUSY_PERCENT = 10;
+/**
+ * The two winners the replay published before the rankings (replay-service.js's topCpu and topMemory at 10 % CPU
+ * busy), written out: the rankings must leave them as they were.
+ */
+const WINNERS_AT_TEN_CPU_BUSY_PERCENT = {
+    topCpu: {groupKey: 'app.slice/chromium', name: 'Chromium', cpuPercent: 6},
+    topMemory: {groupKey: 'app.slice/herdr-server.service', name: 'herdr agents', memoryBytes: 15.7 * BYTES_PER_GIBIBYTE},
+};
+/** A state payload's fields other than the snapshot, as the real service sends them before its first Sample. */
+const STATE_PAYLOAD_REST = Object.freeze({histories: {cpu: [], memory: []}, serviceStartedAtUsec: 1, sequence: 0});
 /** How many of a scenario's first values the range rows read. */
 const REPLAY_VALUES_CHECKED = 10;
 /** How many of busy's first values its walk row reads: far enough for the walk to meet both bounds many times. */
@@ -161,4 +179,63 @@ test('replay request: each scenario request restarts the replay, the word playin
         playedByFileText: ['busy', 'idle', 'light', 'busy', 'busy', 'busy'],
         nothingAskedPlays: 'busy',
     });
+});
+
+/**
+ * Whether a ranking is largest first by one field.
+ *
+ * @param {Array<object>} ranking - A ranking's entries.
+ * @param {string} valueFieldName - 'cpuPercent' or 'memoryBytes'.
+ * @returns {boolean} True when no entry is larger than the one before it.
+ */
+function isLargestFirst(ranking, valueFieldName) {
+    return ranking.every((entry, entryIndex) => entryIndex === 0 ||
+        ranking[entryIndex - 1][valueFieldName] >= entry[valueFieldName]);
+}
+
+test('replay: the apps a snapshot carries reach the extension\'s reader (lib/protocol.js) field for field, both ' +
+    'winners and both rankings, nothing dropped', () => {
+    const sentApps = replayGeneratorModule.replayApps(BUSY_CPU_BUSY_PERCENT);
+    const statePayload = buildStatePayload({...STATE_PAYLOAD_REST, snapshot: {apps: sentApps}});
+    assertEqual(parseStatePayload(statePayload).snapshot.apps, sentApps);
+});
+
+test('replay: each ranking holds as many entries as the apps card shows (APPS_CARD_ROW_LIMIT), each named, with a ' +
+    'group key of its own, largest first; topCpu and topMemory are their first entries, as the replay published them ' +
+    'before the rankings', () => {
+    const {topCpu, topMemory, cpuRanking, memoryRanking} = replayGeneratorModule.replayApps(TEN_CPU_BUSY_PERCENT);
+    const distinctGroupKeyCount = ranking => new Set(ranking.map(entry => entry.groupKey)).size;
+    assertEqual({
+        lengths: [cpuRanking.length, memoryRanking.length],
+        distinctGroupKeys: [distinctGroupKeyCount(cpuRanking), distinctGroupKeyCount(memoryRanking)],
+        named: [...cpuRanking, ...memoryRanking].every(entry => typeof entry.name === 'string' && entry.name !== ''),
+        largestFirst: [isLargestFirst(cpuRanking, 'cpuPercent'), isLargestFirst(memoryRanking, 'memoryBytes')],
+        winnersAreFirstEntries: JSON.stringify([topCpu, topMemory]) === JSON.stringify([cpuRanking[0], memoryRanking[0]]),
+        winners: {topCpu, topMemory},
+    }, {
+        lengths: [APPS_CARD_ROW_LIMIT, APPS_CARD_ROW_LIMIT],
+        distinctGroupKeys: [APPS_CARD_ROW_LIMIT, APPS_CARD_ROW_LIMIT],
+        named: true,
+        largestFirst: [true, true],
+        winnersAreFirstEntries: true,
+        winners: WINNERS_AT_TEN_CPU_BUSY_PERCENT,
+    });
+});
+
+test('replay: the CPU ranking follows the snapshot\'s CPU figure (each entry the same share of it, in the same ' +
+    'order, idle\'s near 0 % and busy\'s tens of percent, together never above it); the memory ranking is fixed', () => {
+    const idleApps = replayGeneratorModule.replayApps(IDLE_CPU_BUSY_PERCENT);
+    const busyApps = replayGeneratorModule.replayApps(BUSY_CPU_BUSY_PERCENT);
+    const sharesOf = ({cpuRanking}, cpuBusyPercent) =>
+        cpuRanking.map(entry => Number((entry.cpuPercent / cpuBusyPercent).toFixed(PINNED_VALUE_DECIMALS)));
+    const idleShares = sharesOf(idleApps, IDLE_CPU_BUSY_PERCENT);
+    const busyCpuTotal = busyApps.cpuRanking.reduce((total, entry) => total + entry.cpuPercent, 0);
+    assertEqual({
+        sameShares: JSON.stringify(idleShares) === JSON.stringify(sharesOf(busyApps, BUSY_CPU_BUSY_PERCENT)),
+        everyShareAboveZero: idleShares.every(share => share > 0),
+        sameOrder: JSON.stringify(idleApps.cpuRanking.map(entry => entry.name)) ===
+            JSON.stringify(busyApps.cpuRanking.map(entry => entry.name)),
+        busyTotalWithinBusy: busyCpuTotal <= BUSY_CPU_BUSY_PERCENT,
+        memoryFixed: JSON.stringify(idleApps.memoryRanking) === JSON.stringify(busyApps.memoryRanking),
+    }, {sameShares: true, everyShareAboveZero: true, sameOrder: true, busyTotalWithinBusy: true, memoryFixed: true});
 });

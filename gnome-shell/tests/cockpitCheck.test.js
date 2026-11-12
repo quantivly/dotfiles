@@ -7,7 +7,10 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
-import {COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
+import {
+    APPS_CARD_ROW_LIMIT, COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS,
+} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
+import {replayApps} from './nested/replayGenerator.js';
 
 const NESTED_DIR_URI = GLib.uri_resolve_relative(import.meta.url, './nested/', GLib.UriFlags.NONE);
 const CHECK_FUNCTION_NAME = 'resourcePulseCockpitCheck';
@@ -44,6 +47,18 @@ const GRID_OPTIONS = Object.freeze({
     expectedCaptions: CAPTIONS, expectedCardIds: KNOWN_CARD_IDS, unknownCardIds: UNKNOWN_CARD_IDS,
 });
 const SESSION_NAMES = ['alpha-sync', 'beta-docs'];
+/** The CPU busy percent the fake's apps card was drawn at; any figure gives the replay's names. */
+const APPS_DRAWN_AT_CPU_BUSY_PERCENT = 50;
+/** apps-rows' options as the harness reads them from the replay's snapshot: the names of each ranking's entries. */
+const REPLAY_APPS = replayApps(APPS_DRAWN_AT_CPU_BUSY_PERCENT);
+const REPLAY_APPS_OPTIONS = Object.freeze({
+    cpuNames: REPLAY_APPS.cpuRanking.map(entry => entry.name),
+    memoryNames: REPLAY_APPS.memoryRanking.map(entry => entry.name),
+});
+/** Where the v2 card sits with no layer: top right of the work area, as the extension places it. */
+const V2_CARD_TOP_RIGHT_RECT = Object.freeze({
+    x: WORK_AREA.x + WORK_AREA.width - 456, y: WORK_AREA.y + 24, width: 416, height: 280,
+});
 const PROBE_PID = 4242;
 const DECOY_PID = 4343;
 const WINDOW_SIZE = Object.freeze({width: 320, height: 200});
@@ -311,6 +326,39 @@ function makeSessionsCard(origin) {
 }
 
 /**
+ * One ranking's rows of the apps card, as cockpitCards.js builds them (APPS_CARD_ROW_LIMIT, each an actor and a name
+ * label in the card's content box): one shown per name, the rest hidden.
+ *
+ * @param {FakeActor} contentBox - The card's content box.
+ * @param {string[]} names - The names the ranking shows, in order.
+ * @returns {Array<{actor: FakeActor, nameLabel: FakeActor}>} The rows.
+ */
+function makeAppRows(contentBox, names) {
+    return Array.from({length: APPS_CARD_ROW_LIMIT}, (_, rowIndex) => {
+        const row = {actor: new FakeActor(), nameLabel: new FakeActor({text: names[rowIndex] ?? ''})};
+        row.actor.visible = rowIndex < names.length;
+        row.actor.add_child(row.nameLabel);
+        contentBox.add_child(row.actor);
+        return row;
+    });
+}
+
+/**
+ * Takes the layer away as the extension does when the layout can no longer be read (a REMOVE): the layer out of the
+ * background group and forgotten, the v2 card put back top right in the background group.
+ *
+ * @param {object} shell - From makeHealthyShell.
+ * @returns {void}
+ */
+function takeLayerAway(shell) {
+    const {stateObj, backgroundGroup} = shell;
+    backgroundGroup.remove_child(stateObj._layer);
+    stateObj._layer = null;
+    backgroundGroup.add_child(stateObj._card);
+    stateObj._card.rect = {...V2_CARD_TOP_RIGHT_RECT};
+}
+
+/**
  * A tooltip of the cockpit: shown or not, its label in the given parent.
  *
  * @param {FakeActor} labelParent - Where its label is (the chrome).
@@ -341,6 +389,10 @@ function buildExtensionParts(shell) {
         card._noDataLabel = card.add_child(new FakeActor({text: ''}));
         card._noDataLabel.visible = false;
         card._contentBox = card.add_child(new FakeActor());
+        if (cardId === 'apps') {
+            card._cpuRows = makeAppRows(card._contentBox, REPLAY_APPS_OPTIONS.cpuNames);
+            card._memoryRows = makeAppRows(card._contentBox, REPLAY_APPS_OPTIONS.memoryNames);
+        }
         cardsById.set(cardId, layer.add_child(card));
     }
     const v2Card = cardsById.get('system').add_child(new FakeActor({styleClasses: ['resource-pulse-card']}));
@@ -1345,6 +1397,92 @@ test('cockpit check: stale-card is ok stale while the card shows "no data since"
     }), {
         stale: OK, 'not-stale': `${BAD}+needle`, fresh: OK, 'not-fresh': `${BAD}+needle`,
         'unknown-expectation': COULD_NOT_JUDGE, 'no-line': COULD_NOT_JUDGE,
+    });
+});
+
+test('cockpit check: apps-rows is ok for the replay\'s rankings shown (as many rows of each as the card shows, each ' +
+    'named, the first the replay\'s first entry), bad for a card with no rows, a wrong first row, a short ranking or a ' +
+    'row with no name, could-not-judge for rankings it is not given or rows it cannot read', async () => {
+    const appsCardOf = shell => shell.stateObj._layer._cardsById.get('apps');
+    const longerCpuNames = [...REPLAY_APPS_OPTIONS.cpuNames, 'Extra one', 'Extra two', 'Extra three', 'Extra four'];
+    const okNeedle = `${APPS_CARD_ROW_LIMIT} CPU and ${APPS_CARD_ROW_LIMIT} memory rows`;
+    assertEqual(await verdictsOfCases('apps-rows', {
+        shown: {options: REPLAY_APPS_OPTIONS, needle: okNeedle},
+        'more-sent-than-shown': {options: {...REPLAY_APPS_OPTIONS, cpuNames: longerCpuNames}, needle: okNeedle},
+        'no-rows': {breakShell: shell => {
+            const card = appsCardOf(shell);
+            card._contentBox.visible = false;
+            card._noDataLabel.visible = true;
+            card._noDataLabel.text = 'no data';
+        }, options: REPLAY_APPS_OPTIONS, needle: "the apps card shows no row but 'no data'"},
+        'wrong-first-cpu-row': {breakShell: shell => {
+            appsCardOf(shell)._cpuRows[0].nameLabel.text = 'Firefox';
+        }, options: REPLAY_APPS_OPTIONS, needle: "the CPU ranking's first row reads 'Firefox', not the replay's 'Chromium'"},
+        'wrong-first-memory-row': {breakShell: shell => {
+            appsCardOf(shell)._memoryRows[0].nameLabel.text = 'Chromium';
+        }, options: REPLAY_APPS_OPTIONS,
+        needle: "the memory ranking's first row reads 'Chromium', not the replay's 'herdr agents'"},
+        'short-ranking': {breakShell: shell => {
+            appsCardOf(shell)._memoryRows.slice(2).forEach(row => {
+                row.actor.visible = false;
+            });
+        }, options: REPLAY_APPS_OPTIONS,
+        needle: `the memory ranking shows 2 row(s) (herdr agents, Chromium), not ${APPS_CARD_ROW_LIMIT} of the`},
+        'unnamed-row': {breakShell: shell => {
+            appsCardOf(shell)._cpuRows[3].nameLabel.text = '';
+        }, options: REPLAY_APPS_OPTIONS, needle: 'a row of the CPU ranking shows no name'},
+        'no-rankings-given': {options: {}, needle: 'apps-rows needs cpuNames and memoryNames'},
+        'empty-ranking-sent': {options: {...REPLAY_APPS_OPTIONS, cpuNames: []},
+            needle: "the replay's CPU ranking is empty: nothing to judge"},
+        'rows-unreadable': {breakShell: shell => {
+            delete appsCardOf(shell)._memoryRows;
+        }, options: REPLAY_APPS_OPTIONS, needle: '(_memoryRows)'},
+        'no-apps-card': {breakShell: shell => shell.stateObj._layer._cardsById.delete('apps'),
+            options: REPLAY_APPS_OPTIONS, needle: 'the layer draws no apps card'},
+    }), {
+        shown: `${OK}+needle`, 'more-sent-than-shown': `${OK}+needle`, 'no-rows': `${BAD}+needle`,
+        'wrong-first-cpu-row': `${BAD}+needle`, 'wrong-first-memory-row': `${BAD}+needle`,
+        'short-ranking': `${BAD}+needle`, 'unnamed-row': `${BAD}+needle`,
+        'no-rankings-given': `${COULD_NOT_JUDGE}+needle`, 'empty-ranking-sent': `${COULD_NOT_JUDGE}+needle`,
+        'rows-unreadable': `${COULD_NOT_JUDGE}+needle`, 'no-apps-card': `${BAD}+needle`,
+    });
+});
+
+test('cockpit check: layer-removed is ok with no layer, the v2 card top right in the background group and the ' +
+    'dropdown\'s sessions item shown while the cockpit is live (ruling D23); bad for each fault; could-not-judge while ' +
+    'the cockpit is not live, or for a part it cannot read', async () => {
+    assertEqual(await verdictsOfCases('layer-removed', {
+        removed: {breakShell: takeLayerAway, needle: 'no layer; the v2 card top right in the background group'},
+        'layer-still-shown': {needle: 'the extension still holds a cockpit layer'},
+        'layer-left-in-the-group': {breakShell: shell => {
+            takeLayerAway(shell);
+            shell.backgroundGroup.add_child(new FakeActor({styleClasses: ['rp-cockpit-layer']}));
+        }, needle: 'the background group still holds 1 cockpit layer(s)'},
+        'card-nowhere': {breakShell: shell => {
+            takeLayerAway(shell);
+            shell.backgroundGroup.remove_child(shell.stateObj._card);
+        }, needle: 'the v2 card is not in the background group'},
+        'card-bottom-left': {breakShell: shell => {
+            takeLayerAway(shell);
+            shell.stateObj._card.rect = {x: WORK_AREA.x + 24, y: WORK_AREA.y + WORK_AREA.height - 304, width: 416,
+                height: 280};
+        }, needle: 'not top right of the work area'},
+        'sessions-item-hidden': {breakShell: shell => {
+            takeLayerAway(shell);
+            shell.stateObj._indicator._sessionsItem.visible = false;
+        }, needle: "the dropdown's sessions item is hidden while the cockpit is live (ruling D23)"},
+        'cockpit-not-live': {breakShell: shell => {
+            takeLayerAway(shell);
+            shell.stateObj._cockpitClient.state = 'starting';
+        }, needle: 'the cockpit is starting, not live'},
+        'layer-unreadable': {breakShell: shell => {
+            takeLayerAway(shell);
+            delete shell.stateObj._layer;
+        }, needle: '(_layer)'},
+    }), {
+        removed: `${OK}+needle`, 'layer-still-shown': `${BAD}+needle`, 'layer-left-in-the-group': `${BAD}+needle`,
+        'card-nowhere': `${BAD}+needle`, 'card-bottom-left': `${BAD}+needle`, 'sessions-item-hidden': `${BAD}+needle`,
+        'cockpit-not-live': `${COULD_NOT_JUDGE}+needle`, 'layer-unreadable': `${COULD_NOT_JUDGE}+needle`,
     });
 });
 

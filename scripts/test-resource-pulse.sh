@@ -5777,8 +5777,11 @@ check "nested: probe-window.js refuses (exit 2) before loading Gtk outside a nes
 # requests of the in-shell files (each with its own plain-gjs rows,
 # gnome-shell/tests/cockpitCheck.test.js). Here a stand-in busctl answers each
 # request from a directory of answers (ok unless a case's file says otherwise,
-# for the request or for its Nth call) and, for the Nth click, appends <answers>/click-N.log to the run's shell log,
-# as the extension's focus lines would be; a stand-in gjs stands in for the
+# for the request, for its Nth call, or for the window it names by pid, by the title the run recorded for it) and,
+# for the Nth click, appends <answers>/click-N.log to the run's shell log, as the extension's focus lines would be,
+# and for a request's first call <answers>/<function>.<request>.log; it keeps a copy of the run's fixture as each
+# request last saw it (CHECK_CALLS.fixture.<request>), and answers GetState with <answers>/GetState (the replay's state
+# JSON), or fails while <answers>/GetState.fails exists; a stand-in gjs stands in for the
 # window (it records how it was started and waits); the real jq rewrites the
 # run's fixture. A fake gnome-shell in this session makes the run live.
 CHECK_STUB_BIN="$WIRING_TMP/check-bin"
@@ -5810,6 +5813,21 @@ if [[ "$*" == *" Screenshot "* ]]; then
   printf '%s\n' '{"type":"bs","data":[true,"stand-in"]}'
   exit 0
 fi
+# GetState of the replay: recorded with its name, path and interface (the three words after `call`).
+if [[ "$eval_code" == GetState ]]; then
+  call_words=("$@")
+  for word_index in "${!call_words[@]}"; do
+    [[ "${call_words[word_index]}" == call ]] && call_word_index=$word_index
+  done
+  printf 'GetState %s %s %s\n' "${call_words[call_word_index+1]}" "${call_words[call_word_index+2]}" \
+    "${call_words[call_word_index+3]}" >>"$CHECK_STUB_CALLS"
+  if [[ -f "$CHECK_STUB_ANSWERS/GetState.fails" ]]; then
+    printf 'Call failed: The name is not activatable\n' >&2
+    exit 1
+  fi
+  jq -cn --rawfile state "$CHECK_STUB_ANSWERS/GetState" '{type: "s", data: [($state | rtrimstr("\n"))]}'
+  exit 0
+fi
 call_line="$(printf '%s\n' "$eval_code" | tail -n 1)"
 function_name="${call_line%%(*}"
 request="${call_line#*\(\'}"
@@ -5827,8 +5845,25 @@ fi
 answer_path="$CHECK_STUB_ANSWERS/$function_name.$request"
 # The Nth call of a request may have an answer of its own: <function>.<request>.<N>.
 request_number="$(grep -c -x -F "$function_name $request" "$CHECK_STUB_CALLS")"
+if [[ "$request_number" == 1 && -f "$answer_path.log" ]]; then
+  cat "$answer_path.log" >>"$CHECK_STUB_SHELL_LOG"
+fi
+if [[ -n "${RESOURCE_PULSE_NESTED_DIR:-}" ]]; then
+  cp -- "$RESOURCE_PULSE_NESTED_DIR/state/cockpit-fixture.json" "$CHECK_STUB_CALLS.fixture.$request" 2>/dev/null
+fi
+# A request naming a window by pid may have an answer of its own for that window: <function>.<request>.<title>.
+call_pid=""
+[[ "$call_options" =~ \"pid\":([0-9]+) ]] && call_pid="${BASH_REMATCH[1]}"
+call_title=""
+for window_record in "${RESOURCE_PULSE_NESTED_DIR:-/nonexistent}"/state/windows/*.pid; do
+  [[ -n "$call_pid" && -f "$window_record" && "$(<"$window_record")" == "$call_pid" ]] || continue
+  call_title="${window_record##*/}"
+  call_title="${call_title%.pid}"
+done
 if [[ -f "$answer_path.$request_number" ]]; then
   answer_path+=".$request_number"
+elif [[ -n "$call_title" && -f "$answer_path.$call_title" ]]; then
+  answer_path+=".$call_title"
 elif [[ ! -f "$answer_path" ]]; then
   answer_path="$CHECK_STUB_ANSWERS/default"
 fi
@@ -6107,6 +6142,18 @@ printf '%s\n' '(gnome-shell:7): Gjs-Console-WARNING **: 10:00:02.000: resource-p
   >"$CHECK_ANSWERS/click-3.log"
 printf '%s\n' '(gnome-shell:7): Gjs-Console-WARNING **: 10:00:03.000: resource-pulse: cockpit: focus: herdr-unreachable' \
   >"$CHECK_ANSWERS/click-5.log"
+# The replay's state as GetState answers it, its snapshot's two rankings two entries each (apps-rows gives their names
+# to the in-shell request); and a state from a replay before the rankings, its winners alone.
+CHECK_REPLAY_CPU_RANKING='[{"groupKey":"app.slice/chromium","name":"Chromium","cpuPercent":30},'
+CHECK_REPLAY_CPU_RANKING+='{"groupKey":"app.slice/herdr-server.service","name":"herdr agents","cpuPercent":7.5}]'
+CHECK_REPLAY_MEMORY_RANKING='[{"groupKey":"app.slice/herdr-server.service","name":"herdr agents","memoryBytes":16857746636},'
+CHECK_REPLAY_MEMORY_RANKING+='{"groupKey":"app.slice/chromium","name":"Chromium","memoryBytes":4509715660}]'
+CHECK_REPLAY_WINNERS='"topCpu":{"groupKey":"app.slice/chromium","name":"Chromium","cpuPercent":30},'
+CHECK_REPLAY_WINNERS+='"topMemory":{"groupKey":"app.slice/herdr-server.service","name":"herdr agents","memoryBytes":16857746636}'
+printf '%s\n' "{\"protocol\":1,\"sequence\":3,\"snapshot\":{\"apps\":{$CHECK_REPLAY_WINNERS,\"cpuRanking\":$CHECK_REPLAY_CPU_RANKING,\"memoryRanking\":$CHECK_REPLAY_MEMORY_RANKING}}}" \
+  >"$CHECK_ANSWERS/GetState"
+CHECK_REPLAY_STATE_WITHOUT_RANKINGS="{\"protocol\":1,\"sequence\":3,\"snapshot\":{\"apps\":{$CHECK_REPLAY_WINNERS}}}"
+CHECK_REPLAY_APPS_OPTIONS='{"cpuNames":["Chromium","herdr agents"],"memoryNames":["herdr agents","Chromium"]}'
 # answers_with <name> <file name> <answer>... copies the healthy answers to a directory of its own, replaces those
 # named, and prints the directory.
 answers_with() {
@@ -6369,10 +6416,10 @@ check_cockpit_stubbed() {
     ' check-cockpit "$NESTED_SCRIPT" 2>&1)"
   CHECK_STUB_EXIT=$?
 }
-CHECK_STEP_NAMES="extension early-log layer grid interactive hover windows click click-log click-show-desktop"
+CHECK_STEP_NAMES="extension early-log layer grid apps-rows interactive hover windows click click-log click-show-desktop"
 CHECK_STEP_NAMES+=" click-no-window click-no-window-again click-not-focused click-twice cover cover-holds-changes reveal"
-CHECK_STEP_NAMES+=" visible-change stale stale-recovers dropdown-order dropdown-open dropdown-tooltip dropdown-closed"
-CHECK_STEP_NAMES+=" dropdown-change dropdown-click lock-path screenshot log count-budgets"
+CHECK_STEP_NAMES+=" visible-change stale stale-recovers layer-readd dropdown-order dropdown-open dropdown-tooltip"
+CHECK_STEP_NAMES+=" dropdown-closed dropdown-change dropdown-click lock-path screenshot log count-budgets"
 # check_steps_seen prints the step names of the output's step lines, in order.
 check_steps_seen() {
   sed -n -E 's/^(ok|bad|could not judge) ([a-z-]+): .*/\2/p' <<<"$CHECK_STUB_OUTPUT" | tr '\n' ' '
@@ -6395,7 +6442,7 @@ check_step_verdicts() {
 check_cockpit_stubbed "$CHECK_ANSWERS"
 healthy_check_summary="exit=$CHECK_STUB_EXIT steps=[$(check_steps_seen)]"
 healthy_check_summary+=" ok=$(grep -c '^ok ' <<<"$CHECK_STUB_OUTPUT")"
-healthy_check_summary+=" summary=$(grep -c -x -F 'check cockpit: 30 ok, 0 bad, 0 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+healthy_check_summary+=" summary=$(grep -c -x -F 'check cockpit: 32 ok, 0 bad, 0 could not judge' <<<"$CHECK_STUB_OUTPUT")"
 healthy_check_summary+=" windows-opened=$(wc -l <"$CHECK_WINDOW_LAUNCHES")"
 healthy_check_summary+=" windows-left=$(find "$CHECK_RUN/state/windows" -type f 2>/dev/null | wc -l)"
 healthy_check_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
@@ -6405,7 +6452,7 @@ healthy_check_summary+=" lock-path=$(check_stub_call_count '^resourcePulseCockpi
 healthy_check_summary+=" clicks=$(check_stub_call_count '^resourcePulseNestedPointer click$')"
 check "nested: check cockpit, every request answered ok, prints one ok line per step in the notes' order and exits 0, ending its windows and putting the run's fixture back" \
   "$healthy_check_summary" \
-  "exit=0 steps=[$CHECK_STEP_NAMES ] ok=30 summary=1 windows-opened=2 windows-left=0 fixture=restored perf=1 lock-path=1 clicks=7"
+  "exit=0 steps=[$CHECK_STEP_NAMES ] ok=32 summary=1 windows-opened=2 windows-left=0 fixture=restored perf=1 lock-path=1 clicks=7"
 # Before its screenshot the check moves the pointer off the grid, to the canary's point (20, 600 in stage pixels: left
 # of the grid on the nested monitor at either scale), and waits for it there, so that no hover or tooltip an earlier
 # step left is in the picture: the two requests right before the Screenshot call are that move and its arrival.
@@ -6419,7 +6466,9 @@ check "nested: check cockpit moves the pointer off the grid, to the canary's poi
 # run (Task 12b) the probe's late map took the focus back from a decoy activated a second after the probe opened. So
 # the check waits until each window it opens has the focus before it activates the decoy. Read from the requests the
 # stand-in recorded, from the first window's placement to the decoy's activation, each named with whose window it
-# asks about (the first placed is the decoy, the second the probe).
+# asks about (the first placed is the decoy, the second the probe). Only the rule is read: for each window, where its
+# first focused-window falls against its own window-clear and the decoy's activation (between, when it waits as it
+# should); no other request of the setup counts.
 window_setup_calls="$(awk '$2 == "place-window-clear" { is_window_setup = 1 }
   is_window_setup { print }
   $2 == "activate-window" { exit }' "$CHECK_CALL_OPTIONS")"
@@ -6431,29 +6480,81 @@ while read -r _ window_setup_request window_setup_options; do
   window_setup_role=other
   [[ -n "$window_setup_pid" && "$window_setup_pid" == "$window_setup_decoy_pid" ]] && window_setup_role=decoy
   [[ -n "$window_setup_pid" && "$window_setup_pid" == "$window_setup_probe_pid" ]] && window_setup_role=probe
-  window_setup_sequence+="$window_setup_request:$window_setup_role "
+  window_setup_sequence+="$window_setup_request:$window_setup_role"$'\n'
 done <<<"$window_setup_calls"
-check "nested: check cockpit waits until each window it opens has the focus (Mutter's map of it is over) before it activates the decoy, so a late map of the probe cannot take the focus back from the decoy" \
-  "distinct=$([[ -n "$window_setup_decoy_pid" && "$window_setup_decoy_pid" != "$window_setup_probe_pid" ]] && printf yes || printf no) sequence=[$window_setup_sequence]" \
-  "distinct=yes sequence=[place-window-clear:decoy window-clear:decoy focused-window:decoy window-shown:probe place-window-clear:probe window-clear:probe focused-window:probe activate-window:decoy ]"
+# window_focus_wait_place <role> prints where that window's first focused-window falls in the setup's requests:
+# between (after its own last window-clear before it, and before the decoy's activation), before-clear, after-activate,
+# or none (never asked).
+window_focus_wait_place() {
+  awk -v role="$1" '
+    $0 == "window-clear:" role { clear_index = NR }
+    $0 == "focused-window:" role && focus_index == 0 { focus_index = NR; clear_index_at_focus = clear_index }
+    $0 == "activate-window:decoy" && activate_index == 0 { activate_index = NR }
+    END {
+      if (focus_index == 0) print "none"
+      else if (clear_index_at_focus == 0) print "before-clear"
+      else if (activate_index == 0 || focus_index > activate_index) print "after-activate"
+      else print "between"
+    }' <<<"$window_setup_sequence"
+}
+window_wait_summary="distinct=$([[ -n "$window_setup_decoy_pid" && "$window_setup_decoy_pid" != "$window_setup_probe_pid" ]] \
+  && printf yes || printf no)"
+window_wait_summary+=" decoy=$(window_focus_wait_place decoy) probe=$(window_focus_wait_place probe)"
+check "nested: check cockpit waits until each window it opens has the focus (Mutter's map of it is over) before it activates the decoy, so a late map of the probe cannot take the focus back from the decoy: each window's focused-window comes after its own window-clear and before the decoy's activation" \
+  "$window_wait_summary" "distinct=yes decoy=between probe=between"
+
+# apps-rows reads what the replay sent from the replay itself, right after the grid step: GetState of the sampler's
+# name on the run's bus, by the name, object path and interface lib/protocol.js gives the service (read from it here),
+# and gives the names of the snapshot's two rankings to apps-rows; never through the extension, whose reading of them
+# the step judges.
+PROTOCOL_MODULE="$DOTFILES/gnome-shell/extensions/resource-pulse@dotfiles/lib/protocol.js"
+protocol_bus_name="$(sed -n -E "s/^export const RESOURCE_PULSE_BUS_NAME = '([^']+)';$/\1/p" "$PROTOCOL_MODULE")"
+protocol_object_path="$(sed -n -E "s/^export const RESOURCE_PULSE_OBJECT_PATH = '([^']+)';$/\1/p" "$PROTOCOL_MODULE")"
+protocol_interface_line_count="$(grep -c -x -F 'export const RESOURCE_PULSE_INTERFACE_NAME = RESOURCE_PULSE_BUS_NAME;' \
+  "$PROTOCOL_MODULE")"
+apps_rows_summary="protocol-read=$([[ -n "$protocol_bus_name" && -n "$protocol_object_path" ]] && printf yes \
+  || printf no)/$protocol_interface_line_count"
+apps_rows_summary+=" after-grid=[$(grep -A 2 -x -F 'resourcePulseCockpitCheck grid-geometry' "$CHECK_CALLS" | head -n 3 \
+  | tr '\n' ' ')]"
+apps_rows_summary+=" options=$(grep -F 'resourcePulseCockpitCheck apps-rows ' "$CHECK_CALL_OPTIONS" | head -n 1 \
+  | cut -d ' ' -f 3-)"
+check "nested: check cockpit's apps-rows reads the replay's snapshot from GetState of the sampler's name, path and interface (lib/protocol.js's) right after the grid step, and gives apps-rows the names of its two rankings" \
+  "$apps_rows_summary" \
+  "protocol-read=yes/1 after-grid=[resourcePulseCockpitCheck grid-geometry GetState $protocol_bus_name $protocol_object_path $protocol_bus_name resourcePulseCockpitCheck apps-rows ] options=$CHECK_REPLAY_APPS_OPTIONS"
+
+# layer-readd, in the same pass: between the stale steps' last request and the dropdown's first, it asks layer-removed,
+# then layer-placement and grid-geometry; the fixture layer-removed saw served no layout and the configError of a
+# cockpit.json the service cannot read (its sources as start wrote them), and the one the second half saw was start's
+# again: put back before the layer is judged back.
+layer_readd_requests="$(awk '$2 == "stale-card" { is_after_stale = 1; requests = ""; next }
+  is_after_stale && $2 == "dropdown-order" { print requests; exit }
+  is_after_stale { requests = requests $2 " " }' "$CHECK_CALLS")"
+layer_readd_summary="requests=[$layer_readd_requests]"
+layer_readd_summary+=" taken-away=$(jq -c '[.state.layout, .state.configError]' "$CHECK_CALLS.fixture.layer-removed" 2>&1)"
+layer_readd_summary+=" sources=$(cmp -s <(jq -S '.state.sources' "$CHECK_CALLS.fixture.layer-removed" 2>&1) \
+  <(jq -S '.state.sources' "$CHECK_RUN/state/cockpit-fixture.start.json" 2>&1) && printf as-start || printf changed)"
+layer_readd_summary+=" given-back=$(cmp -s "$CHECK_CALLS.fixture.layer-placement" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+  && printf start || printf other)"
+check "nested: check cockpit's layer-readd serves the run's fixture with no layout and the configError of a cockpit.json the service cannot read, asks layer-removed, puts the fixture back as start wrote it, then asks layer-placement and grid-geometry" \
+  "$layer_readd_summary" 'requests=[layer-removed layer-placement grid-geometry ] taken-away=[null,"missing"] sources=as-start given-back=start'
 
 BAD_GRID_DETAIL='the apps card is at 600x500+685+80, not its cell 600x500+680+80'
 UNJUDGED_STALE_DETAIL="cannot read the card's no-data line (_noDataLabel)"
-bad_grid_answers="$(answers_with bad-grid resourcePulseCockpitCheck.grid-geometry \
+bad_grid_answers="$(answers_with bad-grid resourcePulseCockpitCheck.grid-geometry.1 \
   "{\"verdict\":\"bad\",\"detail\":\"$BAD_GRID_DETAIL\"}")"
 unjudged_stale_answers="$(answers_with unjudged-stale resourcePulseCockpitCheck.stale-card \
   "{\"verdict\":\"could-not-judge\",\"detail\":\"$UNJUDGED_STALE_DETAIL\"}")"
-both_answers="$(answers_with both resourcePulseCockpitCheck.grid-geometry \
+both_answers="$(answers_with both resourcePulseCockpitCheck.grid-geometry.1 \
   "{\"verdict\":\"bad\",\"detail\":\"$BAD_GRID_DETAIL\"}" resourcePulseCockpitCheck.stale-card \
   "{\"verdict\":\"could-not-judge\",\"detail\":\"$UNJUDGED_STALE_DETAIL\"}")"
 check_cockpit_stubbed "$bad_grid_answers"
 faulted_check_summary="bad-grid=$CHECK_STUB_EXIT/$(grep -c -x -F "bad grid: $BAD_GRID_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
-faulted_check_summary+="/$(grep -c -x -F 'check cockpit: 29 ok, 1 bad, 0 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+faulted_check_summary+="/$(grep -c -x -F 'check cockpit: 31 ok, 1 bad, 0 could not judge' <<<"$CHECK_STUB_OUTPUT")"
 check_cockpit_stubbed "$unjudged_stale_answers"
 faulted_check_summary+=" unjudged-stale=$CHECK_STUB_EXIT/$(grep -c -x -F "could not judge stale: $UNJUDGED_STALE_DETAIL" \
-  <<<"$CHECK_STUB_OUTPUT")/$(grep -c -x -F 'check cockpit: 28 ok, 0 bad, 2 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+  <<<"$CHECK_STUB_OUTPUT")/$(grep -c -x -F 'check cockpit: 30 ok, 0 bad, 2 could not judge' <<<"$CHECK_STUB_OUTPUT")"
 check_cockpit_stubbed "$both_answers"
-faulted_check_summary+=" both=$CHECK_STUB_EXIT/$(grep -c -x -F 'check cockpit: 27 ok, 1 bad, 2 could not judge' \
+faulted_check_summary+=" both=$CHECK_STUB_EXIT/$(grep -c -x -F 'check cockpit: 29 ok, 1 bad, 2 could not judge' \
   <<<"$CHECK_STUB_OUTPUT")"
 silent_log_answers="$(answers_with silent-log)"
 rm -f "$silent_log_answers"/click-*.log
@@ -6509,7 +6610,7 @@ unminimized_answers="$(answers_with unminimized resourcePulseCockpitCheck.minimi
 check_cockpit_stubbed "$unminimized_answers"
 unminimized_summary="exit=$CHECK_STUB_EXIT $(check_step_verdicts cover)"
 unminimized_summary+=" named=$(grep -c -x -F "could not judge cover: $UNMINIMIZED_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
-unminimized_summary+=" summary=$(grep -c -x -F 'check cockpit: 29 ok, 0 bad, 1 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+unminimized_summary+=" summary=$(grep -c -x -F 'check cockpit: 31 ok, 0 bad, 1 could not judge' <<<"$CHECK_STUB_OUTPUT")"
 unminimized_summary+=" asked=$(check_stub_call_count '^resourcePulseCockpitCheck minimize-all$')"
 check "nested: check cockpit takes a minimize-all that could not be judged (a window that did not minimize) for its step's own setup: that step could not be judged, never ok" \
   "$unminimized_summary" "exit=2 cover:unjudged named=1 summary=1 asked=5"
@@ -6625,7 +6726,7 @@ unreadable_state_summary+=" limiter-times=$(grep -c -E '^check-(no-window|not-fo
 unreadable_state_summary+=" named=$(grep -c -F "cannot read the run's state ($CHECK_RUN/state/run.values)" \
   <<<"$CHECK_STUB_OUTPUT")/$(grep -c -F "the run's state ($CHECK_RUN/state/run.values) cannot be read" \
   <<<"$CHECK_STUB_OUTPUT")"
-unreadable_state_summary+=" summary=$(grep -c -x -F 'check cockpit: 25 ok, 0 bad, 5 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+unreadable_state_summary+=" summary=$(grep -c -x -F 'check cockpit: 27 ok, 0 bad, 5 could not judge' <<<"$CHECK_STUB_OUTPUT")"
 STATE_READER_RUN="$WIRING_TMP/state-reader-run"
 mkdir -p "$STATE_READER_RUN/state/run.values" || fatal "cannot lay out $STATE_READER_RUN"
 # state_reader_case prints read_recorded_run_value's status and what it printed, for the check's pass number.
@@ -6711,7 +6812,7 @@ never_shown_answers="$(answers_with never-shown resourcePulseCockpitCheck.window
   '{"verdict":"bad","detail":"no window of pid 1 yet"}')"
 check_cockpit_stubbed "$never_shown_answers"
 skipped_steps_summary="exit=$CHECK_STUB_EXIT steps=[$(check_steps_seen)]"
-skipped_steps_summary+=" summary=$(grep -c -x -F 'check cockpit: 16 ok, 0 bad, 14 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+skipped_steps_summary+=" summary=$(grep -c -x -F 'check cockpit: 18 ok, 0 bad, 14 could not judge' <<<"$CHECK_STUB_OUTPUT")"
 skipped_steps_summary+=" click-lines=$(grep -c -E \
   "^could not judge click[a-z-]*: the check's windows could not be set up \\(see the windows step\\)$" \
   <<<"$CHECK_STUB_OUTPUT")"
@@ -6726,6 +6827,110 @@ skipped_steps_summary+=" setup-fault=$(check_step_verdicts windows click)"
 check "nested: check cockpit prints a could-not-judge line for every step whose precondition is missing (the click steps without its windows, the cover steps without its probe), so the summary counts all of them; its windows' own setup failing could not be judged, never bad" \
   "$skipped_steps_summary" \
   "exit=2 steps=[$CHECK_STEP_NAMES ] summary=1 click-lines=7 cover-lines=4 setup-fault=windows:unjudged click:unjudged"
+
+# A window that never takes the focus as it maps makes the windows step could not judge, by the wait for its focus
+# alone: here the stand-in answers focused-window by the window asked about, the probe never focused and the decoy
+# focused (as it is once activated), so the decoy's activation after the waits succeeds, and only the probe's wait can
+# stop the clicks.
+unfocused_probe_answers="$(answers_with unfocused-probe resourcePulseCockpitCheck.focused-window.herdr-probe \
+  '{"verdict":"bad","detail":"the focus is on the decoy'"'"'s window, not the probe'"'"'s"}')"
+check_cockpit_stubbed "$unfocused_probe_answers"
+probe_focus_summary="$(check_step_verdicts windows click)"
+probe_focus_summary+=" decoy-activated=$(check_stub_call_count '^resourcePulseCockpitCheck activate-window$')"
+check "nested: check cockpit's windows step could not be judged, and its clicks are not run, when a window it opened never takes the focus as it maps, even though the decoy's activation would succeed" \
+  "$probe_focus_summary" "windows:unjudged click:unjudged decoy-activated=1"
+
+# apps-rows could not be judged when the replay's snapshot cannot be read (its GetState fails) or holds no ranking (a
+# replay from before the rankings): apps-rows is then never asked. layer-readd is bad for either half the extension
+# fails (no layer-removed, or no layer back), its fixture put back as start wrote it all the same. One pass gives the
+# first of each pair, a second the other.
+LAYER_REMOVED_BAD_DETAIL='the extension still holds a cockpit layer'
+LAYER_NOT_BACK_DETAIL='the background group holds 0 cockpit layers, not one'
+APPS_ROWS_UNREADABLE_DETAIL="cannot read the two rankings of the replay's snapshot (GetState of $protocol_bus_name)"
+readd_removed_bad_answers="$(answers_with readd-removed-bad resourcePulseCockpitCheck.layer-removed \
+  "{\"verdict\":\"bad\",\"detail\":\"$LAYER_REMOVED_BAD_DETAIL\"}" GetState.fails '')"
+check_cockpit_stubbed "$readd_removed_bad_answers"
+apps_rows_unjudged_summary="replay-unreadable=$(check_step_verdicts apps-rows)"
+apps_rows_unjudged_summary+="/$(grep -c -x -F "could not judge apps-rows: $APPS_ROWS_UNREADABLE_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
+apps_rows_unjudged_summary+="/asked=$(check_stub_call_count '^resourcePulseCockpitCheck apps-rows$')"
+layer_readd_bad_summary="removed-bad=$(check_step_verdicts layer-readd)"
+layer_readd_bad_summary+="/$(grep -c -x -F "bad layer-readd: $LAYER_REMOVED_BAD_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
+layer_readd_bad_summary+="/placement-asked=$(check_stub_call_count '^resourcePulseCockpitCheck layer-placement$')"
+layer_readd_bad_summary+="/fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+  && printf restored || printf changed)"
+# The layer step asks layer-placement first, so the second call onward is layer-readd's: each answered bad.
+readd_back_bad_answers="$(answers_with readd-back-bad GetState "$CHECK_REPLAY_STATE_WITHOUT_RANKINGS")"
+for layer_placement_call in $(seq 2 21); do
+  printf '%s\n' "{\"verdict\":\"bad\",\"detail\":\"$LAYER_NOT_BACK_DETAIL\"}" \
+    >"$readd_back_bad_answers/resourcePulseCockpitCheck.layer-placement.$layer_placement_call"
+done
+check_cockpit_stubbed "$readd_back_bad_answers"
+apps_rows_unjudged_summary+=" no-ranking=$(check_step_verdicts apps-rows)"
+apps_rows_unjudged_summary+="/$(grep -c -x -F "could not judge apps-rows: $APPS_ROWS_UNREADABLE_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
+apps_rows_unjudged_summary+="/asked=$(check_stub_call_count '^resourcePulseCockpitCheck apps-rows$')"
+layer_readd_bad_summary+=" back-bad=$(check_step_verdicts layer-readd)"
+layer_readd_bad_summary+="/$(grep -c -x -F "bad layer-readd: $LAYER_NOT_BACK_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
+layer_readd_bad_summary+="/fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+  && printf restored || printf changed)"
+check "nested: check cockpit's apps-rows could not be judged, and is not asked, when the replay's snapshot cannot be read or holds no ranking" \
+  "$apps_rows_unjudged_summary" \
+  "replay-unreadable=apps-rows:unjudged/1/asked=0 no-ranking=apps-rows:unjudged/1/asked=0"
+check "nested: check cockpit's layer-readd is bad when the layout taken away leaves the layer, and when the layout given back brings none; the fixture is put back as start wrote it either way" \
+  "$layer_readd_bad_summary" \
+  "removed-bad=layer-readd:bad/1/placement-asked=2/fixture=restored back-bad=layer-readd:bad/1/fixture=restored"
+
+# A fixture layer-readd could not rewrite: the step could not be judged, asks neither half, and leaves the fixture as
+# start wrote it; the later steps that need the grid are judged as ever (the layout never went).
+# shellcheck disable=SC2016  # Evaluated by the check's own bash.
+CHECK_STUB_OVERRIDES='eval "original_$(declare -f replace_run_cockpit_fixture)"
+replace_run_cockpit_fixture() {
+  [[ "$2" == "$UNREADABLE_LAYOUT_JQ" ]] && return 1
+  original_replace_run_cockpit_fixture "$@"
+}'
+check_cockpit_stubbed "$CHECK_ANSWERS"
+CHECK_STUB_OVERRIDES=""
+layout_not_rewritten_summary="$(check_step_verdicts layer-readd)"
+layout_not_rewritten_summary+="/$(grep -c -x -F "could not judge layer-readd: could not rewrite the run's fixture" \
+  <<<"$CHECK_STUB_OUTPUT")"
+layout_not_rewritten_summary+=" removed-asked=$(check_stub_call_count '^resourcePulseCockpitCheck layer-removed$')"
+layout_not_rewritten_summary+=" placement-asked=$(check_stub_call_count '^resourcePulseCockpitCheck layer-placement$')"
+layout_not_rewritten_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+  && printf restored || printf changed) $(check_step_verdicts lock-path count-budgets)"
+check "nested: check cockpit's layer-readd could not be judged when it could not rewrite the run's fixture, asks neither half, leaves the fixture as start wrote it, and the steps that need the grid are still judged" \
+  "$layout_not_rewritten_summary" \
+  "layer-readd:unjudged/1 removed-asked=0 placement-asked=1 fixture=restored lock-path:ok count-budgets:ok"
+
+# The line the extension writes for an unreadable layout (its client log's console.warn: GNOME Shell's WARNING mark,
+# as in the one nested run's log) is provoked by layer-readd, and the log steps never read it as a fault of the
+# extension; a critical between the two halves still reads as it does anywhere (one of St naming the extension's widget
+# by its GType name, which no stack ties to the extension: could not be judged). In the first of these passes the
+# check's waits are recorded too: right before its screenshot the check waits SCREENSHOT_WINDOW_EFFECT_WAIT_SECONDS (2)
+# after the pointer's rest, so that no closing window's effect is in the picture.
+LAYOUT_UNREADABLE_LOG_LINE='(gnome-shell:7): GNOME Shell-WARNING **: 10:00:04.000: resource-pulse: could not read the'
+LAYOUT_UNREADABLE_LOG_LINE+=' cockpit layout (missing), so the card is drawn top right'
+LAYER_READD_ST_CRITICAL_LINE='(gnome-shell:7): St-CRITICAL **: 10:00:04.100: st_widget_get_theme_node called on the'
+LAYER_READD_ST_CRITICAL_LINE+=' widget [0x5600 Gjs_resource-pulse_dotfiles_cockpitLayer_CockpitLayer.rp-cockpit-layer'
+LAYER_READD_ST_CRITICAL_LINE+=':insensitive ("MACHINE")] which is not in the stage.'
+layout_line_answers="$(answers_with layout-line resourcePulseCockpitCheck.layer-removed.log \
+  "$LAYOUT_UNREADABLE_LOG_LINE")"
+# shellcheck disable=SC2016  # Evaluated by the check's own bash.
+CHECK_STUB_OVERRIDES='sleep() { printf "sleep %s\n" "$1" >>"$CHECK_STUB_CALLS"; }'
+check_cockpit_stubbed "$layout_line_answers"
+CHECK_STUB_OVERRIDES=""
+provoked_layout_line_summary="provoked=$(grep -c -x -F "$LAYOUT_UNREADABLE_LOG_LINE" "$CHECK_RUN/log/shell.log")"
+provoked_layout_line_summary+=" $(check_step_verdicts layer-readd log)"
+screenshot_wait_summary="before-screenshot=[$(grep -B 3 -x -F 'Screenshot cockpit-1.png' "$CHECK_CALLS" | head -n 3 \
+  | tr '\n' ' ')]"
+layout_critical_answers="$(answers_with layout-critical resourcePulseCockpitCheck.layer-removed.log \
+  "$LAYOUT_UNREADABLE_LOG_LINE"$'\n'"$LAYER_READD_ST_CRITICAL_LINE")"
+check_cockpit_stubbed "$layout_critical_answers"
+provoked_layout_line_summary+=" with-critical=$(check_step_verdicts log)"
+provoked_layout_line_summary+="/$(grep -c -F 'could not judge log: 1 critical line(s) of the toolkit' <<<"$CHECK_STUB_OUTPUT")"
+check "nested: check cockpit's log steps do not read layer-readd's own provoked line (a warning) as a fault of the extension, and still read a critical between its halves as they would anywhere" \
+  "$provoked_layout_line_summary" "provoked=1 layer-readd:ok log:ok with-critical=log:unjudged/1"
+check "nested: check cockpit waits after the pointer's rest before its screenshot, so that no closing window's effect is in the picture" \
+  "$screenshot_wait_summary" \
+  'before-screenshot=[resourcePulseNestedPointer move resourcePulseNestedPointer at sleep 2 ]'
 
 # A window whose pid record cannot be written (a directory stands where the
 # record goes) is ended at once: no stop and no exit could find it by its
@@ -6754,18 +6959,27 @@ check "nested: a window whose pid record cannot be written is ended at once, sin
 
 # A fixture that could not be put back makes the step that ran on it could not
 # judge: the step after the cover's put-back (stale), the stale step whose own
-# put-back failed (stale-recovers), and the step after the dropdown's
-# (dropdown-click). Every put-back fails here.
+# put-back failed (stale-recovers, layer-readd), and the step after the dropdown's
+# (dropdown-click); layer-readd then judges no second half, and the later steps
+# that need the grid (lock-path, count-budgets) could not be judged either,
+# since the layout may not be back. Every put-back fails here.
 CHECK_FIXTURE_NOT_RESTORED_DETAIL="the run's fixture could not be put back as start wrote it, so this step ran on a"
 CHECK_FIXTURE_NOT_RESTORED_DETAIL+=" rewritten one"
+CHECK_GRID_NOT_BACK_DETAIL='layer-readd could not put the layout back, so the grid this step needs may not be drawn'
 CHECK_STUB_RESTORE_FAILS=1 check_cockpit_stubbed "$CHECK_ANSWERS"
-restore_failed_summary="exit=$CHECK_STUB_EXIT $(check_step_verdicts stale stale-recovers dropdown-click)"
-restore_failed_summary+=" named=$(grep -c -E "^could not judge (stale|stale-recovers|dropdown-click): $CHECK_FIXTURE_NOT_RESTORED_DETAIL$" \
+restore_failed_summary="exit=$CHECK_STUB_EXIT $(check_step_verdicts stale stale-recovers layer-readd dropdown-click \
+  lock-path count-budgets)"
+restore_failed_summary+=" named=$(grep -c -E \
+  "^could not judge (stale|stale-recovers|layer-readd|dropdown-click): $CHECK_FIXTURE_NOT_RESTORED_DETAIL$" \
   <<<"$CHECK_STUB_OUTPUT")"
-restore_failed_summary+=" summary=$(grep -c -x -F 'check cockpit: 27 ok, 0 bad, 3 could not judge' <<<"$CHECK_STUB_OUTPUT")"
-check "nested: check cockpit makes the step that ran on a fixture it could not put back could not judge (the next step, or the one whose own put-back failed)" \
+restore_failed_summary+=" grid-named=$(grep -c -E "^could not judge (lock-path|count-budgets): $CHECK_GRID_NOT_BACK_DETAIL$" \
+  <<<"$CHECK_STUB_OUTPUT")"
+restore_failed_summary+=" placement-asked=$(check_stub_call_count '^resourcePulseCockpitCheck layer-placement$')"
+restore_failed_summary+=" lock-path-asked=$(check_stub_call_count '^resourcePulseCockpitCheck lock-path$')"
+restore_failed_summary+=" summary=$(grep -c -x -F 'check cockpit: 26 ok, 0 bad, 6 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+check "nested: check cockpit makes the step that ran on a fixture it could not put back could not judge (the next step, or the one whose own put-back failed); with the layout not put back, layer-readd judges nothing back and the steps that need the grid (lock-path, count-budgets) could not be judged" \
   "$restore_failed_summary" \
-  "exit=2 stale:unjudged stale-recovers:unjudged dropdown-click:unjudged named=3 summary=1"
+  "exit=2 stale:unjudged stale-recovers:unjudged layer-readd:unjudged dropdown-click:unjudged lock-path:unjudged count-budgets:unjudged named=4 grid-named=2 placement-asked=1 lock-path-asked=0 summary=1"
 
 # end_check_perf signals CHECK_PERF_PID only while it is the check's own child
 # (is_own_child_process, as end_perf_window and end_perf_cost_job do): between
@@ -7094,7 +7308,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1195
+EXPECTED_ROWS=1208
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

@@ -28,7 +28,7 @@ import System from 'system';
 
 import {
     DEFAULT_REPLAY_SCENARIO_NAME, REPLAY_TOTAL_MEMORY_BYTES, ReplayGenerator, isNewScenarioRequest,
-    parseScenarioRequest,
+    parseScenarioRequest, replayApps,
 } from './replayGenerator.js';
 
 const LOG_PREFIX = 'replay-service:';
@@ -69,12 +69,8 @@ const DISK_SWAP_BYTES = 0;
 const CPU_PRESSURE_PER_CPU_PERCENT = 0.25;
 const MEMORY_PRESSURE_PERCENT = 0.1;
 const IO_PRESSURE_PERCENT = 0.2;
-const TOP_CPU_APP_GROUP_KEY = 'app.slice/chromium';
-const TOP_CPU_APP_NAME = 'Chromium';
-const TOP_CPU_APP_CPU_RATIO = 0.6;
-const TOP_MEMORY_APP_GROUP_KEY = 'app.slice/herdr-server.service';
-const TOP_MEMORY_APP_NAME = 'herdr agents';
-const TOP_MEMORY_APP_GIBIBYTES = 15.7;
+// The apps (both winners and both rankings) come from replayGenerator.js replayApps, which a row reads as the
+// extension's reader does.
 
 /**
  * Succeeds only for the address of the run's own private session bus, as dbus-run-session hands it over: exactly
@@ -371,18 +367,7 @@ class ReplayService {
                 memory: MEMORY_PRESSURE_PERCENT,
                 io: IO_PRESSURE_PERCENT,
             },
-            apps: {
-                topCpu: {
-                    groupKey: TOP_CPU_APP_GROUP_KEY,
-                    name: TOP_CPU_APP_NAME,
-                    cpuPercent: cpuBusyPercent * TOP_CPU_APP_CPU_RATIO,
-                },
-                topMemory: {
-                    groupKey: TOP_MEMORY_APP_GROUP_KEY,
-                    name: TOP_MEMORY_APP_NAME,
-                    memoryBytes: TOP_MEMORY_APP_GIBIBYTES * bytesPerGibibyte,
-                },
-            },
+            apps: replayApps(cpuBusyPercent),
             isComplete: true,
         };
     }

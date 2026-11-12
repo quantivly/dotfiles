@@ -32,6 +32,14 @@
 //   grid-geometry {expectedCaptions,    the layer holds the layout's groups, draws exactly the known card ids, none of
 //     expectedCardIds, unknownCardIds}  the unknown ones; each card on screen at its cell, inside the work area; each
 //                                       caption shown with its text
+//   apps-rows {cpuNames, memoryNames}   the apps card shows the replay's rankings (the names its snapshot holds):
+//                                       of each, as many rows as it shows (the entries sent, at most
+//                                       APPS_CARD_ROW_LIMIT), each named, the first the replay's first entry; a card
+//                                       showing no rows is bad; a ranking not given, or empty, could-not-judge
+//   layer-removed                       the layout taken away inside one enable: no layer, none in the background
+//                                       group, the v2 card top right in it, the dropdown's sessions item shown while
+//                                       the cockpit is live (ruling D23); judged again by layer-placement and
+//                                       grid-geometry once the layout is back
 //   layer-interactive                   the layer takes the pointer, no DESKTOP window, the session rows reactive
 //   session-row-point {surface}         the middle of the first session row of the layer's or the dropdown's card, in
 //                                       stage pixels, with its session id, name and tooltip text
@@ -93,6 +101,9 @@ function resourcePulseCockpitCheck(request, options = {}) {
         V2_CARD_STYLE_CLASS, 'resource-pulse-hover-label'];
     const SYSTEM_CARD_ID = 'system';
     const SESSIONS_CARD_ID = 'sessions';
+    const APPS_CARD_ID = 'apps';
+    /** lib/constants.js APPS_CARD_ROW_LIMIT: the rows the apps card shows of each ranking at most. */
+    const APPS_CARD_ROW_LIMIT = 6;
     const LAYER_SURFACE = 'layer';
     const DROPDOWN_SURFACE = 'dropdown';
     const COVERED_EXPECTATION = 'covered';
@@ -1007,6 +1018,131 @@ function resourcePulseCockpitCheck(request, options = {}) {
             `the ${cardId} card shows its rows again`);
     }
 
+    /**
+     * @param {object} card - The apps card.
+     * @param {string} fieldName - '_cpuRows' or '_memoryRows'.
+     * @param {string} description - What the rows are, for the could-not-judge.
+     * @returns {Array<object>} That ranking's rows (CardRow: actor, nameLabel), shown or not.
+     * @throws {CouldNotJudgeError} When they cannot be read as a list.
+     */
+    function appRowsOf(card, fieldName, description) {
+        const rows = readField(card, fieldName, description);
+        if (!Array.isArray(rows))
+            throw new CouldNotJudgeError(`${description} are not a list`);
+        return rows;
+    }
+
+    /**
+     * One ranking of the apps card against what the replay sent for it: as many rows shown as the card shows of it
+     * (the entries sent, at most APPS_CARD_ROW_LIMIT), each named, the first the replay's first entry.
+     *
+     * @param {string} rankingName - 'CPU' or 'memory', for the faults.
+     * @param {Array<object>} shownRows - The ranking's rows shown now.
+     * @param {string[]} sentNames - The names of the replay's entries, in order; at least one.
+     * @returns {string[]} The faults found; none when it holds.
+     */
+    function appsRankingFaults(rankingName, shownRows, sentNames) {
+        const faults = [];
+        const shownNames = shownRows.map(row => row.nameLabel.text);
+        const expectedCount = Math.min(sentNames.length, APPS_CARD_ROW_LIMIT);
+        if (shownNames.length !== expectedCount) {
+            const shownText = `${shownNames.length} row(s) (${shownNames.join(', ')})`;
+            const sentText = `${sentNames.length} the replay sent (${sentNames.join(', ')})`;
+            faults.push(`the ${rankingName} ranking shows ${shownText}, not ${expectedCount} of the ${sentText}`);
+        }
+        if (shownNames.some(name => name === ''))
+            faults.push(`a row of the ${rankingName} ranking shows no name`);
+        if (shownNames.length > 0 && shownNames[0] !== sentNames[0])
+            faults.push(`the ${rankingName} ranking's first row reads '${shownNames[0]}', not the replay's '${sentNames[0]}'`);
+        return faults;
+    }
+
+    /**
+     * @param {{cpuNames: string[], memoryNames: string[]}} sent - The names of the replay's two rankings, as its
+     *     snapshot (GetState) holds them.
+     * @returns {object} apps-rows' answer.
+     */
+    function judgeAppsRows({cpuNames, memoryNames}) {
+        if (!Array.isArray(cpuNames) || !Array.isArray(memoryNames))
+            throw new CouldNotJudgeError("apps-rows needs cpuNames and memoryNames: the names of the replay's rankings");
+        for (const [rankingName, sentNames] of [['CPU', cpuNames], ['memory', memoryNames]]) {
+            if (sentNames.length === 0)
+                throw new CouldNotJudgeError(`the replay's ${rankingName} ranking is empty: nothing to judge its rows against`);
+        }
+        const card = layerCard(cockpitLayer(extensionObject()), APPS_CARD_ID);
+        const cpuRows = appRowsOf(card, '_cpuRows', "the apps card's CPU rows");
+        const memoryRows = appRowsOf(card, '_memoryRows', "the apps card's memory rows");
+        const contentBox = readField(card, '_contentBox', "the apps card's rows");
+        const noDataLabel = readField(card, '_noDataLabel', "the apps card's no-data line");
+        if (!contentBox.visible) {
+            const sentText = `${cpuNames.length} CPU and ${memoryNames.length} memory entries the replay sent`;
+            return badAnswer([`the apps card shows no row but '${noDataLabel.text}', against the ${sentText}`]);
+        }
+        const shownCpuRows = cpuRows.filter(row => row.actor.visible);
+        const shownMemoryRows = memoryRows.filter(row => row.actor.visible);
+        const faults = [
+            ...appsRankingFaults('CPU', shownCpuRows, cpuNames),
+            ...appsRankingFaults('memory', shownMemoryRows, memoryNames),
+        ];
+        const shownCountsText = `${shownCpuRows.length} CPU and ${shownMemoryRows.length} memory rows`;
+        return judged(faults, `the apps card shows ${shownCountsText}, each named, the replay's first entries first ` +
+            `(${cpuNames[0]}; ${memoryNames[0]})`);
+    }
+
+    /**
+     * Whether a rectangle lies inside a work area, in its top right quarter by its middle.
+     *
+     * @param {{x: number, y: number, width: number, height: number}} rect - A rectangle.
+     * @param {{x: number, y: number, width: number, height: number}} workArea - The work area.
+     * @returns {boolean} True when it does.
+     */
+    function isTopRightOf(rect, workArea) {
+        const isRightHalf = rect.x + rect.width / 2 > workArea.x + workArea.width / 2;
+        const isTopHalf = rect.y + rect.height / 2 < workArea.y + workArea.height / 2;
+        return isRectInside(rect, workArea) && isRightHalf && isTopHalf;
+    }
+
+    /**
+     * The layout taken away inside one enable (the service's configError, no layout): the extension removed the layer
+     * and drew the v2 card top right, as with no cockpit; the dropdown keeps its sessions item while the cockpit is
+     * live (ruling D23).
+     *
+     * @returns {object} layer-removed's answer.
+     */
+    function judgeLayerRemoved() {
+        const stateObj = extensionObject();
+        const layer = readField(stateObj, '_layer', "the extension's cockpit layer");
+        const v2Card = readField(stateObj, '_card', "the extension's v2 card");
+        const sessionsItem = readField(topBarIndicator(stateObj), '_sessionsItem', "the dropdown's sessions item");
+        const cockpitState = readField(stateObj, '_cockpitClient', "the extension's cockpit client").state;
+        const backgroundGroup = readField(Main.layoutManager, '_backgroundGroup', "the shell's background group");
+        const monitors = Main.layoutManager.monitors;
+        if (monitors.length !== 1)
+            throw new CouldNotJudgeError(`the run has ${monitors.length} monitors, not the one the only-monitor rule needs`);
+        if (cockpitState !== COCKPIT_LIVE_STATE)
+            throw new CouldNotJudgeError(`the cockpit is ${cockpitState}, not ${COCKPIT_LIVE_STATE}`);
+        const faults = [];
+        if (layer !== null)
+            faults.push('the extension still holds a cockpit layer');
+        const layerActorCount = backgroundGroup.get_children()
+            .filter(actor => actor.has_style_class_name?.(LAYER_STYLE_CLASS)).length;
+        if (layerActorCount > 0)
+            faults.push(`the background group still holds ${layerActorCount} cockpit layer(s)`);
+        const workArea = Main.layoutManager.getWorkAreaForMonitor(ONLY_MONITOR_INDEX);
+        if (v2Card === null || v2Card.get_parent() !== backgroundGroup) {
+            faults.push('the v2 card is not in the background group');
+        } else if (!v2Card.mapped) {
+            faults.push('the v2 card is not on screen');
+        } else if (!isTopRightOf(stageRect(v2Card), workArea)) {
+            const cardRectText = describeRect(stageRect(v2Card));
+            faults.push(`the v2 card is at ${cardRectText}, not top right of the work area ${describeRect(workArea)}`);
+        }
+        if (sessionsItem === null || !sessionsItem.visible)
+            faults.push("the dropdown's sessions item is hidden while the cockpit is live (ruling D23)");
+        return judged(faults, "no layer; the v2 card top right in the background group; the dropdown's sessions item " +
+            'shown, the cockpit live (ruling D23)');
+    }
+
     /** @returns {object} dropdown-order's answer. */
     function judgeDropdownOrder() {
         const stateObj = extensionObject();
@@ -1243,6 +1379,8 @@ function resourcePulseCockpitCheck(request, options = {}) {
         'draw-watch-arm': armDrawWatch,
         'draw-watch-read': readDrawWatch,
         'stale-card': judgeStaleCard,
+        'apps-rows': judgeAppsRows,
+        'layer-removed': judgeLayerRemoved,
         'dropdown-order': judgeDropdownOrder,
         'dropdown-open': expectation => setDropdownOpen(true, expectation),
         'dropdown-close': () => setDropdownOpen(false),

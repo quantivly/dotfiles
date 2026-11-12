@@ -162,11 +162,13 @@
 #       otherwise, before it acts), one line per step (ok, bad, or could not judge:
 #       never ok), each in-shell step a request of tests/nested/cockpit-check.js:
 #       the extension ACTIVE, and the log so far free of its errors; the layer and
-#       the grid; hover; two windows of its own (a decoy holding the focus, then
-#       herdr-probe, the fixture's one candidate); the clicks (from the decoy's focus,
-#       from every window minimized, a reply naming no window, one not focused, two
-#       quick clicks); cover and reveal; a source made stale and put back; the
-#       dropdown; the lock path (disable, enable); shots/cockpit-<pass>.png; the log;
+#       the grid; the apps card's rows against the replay's rankings; hover; two
+#       windows of its own (a decoy holding the focus, then herdr-probe, the
+#       fixture's one candidate); the clicks (from the decoy's focus, from every
+#       window minimized, a reply naming no window, one not focused, two quick
+#       clicks); cover and reveal; a source made stale and put back; the layout
+#       taken away and given back; the dropdown; the lock path (disable, enable);
+#       shots/cockpit-<pass>.png, once window effects are over; the log;
 #       and the count budgets through perf (about nine minutes more). It may run
 #       again in the same run: each pass is numbered in state/run.values, judges the
 #       log from where the last pass's log step read to (the first pass from the
@@ -451,6 +453,11 @@ readonly POINTER_CLICK_WORD='click'
 # of it on the nested monitor at either scale), so that no hover or tooltip an earlier step left is in the picture.
 readonly POINTER_REST_X_PX=20
 readonly POINTER_REST_Y_PX=600
+# The check's windows close right before its screenshot, and GNOME Shell's effect on a closing window (windowManager.js
+# DESTROY_WINDOW_ANIMATION_TIME, 150 ms; a minimize's MINIMIZE_WINDOW_ANIMATION_TIME, 400 ms) can outlast the window
+# leaving the session's list: the one nested run's first shot held a window mid-effect. After the pointer's rest the
+# screenshot waits this long, so that no window effect is in the picture.
+readonly SCREENSHOT_WINDOW_EFFECT_WAIT_SECONDS=2
 readonly CHECK_COCKPIT_WORD='cockpit'
 # The verdicts the in-shell answers carry.
 readonly CHECK_OK_VERDICT='ok'
@@ -490,6 +497,20 @@ readonly STALE_NETWORK_JQ='.state.sources.network.sampledAtUsec -=
     ($intervals * .state.sources.network.intervalSeconds * 1000000)'
 # Past lib/constants.js COCKPIT_SOURCE_STALE_INTERVALS (3), so the network source is stale.
 readonly STALE_NETWORK_INTERVALS=4
+# layer-readd's rewrite: the state the cockpit service serves for a cockpit.json it cannot read (service/cockpit.js
+# COCKPIT_CONFIG_MISSING_ERROR, also what a file that is not there gives): no layout, and that configError.
+readonly COCKPIT_CONFIG_MISSING_ERROR='missing'
+# shellcheck disable=SC2016  # jq programs: jq binds the $ names.
+readonly UNREADABLE_LAYOUT_JQ='.state.layout = null | .state.configError = $config_error'
+# apps-rows reads the replay's snapshot as the extension's client does, from GetState of the sampler's name on the
+# run's bus (lib/protocol.js RESOURCE_PULSE_OBJECT_PATH, RESOURCE_PULSE_INTERFACE_NAME, GET_STATE_METHOD_NAME), and
+# never through the extension, whose reading of it is what the step judges: the names of its two rankings.
+readonly SERVICE_OBJECT_PATH='/io/github/quantivly/dotfiles/ResourcePulse1'
+readonly SERVICE_INTERFACE_NAME="$SERVICE_BUS_NAME"
+readonly GET_STATE_METHOD_NAME='GetState'
+readonly REPLAY_APPS_OPTIONS_JQ='.data[0] | fromjson | .snapshot.apps
+    | {cpuNames: [(.cpuRanking // error("no cpuRanking"))[].name],
+        memoryNames: [(.memoryRanking // error("no memoryRanking"))[].name]}'
 readonly STALE_CARD_ID='connections'
 readonly COVERED_NAME_SUFFIX='-covered'
 readonly VISIBLE_NAME_SUFFIX='-visible'
@@ -649,6 +670,9 @@ CHECK_PASS_STATE_NOTE=""
 CHECK_PASS_NUMBER_NOTE=""
 # Set when the run's fixture could not be put back: the next step (or the one under way) could not be judged.
 CHECK_FIXTURE_NOT_RESTORED_NOTE=""
+# Set when layer-readd could not put the layout back: the later steps that need the grid (lock-path, count-budgets)
+# could not be judged, since the grid may not be drawn.
+CHECK_GRID_NOT_BACK_NOTE=""
 # check cockpit's perf pass while it runs in the background (end_check_perf ends it on a signal).
 CHECK_PERF_PID=""
 # The window perf opened over the card, by pid and start time (end_perf_window ends only that process, and only
@@ -3782,6 +3806,42 @@ check_cockpit_layout_steps() {
         note_unjudged "cannot read the layout of the run's fixture"
     fi
     end_check_step grid "$CHECK_DETAIL"
+    check_cockpit_apps_rows_step
+}
+
+#######################################
+# Print apps-rows' options, {cpuNames, memoryNames}: the names of the two
+# rankings in the replay's snapshot, from GetState of the sampler's name on
+# the run's bus. Fails, saying why on stderr, when the call fails or the
+# snapshot holds no ranking.
+#######################################
+replay_apps_options() {
+    local reply
+    if ! reply="$(busctl --address="$CHECK_ADDRESS" --json=short --timeout="$EVAL_TIMEOUT_SECONDS" \
+        call "$SERVICE_BUS_NAME" "$SERVICE_OBJECT_PATH" "$SERVICE_INTERFACE_NAME" "$GET_STATE_METHOD_NAME" 2>&1)"; then
+        note "the $GET_STATE_METHOD_NAME call failed: $reply"
+        return 1
+    fi
+    jq -c "$REPLAY_APPS_OPTIONS_JQ" <<<"$reply"
+}
+
+#######################################
+# Step 3b: the apps card shows the replay's rankings (apps-rows): of each, as
+# many rows as the card shows, each named, the first the replay's first entry.
+# What the replay sent is read from its own snapshot (replay_apps_options),
+# never through the extension; a snapshot that cannot be read, or holds no
+# ranking, could not be judged.
+#######################################
+check_cockpit_apps_rows_step() {
+    local apps_options
+    begin_check_step
+    if apps_options="$(replay_apps_options)"; then
+        poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check apps-rows "$apps_options"
+        note_answer
+    else
+        note_unjudged "cannot read the two rankings of the replay's snapshot ($GET_STATE_METHOD_NAME of $SERVICE_BUS_NAME)"
+    fi
+    end_check_step apps-rows "$CHECK_DETAIL"
 }
 
 #######################################
@@ -4034,6 +4094,48 @@ check_cockpit_stale_steps() {
 }
 
 #######################################
+# Step 7b: the layout taken away and given back inside one enable
+# (layer-readd), the path a dock, a returning cockpit service and a repaired
+# cockpit.json take: the run's fixture serves no layout and the configError of
+# a cockpit.json that cannot be read, then is put back as start wrote it, on
+# every path. Taken away (layer-removed): no layer, the v2 card top right, the
+# dropdown as ruling D23 has it. Given back (layer-placement, grid-geometry):
+# one layer, the v2 card in the system cell, every card of the layout at its
+# cell. A fixture that could not be rewritten could not be judged; one that
+# could not be put back could not be judged either, and nor can the later
+# steps that need the grid (CHECK_GRID_NOT_BACK_NOTE). The extension's journal
+# line for the unreadable layout is a warning (console.warn on its client log,
+# "could not read the cockpit layout (missing), ..."), which the log steps
+# never read as a fault; any critical between the two halves still reads as
+# it would anywhere else.
+#######################################
+check_cockpit_layer_readd_step() {
+    local grid_options is_layout_taken_away=0
+    begin_check_step
+    if ! grid_options="$(jq -c --argjson known "$COCKPIT_KNOWN_CARD_IDS_JSON" "$GRID_OPTIONS_JQ" \
+        "$CHECK_RUN_DIR/$COCKPIT_FIXTURE_START_RELATIVE_PATH")"; then
+        note_unjudged "cannot read the layout of the run's fixture"
+        end_check_step layer-readd ''
+        return 0
+    fi
+    if rewrite_check_fixture "$UNREADABLE_LAYOUT_JQ" --arg config_error "$COCKPIT_CONFIG_MISSING_ERROR"; then
+        is_layout_taken_away=1
+        poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check layer-removed
+        note_answer
+    fi
+    restore_check_fixture
+    if [[ -n "$CHECK_FIXTURE_NOT_RESTORED_NOTE" ]]; then
+        CHECK_GRID_NOT_BACK_NOTE="layer-readd could not put the layout back, so the grid this step needs may not be drawn"
+    elif (( is_layout_taken_away )); then
+        poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check layer-placement
+        note_answer
+        poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check grid-geometry "$grid_options"
+        note_answer
+    fi
+    end_check_step layer-readd "taken away: no layer, the v2 card top right, the dropdown's sessions item shown (ruling D23); given back: one layer, the v2 card in the system cell, every card at its cell"
+}
+
+#######################################
 # Step 8: the dropdown's sessions item, its card open and closed, its tooltip
 # above the menu and gone when it closes, a change drawn on the next Sample
 # while open, and a row's click closing the menu and focusing the probe.
@@ -4108,7 +4210,11 @@ check_cockpit_dropdown_steps() {
 #######################################
 check_cockpit_lock_and_screenshot_steps() {
     local shot_path shot_status
-    check_step_of_request lock-path 1 lock-path "{\"timeoutMs\": $LOCK_PATH_TIMEOUT_MS}"
+    if [[ -n "$CHECK_GRID_NOT_BACK_NOTE" ]]; then
+        print_unjudged_steps "$CHECK_GRID_NOT_BACK_NOTE" lock-path
+    else
+        check_step_of_request lock-path 1 lock-path "{\"timeoutMs\": $LOCK_PATH_TIMEOUT_MS}"
+    fi
     close_check_windows
     begin_check_step
     # Named by the pass's number: one that cannot be told, or recorded, could name an earlier or a later pass's shot.
@@ -4118,6 +4224,7 @@ check_cockpit_lock_and_screenshot_steps() {
         return 0
     fi
     rest_pointer_off_the_grid
+    sleep "$SCREENSHOT_WINDOW_EFFECT_WAIT_SECONDS"
     shot_path="$(screenshot_subcommand "$CHECK_SCREENSHOT_NAME_PREFIX$CHECK_PASS_NUMBER$PNG_SUFFIX")"
     shot_status=$?
     case "$shot_status" in
@@ -4232,6 +4339,11 @@ end_check_perf() {
 #######################################
 check_cockpit_count_budgets_step() {
     local perf_output_path="$CHECK_RUN_DIR/$CHECK_PERF_OUTPUT_RELATIVE_PATH" perf_output perf_status verdict_lines
+    # perf reads the grid in every enabled state: with the layout not put back it would judge a grid that is not drawn.
+    if [[ -n "$CHECK_GRID_NOT_BACK_NOTE" ]]; then
+        print_unjudged_steps "$CHECK_GRID_NOT_BACK_NOTE" count-budgets
+        return 0
+    fi
     # Made first: a redirect that failed would end the job with status 1, perf's own word for a broken budget.
     if ! : >"$perf_output_path"; then
         begin_check_step
@@ -4336,6 +4448,7 @@ check_cockpit_subcommand() {
     check_cockpit_click_steps
     check_cockpit_cover_steps
     check_cockpit_stale_steps
+    check_cockpit_layer_readd_step
     check_cockpit_dropdown_steps
     check_cockpit_lock_and_screenshot_steps
     check_cockpit_log_step
