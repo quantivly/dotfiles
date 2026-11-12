@@ -281,8 +281,8 @@ function linkedUplinkLook(uplink) {
 /**
  * How an uplink that is neither wired nor Wi-Fi looks (kind none: a VPN on a full tunnel, a tethered phone; or a
  * kind the reader did not know): 'online' while the verdict says the internet is reachable, the part named when it is
- * limited or portal, and offline otherwise (kind none with no verdict, 'unknown', reads 'uplink unknown' before it
- * comes here: isUplinkUnknown).
+ * limited or portal, and offline otherwise, which is a verdict of none (with no verdict, null or 'unknown', it reads
+ * 'uplink unknown' before it comes here: isUplinkUnknown).
  *
  * @param {{kind: string|null, connectivity: string|null}} uplink - The uplink.
  * @returns {{icon: string, text: string, tooltipNote: string|null}} The row's icon and words, and the tooltip line
@@ -298,17 +298,18 @@ function otherUplinkLook(uplink) {
 }
 
 /**
- * Whether the uplink says nothing of the internet: no NetworkManager (kind and connectivity null), or a primary
- * connection neither wired nor Wi-Fi whose connectivity NetworkManager has not judged (kind none, 'unknown'). The
- * first has no link to name and the second no verdict, so neither is "offline".
+ * Whether the uplink says nothing of the internet: a primary connection neither wired nor Wi-Fi (kind none, or no
+ * kind: NetworkManager absent) with no verdict from NetworkManager (connectivity null, or 'unknown': checks off or not
+ * run yet). Neither names a link that is known to be down, so neither is "offline"; that word is kept for a verdict
+ * of none. A wired or Wi-Fi link with no verdict reads its kind (linkedUplinkLook).
  *
  * @param {{kind: string|null, connectivity: string|null}} uplink - The uplink.
  * @returns {boolean} True when the row reads 'uplink unknown'.
  */
 function isUplinkUnknown(uplink) {
-    const isNothingKnown = uplink.kind === null && uplink.connectivity === null;
-    const isOtherLinkUnjudged = uplink.kind === 'none' && uplink.connectivity === CONNECTIVITY_UNKNOWN;
-    return isNothingKnown || isOtherLinkUnjudged;
+    const isWiredOrWifi = uplink.kind === 'wired' || uplink.kind === 'wifi';
+    const hasNoVerdict = uplink.connectivity === null || uplink.connectivity === CONNECTIVITY_UNKNOWN;
+    return !isWiredOrWifi && hasNoVerdict;
 }
 
 /**

@@ -5862,7 +5862,9 @@ install_stub "$CHECK_STUB_BIN" gjs "$(check_window_stand_in_source "$CHECK_WINDO
 # session's leader, only the watchdog holds the group's id, so the row's KILL of the group at its end goes out only
 # while the watchdog can still be running (kill_check_session_group): within the lifetime less
 # CHECK_SESSION_KILL_MARGIN_SECONDS of uptime since the session started. Uptime counts suspended time and the
-# watchdog's sleep does not, so the guard can only stop early, never late; what it skips the watchdog ends.
+# watchdog's sleep does not, so the guard can only stop early, never late; what it skips the watchdog ends. A row
+# whose check did not end in time (ended=no) KILLs the group itself while its leader still runs (is_running), which
+# ends the watchdog too, and then sends no guarded KILL: the group's id is held by nothing of the row's after it.
 CHECK_SESSION_LIFETIME_SECONDS=60
 CHECK_SESSION_KILL_MARGIN_SECONDS=2
 CHECK_SESSION_BIN="$WIRING_TMP/check-session-bin"
@@ -6825,9 +6827,11 @@ for (( check_term_tenth = 0; check_term_tenth < CHECK_TERM_END_LIMIT_TENTHS; che
   is_running "$check_term_pid" || break
   sleep 0.1
 done
+check_term_group_killed=""
 if is_running "$check_term_pid"; then
   check_term_summary+=" ended=no"
   kill -KILL -- "-$check_term_pid" 2>/dev/null
+  check_term_group_killed=yes
   wait "$check_term_pid" 2>/dev/null
 else
   wait "$check_term_pid"
@@ -6836,7 +6840,7 @@ fi
 check_term_summary+=" perf-put-back=$(grep -c -x -F 'perf put the run back after its TERM' "$CHECK_CALLS")"
 check_term_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
   && printf restored || printf changed)"
-kill_check_session_group "$check_term_pid" "$check_term_started_uptime"
+[[ -n "$check_term_group_killed" ]] || kill_check_session_group "$check_term_pid" "$check_term_started_uptime"
 nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
 check "nested: a TERM to check cockpit during its perf pass is taken at once: perf is sent TERM and waited for while it puts the run back, the run's fixture put back, exit 143" \
   "$check_term_summary" "perf-ran=yes ended=143 perf-put-back=1 fixture=restored"
@@ -6891,6 +6895,7 @@ PERF_STOPPING_NEEDLE='perf is stopping: putting the run back first'
 # table's> said=<the check's stop lines>/<perf's>. Whatever is left of the row's session then ends with it.
 check_put_back_run() {
   local term_plan="$1" check_pid check_started_uptime put_back_tenth put_back_summary perf_term_delay_seconds=""
+  local check_group_killed=""
   [[ "$term_plan" == group ]] && perf_term_delay_seconds="$CHECK_TERM_TO_PERF_DELAY_SECONDS"
   make_check_run yes gc-log=1 replay=1
   : >"$CHECK_CALLS"
@@ -6930,6 +6935,7 @@ check_put_back_run() {
   if is_running "$check_pid"; then
     put_back_summary="ended=no"
     kill -KILL -- "-$check_pid" 2>/dev/null
+    check_group_killed=yes
     wait "$check_pid" 2>/dev/null
   else
     wait "$check_pid"
@@ -6942,7 +6948,7 @@ check_put_back_run() {
   put_back_summary+="/$(wc -l <"$CHECK_WINDOW_LAUNCHES")"
   put_back_summary+=" said=$(grep -c -F "$CHECK_STOPPING_FOR_PERF_NEEDLE" "$CHECK_PUT_BACK_OUTPUT")"
   put_back_summary+="/$(grep -c -F "$PERF_STOPPING_NEEDLE" "$CHECK_PUT_BACK_OUTPUT")"
-  kill_check_session_group "$check_pid" "$check_started_uptime"
+  [[ -n "$check_group_killed" ]] || kill_check_session_group "$check_pid" "$check_started_uptime"
   nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
   printf '%s' "$put_back_summary"
 }

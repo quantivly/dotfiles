@@ -255,7 +255,8 @@ test('cockpitFormat: uplink kinds, vpn states and ssh counts', () => {
     assertEqual([wifi.icon, wifi.text, wifi.tooltip],
         ['network-wireless-symbolic', 'wifi · portal', ['internet: portal']]);
     const none = uplinkOf({kind: 'none', connectivity: null, wifiEnabled: null});
-    assertEqual([none.icon, none.text, none.tooltip], ['network-offline-symbolic', 'offline', ['internet: unknown']]);
+    assertEqual([none.icon, none.text, none.tooltip],
+        ['dialog-question-symbolic', 'uplink unknown', ['internet: unknown']]);
     const vpnOf = (vpn) => cockpitFormat.connectionsRows({...NETWORK, vpn}, MOUNTS).rows[1].text;
     assertEqual(vpnOf({isUp: true, interfaceName: null}), 'VPN up');
     assertEqual(vpnOf({isUp: false, interfaceName: null}), 'VPN down');
@@ -335,12 +336,14 @@ test('cockpitFormat: an uplink nothing is known of (no NetworkManager: kind and 
     assertEqual(uplinkLookOf({kind: null, connectivity: null, wifiEnabled: null}),
         {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']}));
 
-test('cockpitFormat: an uplink of kind none whose connectivity NetworkManager has not judged (unknown) reads ' +
-    '"uplink unknown" with the unknown icon, as one nothing is known of: the source never said it was offline; a ' +
-    'wired one with the same verdict still reads its kind', () => assertEqual([
+test('cockpitFormat: an uplink neither wired nor Wi-Fi with no verdict from NetworkManager (connectivity unknown or ' +
+    'none given: kind none, or no kind) reads "uplink unknown" with the unknown icon, as one nothing is known of: ' +
+    'the source never said it was offline; a wired one with the same verdict still reads its kind', () => assertEqual([
     {kind: 'none', connectivity: 'unknown', wifiEnabled: null},
+    {kind: null, connectivity: 'unknown', wifiEnabled: null},
     {kind: 'wired', connectivity: 'unknown', wifiEnabled: true},
 ].map(uplinkLookOf), [
+    {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']},
     {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']},
     {icon: WIRED_ICON, text: 'wired', tooltip: ['internet: unknown']},
 ]));

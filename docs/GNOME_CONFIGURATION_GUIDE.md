@@ -378,8 +378,8 @@ rested on it for 300 ms.
   `wired` (`wired · wifi off` when docked) or `wifi`; `wired · limited` or `wifi · portal` when
   NetworkManager reaches the internet only in part; `wired · no internet`, with the offline icon, when not at
   all; `online` when the primary connection is neither, such as a VPN on a full tunnel or a tethered phone
-  (its tooltip says so); `offline` with no link; and `uplink unknown` without NetworkManager, or while it
-  has not judged a link that is neither. Its tooltip
+  (its tooltip says so), and `offline` when NetworkManager finds no internet over it; `uplink unknown` without
+  NetworkManager, or while it has not judged a link that is neither. Its tooltip
   gives NetworkManager's verdict, `internet: <connectivity>`. Then the VPN (`VPN up (tun0)` or `VPN down`,
   its icon teal while up and grey while down or unknown), the SSH masters (`3 live ssh masters`), then one
   row per mount: its label and free space, with a bar of the space used, and its mount point, filesystem type
