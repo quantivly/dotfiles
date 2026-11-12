@@ -31,6 +31,11 @@
 // cards take the pointer only while none does. The shell's budgets are per state: docs/GNOME_CONFIGURATION_GUIDE.md,
 // "What it costs".
 //
+// A click on a session row (the layer's sessions card or the dropdown's) does one safe thing or nothing, one click at
+// a time: it asks the cockpit service to focus the session's herdr pane (FocusSession), and when it answers,
+// activates the window that shows herdr, as a dock click does (Main.activateWindow, the shell's one action). No
+// matching window, no action: one journal line, at most once per 10 minutes. An answer after disable() does nothing.
+//
 // This runs inside gnome-shell, the Wayland compositor, so a mistake here destabilises the whole desktop. Without
 // the unlock-dialog session mode the shell disables the extension whenever that mode is pushed and enables it
 // when it pops. In GNOME 50 that is every lock AND every idle blank: a blank goes through ScreenShield.activate(),
@@ -72,7 +77,9 @@ import {PulseClient} from './pulseClient.js';
 import {
     COCKPIT_SYSTEM_CARD_ID, COVER_FALLBACK_INTERVAL_SECONDS, CockpitClientEventType,
 } from './lib/constants.js';
-import {DESKTOP_WINDOW_TYPE, isCockpitWatchWanted, isDesktopInteractive} from './lib/cockpitInteraction.js';
+import {
+    DESKTOP_WINDOW_TYPE, focusSessionOutcome, isCockpitWatchWanted, isDesktopInteractive, pickWindowToActivate,
+} from './lib/cockpitInteraction.js';
 import {cockpitMonitorIndexFor} from './lib/cockpitMonitor.js';
 import {
     CockpitLayerChange, cockpitLayerChange, cockpitLayoutToKeep, cockpitSurfacesSeen, frozenCardsDueRepaint,
@@ -103,6 +110,19 @@ const COVERING_WINDOW_TYPES = new Set([Meta.WindowType.NORMAL, Meta.WindowType.D
 const NO_WINDOWS_ON_MONITOR = Object.freeze({metaWindows: [], frameRects: [], desktopWindows: []});
 /** The template key of the journal line for a layer that could not be built, rebuilt or placed (lib/errorLog.js). */
 const COCKPIT_LAYER_FAILURE_LOG_KEY = 'could not draw the cockpit layer';
+/**
+ * The window types a session row's click may bring forward: ordinary windows and dialogs. Never an override-redirect
+ * window (a menu, a tooltip), which Mutter neither activates nor orders by stacking, nor a desktop, dock or panel.
+ */
+const ACTIVATABLE_WINDOW_TYPES = new Set([Meta.WindowType.NORMAL, Meta.WindowType.DIALOG]);
+/** The template key of the journal line for an activation that failed (lib/errorLog.js). */
+const SESSION_ACTIVATION_FAILURE_LOG_KEY = 'could not activate a session';
+/**
+ * The template key of the journal line for a session focus that brought no window forward (lib/cockpitInteraction.js
+ * focusSessionOutcome's line): one key whatever the reason, so such a line comes at most once per
+ * ERROR_LOG_REPEAT_INTERVAL_USEC (10 minutes) however often rows are clicked (Review Focus 3: at most one a minute).
+ */
+const SESSION_FOCUS_OUTCOME_LOG_KEY = 'a session focus brought no window forward';
 
 /**
  * The index in its panel box of the system menu (quick settings), so an indicator inserted there sits just left
@@ -139,6 +159,31 @@ function shellMonitors() {
         index: monitor.index, x: monitor.x, y: monitor.y, width: monitor.width, height: monitor.height,
         isPrimary: monitor.index === primaryIndex,
     }));
+}
+
+/**
+ * The windows a session row's click may bring forward, as lib/cockpitInteraction.js pickWindowToActivate takes them:
+ * the display's normal and dialog windows (ACTIVATABLE_WINDOW_TYPES, kept before the sort, which cannot order an
+ * override-redirect window), in stacking order, bottom first (Meta.Display.sort_windows_by_stacking), so each one's
+ * index in that order is its stackIndex; each with its pid, whether it is on the active workspace (or on all of them)
+ * and whether it is minimized.
+ *
+ * @returns {{metaWindows: Meta.Window[], windows: Array<{pid: number, stackIndex: number,
+ *     isOnActiveWorkspace: boolean, isMinimized: boolean}>}} The windows bottom first, and each one's reading at the
+ *     same index.
+ */
+function activatableWindowsByStacking() {
+    const activeWorkspace = global.workspace_manager.get_active_workspace();
+    const activatableWindows = global.display.list_all_windows()
+        .filter(metaWindow => ACTIVATABLE_WINDOW_TYPES.has(metaWindow.get_window_type()));
+    const metaWindows = global.display.sort_windows_by_stacking(activatableWindows);
+    const windows = metaWindows.map((metaWindow, stackIndex) => ({
+        pid: metaWindow.get_pid(),
+        stackIndex,
+        isOnActiveWorkspace: metaWindow.is_on_all_workspaces() || metaWindow.get_workspace() === activeWorkspace,
+        isMinimized: metaWindow.minimized,
+    }));
+    return {metaWindows, windows};
 }
 
 export default class ResourcePulseExtension extends Extension {
@@ -182,6 +227,8 @@ export default class ResourcePulseExtension extends Extension {
         this._isCockpitSubscriptionWanted = false;
         this._dropdownMenu = null;
         this._isDropdownOpen = false;
+        // True from a session row's click until its activation ends (_activateSession): one at a time.
+        this._isActivationInFlight = false;
         // Both limiters are kept across enable() and disable(), so a failure that repeats on every enable (every
         // unlock and blank) is still logged at most once per 10 minutes. The extension's own failures (a teardown
         // step that threw) leave it broken: errors. The clients' (StartUnit refused, a call timed out, a payload they
@@ -1082,27 +1129,86 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * A click on a session row of the cockpit, on the layer's sessions card or the dropdown's (which has closed the
-     * menu first). It does nothing yet: taking the user to the session's herdr pane (FocusSession, then the window
-     * lib/cockpitInteraction.js pickWindowToActivate names) is the next change.
+     * A click on a session row of the cockpit, on the layer's sessions card (which calls this unguarded) or the
+     * dropdown's (which has closed the menu first): takes the user to the session (_focusSessionThenActivateWindow),
+     * one at a time. A click while an activation is in flight does nothing; otherwise the activation is marked in
+     * flight and started, and this returns at once, with nothing: the activation is asynchronous and never throws, so
+     * no click handler waits for it or sees it fail.
      *
-     * @param {string} _sessionId - The clicked session's id.
+     * @param {string} sessionId - The clicked session's id.
      * @returns {void}
      */
-    _activateSession(_sessionId) {
-        // Nothing yet; see above.
+    _activateSession(sessionId) {
+        if (this._isActivationInFlight)
+            return;
+        this._isActivationInFlight = true;
+        this._focusSessionThenActivateWindow(sessionId);
+    }
+
+    /**
+     * Takes the user to a session, the click's one action: asks the cockpit service to focus the session's herdr pane
+     * (FocusSession, through the cockpit client, whose promise never rejects), then brings forward the window that
+     * shows it (_activateWindowForFocusReply). Nothing else is asked of the service, and nothing is drawn from its
+     * answer. An answer that comes after disable(), or after a later enable(), finds another cockpit client than the
+     * one asked (or none) and does nothing: no window is read, none is activated. Everything from the call on runs
+     * inside the try: a failure is one journal line on the error log, rate-limited by its template key. The
+     * activation is no longer in flight once it ends, unless teardown has already cleared that (the client it asked
+     * is gone), so an earlier activation never clears a later one's mark.
+     *
+     * @param {string} sessionId - The clicked session's id.
+     * @returns {Promise<void>} Settles once the activation is done; never rejects.
+     */
+    async _focusSessionThenActivateWindow(sessionId) {
+        const cockpitClient = this._cockpitClient;
+        try {
+            const focusReply = await cockpitClient.focusSession(sessionId);
+            if (cockpitClient !== this._cockpitClient)
+                return;
+            this._activateWindowForFocusReply(focusReply);
+        } catch (error) {
+            const errorText = describeErrorWithStack(error);
+            this._errorLog.log(`could not activate a session: ${errorText}`, SESSION_ACTIVATION_FAILURE_LOG_KEY);
+        } finally {
+            if (cockpitClient === this._cockpitClient)
+                this._isActivationInFlight = false;
+        }
+    }
+
+    /**
+     * Brings forward the window that shows the focused session's herdr pane: reads the windows now
+     * (activatableWindowsByStacking), lets lib/cockpitInteraction.js pickWindowToActivate pick one among the reply's
+     * candidate pids and focusSessionOutcome decide, then activates the picked window as a dock click does
+     * (Main.activateWindow: it switches to the window's workspace, unminimizes and raises it, which ends show-desktop,
+     * and closes the overview), or logs the outcome's line, which names only the reply's error code or its candidate
+     * pids, as a warning at most once per ERROR_LOG_REPEAT_INTERVAL_USEC whatever the reason. No match, no action:
+     * herdr inside tmux, or in a terminal whose process is none of the candidates, has its pane focused and nothing
+     * more.
+     *
+     * @param {{focused: boolean|null, error: string|null, windowPidCandidates: number[]}} focusReply - The cockpit
+     *     client's FocusSession reply.
+     * @returns {void}
+     */
+    _activateWindowForFocusReply(focusReply) {
+        const {metaWindows, windows} = activatableWindowsByStacking();
+        const pickedStackIndex = pickWindowToActivate({windows, candidatePids: focusReply.windowPidCandidates});
+        const focusOutcome = focusSessionOutcome({reply: focusReply, pickedStackIndex});
+        if (focusOutcome.activateWindow)
+            Main.activateWindow(metaWindows[pickedStackIndex]);
+        else
+            this._clientLog.log(focusOutcome.logLine, SESSION_FOCUS_OUTCOME_LOG_KEY);
     }
 
     /**
      * Undoes enable(), whatever it got to, and never throws: keeps the client's last good clock label and the
      * cockpit's layout for the next enable (getter reads, before anything is destroyed, guarded as each step is: on a
      * failure what is already kept stays; never a layout that failed to draw); clears every field (the failed layout
-     * too, so each enable tries the layout it is sent); then disconnects from the overview, the layout manager,
-     * the display, the window manager, the workspace manager, the card, the dropdown menu and the covering windows,
-     * removes both client listeners, the pending cover check, the fallback timeout and a pending placement, and
-     * cancels the DisplayConfig read; then destroys the layer (which gives the v2 card back), the card (which also
-     * takes it out of the background group), the indicator and the clients. Each step runs under its own guard
-     * (lib/teardown.js runEveryStep): one that throws is logged, rate-limited, and the rest still run.
+     * too, so each enable tries the layout it is sent, and the activation in flight, whose answer is then ignored);
+     * then disconnects from the overview, the layout manager, the display, the window manager, the workspace manager,
+     * the card, the dropdown menu and the covering windows, removes both client listeners, the pending cover check,
+     * the fallback timeout and a pending placement, and cancels the DisplayConfig read; then destroys the layer (which
+     * gives the v2 card back), the card (which also takes it out of the background group), the indicator and the
+     * clients. Each step runs under its own guard (lib/teardown.js runEveryStep): one that throws is logged,
+     * rate-limited, and the rest still run.
      *
      * @returns {void}
      */
@@ -1153,6 +1259,7 @@ export default class ResourcePulseExtension extends Extension {
         this._frozenCardPaintedAtUsecByCardId = {};
         this._isCockpitSubscriptionWanted = false;
         this._ticksSinceCoverCheck = 0;
+        this._isActivationInFlight = false;
         runEveryStep([
             {name: 'disconnect from the overview', run: () => Main.overview.disconnectObject(this)},
             {name: 'disconnect from the layout manager', run: () => Main.layoutManager.disconnectObject(this)},

@@ -3,9 +3,14 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
+import {CockpitClient} from '../extensions/resource-pulse@dotfiles/cockpitClient.js';
 import {
-    COCKPIT_ICON_NAMES, COCKPIT_LONG_IDLE_ROW_OPACITY, COCKPIT_ROW_ICON_SIZE_PX,
+    COCKPIT_ICON_NAMES, COCKPIT_LONG_IDLE_ROW_OPACITY, COCKPIT_ROW_ICON_SIZE_PX, ERROR_LOG_REPEAT_INTERVAL_USEC,
 } from '../extensions/resource-pulse@dotfiles/lib/constants.js';
+import {
+    COCKPIT_FOCUS_SESSION_METHOD_NAME, COCKPIT_GET_STATE_METHOD_NAME, COCKPIT_UNWATCH_METHOD_NAME,
+    COCKPIT_WATCH_METHOD_NAME,
+} from '../extensions/resource-pulse@dotfiles/lib/cockpitProtocol.js';
 
 const EXTENSION_DIRECTORY_URI =
     GLib.uri_resolve_relative(import.meta.url, '../extensions/resource-pulse@dotfiles/', GLib.UriFlags.NONE);
@@ -1435,15 +1440,14 @@ test('extension.js: each tick, after the cover and the frozen repaint, hands the
         'this._layer?.onSampleTick({isSubscriptionWanted: this._isCockpitSubscriptionWanted});',
     ]));
 
-test('extension.js: a session row\'s click, on the layer\'s card or the dropdown\'s, reaches _activateSession, which ' +
-    'does nothing yet and logs nothing; the indicator is made with the cockpit client and the shared error log', () => {
+test('extension.js: a session row\'s click, on the layer\'s card or the dropdown\'s, reaches _activateSession; the ' +
+    'indicator is made with the cockpit client and the shared error log', () => {
     const enableStatements = extensionMethodStatements('enable() {');
     const indicatorIndex = enableStatements.indexOf('this._indicator = new PulseIndicator(this._client, {');
     assertEqual({
         handedToTheLayer: extensionMethodStatements('_addCockpitLayer() {')
             .includes('errorLog: this._errorLog, onSessionActivated: sessionId => this._activateSession(sessionId),'),
         handedToTheIndicator: indicatorIndex < 0 ? [] : enableStatements.slice(indicatorIndex, indicatorIndex + 4),
-        activate: statementsOf(methodBody(readExtensionFile(EXTENSION_SOURCE_FILE), '_activateSession(_sessionId) {')),
     }, {
         handedToTheLayer: true,
         handedToTheIndicator: [
@@ -1452,19 +1456,264 @@ test('extension.js: a session row\'s click, on the layer\'s card or the dropdown
             'onSessionActivated: sessionId => this._activateSession(sessionId),',
             '});',
         ],
-        activate: ['_activateSession(_sessionId) {', '}'],
+    });
+});
+
+// extension.js: the click's one action (Task 10). FocusSession through the cockpit client, then at most one
+// Main.activateWindow. Glue: these rows read it.
+
+/** The click's entry, which both cards' rows call. */
+const ACTIVATE_SESSION_DECLARATION = '_activateSession(sessionId) {';
+/** The activation itself, asynchronous: FocusSession, then the window. */
+const FOCUS_THEN_ACTIVATE_DECLARATION = 'async _focusSessionThenActivateWindow(sessionId) {';
+/** The step that acts on the cockpit service's answer. */
+const ACTIVATE_WINDOW_DECLARATION = '_activateWindowForFocusReply(focusReply) {';
+/** The module function that reads the windows as lib/cockpitInteraction.js pickWindowToActivate takes them. */
+const ACTIVATABLE_WINDOWS_DECLARATION = 'function activatableWindowsByStacking() {';
+/** The statement that awaits the cockpit service's answer. */
+const FOCUS_SESSION_AWAIT_STATEMENT = 'const focusReply = await cockpitClient.focusSession(sessionId);';
+/** The call whose first statement reads the windows. */
+const WINDOWS_READ_CALL_STATEMENT = 'this._activateWindowForFocusReply(focusReply);';
+/** The answer's name, in every statement that uses it. */
+const FOCUS_REPLY_NAME = 'focusReply';
+/** The try statement around the answer, and its catch and finally, as they open their lines. */
+const TRY_OPENING_LINE = 'try {';
+const CATCH_OPENING_LINE = '} catch (error) {';
+const FINALLY_OPENING_LINE = '} finally {';
+/** What a statement line that closes a block starts with. */
+const BLOCK_CLOSING_PREFIX = '}';
+/**
+ * Calls that would bring a window forward on the shell side: the shell's own activation, Mutter's, and a window's
+ * focus, raise and unminimize.
+ */
+const WINDOW_ACTIVATION_CALL_NEEDLES = [
+    'activateWindow(', 'activate_with_focus(', '.unminimize(', '.raise(', '.focus(',
+];
+/** The shell side's directory beside the top level (service/ is the services'). */
+const LIB_DIRECTORY_NAME = 'lib';
+const JAVASCRIPT_SUFFIX = '.js';
+/** The method names of the cockpit service's D-Bus interface. */
+const COCKPIT_SERVICE_METHOD_NAMES = [
+    COCKPIT_GET_STATE_METHOD_NAME, COCKPIT_WATCH_METHOD_NAME, COCKPIT_UNWATCH_METHOD_NAME,
+    COCKPIT_FOCUS_SESSION_METHOD_NAME,
+];
+/** A class prototype's own property that is not one of its members. */
+const CONSTRUCTOR_PROPERTY_NAME = 'constructor';
+/** Review Focus 3's bound: at most one journal line a minute. */
+const MICROSECONDS_PER_MINUTE = 60_000_000;
+
+/**
+ * The JavaScript files of one directory of the extension, by name.
+ *
+ * @param {string} directoryPath - The directory's absolute path.
+ * @returns {string[]} The names of its .js files, sorted.
+ */
+function javaScriptFileNamesIn(directoryPath) {
+    const enumerator = Gio.File.new_for_path(directoryPath)
+        .enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+    const fileNames = [];
+    for (let fileInfo = enumerator.next_file(null); fileInfo !== null; fileInfo = enumerator.next_file(null)) {
+        if (fileInfo.get_name().endsWith(JAVASCRIPT_SUFFIX))
+            fileNames.push(fileInfo.get_name());
+    }
+    enumerator.close(null);
+    return fileNames.sort();
+}
+
+/**
+ * The shell side's files, relative to the extension directory: every .js file at its top level and in lib/ (which
+ * also holds a few modules only the services import; none of them may activate a window either).
+ *
+ * @returns {string[]} The relative paths.
+ */
+function shellSideFileNames() {
+    const libDirectoryPath = GLib.build_filenamev([EXTENSION_DIRECTORY_PATH, LIB_DIRECTORY_NAME]);
+    const libFileNames = javaScriptFileNamesIn(libDirectoryPath)
+        .map(fileName => `${LIB_DIRECTORY_NAME}/${fileName}`);
+    return [...javaScriptFileNamesIn(EXTENSION_DIRECTORY_PATH), ...libFileNames];
+}
+
+/**
+ * The activation's statements (_focusSessionThenActivateWindow), comments removed, between its declaration and its
+ * closing brace.
+ *
+ * @returns {string[]} Its statements, trimmed; none when it is not declared as asynchronous.
+ */
+function activationStatements() {
+    return extensionMethodStatements(FOCUS_THEN_ACTIVATE_DECLARATION);
+}
+
+test('extension.js: one activation at a time: a click while one is in flight does nothing; otherwise ' +
+    '_activateSession marks one in flight, starts it and returns nothing, and the activation clears the mark in ' +
+    'its finally, unless teardown has (it was asked of a cockpit client since replaced), so an earlier activation ' +
+    'never clears a later one\'s mark', () => {
+    const statements = activationStatements();
+    const finallyIndex = statements.indexOf(FINALLY_OPENING_LINE);
+    assertEqual({
+        activate: extensionMethodStatements(ACTIVATE_SESSION_DECLARATION),
+        finally: finallyIndex < 0 ? [] : statements.slice(finallyIndex),
+    }, {
+        activate: [
+            'if (this._isActivationInFlight)', 'return;', 'this._isActivationInFlight = true;',
+            'this._focusSessionThenActivateWindow(sessionId);',
+        ],
+        finally: [
+            FINALLY_OPENING_LINE, 'if (cockpitClient === this._cockpitClient)', 'this._isActivationInFlight = false;',
+            '}',
+        ],
+    });
+});
+
+test('extension.js: the activation awaits FocusSession from the cockpit client it was started with as the first ' +
+    'statement of its try, so the answer and everything done with it are inside the try', () => {
+    const statements = activationStatements();
+    const tryIndex = statements.indexOf(TRY_OPENING_LINE);
+    const catchIndex = statements.indexOf(CATCH_OPENING_LINE);
+    const isTryFound = tryIndex >= 0 && catchIndex > tryIndex;
+    const answerUsesOutsideTheTry = statements.filter((statement, statementIndex) =>
+        statement.includes(FOCUS_REPLY_NAME) && (statementIndex <= tryIndex || statementIndex >= catchIndex));
+    assertEqual({
+        beforeTheTry: isTryFound ? statements.slice(0, tryIndex) : null,
+        firstInTheTry: isTryFound ? statements[tryIndex + 1] : null,
+        answerUsesOutsideTheTry: isTryFound ? answerUsesOutsideTheTry : null,
+    }, {
+        beforeTheTry: ['const cockpitClient = this._cockpitClient;'],
+        firstInTheTry: FOCUS_SESSION_AWAIT_STATEMENT,
+        answerUsesOutsideTheTry: [],
+    });
+});
+
+test('extension.js: a failure in the activation is one journal line on the error log, rate-limited by its template ' +
+    'key, never a throw into the click handler (ruling D25)', () => {
+    const statements = activationStatements();
+    const catchIndex = statements.indexOf(CATCH_OPENING_LINE);
+    // The catch block ends at the next line that closes a block: the finally's opening, or the try's own end.
+    const catchEndIndex = statements.findIndex((statement, statementIndex) =>
+        statementIndex > catchIndex && statement.startsWith(BLOCK_CLOSING_PREFIX));
+    assertEqual({
+        catch: catchIndex < 0 || catchEndIndex < 0 ? null : statements.slice(catchIndex, catchEndIndex),
+        failureLogKey: occurrenceCount(codeOf(EXTENSION_SOURCE_FILE),
+            "const SESSION_ACTIVATION_FAILURE_LOG_KEY = 'could not activate a session';"),
+    }, {
+        catch: [
+            CATCH_OPENING_LINE, 'const errorText = describeErrorWithStack(error);',
+            'this._errorLog.log(`could not activate a session: ${errorText}`, SESSION_ACTIVATION_FAILURE_LOG_KEY);',
+        ],
+        failureLogKey: 1,
+    });
+});
+
+test('extension.js: an answer that comes after disable(), or after a later enable(), does nothing: between the ' +
+    'await and the call that reads the windows, the activation returns unless the cockpit client it asked is still ' +
+    'the extension\'s', () => {
+    const statements = activationStatements();
+    const answerIndex = statements.indexOf(FOCUS_SESSION_AWAIT_STATEMENT);
+    const windowsReadIndex = statements.indexOf(WINDOWS_READ_CALL_STATEMENT);
+    const isOrdered = answerIndex >= 0 && windowsReadIndex > answerIndex;
+    assertEqual(isOrdered ? statements.slice(answerIndex + 1, windowsReadIndex) : null,
+        ['if (cockpitClient !== this._cockpitClient)', 'return;']);
+});
+
+test('extension.js: the answer goes through lib/cockpitInteraction.js as it is: the windows read first, then ' +
+    'pickWindowToActivate among the reply\'s candidate pids, then focusSessionOutcome on the reply and pick', () =>
+    assertEqual(extensionMethodStatements(ACTIVATE_WINDOW_DECLARATION).slice(0, 3), [
+        'const {metaWindows, windows} = activatableWindowsByStacking();',
+        'const pickedStackIndex = pickWindowToActivate({windows, candidatePids: focusReply.windowPidCandidates});',
+        'const focusOutcome = focusSessionOutcome({reply: focusReply, pickedStackIndex});',
+    ]));
+
+test('extension.js: the outcome is acted on as given: the picked window brought forward by Main.activateWindow ' +
+    '(it switches to the window\'s workspace, unminimizes and raises it, ending show-desktop), else the outcome\'s ' +
+    'line logged as a warning under one template key, whatever its reason', () =>
+    assertEqual({
+        act: extensionMethodStatements(ACTIVATE_WINDOW_DECLARATION).slice(3),
+        outcomeLogKey: occurrenceCount(codeOf(EXTENSION_SOURCE_FILE),
+            "const SESSION_FOCUS_OUTCOME_LOG_KEY = 'a session focus brought no window forward';"),
+    }, {
+        act: [
+            'if (focusOutcome.activateWindow)', 'Main.activateWindow(metaWindows[pickedStackIndex]);', 'else',
+            'this._clientLog.log(focusOutcome.logLine, SESSION_FOCUS_OUTCOME_LOG_KEY);',
+        ],
+        outcomeLogKey: 1,
+    }));
+
+test('lib/constants.js: the outcome\'s one template key gives at most one line a minute (Review Focus 3): ' +
+    'ERROR_LOG_REPEAT_INTERVAL_USEC is at least a minute', () =>
+    assertEqual(ERROR_LOG_REPEAT_INTERVAL_USEC >= MICROSECONDS_PER_MINUTE, true));
+
+test('extension.js: the windows are read as pickWindowToActivate takes them: the display\'s normal and dialog ' +
+    'windows (never an override-redirect one, which Mutter neither activates nor stacks), sorted by stacking bottom ' +
+    'first so each one\'s index is its stackIndex, each with its pid, whether it is on the active workspace or on ' +
+    'all, and whether it is minimized', () =>
+    assertEqual({
+        read: extensionMethodStatements(ACTIVATABLE_WINDOWS_DECLARATION),
+        windowTypes: occurrenceCount(codeOf(EXTENSION_SOURCE_FILE),
+            'const ACTIVATABLE_WINDOW_TYPES = new Set([Meta.WindowType.NORMAL, Meta.WindowType.DIALOG]);'),
+    }, {
+        read: [
+            'const activeWorkspace = global.workspace_manager.get_active_workspace();',
+            'const activatableWindows = global.display.list_all_windows()',
+            '.filter(metaWindow => ACTIVATABLE_WINDOW_TYPES.has(metaWindow.get_window_type()));',
+            'const metaWindows = global.display.sort_windows_by_stacking(activatableWindows);',
+            'const windows = metaWindows.map((metaWindow, stackIndex) => ({',
+            'pid: metaWindow.get_pid(),',
+            'stackIndex,',
+            'isOnActiveWorkspace: metaWindow.is_on_all_workspaces() || ' +
+                'metaWindow.get_workspace() === activeWorkspace,',
+            'isMinimized: metaWindow.minimized,',
+            '}));',
+            'return {metaWindows, windows};',
+        ],
+        windowTypes: 1,
+    }));
+
+test('extension.js: Main.activateWindow is the shell side\'s one call that brings a window forward: exactly one, ' +
+    'in extension.js, and no file outside service/ otherwise activates, focuses, raises or unminimizes one', () => {
+    const activationCallsByFile = {};
+    for (const fileName of shellSideFileNames()) {
+        const code = codeOf(fileName);
+        const callCounts = WINDOW_ACTIVATION_CALL_NEEDLES
+            .map(needle => [needle, occurrenceCount(code, needle)])
+            .filter(([, callCount]) => callCount > 0);
+        if (callCounts.length > 0)
+            activationCallsByFile[fileName] = Object.fromEntries(callCounts);
+    }
+    assertEqual(activationCallsByFile, {'extension.js': {'activateWindow(': 1}});
+});
+
+test('extension.js: a click asks the cockpit service for FocusSession and nothing else: the activation uses no ' +
+    'member of the cockpit client but focusSession, and names none of the service\'s D-Bus methods', () => {
+    const extensionSource = readExtensionFile(EXTENSION_SOURCE_FILE);
+    const handlerBodies = [
+        ACTIVATE_SESSION_DECLARATION, FOCUS_THEN_ACTIVATE_DECLARATION, ACTIVATE_WINDOW_DECLARATION,
+        ACTIVATABLE_WINDOWS_DECLARATION,
+    ].map(declarationLine => methodBody(extensionSource, declarationLine));
+    const handlerText = handlerBodies.join('\n');
+    const clientMemberNames = Object.getOwnPropertyNames(CockpitClient.prototype)
+        .filter(propertyName => propertyName !== CONSTRUCTOR_PROPERTY_NAME);
+    assertEqual({
+        // Every part read, so a part renamed away cannot hide a call.
+        partsRead: handlerBodies.filter(bodyText => bodyText !== '').length,
+        clientMembersUsed: clientMemberNames.filter(memberName => new RegExp(`\\.${memberName}\\b`).test(handlerText)),
+        serviceMethodsNamed: COCKPIT_SERVICE_METHOD_NAMES.filter(methodName =>
+            new RegExp(`\\b${methodName}\\b`).test(handlerText)),
+    }, {
+        partsRead: 4,
+        clientMembersUsed: ['focusSession'],
+        serviceMethodsNamed: [],
     });
 });
 
 test('extension.js: teardown keeps the layout to cache before anything is destroyed, clears the cockpit\'s fields ' +
-    '(the layout that failed included, so each enable tries again), removes the cockpit client listener, cancels ' +
-    'the DisplayConfig read and destroys the layer first', () => {
+    '(the layout that failed included, so each enable tries again, and the activation in flight, so the next ' +
+    'enable\'s first click is taken), removes the cockpit client listener, cancels the DisplayConfig read and ' +
+    'destroys the layer first', () => {
     const tearDownStatements = extensionMethodStatements('_tearDown() {');
     const clearedFields = [
         'this._layer = null;', 'this._cockpitClient = null;', 'this._displayConfigReader = null;',
         'this._displayConfigState = null;', 'this._cockpitListenerId = null;', 'this._failedCockpitLayout = null;',
         'this._visibleCardIds = VISIBLE_CARD_IDS_BEFORE_COVER_CHECK;', 'this._frozenCardPaintedAtUsecByCardId = {};',
-        'this._isCockpitSubscriptionWanted = false;',
+        'this._isCockpitSubscriptionWanted = false;', 'this._isActivationInFlight = false;',
     ];
     const firstDestroyIndex = tearDownStatements.findIndex(statement => statement.includes('?.destroy()'));
     const layerDestroyIndex =
