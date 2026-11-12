@@ -972,9 +972,10 @@ function layerMethodStatements(declarationLine) {
     return statementsOf(layerMethodBody(declarationLine)).slice(1, -1);
 }
 
-test('cockpitLayer.js: the layer is a non-reactive St.Widget of class rp-cockpit-layer that, once built (its ' +
-    'tooltip, the v2 card out of its parent, the layout, both client listeners), adds itself to the background group ' +
-    'last; a failure while building destroys what was built and rethrows', () => {
+test('cockpitLayer.js: the layer is a non-reactive St.Widget of class rp-cockpit-layer that builds its tooltip, takes ' +
+    'the v2 card out of its parent and adds itself to the background group before setLayout builds and draws the ' +
+    'cards (a card drawn off the stage asks St for a theme node it cannot give), then follows both clients; a failure ' +
+    'while building destroys what was built, the layer out of the background group with it, and rethrows', () => {
     const source = codeOf(LAYER_SOURCE_FILE);
     const initStatements = layerMethodStatements('_init(');
     const tryIndex = initStatements.indexOf('try {');
@@ -991,10 +992,10 @@ test('cockpitLayer.js: the layer is a non-reactive St.Widget of class rp-cockpit
         built: [
             'this._tooltip = new CockpitTooltip();',
             'pulseCard.get_parent()?.remove_child(pulseCard);',
+            'Main.layoutManager._backgroundGroup.add_child(this);',
             'this.setLayout(cockpitClient.layout);',
             'this._cockpitListenerId = cockpitClient.addListener(event => this._pacing.onCockpitEvent(event));',
             'this._snapshotListenerId = pulseClient.addListener(snapshot => this._onSnapshot(snapshot));',
-            'Main.layoutManager._backgroundGroup.add_child(this);',
         ],
         onFailure: ['this.destroy();', 'throw error;'],
         backgroundGroupAdds: 1,

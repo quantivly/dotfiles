@@ -126,14 +126,16 @@ export function rowBarWidthPx(fraction, trackWidthPx) {
 }
 
 /**
- * Whether the apps card can draw a snapshot's apps: a snapshot from a sampler before the rankings, or none yet, has
- * none. A null ranking inside is drawn as an empty list (appsRows).
+ * Whether the apps card can draw a snapshot's apps: it needs at least one of the two rankings (cpuRanking,
+ * memoryRanking; lib/apps.js) as an array, an empty one included. An apps object from a sampler before the rankings
+ * (topCpu and topMemory alone), or none yet, is no data, never a blank card. The other ranking, null, is drawn as an
+ * empty list (appsRows).
  *
  * @param {object|null|undefined} apps - A pulse snapshot's apps.
- * @returns {boolean} True unless the apps are missing.
+ * @returns {boolean} True when the apps carry either ranking as an array.
  */
 export function canDrawApps(apps) {
-    return isPresent(apps);
+    return isPresent(apps) && (Array.isArray(apps.cpuRanking) || Array.isArray(apps.memoryRanking));
 }
 
 /**

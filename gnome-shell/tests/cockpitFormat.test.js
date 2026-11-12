@@ -27,6 +27,14 @@ const MOUNTS = {
     ],
 };
 
+/**
+ * The sampler's two rankings (lib/apps.js), one entry each, and the two winners alone, as a sampler from before the
+ * rankings publishes them.
+ */
+const APPS_CPU_RANKING = [{groupKey: 'app:firefox.desktop', name: 'Firefox', cpuPercent: 31}];
+const APPS_MEMORY_RANKING = [{groupKey: 'app:firefox.desktop', name: 'Firefox', memoryBytes: 2_000_000_000}];
+const APPS_WINNERS_ONLY = {topCpu: APPS_CPU_RANKING[0], topMemory: APPS_MEMORY_RANKING[0]};
+
 /** The memory caveat every session tooltip ends with. */
 const MEMORY_NOTE = 'memory: process only; MCP servers and tool shells not counted';
 /** The uplink row's icons, written out rather than imported, so a changed icon fails here instead of moving with it. */
@@ -406,9 +414,28 @@ test('cockpitFormat: the card titles, and the sessions header\'s title is the se
     assertEqual([cockpitFormat.appsCardTitle, cockpitFormat.connectionsCardTitle, cockpitFormat.sessionsCardTitle,
         cockpitFormat.sessionsHeader(SESSIONS).title], ['APPS', 'CONNECTIONS', 'SESSIONS', 'SESSIONS']));
 
-test('cockpitFormat: the apps card draws any apps object, even with null rankings, and no data for none', () =>
-    assertEqual([{cpuRanking: null, memoryRanking: null}, null, undefined].map(cockpitFormat.canDrawApps),
-        [true, false, false]));
+test('cockpitFormat: an apps object with neither ranking (a sampler from before the rankings sends only topCpu and ' +
+    'topMemory) is no data for the apps card, as a missing one is, never a blank card', () =>
+    assertEqual([APPS_WINNERS_ONLY, {}, {cpuRanking: null, memoryRanking: null}, null, undefined]
+        .map(cockpitFormat.canDrawApps), [false, false, false, false, false]));
+
+test('cockpitFormat: the apps card draws an apps object with one ranking only, either one, even an empty one', () =>
+    assertEqual([
+        {...APPS_WINNERS_ONLY, cpuRanking: APPS_CPU_RANKING, memoryRanking: null},
+        {...APPS_WINNERS_ONLY, cpuRanking: null, memoryRanking: APPS_MEMORY_RANKING},
+        {...APPS_WINNERS_ONLY, memoryRanking: []},
+    ].map(cockpitFormat.canDrawApps), [true, true, true]));
+
+test('cockpitFormat: the apps card draws an apps object with both rankings', () =>
+    assertEqual(cockpitFormat.canDrawApps(
+        {...APPS_WINNERS_ONLY, cpuRanking: APPS_CPU_RANKING, memoryRanking: APPS_MEMORY_RANKING}), true));
+
+test('cockpitFormat: a ranking that is not an array is no ranking: an apps object with no other is no data', () =>
+    assertEqual([
+        {...APPS_WINNERS_ONLY, cpuRanking: 'Firefox'},
+        {...APPS_WINNERS_ONLY, memoryRanking: {0: APPS_MEMORY_RANKING[0], length: 1}},
+        {...APPS_WINNERS_ONLY, cpuRanking: 31, memoryRanking: APPS_MEMORY_RANKING[0]},
+    ].map(cockpitFormat.canDrawApps), [false, false, false]));
 
 test('cockpitFormat: the sessions card draws a source with its rows and a count for every state, empty rows ' +
     'included; a missing source, rows, counts, or first or last count is no data', () => {

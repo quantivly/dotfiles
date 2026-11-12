@@ -85,9 +85,11 @@ function placeActor(actor, {x, y, width, height}) {
 export const CockpitLayer = GObject.registerClass(
 class CockpitLayer extends St.Widget {
     /**
-     * Builds the layer from the cockpit client's layout, takes the v2 card out of the background group, follows both
-     * clients, and adds itself to the background group last. It lays nothing out until placeOnMonitor(). A failure
-     * destroys whatever was built (giving the v2 card back) and rethrows.
+     * Builds the layer: takes the v2 card out of the background group, adds itself to the background group, then
+     * builds and draws the grid from the cockpit client's layout and follows both clients. It is on the stage before
+     * any card draws, so no card asks St for the theme node of a tree off the stage. It lays nothing out until
+     * placeOnMonitor(), which the extension calls in the same turn of the main loop. A failure destroys whatever was
+     * built (which takes the layer out of the background group and gives the v2 card back) and rethrows.
      *
      * @param {object} options - The layer's parts.
      * @param {import('./cockpitClient.js').CockpitClient} options.cockpitClient - The cockpit client: the layout and
@@ -130,10 +132,11 @@ class CockpitLayer extends St.Widget {
         try {
             this._tooltip = new CockpitTooltip();
             pulseCard.get_parent()?.remove_child(pulseCard);
+            // On the stage before setLayout() draws: a card drawn off it asks St for a theme node it cannot give.
+            Main.layoutManager._backgroundGroup.add_child(this);
             this.setLayout(cockpitClient.layout);
             this._cockpitListenerId = cockpitClient.addListener(event => this._pacing.onCockpitEvent(event));
             this._snapshotListenerId = pulseClient.addListener(snapshot => this._onSnapshot(snapshot));
-            Main.layoutManager._backgroundGroup.add_child(this);
         } catch (error) {
             this.destroy();
             throw error;
