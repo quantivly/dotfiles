@@ -132,7 +132,8 @@
 #       stops it there, with exit 2.
 #       Every exit once it acts on the run (a breach, a failure or a signal too)
 #       puts the run back: its window and its background measurement ended, the
-#       extension enabled and the top bar shown again
+#       extension enabled and the top bar shown again; a second TERM or interrupt
+#       cannot cut that short
 #   scripts/resource-pulse-nested.sh window <title>
 #       open a small Gtk 4 window titled <title> (a plain name) in a live run whose
 #       cockpit serves the run's fixture, as a client of the nested shell only (see
@@ -163,7 +164,8 @@
 #       from an earlier pass, naming how long is left. It rewrites only the run's copy
 #       of the fixture, and puts it back and closes its windows on every exit. A TERM
 #       or an interrupt during its perf pass ends that pass too: perf puts the run
-#       back once its current wait ends (up to a minute), and the check waits for it.
+#       back once its current wait ends (up to a minute), and the check waits for it;
+#       a second one, to the check or to perf, cuts neither put-back short.
 #       Exit 1 when a step is bad, else 2 when one could not be judged
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services, the windows `window` opened and
@@ -650,6 +652,20 @@ note() {
 die() {
     note "$*"
     exit "$EXIT_REFUSED"
+}
+
+#######################################
+# A signal's exit for a subcommand whose EXIT trap puts the run back (perf,
+# check cockpit): ignore TERM and INT first, then exit, so that no second
+# signal can cut that put-back short, however soon after the first it comes
+# (one landing before the EXIT trap's own first statement included: bash runs
+# a pending trap before each command, and its `exit` would end the EXIT trap).
+# Arguments:
+#   $1 - exit status
+#######################################
+exit_with_signals_ignored() {
+    trap '' TERM INT
+    exit "$1"
 }
 
 #######################################
@@ -2483,13 +2499,28 @@ restore_perf_extension() {
 # trap): end the window it opened and its background measurement job, then
 # enable the extension and show the top bar again. Each step is guarded, so one
 # that fails never skips the others, and none exits: it acts on the nested run
-# and perf's own children only.
+# and perf's own children only. No TERM or INT can cut it short: on a signal's
+# path they are ignored before the exit (exit_with_signals_ignored), and on any
+# other (a failure, a breach, the end) here first.
 #######################################
 end_perf_run() {
+    trap '' TERM INT
     end_perf_window
     end_perf_cost_job
     restore_perf_extension
     return 0
+}
+
+#######################################
+# From here perf acts on the run: install its exit (end_perf_run, the EXIT
+# trap), which every exit runs, a failure, a breach or a signal included; a
+# signal's exit ignores further ones first (a TERM to check cockpit's process
+# group reaches perf, and the check's exit sends it one more).
+#######################################
+install_perf_exit_traps() {
+    trap end_perf_run EXIT
+    trap 'exit_with_signals_ignored 143' TERM
+    trap 'exit_with_signals_ignored 130' INT
 }
 
 #######################################
@@ -2908,9 +2939,7 @@ perf_subcommand() {
         || die "refusing: the nested session already has $window_count window(s); perf covers the card with its own"
     # From here perf acts on the run: every exit, a failure, a breach or a signal included, puts it back.
     PERF_ADDRESS="$address"
-    trap end_perf_run EXIT
-    trap 'exit 143' TERM
-    trap 'exit 130' INT
+    install_perf_exit_traps
     start_perf_window "$run_dir" "$address" "$window_command_path"
     wait_for_perf_window "$address" || die "the $PERF_WINDOW_COMMAND_NAME window did not open (see $run_dir/log/)"
 
@@ -3980,9 +4009,12 @@ check_cockpit_count_budgets_step() {
 #######################################
 # check cockpit's exit, on every path: its perf pass ended and waited for, the
 # check's windows ended, the run's fixture put back, the dropdown closed. Each
-# step guarded.
+# step guarded. No TERM or INT can cut it short: on a signal's path they are
+# ignored before the exit (exit_with_signals_ignored), and on any other here
+# first.
 #######################################
 end_check_cockpit() {
+    trap '' TERM INT
     end_check_perf
     end_recorded_window "$CHECK_RUN_DIR" "$HERDR_PROBE_WINDOW_TITLE"
     end_recorded_window "$CHECK_RUN_DIR" "$DECOY_WINDOW_TITLE"
@@ -4026,8 +4058,8 @@ check_cockpit_subcommand() {
     (( window_count == 0 )) \
         || die "refusing: the nested session has $window_count window(s) already; the check opens its own"
     trap end_check_cockpit EXIT
-    trap 'exit 143' TERM
-    trap 'exit 130' INT
+    trap 'exit_with_signals_ignored 143' TERM
+    trap 'exit_with_signals_ignored 130' INT
     begin_check_pass
     check_cockpit_layout_steps
     check_cockpit_hover_steps

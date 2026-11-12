@@ -5867,7 +5867,8 @@ check "nested: pointer moves (and clicks) through pointer.js, then waits until t
 # (exit 2), both (exit 1), and a log without the provoked focus lines.
 # check_cockpit_stubbed <answers dir> [again] runs `check cockpit` with sleep and perf stubbed, on a fresh run, or,
 # with again, on the run as the last pass left it (another pass in the same run). CHECK_STUB_RESTORE_FAILS=1 makes
-# every put-back of the run's fixture fail. Leaves CHECK_STUB_OUTPUT and CHECK_STUB_EXIT.
+# every put-back of the run's fixture fail; CHECK_STUB_OVERRIDES holds definitions the child evaluates last (a case's
+# own stand-ins for the script's functions). Leaves CHECK_STUB_OUTPUT and CHECK_STUB_EXIT.
 check_cockpit_stubbed() {
   [[ "${2:-}" == again ]] || make_check_run yes gc-log=1 replay=1
   : >"$CHECK_CALLS"
@@ -5875,7 +5876,8 @@ check_cockpit_stubbed() {
   # shellcheck disable=SC2016  # Expanded by the child bash.
   CHECK_STUB_OUTPUT="$(env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_RUN" \
     PATH="$CHECK_STUB_BIN:$PATH" CHECK_STUB_ANSWERS="$1" CHECK_STUB_CALLS="$CHECK_CALLS" \
-    CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" CHECK_STUB_RESTORE_FAILS="${CHECK_STUB_RESTORE_FAILS:-}" bash -c '
+    CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" CHECK_STUB_RESTORE_FAILS="${CHECK_STUB_RESTORE_FAILS:-}" \
+    CHECK_STUB_OVERRIDES="${CHECK_STUB_OVERRIDES:-}" bash -c '
       source "$1" || exit 99
       sleep() { :; }
       run_perf_for_check_cockpit() {
@@ -5884,6 +5886,7 @@ check_cockpit_stubbed() {
       if [[ -n "$CHECK_STUB_RESTORE_FAILS" ]]; then
         restore_run_cockpit_fixture() { return 1; }
       fi
+      eval "$CHECK_STUB_OVERRIDES"
       check_cockpit_subcommand
     ' check-cockpit "$NESTED_SCRIPT" 2>&1)"
   CHECK_STUB_EXIT=$?
@@ -6189,6 +6192,164 @@ check_term_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/co
 check "nested: a TERM to check cockpit during its perf pass is taken at once: perf is sent TERM and waited for while it puts the run back, the run's fixture put back, exit 143" \
   "$check_term_summary" "perf-ran=yes ended=143 perf-put-back=1 fixture=restored"
 
+# A TERM can reach check cockpit and its perf pass at once (a TERM to the
+# check's process group: a timeout, a tool stopping a background task), and the
+# check's exit then sends perf a second one milliseconds later; or the check
+# can get two TERMs in quick succession. No second TERM may cut a put-back
+# short: perf's (its window ended, the extension enabled, the top bar shown) or
+# the check's (perf waited for, its windows ended, the run's fixture put back).
+# The perf here is a stand-in with perf's own exit handling (the script's
+# install_perf_exit_traps and end_perf_run), whose three put-back steps each
+# take a third of a second and record themselves; it waits in the wait builtin,
+# which a TERM interrupts at once (perf's own waits are foreground commands,
+# which take a TERM sent to perf alone only once they end: up to a minute). The
+# check runs in a session of its own, which the row ends whole at its end.
+CHECK_PUT_BACK_PERF_STAND_IN="$WIRING_TMP/check-put-back-perf"
+CHECK_PUT_BACK_PERF_STARTED="$WIRING_TMP/check-put-back-perf-started"
+CHECK_PUT_BACK_OUTPUT="$WIRING_TMP/check-put-back-output"
+PERF_PUT_BACK_STEP_SECONDS=0.33
+# The second of two TERMs in quick succession: well inside perf's put-back, which takes about a second.
+CHECK_SECOND_TERM_DELAY_SECONDS=0.2
+# With a TERM to the group, the check's own TERM reaches perf within a millisecond, often together with perf's own (two
+# pending TERMs are taken as one). Here the check's exit waits this long before it sends perf its TERM, so that the
+# TERM lands once perf's own has begun its put-back, as it can on a loaded machine.
+CHECK_TERM_TO_PERF_DELAY_SECONDS=0.1
+cat >"$CHECK_PUT_BACK_PERF_STAND_IN" <<STAND_IN
+#!/bin/bash
+# Stands in for check cockpit's perf pass with perf's own exit handling; each put-back step records itself.
+source "$NESTED_SCRIPT" || exit 99
+record_put_back_step() {
+  sleep $PERF_PUT_BACK_STEP_SECONDS
+  printf 'perf put back: %s\n' "\$1" >>"\$CHECK_STUB_CALLS"
+}
+end_perf_window() { record_put_back_step window; }
+end_perf_cost_job() { record_put_back_step cost-job; }
+restore_perf_extension() { record_put_back_step extension; }
+install_perf_exit_traps
+: >"$CHECK_PUT_BACK_PERF_STARTED"
+sleep $CHECK_PERF_STAND_IN_WAIT_SECONDS &
+wait "\$!"
+STAND_IN
+chmod +x "$CHECK_PUT_BACK_PERF_STAND_IN" || fatal "cannot make $CHECK_PUT_BACK_PERF_STAND_IN executable"
+# check_put_back_run <group or twice> starts check cockpit on a fresh run with the stand-in as its perf pass, sends,
+# once the stand-in runs, one TERM to the check's process group (group, the check's own TERM to perf then sent
+# CHECK_TERM_TO_PERF_DELAY_SECONDS late) or two to the check alone in quick succession (twice), waits for the check to
+# end, and prints ended=<status> put-back-at-exit=[<the steps perf had recorded when the check ended>]
+# fixture=<restored or changed>. Whatever is left of the row's session then ends with it.
+check_put_back_run() {
+  local term_plan="$1" check_pid put_back_tenth put_back_summary perf_term_delay_seconds=""
+  [[ "$term_plan" == group ]] && perf_term_delay_seconds="$CHECK_TERM_TO_PERF_DELAY_SECONDS"
+  make_check_run yes gc-log=1 replay=1
+  : >"$CHECK_CALLS"
+  rm -f "$CHECK_PUT_BACK_PERF_STARTED"
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  setsid env "${LIVE_SETTINGS_BARRIER[@]}" RESOURCE_PULSE_NESTED_DIR="$CHECK_RUN" PATH="$CHECK_STUB_BIN:$PATH" \
+    CHECK_STUB_ANSWERS="$CHECK_ANSWERS" CHECK_STUB_CALLS="$CHECK_CALLS" CHECK_STUB_SHELL_LOG="$CHECK_RUN/log/shell.log" \
+    CHECK_PUT_BACK_PERF_STAND_IN="$CHECK_PUT_BACK_PERF_STAND_IN" PERF_TERM_DELAY_SECONDS="$perf_term_delay_seconds" \
+    bash -c '
+      source "$1" || exit 99
+      sleep() { :; }
+      run_perf_for_check_cockpit() { exec "$CHECK_PUT_BACK_PERF_STAND_IN"; }
+      if [[ -n "$PERF_TERM_DELAY_SECONDS" ]]; then
+        eval "script_$(declare -f end_check_perf)"
+        end_check_perf() { command sleep "$PERF_TERM_DELAY_SECONDS"; script_end_check_perf; }
+      fi
+      check_cockpit_subcommand
+    ' check-put-back "$NESTED_SCRIPT" >"$CHECK_PUT_BACK_OUTPUT" 2>&1 &
+  check_pid=$!
+  for (( put_back_tenth = 0; put_back_tenth < CHECK_TERM_START_LIMIT_TENTHS; put_back_tenth++ )); do
+    [[ -e "$CHECK_PUT_BACK_PERF_STARTED" ]] && break
+    sleep 0.1
+  done
+  case "$term_plan" in
+    group) kill -TERM -- "-$check_pid" 2>/dev/null ;;
+    twice)
+      kill -TERM "$check_pid" 2>/dev/null
+      sleep "$CHECK_SECOND_TERM_DELAY_SECONDS"
+      kill -TERM "$check_pid" 2>/dev/null ;;
+  esac
+  for (( put_back_tenth = 0; put_back_tenth < CHECK_TERM_END_LIMIT_TENTHS; put_back_tenth++ )); do
+    is_running "$check_pid" || break
+    sleep 0.1
+  done
+  if is_running "$check_pid"; then
+    put_back_summary="ended=no"
+    kill -KILL -- "-$check_pid" 2>/dev/null
+    wait "$check_pid" 2>/dev/null
+  else
+    wait "$check_pid"
+    put_back_summary="ended=$?"
+  fi
+  put_back_summary+=" put-back-at-exit=[$(sed -n 's/^perf put back: //p' "$CHECK_CALLS" | tr '\n' ' ')]"
+  put_back_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+    && printf restored || printf changed)"
+  kill -KILL -- "-$check_pid" 2>/dev/null
+  nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
+  printf '%s' "$put_back_summary"
+}
+check "nested: a TERM to check cockpit's process group during its perf pass reaches perf too, and the check's own TERM to perf, landing once perf's put-back has begun, cuts no step of it: the check waits for every step, puts the run's fixture back and exits 143" \
+  "$(check_put_back_run group)" "ended=143 put-back-at-exit=[window cost-job extension ] fixture=restored"
+check "nested: a second TERM to check cockpit in quick succession cuts its exit short nowhere: it still waits for every step of perf's put-back, then puts the run's fixture back, and exits 143" \
+  "$(check_put_back_run twice)" "ended=143 put-back-at-exit=[window cost-job extension ] fixture=restored"
+
+# A TERM can also land where no row above can time it: after a first TERM
+# began an exit, before the exit handler's own first statement (the gap); or
+# during the put-back of a perf or a check that ended by itself (a timeout
+# firing just then). Each is sent here by the process to itself, at that point:
+# perf's handlers are the script's (its put-back steps recording themselves at
+# once), the check's run stubbed as above. Each must still run its put-back to
+# the end: perf every step; the check its fixture put back and its last step,
+# the dropdown closed, with the exit status it had.
+# perf_put_back_with_term <gap or own-exit> prints the steps perf's put-back recorded.
+perf_put_back_with_term() {
+  local put_back_record="$WIRING_TMP/perf-put-back-$1"
+  : >"$put_back_record"
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  PERF_PUT_BACK_RECORD="$put_back_record" bash -c '
+    source "$1" || exit 99
+    record_put_back_step() { printf "%s " "$1" >>"$PERF_PUT_BACK_RECORD"; }
+    end_perf_window() { record_put_back_step window; }
+    end_perf_cost_job() { record_put_back_step cost-job; }
+    restore_perf_extension() { record_put_back_step extension; }
+    case "$2" in
+      gap)
+        eval "script_$(declare -f end_perf_run)"
+        end_perf_run() { kill -TERM "$$"; script_end_perf_run; }
+        install_perf_exit_traps
+        kill -TERM "$$" ;;
+      own-exit)
+        end_perf_window() { record_put_back_step window; kill -TERM "$$"; }
+        install_perf_exit_traps
+        exit 0 ;;
+    esac
+    exit 99
+  ' perf-put-back "$NESTED_SCRIPT" "$1" >/dev/null 2>&1
+  printf '[%s]' "$(<"$put_back_record")"
+}
+# check_put_back_with_term <gap or own-exit> prints exit/fixture/the check's last in-shell request.
+check_put_back_with_term() {
+  local term_overrides
+  # shellcheck disable=SC2016  # Evaluated by the check's bash.
+  case "$1" in
+    gap) term_overrides='run_perf_for_check_cockpit() { kill -TERM "$$"; }
+      eval "script_$(declare -f end_check_cockpit)"
+      end_check_cockpit() { kill -TERM "$$"; script_end_check_cockpit; }' ;;
+    own-exit) term_overrides='eval "script_$(declare -f end_check_perf)"
+      end_check_perf() { kill -TERM "$$"; script_end_check_perf; }' ;;
+  esac
+  CHECK_STUB_OVERRIDES="$term_overrides" check_cockpit_stubbed "$CHECK_ANSWERS"
+  printf '%s/%s/%s' "$CHECK_STUB_EXIT" "$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+    && printf restored || printf changed)" "$(tail -n 1 "$CHECK_CALLS" | tr ' ' ':')"
+  nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
+}
+put_back_term_summary="perf-gap=$(perf_put_back_with_term gap)"
+put_back_term_summary+=" perf-own-exit=$(perf_put_back_with_term own-exit)"
+put_back_term_summary+=" check-gap=$(check_put_back_with_term gap)"
+put_back_term_summary+=" check-own-exit=$(check_put_back_with_term own-exit)"
+check "nested: a TERM landing after a first TERM began an exit, before the exit handler's first statement, or during the put-back of a perf or a check that ended by itself, cuts neither perf's put-back nor check cockpit's exit short" \
+  "$put_back_term_summary" \
+  "perf-gap=[window cost-job extension ] perf-own-exit=[window cost-job extension ] check-gap=143/restored/resourcePulseCockpitCheck:dropdown-close check-own-exit=0/restored/resourcePulseCockpitCheck:dropdown-close"
+
 nested_call end_recorded_windows "$CHECK_RUN" >/dev/null 2>&1
 kill "$check_fake_shell_pid" 2>/dev/null
 wait "$check_fake_shell_pid" 2>/dev/null
@@ -6208,7 +6369,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1129
+EXPECTED_ROWS=1132
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
