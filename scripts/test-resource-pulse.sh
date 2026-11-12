@@ -6415,6 +6415,27 @@ screenshot_pointer_summary+=" last-move=$(grep -F 'resourcePulseNestedPointer mo
 check "nested: check cockpit moves the pointer off the grid, to the canary's point, and waits for it there before its screenshot, so that no hover an earlier step left is in the picture" \
   "$screenshot_pointer_summary" \
   'before-screenshot=[resourcePulseNestedPointer move resourcePulseNestedPointer at ] last-move=resourcePulseNestedPointer move {"x":20,"y":600,"clickCount":0}'
+# A new window takes the focus as Mutter maps it, and window-shown sees a window before that map: in the one nested
+# run (Task 12b) the probe's late map took the focus back from a decoy activated a second after the probe opened. So
+# the check waits until each window it opens has the focus before it activates the decoy. Read from the requests the
+# stand-in recorded, from the first window's placement to the decoy's activation, each named with whose window it
+# asks about (the first placed is the decoy, the second the probe).
+window_setup_calls="$(awk '$2 == "place-window-clear" { is_window_setup = 1 }
+  is_window_setup { print }
+  $2 == "activate-window" { exit }' "$CHECK_CALL_OPTIONS")"
+window_setup_decoy_pid="$(awk '$2 == "place-window-clear"' <<<"$window_setup_calls" | sed -n -E '1s/.*"pid":([0-9]+).*/\1/p')"
+window_setup_probe_pid="$(awk '$2 == "place-window-clear"' <<<"$window_setup_calls" | sed -n -E '2s/.*"pid":([0-9]+).*/\1/p')"
+window_setup_sequence=""
+while read -r _ window_setup_request window_setup_options; do
+  window_setup_pid="$(sed -n -E 's/.*"pid":([0-9]+).*/\1/p' <<<"$window_setup_options")"
+  window_setup_role=other
+  [[ -n "$window_setup_pid" && "$window_setup_pid" == "$window_setup_decoy_pid" ]] && window_setup_role=decoy
+  [[ -n "$window_setup_pid" && "$window_setup_pid" == "$window_setup_probe_pid" ]] && window_setup_role=probe
+  window_setup_sequence+="$window_setup_request:$window_setup_role "
+done <<<"$window_setup_calls"
+check "nested: check cockpit waits until each window it opens has the focus (Mutter's map of it is over) before it activates the decoy, so a late map of the probe cannot take the focus back from the decoy" \
+  "distinct=$([[ -n "$window_setup_decoy_pid" && "$window_setup_decoy_pid" != "$window_setup_probe_pid" ]] && printf yes || printf no) sequence=[$window_setup_sequence]" \
+  "distinct=yes sequence=[place-window-clear:decoy window-clear:decoy focused-window:decoy window-shown:probe place-window-clear:probe window-clear:probe focused-window:probe activate-window:decoy ]"
 
 BAD_GRID_DETAIL='the apps card is at 600x500+685+80, not its cell 600x500+680+80'
 UNJUDGED_STALE_DETAIL="cannot read the card's no-data line (_noDataLabel)"
@@ -7073,7 +7094,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1191
+EXPECTED_ROWS=1192
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

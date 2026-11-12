@@ -3803,8 +3803,12 @@ check_cockpit_hover_steps() {
 
 #######################################
 # Open the check's two windows (the decoy, then the probe the fixture's
-# focusReply names), move both clear of the sessions card, and give the decoy
-# the focus. Sets CHECK_PROBE_PID and CHECK_DECOY_PID; prints the step's line.
+# focusReply names), move both clear of the sessions card, wait until each has
+# taken the focus as Mutter maps it, and give the decoy the focus. The wait is
+# for the map: window-shown sees a window as soon as Mutter has one, which can
+# be before its first map, and that map takes the focus back from a decoy
+# activated before it (measured in the one nested run, Task 12b). Sets
+# CHECK_PROBE_PID and CHECK_DECOY_PID; prints the step's line.
 # All of it is the harness's own setup, so what fails could not be judged,
 # never bad. Returns 1 when the windows could not be set up.
 #######################################
@@ -3826,6 +3830,8 @@ open_check_windows() {
         ask_check place-window-clear "$clear_options"
         note_setup_answer
         poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check window-clear "$clear_options"
+        note_setup_answer
+        poll_nested "$FOCUS_ANSWER_ATTEMPTS" ask_check focused-window "$(pid_options_json "$window_pid")"
         note_setup_answer
     done
     ask_check activate-window "$(pid_options_json "$CHECK_DECOY_PID")"

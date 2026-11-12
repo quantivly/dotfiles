@@ -529,6 +529,8 @@ function makeHealthyShell() {
             return device;
         },
     };
+    // As in GNOME Shell 50: the seat is the stage's Clutter backend's; global.backend (a Meta.Backend) has none.
+    stage.context = {get_backend: () => ({get_default_seat: () => seat})};
     const pointerPosition = {x: 0, y: 0};
     const clock = {usec: FAKE_CLOCK_START_USEC};
     Object.assign(shell, {
@@ -548,7 +550,7 @@ function makeHealthyShell() {
                 },
             },
             global: {
-                stage, display, backend: {get_default_seat: () => seat},
+                stage, display, backend: {},
                 get_pointer: () => [pointerPosition.x, pointerPosition.y, 0],
             },
             imports: {gi: {Clutter: {
@@ -1510,7 +1512,7 @@ test('nested pointer: one virtual pointer of the seat moves to a point, clicks o
     const threeClicks = pointer(shell, 'click', {x: 10, y: 10, clickCount: 3});
     const unknown = pointer(shell, 'drag', {x: 10, y: 10});
     const seatlessShell = makeHealthyShell();
-    seatlessShell.scope.global.backend = {get_default_seat: () => null};
+    seatlessShell.stage.context = {get_backend: () => ({get_default_seat: () => null})};
     const seatless = pointer(seatlessShell, 'move', {x: 10, y: 10});
     assertEqual({
         verdicts: [moved.verdict, clicked.verdict, doubleClicked.verdict, arrived.verdict, elsewhere.verdict],

@@ -4,8 +4,10 @@
 // same text runs against a fake shell, with rows (gnome-shell/tests/cockpitCheck.test.js).
 //
 // It drives a Clutter virtual pointer device of the nested shell's own seat
-// (global.backend.get_default_seat().create_virtual_device(POINTER_DEVICE)), made once and kept for the life of the
-// nested shell in globalThis.__resourcePulseNestedPointer, at logical (stage) coordinates. The events it sends are
+// (global.stage.context.get_backend().get_default_seat().create_virtual_device(POINTER_DEVICE)), made once and kept
+// for the life of the nested shell in globalThis.__resourcePulseNestedPointer, at logical (stage) coordinates. The seat
+// is the Clutter backend's: GNOME Shell 50's global.backend (a Meta.Backend) has no get_default_seat, measured in the
+// one nested run (Task 12b), where that route made no pointer at all. The events it sends are
 // queued; the shell handles them after this Eval returns, so a move is confirmed by a later `at`, never by itself.
 //
 // Requests: 'move' {x, y}; 'click' {x, y, clickCount} (a move, then clickCount presses and releases of the primary
@@ -32,11 +34,18 @@ function resourcePulseNestedPointer(request, options = {}) {
     const couldNotJudge = detail => ({verdict: 'could-not-judge', detail});
 
     /**
+     * @returns {object|null} The seat of the stage's Clutter backend, or null when there is none to read.
+     */
+    function clutterBackendSeat() {
+        return global.stage?.context?.get_backend?.()?.get_default_seat?.() ?? null;
+    }
+
+    /**
      * @returns {object|null} The virtual pointer device, made on first use; null when the seat makes none.
      */
     function virtualPointer() {
         if (pointerState.virtualPointer === null) {
-            const seat = global.backend?.get_default_seat?.() ?? null;
+            const seat = clutterBackendSeat();
             pointerState.virtualPointer =
                 seat?.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE) ?? null;
         }

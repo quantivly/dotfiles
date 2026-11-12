@@ -338,15 +338,18 @@ test('cockpitFormat: an uplink nothing is known of (no NetworkManager: kind and 
 
 test('cockpitFormat: an uplink neither wired nor Wi-Fi with no verdict from NetworkManager (connectivity unknown or ' +
     'none given: kind none, or no kind) reads "uplink unknown" with the unknown icon, as one nothing is known of: ' +
-    'the source never said it was offline; a wired one with the same verdict still reads its kind', () => assertEqual([
-    {kind: 'none', connectivity: 'unknown', wifiEnabled: null},
-    {kind: null, connectivity: 'unknown', wifiEnabled: null},
-    {kind: 'wired', connectivity: 'unknown', wifiEnabled: true},
-].map(uplinkLookOf), [
-    {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']},
-    {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']},
-    {icon: WIRED_ICON, text: 'wired', tooltip: ['internet: unknown']},
-]));
+    'the source never said it was offline; a wired or Wi-Fi one with the same verdict still reads its kind', () =>
+    assertEqual([
+        {kind: 'none', connectivity: 'unknown', wifiEnabled: null},
+        {kind: null, connectivity: 'unknown', wifiEnabled: null},
+        {kind: 'wired', connectivity: 'unknown', wifiEnabled: true},
+        {kind: 'wifi', connectivity: 'unknown', wifiEnabled: true},
+    ].map(uplinkLookOf), [
+        {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']},
+        {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']},
+        {icon: WIRED_ICON, text: 'wired', tooltip: ['internet: unknown']},
+        {icon: WIFI_ICON, text: 'wifi', tooltip: ['internet: unknown']},
+    ]));
 
 test('cockpitFormat: the VPN row\'s icon carries the working state\'s class while up and the idle state\'s while ' +
     'down or unknown; the uplink, ssh and mount rows carry none', () => {
@@ -367,9 +370,9 @@ test('cockpitFormat: the apps card with no apps says the system card\'s words fr
     assertEqual([cockpitFormat.appsNoDataText('14:02'), cockpitFormat.appsNoDataText(null)],
         ['no data since 14:02', 'no data']));
 
-test('cockpitFormat: the apps card names since when only while the sampler\'s snapshot carries no numbers, when the ' +
-    'system card says no data since too; a live snapshot with no apps (before the first scan, after one that threw) ' +
-    'reads the bare no data', () => {
+test('cockpitFormat: the apps card names since when only while the sampler\'s snapshot carries no numbers (neither ' +
+    'CPU nor memory) or there is none yet; a snapshot with either number and no apps (before the first scan, after ' +
+    'one that threw) reads the bare no data', () => {
     const lastGoodClockLabel = '14:02';
     const appsTextFor = snapshot => cockpitFormat.appsNoDataText(
         cockpitFormat.appsNoDataSinceClockLabel(snapshot, lastGoodClockLabel));
@@ -378,10 +381,12 @@ test('cockpitFormat: the apps card names since when only while the sampler\'s sn
     assertEqual({
         live: appsTextFor(liveSnapshotWithoutApps),
         liveMemoryOnly: appsTextFor({...liveSnapshotWithoutApps, cpuBusyPercent: null}),
+        liveCpuOnly: appsTextFor({...liveSnapshotWithoutApps, memory: null}),
         noNumbers: appsTextFor(noNumbersSnapshot),
         noSnapshotYet: appsTextFor(null),
     }, {
-        live: 'no data', liveMemoryOnly: 'no data', noNumbers: 'no data since 14:02', noSnapshotYet: 'no data since 14:02',
+        live: 'no data', liveMemoryOnly: 'no data', liveCpuOnly: 'no data', noNumbers: 'no data since 14:02',
+        noSnapshotYet: 'no data since 14:02',
     });
 });
 

@@ -378,8 +378,8 @@ rested on it for 300 ms.
   `wired` (`wired · wifi off` when docked) or `wifi`; `wired · limited` or `wifi · portal` when
   NetworkManager reaches the internet only in part; `wired · no internet`, with the offline icon, when not at
   all; `online` when the primary connection is neither, such as a VPN on a full tunnel or a tethered phone
-  (its tooltip says so), and `offline` when NetworkManager finds no internet over it; `uplink unknown` without
-  NetworkManager, or while it has not judged a link that is neither. Its tooltip
+  (its tooltip says so), and `offline` when NetworkManager finds no internet over it, as with no link at all;
+  `uplink unknown` without NetworkManager, or while it has not judged a link that is neither. Its tooltip
   gives NetworkManager's verdict, `internet: <connectivity>`. Then the VPN (`VPN up (tun0)` or `VPN down`,
   its icon teal while up and grey while down or unknown), the SSH masters (`3 live ssh masters`), then one
   row per mount: its label and free space, with a bar of the space used, and its mount point, filesystem type
@@ -541,8 +541,9 @@ shell's journal:
   card is drawn top right`: the cockpit monitor's work area is too small for the cards, written once as that
   begins.
 - `resource-pulse: could not read the cockpit layout (<error>), so the card is drawn top right`: the service
-  could not read `cockpit.json`, as `gnome-status` says it: `missing` with no file, `config: malformed JSON`
-  for text that is not JSON (a half-typed save included), or the first field it found wrong, such as
+  could not read `cockpit.json`, as `gnome-status` says it. Among the errors: `missing` with no file or one
+  that cannot be read, `config: malformed JSON` for text that is not JSON (a half-typed save included),
+  `config: expected a JSON object` for JSON that is not an object, or the first field it found wrong, such as
   `groups[1].caption: expected a non-empty string`; the grid goes until the file reads again.
 - `resource-pulse: cockpit: focus: <reason>`: a session row's click brought no window forward. The reason is
   one of `FocusSession`'s five error codes ([The cockpit service](#the-cockpit-service); `internal` also when
@@ -566,6 +567,7 @@ scripts/resource-pulse-nested.sh start --gc-log --replay   # or: collections log
 scripts/resource-pulse-nested.sh eval 'Main.extensionManager.lookup("resource-pulse@dotfiles").state'
 scripts/resource-pulse-nested.sh screenshot card.png 2600 40 470 200   # x y width height, optional
 scripts/resource-pulse-nested.sh scenario idle   # with --replay: idle, light or busy (busy until asked)
+RESOURCE_PULSE_NESTED_LIFETIME_SECONDS=3600 scripts/resource-pulse-nested.sh start --gc-log --replay   # for check cockpit
 nohup scripts/resource-pulse-nested.sh check cockpit >check.txt 2>&1   # with --gc-log --replay and no window yet
 scripts/resource-pulse-nested.sh window herdr-probe   # a small window, the cockpit's one window candidate
 scripts/resource-pulse-nested.sh pointer 1200 400 click   # the nested pointer to x y (stage pixels), and a click
@@ -617,6 +619,9 @@ rows are in the suite below.
   could not be judged. It rewrites only the run's copy of the fixture. It may run again in the same run:
   each pass judges the log from where the last one stopped reading, and cannot judge the clicks whose one
   journal line the extension's 10-minute limit still holds from an earlier pass, and says how long is left.
+  A pass takes about 9 minutes, its `perf` pass included (9 min 6 s and 9 min 9 s in the nested shell on
+  2026-11-12), and a run lives 20 minutes by default, so start a run meant for it with
+  `RESOURCE_PULSE_NESTED_LIFETIME_SECONDS` raised, as above: an hour holds a pass, a fix and a second pass.
 
 **Stopping a `check cockpit` or a `perf`.** A stopped one first puts the run back: its windows closed, the
 extension enabled, the top bar shown, the fixture restored. That takes about a minute, and up to a few
@@ -699,6 +704,13 @@ scripts/resource-pulse-nested.sh stop
   cockpit visible, its four cards and the top bar, as in the first table; and, as for the card, no forced
   collection the extension causes, no repeating timer in the shell, and one frame a Sample at most. The live
   desktop reads above the nested figures, as the bullet on it says, and has no percentage to pass.
+- **Measured in the nested shell on 2026-11-12**, three `perf` runs with the fixture's grid drawn in every
+  enabled state, in % of one core over the disabled state (lowest to highest, then the median): covered with
+  idle input 0.074 to 0.113 (0.109), above the 0.08 the first table gives a covered card; covered and busy
+  0.181 to 0.217 (0.185); top bar hidden and covered 0.093 to 0.110 (0.110); the cockpit visible and busy
+  0.288 to 0.320 (0.289), within its 0.5. The main
+  thread's median per tick, the median of the three: 0.81 ms covered and idle, 2.93 ms covered and busy,
+  4.86 ms visible. Every count and cockpit budget held in each run.
 
 **The services and memory,** at idle:
 
@@ -745,7 +757,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1191 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1192 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's
