@@ -20,6 +20,8 @@ reopens a decision of theirs it says so; everything it does not mention stands.
 - **The largest single cause was not on anyone's list:** every Sample makes GJS schedule a forced, full,
   non-incremental garbage collection on the compositor thread. On the live shell that is a burst of 22–56 ms
   every 10 seconds for as long as the extension is enabled: two or three missed frames each time.
+  *Corrected 2026-11-11: that holds in the nested shell. On the live shell most of those bursts are the
+  stock shell's own and continue with the extension disabled; see "Measured on the live shell".*
 - **Two periodic 2-second timers** cost about as much as handling the Sample.
 - **A covered card is still painted.** Under a window that repaints, the frozen card beneath it costs more than
   everything else: 0.8 points on the live shell at only 15 frames a second. Drawing the card through an offscreen
@@ -135,6 +137,8 @@ handler, and the timers cost far more than their few lines.
   and compile again. The sampling profile shows compilation recurring all session: 18–23 ms in each 120 s.
 - **The sampler service does not have this problem.** Alone for 70 s it logged one such collection at start-up,
   then only its own planned ones, 1–2 ms each.
+- *Added 2026-11-11: "with it disabled they stop" is the nested shell. The live shell forces the same
+  collection by itself, from its own objects; see "Measured on the live shell".*
 
 ### 4. Cold execution: in place costs about seven times the hot loop
 
@@ -310,6 +314,10 @@ the extension toggled with `gnome-extensions`, 130 s windows, % of one core for 
   10.0 s while the extension is enabled: 13 or 14 in each 130 s window. Disabled, such bursts come 3 to 8 times
   and irregularly. Each is two or three missed frames at 60 Hz. Together they are about 0.3 points, most of what
   the extension adds in the covered state.
+  *Corrected 2026-11-11: this counted only bursts exactly 10.0 s apart. Counting every burst of 10 ms or more,
+  the disabled windows of this reading have 8, 17, 11 and 8, of 21 to 38 ms each: the stock shell's own
+  collections. "About 0.3 points, most of what the extension adds" was too much; see "Measured on the live
+  shell".*
 - **A frame costs more on a real output.** From the live shell's own marks: 1.7 ms of dispatch with only the top
   bar drawn and 3.4 ms with the card, against 1.0 and 1.5 in the nested shell, plus 0.3 ms on the KMS thread.
 - **The frozen card under a repainting window costs about 0.8 points at 15 frames a second,** after the tick's
@@ -342,7 +350,7 @@ the extension toggled with `gnome-extensions`, 130 s windows, % of one core for 
 
 | Method | Measured gain | Cost, risk, upkeep | Verdict |
 |---|---|---|---|
-| Take Samples through a subscription on the shared connection, not a proxy | Forced collections 6 → 1–2 a minute (an idle shell's own rate); on the live shell about 0.3 points and a 22–56 ms burst every 10 s | Small: `signal_subscribe`, `bus_watch_name`, `connection.call` replace the proxy | **Do.** The largest single win, and it removes a periodic hitch. |
+| Take Samples through a subscription on the shared connection, not a proxy | Forced collections 6 → 1–2 a minute (an idle shell's own rate); on the live shell about 0.3 points and a 22–56 ms burst every 10 s *(corrected 2026-11-11: no gain measured on the live shell while it collects by itself, on Wi-Fi or battery; see "Measured on the live shell")* | Small: `signal_subscribe`, `bus_watch_name`, `connection.call` replace the proxy | **Do.** The largest single win, and it removes a periodic hitch. |
 | No periodic timers | About 1.3 ms a tick | Small: a watchdog re-armed by each Sample; the cover re-check rides on Samples and window signals | **Do.** Also makes a hung service show after exactly 6 s. |
 | A lean tick while only the top bar is seen | Part of the factor of two to three under load | The snapshot is parsed when something that shows it asks | **Do.** |
 | Draw the top bar only on a visible change, in whole device pixels, and only while mapped | Idle: no frame, 4.1–5.2 ms a tick → 0.5. Under load: nothing | A comparison before `queue_repaint()`; `ceil`, so an idle CPU stays inside one pixel | **Do.** |
@@ -607,11 +615,66 @@ the same run's disabled state, with the probe's own counting included, median of
   extension against that state's 0.3 budget is not resolved: four valid rounds read -0.17, +0.05, +0.33 and
   +0.71 over the disabled shell (median 0.19), a spread wider than the budget, because the state itself, about
   4% of a core for the window's own frames, moved by half a point with the load.
-- **Not measured yet: the live shell.** The second live reading follows the owner's next login
-  (follow-up 6).
+- **The live shell** was read the evening it was deployed: "Measured on the live shell", below.
 
 Raw output, the scripts and the full tables: `~/Projects/handoffs/resource-pulse-perf-tools/2026-11-11-stage-one/`
 (`result.md`).
+
+### Measured on the live shell (2026-11-11)
+
+The second live reading (the first is finding 12): the deployed stage one, the same script and settings, the
+owner away. Then two traces of the live shell, which the owner ran as root. The laptop was on Wi-Fi and on
+battery, at a load of 8 to 10, so every Sample changed the top bar. % of one core for the whole live shell,
+130 s windows.
+
+| State | Enabled | Disabled | Added | The first reading added |
+|---|---|---|---|---|
+| Card visible (desktop showing) | 0.763, 0.775 | 0.295, 0.255 | 0.47, 0.52 | 0.45–0.73 |
+| Card covered by a static window, top bar on | 0.610, 0.770 | 0.243, 0.212 | 0.37, 0.56 | 0.39–0.54 |
+| Card covered by a window repainting 15 times a second | 3.649 | 3.220 | 0.43 | 1.29 |
+
+- **Under a repainting window the extension costs a third of what it did.** That is the offscreen redirect.
+- **Covered and visible cost what they did,** within the spread of two windows each. The main thread's median
+  per tick fell from 8–11 ms to 5.5–7.5 ms, and the bursts did not change.
+- **The extension triggers no forced collection on the live shell.** The traces put kernel uprobes on GJS's
+  toggle-notify function and on `JS_GC` for 130 s each, with the extension enabled: 143 and 977 toggles, 9 and
+  13 forced collections. No object of the extension is among the toggles.
+- **The stock shell forces them by itself.** What toggled, by GType and native stack: the network indicator's
+  `NMClient`, on NetworkManager's 6 s Wi-Fi poll; the power indicator's proxy, on every UPower update, which is
+  every 30 s while the battery charges or discharges (UPower's own record has the same seconds); the clock,
+  each minute; other D-Bus proxies of the shell and of ubuntu-appindicators; IBus tasks freed by one
+  collection, which arm the next; the dock; the mixer.
+- **The rule, exactly.** GJS keeps one 10 s timer. When it fires, it collects only if something toggled down
+  since it last fired: 24 of 24 windows in the two traces. Every call from native code into JavaScript re-arms
+  it (`Gjs::Closure::invoke`, `GjsCallbackTrampoline::callback_closure` and object construction are among the
+  eight call sites of `schedule_gc_if_needed`). So with a Sample every 2 s it fires every 10.0 s, and without
+  one it waits for the shell's next toggle: about every 12 s in the disabled windows.
+- **So the shell collects with the extension off.** Every burst of 10 ms or more on the main thread, per
+  window: 14, 9, 7 and 9 with the extension disabled (211 to 280 ms, 0.16 to 0.22 % of one core, 20 to 30 ms
+  each), against 13 collections with it enabled.
+
+What the extension adds on the live shell, by part:
+
+| Part | About, % of one core | Evidence |
+|---|---|---|
+| One frame per Sample: the compositor's own work | 0.15 | 68 to 73 frames a window at 2.9 to 3.1 ms each, from mutter's marks: 0.9 to 1.0 ms to paint, 1.5 ms to swap |
+| The shell's collections coming sooner, and the tick that lands in each | 0.08 to 0.15 | 13 a window against 7 to 14; 24 to 36 ms each against 20 to 30 |
+| The extension's own JavaScript per Sample | 0.05 or less | the main thread outside the bursts rises by 200 to 290 ms a window, and the frames are 195 to 220 of it |
+
+- **What that means for stage one.** Its gains are where the nested shell measured them: a machine at rest,
+  where no pixel changes and no frame is drawn, and a shell that is quiet, where the removed proxy was the
+  difference between a collection a minute and one every 10 s. Neither was the state of either live reading.
+  On a busy machine on Wi-Fi or battery the live cost is the frame and the shell's own collections, and stage
+  one changes neither.
+- **What it means for the budgets.** The live figures are about twice the nested budgets. The nested shell
+  under-reads the live one twice: its frame is cheaper, and its shell does not collect by itself. On this
+  display, anything that changes the top bar every 2 s costs at least the frame, about 0.15. Follow-up 11.
+- **What it means for `perf`.** It stays the regression gate for what the extension itself does: its counts
+  hold on the live shell (no collection of the extension's, about one frame a Sample). Its percentages are
+  the nested shell's.
+
+The readings, both traces and the tools: `~/Projects/handoffs/resource-pulse-perf-tools/2026-11-11-stage-one/`
+(`result.md`, `live-reading-2/`, `live-trace/`).
 
 ## Budgets
 
@@ -639,11 +702,14 @@ subtracted. % of one core, added by the extension.
   floor of "a live top bar every 2 s". At idle nothing is drawn and the old 0.1 holds with room.
 - **Why 0.2 is acceptable under load.** It applies when the machine is busy. On a machine running agents at
   three to six cores, 0.2% of one core is about a two-thousandth of the load. What mattered more was the hitch
-  every 10 s, which goes.
+  every 10 s, which goes. *Corrected 2026-11-11: the extension's own goes. The stock shell's remains wherever
+  it collects by itself; see "Measured on the live shell".*
 - **What halves it.** A top bar drawn every 4 s. The owner said laggy numbers are a deal-breaker, so this
   design does not take it; it is one constant if he wants it.
 - **On the live shell** the same states cost about 1.7 times the nested figures, since a real output's frame
   costs more. There is no live percentage to pass; "The live reading" says what the second reading must show.
+  *Measured 2026-11-11: about twice the budgets, 0.37 to 0.56 added in the covered and visible states at a
+  load of 8 to 10; see "Measured on the live shell" and follow-up 11.*
 - **The count budgets are the ones to guard.** Collections, timers and frames are whole numbers a check can
   assert. The percentages move with the core type and the machine's load: readings of one variant taken at
   different times differed by up to 0.2 points.
@@ -720,7 +786,8 @@ description, so it travels with the merge.
 3. **Frozen values dimmer than the muted labels.** Needs a decision on how dim frozen values should be.
 4. **Faster reveal.** Needs a service-side change and its own measurement; see "Faster reveal" above.
 5. **The cockpit's drawing-side plan,** amended for the four conflicts under "The cockpit".
-6. **The second live reading,** after the login that loads stage one. The first is finding 12.
+6. **The second live reading,** after the login that loads stage one. The first is finding 12. *Taken
+   2026-11-11, with two traces: "Measured on the live shell". For the owner to close.*
 7. **Stage two, the compiled sampler** (decided): its own design and plan, after stage one.
 8. **The watched service's burst scans** under a bursty load (finding 13). With stage two, or as one constant
    before it.
@@ -733,6 +800,15 @@ description, so it travels with the merge.
     (listeners, the watchdog, the top bar's repaints, the cover check with a real window), which live with
     the measurement tools outside the repository. Bring the cover check in as a nested request when the
     cockpit adds cards, and teach `perf`'s probe the cockpit's objects.
+11. **The live cost against the budgets** (added 2026-11-11, by the second live reading). On the live shell
+    the extension adds 0.37 to 0.56 % of one core at a load of 8 to 10, about twice the budgets, and about
+    0.15 of it is the frame each Sample draws. Needs the owner's decision: accept it as the price of a top
+    bar that moves every 2 s, or draw the top bar every 4 s while the card is covered, which halves the
+    frames. A live reading on a machine at rest, wired and charged, would show what stage one gains where
+    it was designed to.
+12. **The stock shell's own collections** (added 2026-11-11). Its network and power indicators make it
+    force a full collection about every 10 s on Wi-Fi or battery, with no extension. Not this
+    extension's to fix; worth a report to GJS and gnome-shell with the traces.
 
 ## My calls (for the owner to check)
 
@@ -775,8 +851,11 @@ its `README.md` lists each tool, the command for each experiment and which resul
 | 11 | the `fractional` experiment | `r6/frac-fractional.jsonl` |
 | 12 | `live/live_reading.sh` | `live-results/` |
 | 13 | `rust-floor/sampler_floor.rs`, `simulate_cadence.js`, `perf record` of the service | `rust-floor/` |
+| Measured on the live shell | `live/live_reading.sh`; `live-trace/trace_shell_toggles.sh` (root), `analyze_trace.py`, `symbolize_stacks.py` | `../2026-11-11-stage-one/live-reading-2/`, `../2026-11-11-stage-one/live-trace/run-*/` |
 
-`perf` needed `kernel.perf_event_paranoid` at 1; the owner set it back to 4 the same evening.
+`perf` needed `kernel.perf_event_paranoid` at 1; the owner set it back to 4 the same evening. The traces need
+root: the script refuses to attach unless the installed GJS, GLib and GObject are the builds its addresses
+were read from.
 
 Sources read: GNOME Shell 50.1 `src/st/st-drawing-area.c`; mutter 50.1 `src/backends/meta-stage-impl.c`,
 `src/core/meta-profiler.c`, `src/compositor/meta-cullable.c`; GJS 1.88.0 `gi/object.cpp`, `gjs/context.cpp`.

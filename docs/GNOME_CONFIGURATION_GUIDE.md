@@ -477,6 +477,14 @@ scripts/resource-pulse-nested.sh stop
   the third. No count moves for a timer that draws nothing, so the timers are guarded in the suite below:
   a row pins every timeout the shell side adds, by file and count, and a new one fails it until it is
   counted there on purpose.
+- **On the live desktop the figures are about twice these.** A reading on 2026-11-11, at a load of 8 to 10,
+  put the extension at 0.37 to 0.56 % of one core with the card covered or visible. About 0.15 of that is
+  the compositor's own frame for each Sample that changes the top bar, which the nested shell draws more
+  cheaply. gnome-shell also forces a full collection about every 10 s by itself while the laptop is on
+  Wi-Fi or its battery is charging or discharging (its network and power indicators do it), with the
+  extension on or off: a 20 to 30 ms burst on that grid is not the extension's. Two traces of the live
+  shell found no collection the extension triggers. The design's "Measured on the live shell" has the
+  readings, the traces and the cost by part.
 - **Not budgeted yet: nothing visible.** With the top bar hidden and the card covered the extension still
   receives Samples, since a card judged covered may still be seen through a translucent window and is kept
   fresh. That state is `perf`'s fourth line; taking it to zero is stage two's.

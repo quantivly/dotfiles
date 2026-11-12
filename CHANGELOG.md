@@ -461,6 +461,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     core for the whole shell, median of three rounds: card covered with idle input 0.326 → 0.075; covered
     with busy input 0.329 → 0.156; card visible with busy input 0.418 → 0.264; major collections a minute
     6 → 1, an idle shell's own rate.
+  - **On the live shell,** read the evening it was deployed (Wi-Fi, battery, a load of 8 to 10): the
+    extension triggers no collection (two traces), costs a third of what it did under a repainting window
+    (1.29 → 0.43), and costs what it did with the card covered or visible (0.37 to 0.56), about twice the
+    nested budgets. gnome-shell forces a collection about every 10 s by itself there, and each Sample that
+    changes the top bar costs the compositor a 3 ms frame. The design's "Measured on the live shell".
   - **No D-Bus proxy object.** `PulseClient` follows the service through a name watch, a signal
     subscription and calls on the shell's shared connection (`serviceLink.js`). A proxy owned only by
     JavaScript, with handlers, made GJS force a full, non-incremental collection 10 s after every Sample:
@@ -598,6 +603,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--theme` rows.
 
 ### Fixed
+
+- **The credential reconciler treats the same grant in two writers' shapes as one login
+  (`scripts/claude-account-dirs.sh`).** The equal-expiry tie-break compared the whole
+  `claudeAiOauth` block, so `subscriptionTypeSource`, which Claude Code writes and `clauth login`
+  does not, made an account dir's copy of its store's own grant read as a different login, refused
+  as undecidable on every run (quantivly-2, 2026-11-11). A new `cred_same_grant` compares the
+  access token, refresh token and expiry, as `claude-doctor` does. It decides the tie, and it runs
+  before the rotation-shape gate, so the same grant is never refused as another account's login.
+  The gate itself is unchanged. Excluding `subscriptionTypeSource` from it, as `rateLimitTier` is
+  excluded, would let a session still on a previous account overwrite a fresh `clauth login`.
+  `scripts/test-claude-account-dirs.sh` goes from 236 to 246 rows.
 
 - **The dock Wi-Fi guard is measured by cause, not by a raw disconnect count
   (`scripts/dock-wifi-report.py`).** The week-one check reported 61 and then 31 "Wi-Fi
