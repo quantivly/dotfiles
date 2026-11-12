@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Resource Pulse draws the desktop cockpit: a grid of four cards on the cockpit monitor, the sessions
+  card in the dropdown, and a click that takes you to a Claude Code session.** Built from
+  `docs/superpowers/plans/2026-11-10-desktop-cockpit-drawing-side.md` (design:
+  `docs/superpowers/specs/2026-11-09-desktop-cockpit-design.md`). It takes effect at the next login, and
+  only where `~/.config/resource-pulse/cockpit.json` exists.
+  - **What is drawn, and where.** The config's groups, each under its caption, on a grid of four columns
+    by three rows centred on the monitor its `monitor` block names (else the only one, else the largest
+    non-primary; an undock moves it), behind every window. Four cards: system (the desktop card, moved
+    into its cell; a click opens Resources), apps (up to six by CPU and six by memory), connections (the
+    uplink, the VPN, the SSH masters, the mounts) and sessions (herdr's Claude Code sessions: state, name,
+    idle age and memory, the largest first). The last three have a tooltip on every row. A card id this
+    release does not draw leaves its cell empty. The last layout is kept across lock and blank, so an
+    unlock draws the grid at once; the lock screen shows none of it.
+  - **Fresh, and quiet while covered.** Each card is judged covered on its own: a covered card is dimmed,
+    frozen and repainted at most every 30 s, and the cockpit's watch and its `Changed` are held only while
+    a card of the grid or the dropdown can be seen. A change is drawn on the next Sample; a source the
+    service stopped refreshing reads "no data since HH:MM"; with the service gone the grid stays and the
+    system card keeps drawing.
+  - **Take me there.** A click on a session row asks the cockpit service to focus the herdr pane
+    (`FocusSession`), then brings forward the window whose process is the herdr client or one of its
+    parents, as a dock click does. One click at a time. herdr inside tmux has its pane focused and nothing
+    comes forward. Each reason nothing came forward is one journal line
+    (`resource-pulse: cockpit: focus: <reason>`), at most once in 10 minutes for each reason.
+  - **The dropdown** gains the sessions card under its system card once the cockpit service has answered,
+    live while open; a row's click closes the menu, then does the same.
+  - **ding.** The cards take the pointer only while no desktop-icons window shows on their monitor, so
+    with ding on they are display-only. `scripts/apply-gnome-settings.sh` gains
+    `gdisable_extension <uuid>` (appends to `disabled-extensions`, removes from `enabled-extensions`). The
+    owner's steps: put `gdisable_extension ding@rastersoft.com` and the background `gset` lines of
+    `examples/gnome-settings.local.template` in `~/.gnome-settings.local`, run `gnome-apply`, and log out
+    and in once.
+  - **Without the file** a colleague sees the previous release: the card top right and the dropdown with
+    its system card and Open Resources. The extension now asks systemd for `cockpit.service` at every
+    enable, and a skipped or missing unit ends the asking until the next. A layout the grid cannot be
+    drawn from leaves the card top right, with one journal line.
+  - **The performance rules it keeps.** No D-Bus proxy (`CockpitClient` follows the service through a
+    name watch, a `Changed` subscription held only while something of the cockpit is seen, and plain
+    calls); no repeating timer while Samples flow; a `Changed` drawn on the next Sample, so the Sample
+    stays the one frame; rows built once and updated by difference; each data card drawn through its own
+    offscreen texture. The cockpit's in-shell budget is the nested shell's: 0.5 % of one core with it
+    visible.
+  - **Nested shell and tests.** `scripts/resource-pulse-nested.sh` serves the cockpit a fixture and gains
+    `window`, `pointer` and `check cockpit`; `perf` reads the grid and fails on a cockpit budget it finds
+    broken. The plain-gjs rows run only in a process started with no reachable bus, a config home that
+    cannot exist and one fixed time zone.
+
+  Guide: `docs/GNOME_CONFIGURATION_GUIDE.md` ("Drawing the cockpit"). State table:
+  `scripts/test-resource-pulse.sh`, 798 checks on `main` and 1141 on this branch; the one nested run
+  still to come (Task 12b) may move it.
+
 - **`scripts/host-sync` is truthful on a host that serves no work tenant, and reports when the
   host's GitHub token expires (DO-900).** For step 8 of the shared-configuration design
   (`docs/superpowers/specs/2026-11-04-shared-claude-config-design.md`, D8 amendments H12 and H13,
