@@ -254,7 +254,7 @@ publishes the `configError` `missing`. The sources are served either way.
 
 | Source | Interval | Also sampled at once on |
 |---|---|---|
-| `sessions` | 10 s while a watch is held, 60 s otherwise | nothing |
+| `sessions` | 10 s while a watch is held, 60 s otherwise | the first watch being taken, as a signal is (so at most once in 2 s) |
 | `network` | 10 s | a change to NetworkManager's primary connection, its type, the connectivity or whether Wi-Fi is enabled |
 | `mounts` | 30 s | a mount or an unmount (the mount monitor's `mounts-changed`) |
 
@@ -375,8 +375,9 @@ most once in 10 minutes for each reason ([Checking that it runs](#checking-that-
 covered card is frozen and dimmed, and repainted, still dimmed, at most every 30 seconds; a revealed card
 (`Super+D` reveals them all) draws the latest at once. Only while a card of the grid can be seen outside
 the overview, or while the dropdown is open, does the extension hold the cockpit service's watch (which
-samples the sessions every 10 s rather than 60) and follow its `Changed`. A change is drawn on the next
-sample, about 2 seconds later, or by itself after 3 seconds if the sampler is silent. A source the service
+samples the sessions at once, then every 10 s rather than 60: the sessions a reveal draws at once give way
+to those sampled at the reveal from the next sample on) and follow its `Changed`. A change is drawn on the
+next sample, about 2 seconds later, or by itself after 3 seconds if the sampler is silent. A source the service
 stopped refreshing reads `no data since HH:MM` on its card, the time of its last sample. If the cockpit
 service goes away the grid stays: the system and apps cards keep drawing from the sampler, the others say
 `no data since HH:MM`, and the extension starts the service again at its next enable (systemd restarts
@@ -698,7 +699,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1141 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1144 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's
