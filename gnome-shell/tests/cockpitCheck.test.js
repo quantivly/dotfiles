@@ -1270,6 +1270,13 @@ test('cockpit check: lock-path is ok when disable leaves nothing and enable brin
     });
 });
 
+test('cockpit check: monotonic-time answers the shell\'s own monotonic clock, the one the extension\'s log limiter ' +
+    'keeps time by', () => {
+    const shell = makeHealthyShell();
+    const answer = check(shell, 'monotonic-time');
+    assertEqual([answer.verdict, answer.monotonicUsec], [OK, shell.scope.GLib.get_monotonic_time()]);
+});
+
 test('cockpit check: an unknown request could not be judged, and a failure that is neither a fault nor a missing ' +
     'part is thrown out to Eval', () => {
     const shell = makeHealthyShell();

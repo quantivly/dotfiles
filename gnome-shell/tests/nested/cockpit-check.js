@@ -68,6 +68,8 @@
 //   dropdown-closed                     closed: the menu closed, the sessions card frozen, its tooltip not shown
 //   lock-path {timeoutMs}               disables the extension: nothing of it left in the shell; enables it: new
 //                                       parts, and the grid back at once, from the kept layout
+//   monotonic-time                      the shell's monotonic clock in µs (GLib.get_monotonic_time, the clock the
+//                                       extension's log limiter keeps time by), as monotonicUsec
 
 /**
  * Runs one request of `check cockpit` in the shell and judges what it reads.
@@ -1115,6 +1117,7 @@ function resourcePulseCockpitCheck(request, options = {}) {
         'dropdown-card': judgeDropdownCard,
         'dropdown-closed': judgeDropdownClosed,
         'lock-path': judgeLockPath,
+        'monotonic-time': () => okAnswer("the shell's monotonic clock", {monotonicUsec: GLib.get_monotonic_time()}),
     };
 
     /**

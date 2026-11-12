@@ -58,7 +58,8 @@
 #                gnome-shell, in the run's own session; scenario and perf also need the run
 #                started with --replay, and its replay service running; perf also needs
 #                --gc-log; window, a click and check also need the cockpit in fixture mode,
-#                where a session row's click can reach no herdr
+#                where a session row's click can reach no herdr; check also needs --gc-log
+#                --replay, for the perf pass that ends it
 #   windows      window's Gtk 4 window (tests/nested/probe-window.js) refuses to open outside
 #                a nested run's own environment; it gets the run's environment, its Wayland
 #                display, the Wayland backend and its private bus, and nothing of the
@@ -122,11 +123,13 @@
 #       names each broken cockpit budget (exit 1): a data card not drawn
 #       through its own texture, the layer or the system cell's wrapper drawn
 #       through one (ruling D12), and a fallback timeout armed while Samples
-#       flow. An enabled state the probe does not find set up as it is named
-#       (the card covered in the covered states and visible in visible-busy, no
-#       card of the grid visible in the covered states and every one in
-#       visible-busy, the top bar hidden only in topbar-hidden-covered) stops
-#       it there, with exit 2.
+#       flow; a state whose record reads no redirect of one of those parts
+#       cannot be judged (exit 2). An enabled state the probe does not find set
+#       up as it is named (the card covered in the covered states and visible in
+#       visible-busy; the grid of the run's fixture drawn, every card of it, in
+#       every enabled state; none of it visible in the covered states and all of
+#       it in visible-busy; the top bar hidden only in topbar-hidden-covered)
+#       stops it there, with exit 2.
 #       Every exit once it acts on the run (a breach, a failure or a signal too)
 #       puts the run back: its window and its background measurement ended, the
 #       extension enabled and the top bar shown again
@@ -142,19 +145,26 @@
 #       button there when asked (only in a run whose cockpit serves the fixture), and
 #       wait until the shell moved it: a pointer that never arrives is exit 2
 #   scripts/resource-pulse-nested.sh check cockpit
-#       judge the cockpit of a live run whose cockpit serves the run's fixture and
-#       whose session has no window yet, one line per step (ok, bad, or could not
-#       judge: never ok), each in-shell step a request of tests/nested/cockpit-check.js:
+#       judge the cockpit of a live run started with --gc-log --replay whose cockpit
+#       serves the run's fixture and whose session has no window yet (refused
+#       otherwise, before it acts), one line per step (ok, bad, or could not judge:
+#       never ok), each in-shell step a request of tests/nested/cockpit-check.js:
 #       the extension ACTIVE, and the log so far free of its errors; the layer and
 #       the grid; hover; two windows of its own (a decoy holding the focus, then
 #       herdr-probe, the fixture's one candidate); the clicks (from the decoy's focus,
 #       from every window minimized, a reply naming no window, one not focused, two
 #       quick clicks); cover and reveal; a source made stale and put back; the
-#       dropdown; the lock path (disable, enable); shots/cockpit.png; the whole log; and
-#       the count budgets through perf (so the run needs --gc-log --replay, and about
-#       nine minutes more). It rewrites only the run's copy of the fixture, and puts
-#       it back and closes its windows on every exit. Exit 1 when a step is bad, else
-#       2 when one could not be judged
+#       dropdown; the lock path (disable, enable); shots/cockpit-<pass>.png; the log;
+#       and the count budgets through perf (about nine minutes more). It may run
+#       again in the same run: each pass is numbered in state/run.values, judges the
+#       log only from where it began (the first pass from the run's start), keeps its
+#       own screenshot, and cannot judge the two clicks whose one log line the
+#       extension's limiter (10 minutes, kept across disable and enable) still holds
+#       from an earlier pass, naming how long is left. It rewrites only the run's copy
+#       of the fixture, and puts it back and closes its windows on every exit. A TERM
+#       or an interrupt during its perf pass ends that pass too: perf puts the run
+#       back once its current wait ends (up to a minute), and the check waits for it.
+#       Exit 1 when a step is bad, else 2 when one could not be judged
 #   scripts/resource-pulse-nested.sh stop
 #       stop the nested shell, its two services, the windows `window` opened and
 #       everything else it started;
@@ -298,8 +308,13 @@ readonly PERF_COCKPIT_WORDS_JQ='
             else (.cockpitRedirects | to_entries | map("\(.key):\(.value)") | join(",")) end),
         (.armedCockpitTimers | word)] | join(" ")
     else empty end'
-# With no layer the v2 card is the grid, checked under the system card's id.
+# The system cell's card id: the cell that adopts the v2 card.
 readonly PERF_V2_CARD_ID='system'
+# The cards the run's fixture lays out that this release draws (its layout's ids among COCKPIT_KNOWN_CARD_IDS_JSON),
+# as read-cockpit's sorted words. Every nested run serves that fixture, so in every enabled state the layer draws
+# exactly these: no layer, or another set, is a state not set up as it is named, never a grid budget passed on a
+# shell that drew no grid.
+readonly PERF_FIXTURE_GRID_CARD_IDS_WORD='apps,connections,sessions,system'
 # Ruling D12: the layer and the system cell's wrapper draw through no texture of their own (the v2 card the wrapper
 # adopts keeps its own, which the cardRedirect budget checks); each data card draws through its own.
 readonly PERF_LAYER_REDIRECT_PART='layer'
@@ -307,6 +322,8 @@ readonly PERF_WANTED_LAYER_REDIRECT='NONE'
 readonly PERF_WANTED_SYSTEM_WRAPPER_REDIRECT='NONE'
 readonly PERF_WANTED_DATA_CARD_REDIRECT='ALWAYS'
 readonly -a PERF_DATA_CARD_IDS=(apps connections sessions)
+# Every part ruling D12 rules on: a grid record must read the redirect of each, or it cannot be judged.
+readonly -a PERF_REDIRECT_PART_NAMES=("$PERF_LAYER_REDIRECT_PART" "$PERF_V2_CARD_ID" "${PERF_DATA_CARD_IDS[@]}")
 readonly PERF_REDIRECT_PAIR_PATTERN='^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$'
 # SpiderMonkey's collection lines in the shell's log (`start --gc-log`): the line's first column, then its pid.
 readonly MAJOR_COLLECTION_LINE_PREFIX='MajorGC:'
@@ -460,7 +477,23 @@ readonly GRID_OPTIONS_JQ='{expectedCaptions: [.state.layout.groups[].caption],
     unknownCardIds: ([.state.layout.groups[].cards[] | select(IN($known[]) | not)] | unique)}'
 readonly SESSION_NAMES_JQ='[.state.sources.sessions.rows[].name]'
 readonly FIRST_SESSION_NAME_JQ='.state.sources.sessions.rows[0].name'
-readonly CHECK_SCREENSHOT_NAME='cockpit.png'
+# Each pass of check cockpit in a run keeps its own screenshot: shots/cockpit-<pass number>.png.
+readonly CHECK_SCREENSHOT_NAME_PREFIX='cockpit-'
+# check cockpit's passes in a run, counted in state/run.values (the last value is the latest pass's number).
+readonly CHECK_PASS_RUN_VALUE_NAME='check-cockpit-pass'
+# The extension's log limiter (lib/errorLog.js, lib/constants.js ERROR_LOG_REPEAT_INTERVAL_USEC): one line per reason
+# at most once per interval, by the nested shell's monotonic clock, kept across disable() and enable(); it restarts
+# only when it lets a line through. click-no-window and click-not-focused each wait for one such line: a pass about
+# to judge one records first, by that clock, the end of the step's wait (by when its line is logged), and a later
+# pass of the run within the interval of that time cannot judge that step.
+readonly EXTENSION_LOG_REPEAT_INTERVAL_USEC=600000000
+readonly USEC_PER_SECOND=1000000
+readonly NO_WINDOW_LOGGED_RUN_VALUE_NAME='check-no-window-logged-usec'
+readonly NOT_FOCUSED_LOGGED_RUN_VALUE_NAME='check-not-focused-logged-usec'
+# What a pass records when the nested shell's clock could not be read: a later pass then cannot judge the step.
+readonly UNKNOWN_TIME_WORD='unknown'
+# Where check cockpit's perf pass writes its lines (perf runs in the background, so a signal ends the check promptly).
+readonly CHECK_PERF_OUTPUT_RELATIVE_PATH='log/check-cockpit-perf.log'
 # The shell log: the focus lines the click steps provoke (the extension's console.warn), and what shell_log_faults
 # reports: an error line of the extension (its prefixes beside a CRITICAL or ERROR mark: console.error is GLib's
 # CRITICAL), a JS ERROR whose stack names the extension within JS_ERROR_STACK_LINES lines, Clutter's warnings from a
@@ -571,6 +604,14 @@ CHECK_BAD_STEP_COUNT=0
 CHECK_UNJUDGED_STEP_COUNT=0
 STEP_BAD_DETAILS=()
 STEP_UNJUDGED_DETAILS=()
+# This pass of check cockpit in its run (begin_check_pass): its number, and the shell log's byte offset its log steps
+# judge from.
+CHECK_PASS_NUMBER=0
+CHECK_LOG_START_OFFSET=0
+# Set when the run's fixture could not be put back: the next step (or the one under way) could not be judged.
+CHECK_FIXTURE_NOT_RESTORED_NOTE=""
+# check cockpit's perf pass while it runs in the background (end_check_perf ends it on a signal).
+CHECK_PERF_PID=""
 # The window perf opened over the card, by pid and start time (end_perf_window ends only that process, and only
 # while it is still perf's own child); the start time stays empty when it could not be read.
 PERF_WINDOW_PID=""
@@ -2557,10 +2598,11 @@ record_perf_state() {
 
 #######################################
 # Succeed when an enabled state's grid was set up as it is named, from the
-# probe's read-cockpit words: in the covered states no card of the grid can be
-# seen; in visible-busy every card the layer draws can be (with no layer, the v2
-# card, under PERF_V2_CARD_ID). Otherwise print why, naming the state and what
-# was expected, and return 2, as check_perf_state_setup does. Pure.
+# probe's read-cockpit words: in every enabled state the layer draws the cards
+# the run's fixture lays out (PERF_FIXTURE_GRID_CARD_IDS_WORD: no layer is no
+# grid, never a grid that passes); in the covered states no card of it can be
+# seen; in visible-busy every one can. Otherwise print why, naming the state
+# and what was expected, and return 2, as check_perf_state_setup does. Pure.
 # Arguments:
 #   $1 - state name (one of PERF_ENABLED_STATE_NAMES)
 #   $2 - the ids that can be seen, as one word (PERF_NONE_WORD for none)
@@ -2569,7 +2611,7 @@ record_perf_state() {
 #   0 set up as named; 2 not, or a name that is not an enabled state's
 #######################################
 check_perf_cockpit_setup() {
-    local state_name="$1" visible_word="$2" grid_word="$3" expected_visible_word mismatch
+    local state_name="$1" visible_word="$2" grid_word="$3" mismatch
     local not_set_up_lead="perf: could not measure $state_name: it was not set up as named:"
     case "$state_name" in
         "$PERF_COVERED_IDLE_STATE" | "$PERF_COVERED_BUSY_STATE" | "$PERF_TOPBAR_HIDDEN_STATE" | \
@@ -2578,15 +2620,20 @@ check_perf_cockpit_setup() {
             printf "perf: could not measure '%s': not an enabled state\n" "$state_name"
             return "$EXIT_REFUSED" ;;
     esac
-    if [[ "$state_name" != "$PERF_VISIBLE_BUSY_STATE" ]]; then
+    if [[ "$grid_word" != "$PERF_FIXTURE_GRID_CARD_IDS_WORD" ]]; then
+        mismatch="expected the layer to draw the fixture's cards ($PERF_FIXTURE_GRID_CARD_IDS_WORD), and"
+        if [[ "$grid_word" == "$PERF_NO_GRID_WORD" ]]; then
+            mismatch+=" there is no layer: no grid is drawn"
+        else
+            mismatch+=" it draws $grid_word"
+        fi
+    elif [[ "$state_name" != "$PERF_VISIBLE_BUSY_STATE" ]]; then
         # The covered states: perf's window, maximized over the work area the grid fills, covers every card.
         [[ "$visible_word" == "$PERF_NONE_WORD" ]] && return 0
         mismatch="expected no card of the grid visible, and $visible_word can be seen"
     else
-        expected_visible_word="$grid_word"
-        [[ "$grid_word" == "$PERF_NO_GRID_WORD" ]] && expected_visible_word="$PERF_V2_CARD_ID"
-        [[ "$visible_word" == "$expected_visible_word" ]] && return 0
-        mismatch="expected every card it draws visible ($expected_visible_word), and"
+        [[ "$visible_word" == "$grid_word" ]] && return 0
+        mismatch="expected every card it draws visible ($grid_word), and"
         if [[ "$visible_word" == "$PERF_NONE_WORD" ]]; then
             mismatch+=" none can be seen"
         else
@@ -2653,26 +2700,38 @@ print_unjudgeable_cockpit() {
 
 #######################################
 # Succeed when an enabled state's grid record can be judged: two words, the
-# redirects either PERF_NO_GRID_WORD or "<part>:<name>" pairs of known parts.
-# Otherwise print why (print_unjudgeable_cockpit) and fail.
+# redirects "<part>:<name>" pairs of known parts that read every part of
+# PERF_REDIRECT_PART_NAMES (no grid, PERF_NO_GRID_WORD, reads none). Otherwise
+# print why (print_unjudgeable_cockpit) and fail.
 # Arguments:
 #   $1 - state name
 #   $2 - its record
 #######################################
 is_judgeable_cockpit_record() {
-    local state_name="$1" cockpit_record="$2" redirect_pair
+    local state_name="$1" cockpit_record="$2" redirect_pair part_name
     local -a record_words redirect_pairs
+    local -A is_part_read=()
     read -r -a record_words <<<"$cockpit_record"
     if (( ${#record_words[@]} != PERF_COCKPIT_RECORD_WORD_COUNT )); then
         print_unjudgeable_cockpit "$state_name's record is not the redirects and the armed fallbacks: '$cockpit_record'"
         return 1
     fi
-    [[ "${record_words[0]}" == "$PERF_NO_GRID_WORD" ]] && return 0
+    if [[ "${record_words[0]}" == "$PERF_NO_GRID_WORD" ]]; then
+        print_unjudgeable_cockpit "$state_name drew no grid: there is no redirect to judge"
+        return 1
+    fi
     IFS=, read -r -a redirect_pairs <<<"${record_words[0]}"
     for redirect_pair in "${redirect_pairs[@]}"; do
         if [[ ! "$redirect_pair" =~ $PERF_REDIRECT_PAIR_PATTERN ]] ||
             ! wanted_cockpit_redirect "${redirect_pair%%:*}" >/dev/null; then
             print_unjudgeable_cockpit "$state_name's redirect '$redirect_pair' is not a known part and its redirect"
+            return 1
+        fi
+        is_part_read["${redirect_pair%%:*}"]=1
+    done
+    for part_name in "${PERF_REDIRECT_PART_NAMES[@]}"; do
+        if [[ -z "${is_part_read[$part_name]:-}" ]]; then
+            print_unjudgeable_cockpit "$state_name's record reads no redirect for $part_name"
             return 1
         fi
     done
@@ -2709,8 +2768,7 @@ perf_cockpit_verdict() {
     for state_index in "${!PERF_ENABLED_STATE_NAMES[@]}"; do
         state_name="${PERF_ENABLED_STATE_NAMES[state_index]}"
         read -r redirects_word timers_word <<<"${cockpit_records[state_index]}"
-        redirect_pairs=()
-        [[ "$redirects_word" == "$PERF_NO_GRID_WORD" ]] || IFS=, read -r -a redirect_pairs <<<"$redirects_word"
+        IFS=, read -r -a redirect_pairs <<<"$redirects_word"
         for redirect_pair in "${redirect_pairs[@]}"; do
             part_name="${redirect_pair%%:*}"
             redirect_name="${redirect_pair#*:}"
@@ -3057,6 +3115,16 @@ begin_check_step() {
 }
 
 #######################################
+# Note, once, that the run's fixture could not be put back (restore_check_fixture),
+# as a part of the step under way that could not be judged.
+#######################################
+note_fixture_not_restored() {
+    [[ -n "$CHECK_FIXTURE_NOT_RESTORED_NOTE" ]] || return 0
+    note_unjudged "$CHECK_FIXTURE_NOT_RESTORED_NOTE"
+    CHECK_FIXTURE_NOT_RESTORED_NOTE=""
+}
+
+#######################################
 # Count the last answer toward the step: bad and could-not-judge are kept.
 #######################################
 note_answer() {
@@ -3087,13 +3155,17 @@ note_unjudged() {
 
 #######################################
 # Print one step's line and count it: bad when any part was, else could not
-# judge when any part could not be, else ok.
+# judge when any part could not be, else ok. A restore of the run's fixture
+# that failed since the last step's line (in this step, or before it began)
+# is a part of this step that could not be judged: it ran on a rewritten
+# fixture.
 # Arguments:
 #   $1 - step name
 #   $2 - what an ok line says
 #######################################
 end_check_step() {
     local step_name="$1" ok_detail="$2" joined_details
+    note_fixture_not_restored
     if (( ${#STEP_BAD_DETAILS[@]} > 0 )); then
         joined_details="$(printf '%s; ' "${STEP_BAD_DETAILS[@]}")"
         CHECK_BAD_STEP_COUNT=$((CHECK_BAD_STEP_COUNT + 1))
@@ -3127,6 +3199,31 @@ check_step_of_request() {
 }
 
 #######################################
+# Count the last answer toward a step that sets up the harness's own windows:
+# anything but ok could not be judged, since it is no fault of the extension.
+#######################################
+note_setup_answer() {
+    [[ "$CHECK_VERDICT" == "$CHECK_OK_VERDICT" ]] || STEP_UNJUDGED_DETAILS+=("$CHECK_DETAIL")
+}
+
+#######################################
+# Print a could-not-judge line for each of several steps whose precondition is
+# missing, so that every step has its line and the summary counts them all.
+# Arguments:
+#   $1 - why
+#   $@ - the step names
+#######################################
+print_unjudged_steps() {
+    local unjudged_reason="$1" step_name
+    shift
+    for step_name in "$@"; do
+        begin_check_step
+        note_unjudged "$unjudged_reason"
+        end_check_step "$step_name" ''
+    done
+}
+
+#######################################
 # Note each fault of the shell log past an offset, of the kinds asked for, as a
 # bad part of the step (the first SHOWN_LOG_FAULTS_LIMIT, then how many more);
 # a log it cannot read could not be judged.
@@ -3135,13 +3232,15 @@ check_step_of_request() {
 #   $2 - the kinds, comma-separated
 #######################################
 note_shell_log_faults() {
+    local fault_text
     local -a fault_lines
-    if [[ ! -r "$CHECK_RUN_DIR/log/shell.log" ]]; then
-        note_unjudged "cannot read $CHECK_RUN_DIR/log/shell.log"
+    # Captured with its status: a read that failed (the log unreadable, tail or awk failing) is never "no faults".
+    if ! fault_text="$(shell_log_faults "$CHECK_RUN_DIR/log/shell.log" "$1" "$2")"; then
+        note_unjudged "cannot read $CHECK_RUN_DIR/log/shell.log past byte $1"
         return 0
     fi
-    mapfile -t fault_lines < <(shell_log_faults "$CHECK_RUN_DIR/log/shell.log" "$1" "$2")
-    (( ${#fault_lines[@]} == 0 )) && return 0
+    [[ -n "$fault_text" ]] || return 0
+    mapfile -t fault_lines <<<"$fault_text"
     note_bad "${#fault_lines[@]} line(s) in log/shell.log: $(printf '%s | ' "${fault_lines[@]:0:SHOWN_LOG_FAULTS_LIMIT}")"
 }
 
@@ -3243,8 +3342,28 @@ start_probe_window() {
         </dev/null >"$run_dir/log/window-$window_title.log" 2>&1 &
     OPENED_WINDOW_PID=$!
     window_starttime="$(starttime_of_process /proc "$OPENED_WINDOW_PID")" || window_starttime=""
-    printf '%s\n' "$OPENED_WINDOW_PID" >"$(window_record_path "$run_dir" "$window_title" "$WINDOW_PID_SUFFIX")" &&
-        printf '%s\n' "$window_starttime" >"$(window_record_path "$run_dir" "$window_title" "$WINDOW_STARTTIME_SUFFIX")"
+    if ! printf '%s\n' "$OPENED_WINDOW_PID" >"$(window_record_path "$run_dir" "$window_title" "$WINDOW_PID_SUFFIX")" ||
+        ! printf '%s\n' "$window_starttime" >"$(window_record_path "$run_dir" "$window_title" \
+            "$WINDOW_STARTTIME_SUFFIX")"; then
+        end_unrecorded_window "$window_starttime"
+        return 1
+    fi
+}
+
+#######################################
+# End the window start_probe_window just started when it could not be
+# recorded (no stop or exit could find it by its record): only while it is
+# still this shell's own child with the start time read at its launch.
+# Arguments:
+#   $1 - its start time, as read at launch (empty when it could not be read)
+#######################################
+end_unrecorded_window() {
+    local launch_starttime="$1"
+    if is_own_child_process "$OPENED_WINDOW_PID" && [[ -z "$launch_starttime" ||
+        "$(starttime_of_process /proc "$OPENED_WINDOW_PID")" == "$launch_starttime" ]]; then
+        kill -TERM "$OPENED_WINDOW_PID" 2>/dev/null
+    fi
+    note "could not record the window of pid $OPENED_WINDOW_PID, so it was ended"
 }
 
 #######################################
@@ -3355,8 +3474,84 @@ rewrite_check_fixture() {
 # give the cockpit service time to read it.
 #######################################
 restore_check_fixture() {
-    restore_run_cockpit_fixture "$CHECK_RUN_DIR" || note "could not restore the run's fixture"
+    if ! restore_run_cockpit_fixture "$CHECK_RUN_DIR"; then
+        note "could not restore the run's fixture"
+        CHECK_FIXTURE_NOT_RESTORED_NOTE="the run's fixture could not be put back as start wrote it, so this step ran"
+        CHECK_FIXTURE_NOT_RESTORED_NOTE+=" on a rewritten one"
+    fi
     sleep "$FIXTURE_RELOAD_WAIT_SECONDS"
+}
+
+#######################################
+# Begin this pass of check cockpit in its run: its number (one more than the
+# run's last recorded pass), recorded; and the shell log's offset its log
+# steps judge from: 0 for the run's first pass (the enable's reparenting is at
+# the run's start), else the log's size now, so that a fault an earlier pass
+# found is not found again.
+#######################################
+begin_check_pass() {
+    local previous_pass_number
+    previous_pass_number="$(recorded_run_value "$CHECK_RUN_DIR" "$CHECK_PASS_RUN_VALUE_NAME")"
+    [[ "$previous_pass_number" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || previous_pass_number=0
+    CHECK_PASS_NUMBER=$((previous_pass_number + 1))
+    CHECK_LOG_START_OFFSET=0
+    (( CHECK_PASS_NUMBER > 1 )) && CHECK_LOG_START_OFFSET="$(check_shell_log_offset)"
+    record_run_value "$CHECK_RUN_DIR" "$CHECK_PASS_RUN_VALUE_NAME" "$CHECK_PASS_NUMBER"
+}
+
+#######################################
+# Print the nested shell's monotonic clock in µs (GLib.get_monotonic_time, the
+# clock the extension's log limiter keeps time by); fail when it cannot be read.
+#######################################
+nested_monotonic_usec() {
+    local monotonic_usec
+    ask_check monotonic-time
+    monotonic_usec="$(check_answer_field monotonicUsec)"
+    [[ "$CHECK_VERDICT" == "$CHECK_OK_VERDICT" && "$monotonic_usec" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || return 1
+    printf '%s' "$monotonic_usec"
+}
+
+#######################################
+# Print why a reason's log line cannot be judged in this pass: an earlier pass
+# of this run had it logged (by the time it recorded) less than
+# EXTENSION_LOG_REPEAT_INTERVAL_USEC ago, by the nested shell's clock, so the
+# extension's limiter cannot have let it through again (naming how long is
+# left); or that time, or the clock, cannot be read. Print nothing when it can
+# be judged (no earlier pass judged it, or the interval has passed).
+# Arguments:
+#   $1 - the run value an earlier pass recorded the time under
+#######################################
+limiter_closed_reason() {
+    local logged_usec now_usec reopen_usec left_seconds interval_seconds
+    logged_usec="$(recorded_run_value "$CHECK_RUN_DIR" "$1")"
+    [[ -n "$logged_usec" ]] || return 0
+    if [[ ! "$logged_usec" =~ $POSITIVE_WHOLE_NUMBER_PATTERN ]] || ! now_usec="$(nested_monotonic_usec)"; then
+        printf "cannot tell whether the extension's log limiter has let this line through again since an earlier pass"
+        printf ' of this run: the time it was logged, or the nested shell'"'"'s clock, cannot be read'
+        return 0
+    fi
+    reopen_usec=$((logged_usec + EXTENSION_LOG_REPEAT_INTERVAL_USEC))
+    (( now_usec >= reopen_usec )) && return 0
+    interval_seconds=$((EXTENSION_LOG_REPEAT_INTERVAL_USEC / USEC_PER_SECOND))
+    left_seconds=$(( (reopen_usec - now_usec + USEC_PER_SECOND - 1) / USEC_PER_SECOND ))
+    printf 'the extension logs this line at most once per %s s, across disable and enable, and an earlier pass' \
+        "$interval_seconds"
+    printf ' of this run had it logged: it can be judged again in %s s' "$left_seconds"
+}
+
+#######################################
+# Record, under a run value, by when this pass's line for a reason will have
+# been logged: the nested shell's clock now plus NO_ACTIVATION_WAIT_SECONDS,
+# the step's wait. Recorded before the click, so that a pass ended in the
+# middle of the step still holds a later pass to the limiter;
+# UNKNOWN_TIME_WORD when the clock cannot be read.
+# Arguments:
+#   $1 - the run value
+#######################################
+record_limited_line_time() {
+    local now_usec logged_by_usec="$UNKNOWN_TIME_WORD"
+    now_usec="$(nested_monotonic_usec)" && logged_by_usec=$((now_usec + NO_ACTIVATION_WAIT_SECONDS * USEC_PER_SECOND))
+    record_run_value "$CHECK_RUN_DIR" "$1" "$logged_by_usec"
 }
 
 #######################################
@@ -3368,8 +3563,8 @@ check_cockpit_layout_steps() {
     local grid_options
     check_step_of_request extension 1 extension-active
     begin_check_step
-    note_shell_log_faults 0 "$EXTENSION_LOG_FAULT_KIND,$CLUTTER_LOG_FAULT_KIND"
-    end_check_step early-log "the shell log so far holds no error of the extension and no reparenting warning"
+    note_shell_log_faults "$CHECK_LOG_START_OFFSET" "$EXTENSION_LOG_FAULT_KIND,$CLUTTER_LOG_FAULT_KIND"
+    end_check_step early-log "the shell log since this pass began (the first pass: since the run began) holds no error of the extension and no reparenting warning"
     check_step_of_request layer 1 layer-placement
     begin_check_step
     if grid_options="$(jq -c --argjson known "$COCKPIT_KNOWN_CARD_IDS_JSON" "$GRID_OPTIONS_JQ" \
@@ -3403,7 +3598,8 @@ check_cockpit_hover_steps() {
 # Open the check's two windows (the decoy, then the probe the fixture's
 # focusReply names), move both clear of the sessions card, and give the decoy
 # the focus. Sets CHECK_PROBE_PID and CHECK_DECOY_PID; prints the step's line.
-# Returns 1 when the windows could not be set up.
+# All of it is the harness's own setup, so what fails could not be judged,
+# never bad. Returns 1 when the windows could not be set up.
 #######################################
 open_check_windows() {
     local window_title window_pid clear_options
@@ -3421,13 +3617,13 @@ open_check_windows() {
         [[ "$window_title" == "$HERDR_PROBE_WINDOW_TITLE" ]] && CHECK_PROBE_PID="$window_pid"
         clear_options="$(jq -cn --argjson pid "$window_pid" '{pid: $pid, cardId: "sessions"}')"
         ask_check place-window-clear "$clear_options"
-        note_answer
+        note_setup_answer
         poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check window-clear "$clear_options"
-        note_answer
+        note_setup_answer
     done
     ask_check activate-window "$(pid_options_json "$CHECK_DECOY_PID")"
     poll_nested "$FOCUS_ANSWER_ATTEMPTS" ask_check focused-window "$(pid_options_json "$CHECK_DECOY_PID")"
-    note_answer
+    note_setup_answer
     end_check_step windows "the decoy ($CHECK_DECOY_PID) holds the focus; the probe ($CHECK_PROBE_PID) is named"
     (( ${#STEP_BAD_DETAILS[@]} + ${#STEP_UNJUDGED_DETAILS[@]} == 0 ))
 }
@@ -3450,13 +3646,21 @@ click_and_expect_probe_focused() {
 # A click that must bring no window forward: remembers the windows, clicks the
 # layer's first session row once, waits NO_ACTIVATION_WAIT_SECONDS, and notes
 # whether the windows are unchanged and the shell log gained a text a number
-# of times.
+# of times. Given the run value of a reason the extension's log limiter holds,
+# the line count could not be judged while an earlier pass of the run had that
+# line logged within the limiter's interval (limiter_closed_reason); to be
+# judged, the time is recorded first, for a later pass.
 # Arguments:
 #   $1 - the text the click's log line holds
 #   $2 - how many such lines it must add
+#   $3 - optional: the run value of the limiter's reason
 #######################################
 click_and_expect_nothing_activated() {
-    local log_offset
+    local log_needle="$1" wanted_line_count="$2" limiter_run_value_name="${3:-}" log_offset limiter_reason=""
+    if [[ -n "$limiter_run_value_name" ]]; then
+        limiter_reason="$(limiter_closed_reason "$limiter_run_value_name")"
+        [[ -z "$limiter_reason" ]] && record_limited_line_time "$limiter_run_value_name"
+    fi
     ask_check remember-windows
     note_answer
     log_offset="$(check_shell_log_offset)"
@@ -3466,7 +3670,11 @@ click_and_expect_nothing_activated() {
     sleep "$NO_ACTIVATION_WAIT_SECONDS"
     ask_check windows-unchanged
     note_answer
-    note_log_line_count "$log_offset" "$1" "$2"
+    if [[ -n "$limiter_reason" ]]; then
+        note_unjudged "$limiter_reason"
+        return 0
+    fi
+    note_log_line_count "$log_offset" "$log_needle" "$wanted_line_count"
 }
 
 #######################################
@@ -3478,7 +3686,11 @@ click_and_expect_nothing_activated() {
 #######################################
 check_cockpit_click_steps() {
     local log_offset
-    open_check_windows || return 0
+    if ! open_check_windows; then
+        print_unjudged_steps "the check's windows could not be set up (see the windows step)" click click-log \
+            click-show-desktop click-no-window click-no-window-again click-not-focused click-twice
+        return 0
+    fi
     begin_check_step
     log_offset="$(check_shell_log_offset)"
     click_and_expect_probe_focused 1
@@ -3494,7 +3706,7 @@ check_cockpit_click_steps() {
     begin_check_step
     if rewrite_check_fixture "$WINDOW_FOCUS_REPLY_JQ" --argjson pid "$NO_WINDOW_PID"; then
         ask_check minimize-all
-        click_and_expect_nothing_activated "$NO_WINDOW_LOG_NEEDLE" 1
+        click_and_expect_nothing_activated "$NO_WINDOW_LOG_NEEDLE" 1 "$NO_WINDOW_LOGGED_RUN_VALUE_NAME"
     fi
     end_check_step click-no-window "candidates matching no window activated nothing and logged one line"
     begin_check_step
@@ -3502,7 +3714,7 @@ check_cockpit_click_steps() {
     end_check_step click-no-window-again "a second such click activated nothing and logged nothing more"
     begin_check_step
     if rewrite_check_fixture "$NOT_FOCUSED_REPLY_JQ" --arg code "$HERDR_UNREACHABLE_CODE"; then
-        click_and_expect_nothing_activated "$NOT_FOCUSED_LOG_NEEDLE" 1
+        click_and_expect_nothing_activated "$NOT_FOCUSED_LOG_NEEDLE" 1 "$NOT_FOCUSED_LOGGED_RUN_VALUE_NAME"
     fi
     end_check_step click-not-focused "focused: false activated nothing and logged its code at once"
     begin_check_step
@@ -3526,9 +3738,7 @@ check_cockpit_click_steps() {
 check_cockpit_cover_steps() {
     local first_name covered_name visible_name
     if [[ -z "$CHECK_PROBE_PID" ]]; then
-        begin_check_step
-        note_unjudged 'no probe window to cover the cards with'
-        end_check_step cover ''
+        print_unjudged_steps 'no probe window to cover the cards with' cover cover-holds-changes reveal visible-change
         return 0
     fi
     first_name="$(jq -r "$FIRST_SESSION_NAME_JQ" "$CHECK_RUN_DIR/$COCKPIT_FIXTURE_START_RELATIVE_PATH")"
@@ -3666,7 +3876,7 @@ check_cockpit_lock_and_screenshot_steps() {
     check_step_of_request lock-path 1 lock-path "{\"timeoutMs\": $LOCK_PATH_TIMEOUT_MS}"
     close_check_windows
     begin_check_step
-    shot_path="$(screenshot_subcommand "$CHECK_SCREENSHOT_NAME")"
+    shot_path="$(screenshot_subcommand "$CHECK_SCREENSHOT_NAME_PREFIX$CHECK_PASS_NUMBER$PNG_SUFFIX")"
     shot_status=$?
     case "$shot_status" in
         0) ;;
@@ -3692,40 +3902,70 @@ close_check_windows() {
 }
 
 #######################################
-# The whole shell log: no error of the extension, no reparenting warning, no
-# activation warning. It could not be judged when the log holds none of the
-# focus lines the click steps provoked: then it may hold none of the
-# extension's lines at all.
+# The shell log since this pass began (CHECK_LOG_START_OFFSET: the whole log
+# for the run's first pass): no error of the extension, no reparenting
+# warning, no activation warning. It could not be judged when the whole log
+# holds none of the focus lines the click steps provoke: then it may hold none
+# of the extension's lines at all. That positive control reads the whole log,
+# since a later pass within the limiter's interval provokes none of its own.
 #######################################
 check_cockpit_log_step() {
     local provoked_line_count
     begin_check_step
-    note_shell_log_faults 0 "$EXTENSION_LOG_FAULT_KIND,$CLUTTER_LOG_FAULT_KIND,$MUTTER_LOG_FAULT_KIND"
+    note_shell_log_faults "$CHECK_LOG_START_OFFSET" \
+        "$EXTENSION_LOG_FAULT_KIND,$CLUTTER_LOG_FAULT_KIND,$MUTTER_LOG_FAULT_KIND"
     provoked_line_count="$(count_log_lines_since "$CHECK_RUN_DIR/log/shell.log" 0 "$FOCUS_LOG_PREFIX")" ||
         provoked_line_count=0
     if (( provoked_line_count == 0 )); then
         note_unjudged "log/shell.log holds none of the focus lines the clicks provoked: it may hold no line of the extension"
     fi
-    end_check_step log "no error of the extension, Clutter or Mutter warning in log/shell.log ($provoked_line_count provoked line(s) found)"
+    end_check_step log "no error of the extension, Clutter or Mutter warning in log/shell.log since this pass began ($provoked_line_count provoked line(s) found in the whole log)"
 }
 
 #######################################
-# Run the performance harness's own measurement over this run (perf, as a
-# child: about nine minutes) for check cockpit's count budgets.
+# Run the performance harness's own measurement over this run (perf: about
+# nine minutes) for check cockpit's count budgets. Run only in the background
+# (`&`): it replaces that subshell with perf, so the pid the check holds is
+# perf's own, which a signal can reach.
 #######################################
 run_perf_for_check_cockpit() {
-    bash "$SCRIPT_PATH" perf
+    exec bash "$SCRIPT_PATH" perf
+}
+
+#######################################
+# End check cockpit's perf pass, if it runs: a TERM, on which perf puts the run
+# back (its window ended, the extension enabled, the top bar shown) once its
+# current wait ends, then wait for it.
+#######################################
+end_check_perf() {
+    [[ -n "$CHECK_PERF_PID" ]] || return 0
+    kill -TERM "$CHECK_PERF_PID" 2>/dev/null
+    wait "$CHECK_PERF_PID" 2>/dev/null
+    CHECK_PERF_PID=""
 }
 
 #######################################
 # Step 11: the count budgets with the cockpit drawn, through perf: no fallback
 # timer armed while Samples flow, at most one frame a tick, and no more major
-# collections than the disabled shell's; perf's lines pass through.
+# collections than the disabled shell's; perf's lines pass through. perf runs
+# in the background and the check waits for it, so that a signal to the check
+# is taken at once (end_check_perf ends perf from the check's exit).
 #######################################
 check_cockpit_count_budgets_step() {
-    local perf_output perf_status verdict_lines
-    perf_output="$(run_perf_for_check_cockpit)"
+    local perf_output_path="$CHECK_RUN_DIR/$CHECK_PERF_OUTPUT_RELATIVE_PATH" perf_output perf_status verdict_lines
+    # Made first: a redirect that failed would end the job with status 1, perf's own word for a broken budget.
+    if ! : >"$perf_output_path"; then
+        begin_check_step
+        note_unjudged "cannot write $perf_output_path for perf's lines"
+        end_check_step count-budgets ''
+        return 0
+    fi
+    run_perf_for_check_cockpit >"$perf_output_path" &
+    CHECK_PERF_PID=$!
+    wait "$CHECK_PERF_PID"
     perf_status=$?
+    CHECK_PERF_PID=""
+    perf_output="$(<"$perf_output_path")" || perf_output=""
     printf '%s\n' "$perf_output"
     verdict_lines="$(grep -E '^perf: (PASS|FAIL|cockpit: |could not)' <<<"$perf_output" | tr '\n' ' ')"
     begin_check_step
@@ -3738,10 +3978,12 @@ check_cockpit_count_budgets_step() {
 }
 
 #######################################
-# check cockpit's exit, on every path: the check's windows ended, the run's
-# fixture put back, the dropdown closed. Each step guarded.
+# check cockpit's exit, on every path: its perf pass ended and waited for, the
+# check's windows ended, the run's fixture put back, the dropdown closed. Each
+# step guarded.
 #######################################
 end_check_cockpit() {
+    end_check_perf
     end_recorded_window "$CHECK_RUN_DIR" "$HERDR_PROBE_WINDOW_TITLE"
     end_recorded_window "$CHECK_RUN_DIR" "$DECOY_WINDOW_TITLE"
     restore_run_cockpit_fixture "$CHECK_RUN_DIR" || note "could not restore the run's fixture"
@@ -3766,6 +4008,11 @@ check_cockpit_subcommand() {
             "a session row's click could reach herdr"
     is_recorded_process_running "$run_dir" cockpit \
         || die "refusing: the run's cockpit service is not running (see $run_dir/log/cockpit.log)"
+    # Its last step is a perf pass, which needs both: refused here, before the check clicks anything.
+    is_requested_in_run "$run_dir" "$GC_LOG_RUN_VALUE_NAME" \
+        || die "refusing: the run in $run_dir was not started with $GC_LOG_OPTION, which the count budgets' perf needs"
+    is_requested_in_run "$run_dir" "$REPLAY_RUN_VALUE_NAME" \
+        || die "refusing: the run in $run_dir was not started with $REPLAY_OPTION, which the count budgets' perf needs"
     require_tools busctl jq gjs setsid mktemp mv awk tail
     CHECK_RUN_DIR="$run_dir"
     CHECK_ADDRESS="$address"
@@ -3781,6 +4028,7 @@ check_cockpit_subcommand() {
     trap end_check_cockpit EXIT
     trap 'exit 143' TERM
     trap 'exit 130' INT
+    begin_check_pass
     check_cockpit_layout_steps
     check_cockpit_hover_steps
     check_cockpit_click_steps
