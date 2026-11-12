@@ -375,7 +375,8 @@ rested on it for 300 ms.
   `wired` (`wired · wifi off` when docked) or `wifi`; `wired · limited` or `wifi · portal` when
   NetworkManager reaches the internet only in part; `wired · no internet`, with the offline icon, when not at
   all; `online` when the primary connection is neither, such as a VPN on a full tunnel or a tethered phone
-  (its tooltip says so); `offline` with no link; and `uplink unknown` without NetworkManager. Its tooltip
+  (its tooltip says so); `offline` with no link; and `uplink unknown` without NetworkManager, or while it
+  has not judged a link that is neither. Its tooltip
   gives NetworkManager's verdict, `internet: <connectivity>`. Then the VPN (`VPN up (tun0)` or `VPN down`,
   its icon teal while up and grey while down or unknown), the SSH masters (`3 live ssh masters`), then one
   row per mount: its label and free space, with a bar of the space used, and its mount point, filesystem type
@@ -430,7 +431,9 @@ right-click menu.
 monitor, and the dropdown with its system card and **Open Resources**. systemd skips the unit at each
 enable, which ends the extension's asking until the next. Masking the unit
 (`systemctl --user mask cockpit.service`) turns the cockpit off the same way from the next login, the file
-kept: the extension takes the mask as it takes a missing file, with no retry and no warning.
+kept: the extension takes the mask as it takes a missing file, with no retry and no warning. `gnome-status`
+does warn, though: with the file there it reports `cannot load (LoadState=masked)` with a ⚠ on every run, so
+removing the file is the quiet way off.
 
 **When the grid cannot be drawn,** because a layout cannot be built, rebuilt or placed, the card stays top
 right, as without a cockpit, and the shell's journal holds one line saying so
@@ -738,7 +741,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1188 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1190 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's
@@ -751,7 +754,8 @@ on every machine. So run them through `gjs -m gnome-shell/tests/run.js` or the t
 face, the cockpit client against it and against a fake systemd that answers its StartUnit and unit read, and the real
 `service/cockpit.js` (under a temp home, with no system bus, and a fake herdr and a
 fake herdr client, a process named `herdr` in a terminal of its own, for `FocusSession`; then with a fault
-injected into its `/proc` scan; then in fixture mode). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
+injected into its `/proc` scan; then with a fake herdr that never answers a focus request, which `FocusSession`
+answers within the client's call timeout; then in fixture mode). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
 covers `genable_extension` and `gdisable_extension`, `gnome-status`, the unit and its install step, the
 cost script and the nested harness, `check cockpit` included, against stubs. It never touches the live
 session, but it is **not fully hermetic**: the

@@ -324,18 +324,26 @@ test('cockpitFormat: a primary connection neither wired nor Wi-Fi (kind none: a 
     {kind: 'none', connectivity: 'full', wifiEnabled: true},
     {kind: 'none', connectivity: 'limited', wifiEnabled: true},
     {kind: 'none', connectivity: 'none', wifiEnabled: true},
-    {kind: 'none', connectivity: 'unknown', wifiEnabled: null},
 ].map(uplinkLookOf), [
     {icon: ONLINE_ICON, text: 'online', tooltip: ['internet: full', OTHER_PRIMARY_CONNECTION_NOTE]},
     {icon: ONLINE_ICON, text: 'online · limited', tooltip: ['internet: limited', OTHER_PRIMARY_CONNECTION_NOTE]},
     {icon: OFFLINE_ICON, text: 'offline', tooltip: ['internet: none']},
-    {icon: OFFLINE_ICON, text: 'offline', tooltip: ['internet: unknown']},
 ]));
 
 test('cockpitFormat: an uplink nothing is known of (no NetworkManager: kind and connectivity null) reads "uplink ' +
     'unknown" with the unknown icon, never offline', () =>
     assertEqual(uplinkLookOf({kind: null, connectivity: null, wifiEnabled: null}),
         {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']}));
+
+test('cockpitFormat: an uplink of kind none whose connectivity NetworkManager has not judged (unknown) reads ' +
+    '"uplink unknown" with the unknown icon, as one nothing is known of: the source never said it was offline; a ' +
+    'wired one with the same verdict still reads its kind', () => assertEqual([
+    {kind: 'none', connectivity: 'unknown', wifiEnabled: null},
+    {kind: 'wired', connectivity: 'unknown', wifiEnabled: true},
+].map(uplinkLookOf), [
+    {icon: UNKNOWN_ICON, text: 'uplink unknown', tooltip: ['internet: unknown']},
+    {icon: WIRED_ICON, text: 'wired', tooltip: ['internet: unknown']},
+]));
 
 test('cockpitFormat: the VPN row\'s icon carries the working state\'s class while up and the idle state\'s while ' +
     'down or unknown; the uplink, ssh and mount rows carry none', () => {

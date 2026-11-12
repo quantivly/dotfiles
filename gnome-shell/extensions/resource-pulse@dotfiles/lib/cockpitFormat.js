@@ -281,7 +281,8 @@ function linkedUplinkLook(uplink) {
 /**
  * How an uplink that is neither wired nor Wi-Fi looks (kind none: a VPN on a full tunnel, a tethered phone; or a
  * kind the reader did not know): 'online' while the verdict says the internet is reachable, the part named when it is
- * limited or portal, and offline otherwise.
+ * limited or portal, and offline otherwise (kind none with no verdict, 'unknown', reads 'uplink unknown' before it
+ * comes here: isUplinkUnknown).
  *
  * @param {{kind: string|null, connectivity: string|null}} uplink - The uplink.
  * @returns {{icon: string, text: string, tooltipNote: string|null}} The row's icon and words, and the tooltip line
@@ -297,8 +298,23 @@ function otherUplinkLook(uplink) {
 }
 
 /**
+ * Whether the uplink says nothing of the internet: no NetworkManager (kind and connectivity null), or a primary
+ * connection neither wired nor Wi-Fi whose connectivity NetworkManager has not judged (kind none, 'unknown'). The
+ * first has no link to name and the second no verdict, so neither is "offline".
+ *
+ * @param {{kind: string|null, connectivity: string|null}} uplink - The uplink.
+ * @returns {boolean} True when the row reads 'uplink unknown'.
+ */
+function isUplinkUnknown(uplink) {
+    const isNothingKnown = uplink.kind === null && uplink.connectivity === null;
+    const isOtherLinkUnjudged = uplink.kind === 'none' && uplink.connectivity === CONNECTIVITY_UNKNOWN;
+    return isNothingKnown || isOtherLinkUnjudged;
+}
+
+/**
  * The uplink row: what kind of link it is and whether the internet is reachable over it (linkedUplinkLook,
- * otherUplinkLook), or 'uplink unknown' when nothing is known of it; NetworkManager's verdict in the tooltip.
+ * otherUplinkLook), or 'uplink unknown' when it says nothing of the internet (isUplinkUnknown); NetworkManager's
+ * verdict in the tooltip.
  *
  * @param {{kind: string|null, connectivity: string|null, wifiEnabled: boolean|null}} uplink - The uplink.
  * @returns {object} A connections row of kind 'uplink'.
@@ -306,7 +322,7 @@ function otherUplinkLook(uplink) {
 function uplinkRow(uplink) {
     const connectivityWord = uplink.connectivity ?? CONNECTIVITY_UNKNOWN;
     const tooltip = [`internet: ${connectivityWord}`];
-    if (uplink.kind === null && uplink.connectivity === null) {
+    if (isUplinkUnknown(uplink)) {
         return {
             kind: 'uplink', icon: COCKPIT_ICON_NAMES.unknown, text: UPLINK_UNKNOWN_TEXT, tooltip, fraction: null,
             iconStyleClass: null,

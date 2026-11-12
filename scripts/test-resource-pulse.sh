@@ -2179,7 +2179,9 @@ printf '\nservice/cockpit.js on a private bus (the real sources, under a home of
 # gnome-shell/tests/fixtures/cockpit/nested-state.json, under a config home with
 # no config and no herdr socket, so what it serves can only be the fixture's.
 # A fourth runs a copy of the extension whose listing of /proc throws a plain
-# Error (a fault, not IO), with a fake herdr of its own.
+# Error (a fault, not IO), with a fake herdr of its own. A fifth has a fake
+# herdr of its own that takes every connection and never answers a focus
+# request, so FocusSession's own request timeout is what answers it.
 COCKPIT_MAIN_PATH="$EXT_DIR/service/cockpit.js"
 COCKPIT_BUS_NAME='io.github.quantivly.dotfiles.Cockpit1'
 COCKPIT_OBJECT_PATH='/io/github/quantivly/dotfiles/Cockpit1'
@@ -2228,6 +2230,15 @@ COCKPIT_PROC_FAULT_REAL_SOURCE_IO="$COCKPIT_PROC_FAULT_EXT_DIR/service/sources/s
 COCKPIT_PROC_FAULT_MAIN_PATH="$COCKPIT_PROC_FAULT_EXT_DIR/service/cockpit.js"
 COCKPIT_PROC_FAULT_LOG="$COCKPIT_RUN_DIR/cockpit-proc-fault.log"
 COCKPIT_PROC_FAULT_HERDR_REQUEST_LOG="$COCKPIT_RUN_DIR/proc-fault-herdr-requests.log"
+COCKPIT_SILENT_HERDR_LOG="$COCKPIT_RUN_DIR/cockpit-silent-herdr.log"
+COCKPIT_SILENT_HERDR_REQUEST_LOG="$COCKPIT_RUN_DIR/silent-herdr-requests.log"
+# The methods the silent run's fake herdr takes and never answers: FocusSession's two requests.
+COCKPIT_SILENT_HERDR_METHODS='workspace.focus,pane.focus'
+# lib/constants.js's DBUS_CALL_TIMEOUT_MS: how long the shell's client waits for FocusSession's reply.
+COCKPIT_CLIENT_CALL_TIMEOUT_MS="$(sed -n -E 's/^export const DBUS_CALL_TIMEOUT_MS = ([0-9]+);$/\1/p' \
+  "$EXT_DIR/lib/constants.js")"
+[[ "$COCKPIT_CLIENT_CALL_TIMEOUT_MS" =~ ^[0-9]+$ ]] \
+  || fatal "cannot read DBUS_CALL_TIMEOUT_MS from $EXT_DIR/lib/constants.js"
 COCKPIT_PROC_FAULT_MESSAGE='injected fault: listing /proc'
 for cockpit_run_name in serve focus; do
   for cockpit_home_kind in home config state; do
@@ -2242,9 +2253,11 @@ done
 mkdir -p "$COCKPIT_RUN_DIR/focus-config/herdr" || fatal "cannot create the fake herdr's directory"
 for cockpit_home_kind in home config state; do
   mkdir -p "$COCKPIT_RUN_DIR/fixture-$cockpit_home_kind" "$COCKPIT_RUN_DIR/proc-fault-$cockpit_home_kind" \
-    || fatal "cannot create the fixture and /proc-fault $cockpit_home_kind directories under $COCKPIT_RUN_DIR"
+    "$COCKPIT_RUN_DIR/silent-herdr-$cockpit_home_kind" \
+    || fatal "cannot create the fixture, /proc-fault and silent-herdr $cockpit_home_kind directories under $COCKPIT_RUN_DIR"
 done
-mkdir -p "$COCKPIT_RUN_DIR/proc-fault-config/herdr" "${COCKPIT_REFUSED_FIXTURE_PATH%/*}" "$COCKPIT_FAKE_CLIENT_DIR" \
+mkdir -p "$COCKPIT_RUN_DIR/proc-fault-config/herdr" "$COCKPIT_RUN_DIR/silent-herdr-config/herdr" \
+  "${COCKPIT_REFUSED_FIXTURE_PATH%/*}" "$COCKPIT_FAKE_CLIENT_DIR" \
   || fatal "cannot create the /proc-fault fake herdr's, the refused fixture's or the fake client's directory"
 cp -- "$COCKPIT_NESTED_FIXTURE" "$COCKPIT_REFUSED_FIXTURE_PATH" || fatal "cannot copy $COCKPIT_NESTED_FIXTURE"
 cat >"$COCKPIT_FAKE_CLIENT_PATH" <<'FAKE_HERDR_CLIENT' || fatal "cannot write $COCKPIT_FAKE_CLIENT_PATH"
@@ -2293,6 +2306,7 @@ fi
 : >"$COCKPIT_SERVE_LOG"; : >"$COCKPIT_FOCUS_LOG"; : >"$COCKPIT_HERDR_REQUEST_LOG"; : >"$COCKPIT_FAKE_HERDR_LOG"
 : >"$COCKPIT_FIXTURE_LOG"; : >"$COCKPIT_BAD_FIXTURE_LOG"; : >"$COCKPIT_REFUSED_FIXTURE_LOG"
 : >"$COCKPIT_FAKE_CLIENT_LOG"; : >"$COCKPIT_PROC_FAULT_LOG"; : >"$COCKPIT_PROC_FAULT_HERDR_REQUEST_LOG"
+: >"$COCKPIT_SILENT_HERDR_LOG"; : >"$COCKPIT_SILENT_HERDR_REQUEST_LOG"
 # Decodes a gdbus call's reply (GLib.Variant text, as gdbus prints it, holding
 # one JSON string). For `reply` it prints the JSON compactly (FocusSession's);
 # `client-reply` does the same, but a focused reply's windowPidCandidates print
@@ -2374,12 +2388,16 @@ print(decoded);
 # service/herdrSocket.js). It logs each request as `<method> <params JSON>` to
 # <request log>. Its snapshot holds four claude panes: w1:p1; w1:p2, whose
 # pane.focus it rejects as herdr does a pane that is gone; p3, in no
-# workspace; and one with no pane at all, whose row id is its session id.
+# workspace; and one with no pane at all, whose row id is its session id. A
+# request whose method is in the optional third argument (comma-separated) is
+# logged and never answered: its connection is held open, unanswered.
 # shellcheck disable=SC2016  # JavaScript source: $ and backticks are gjs's, not bash's.
 COCKPIT_FAKE_HERDR_JS='
 const {Gio, GLib} = imports.gi;
-const [socketPath, requestLogPath] = ARGV;
+const [socketPath, requestLogPath, silentMethodList = ""] = ARGV;
 const PANE_HERDR_REJECTS = "p2";
+const SILENT_METHODS = new Set(silentMethodList.split(",").filter(methodName => methodName !== ""));
+const heldConnections = [];
 const SNAPSHOT = {
     workspaces: [{workspace_id: "w1", label: "alpha"}],
     agents: [
@@ -2407,12 +2425,13 @@ function answerFor(method, params) {
         return {error: {code: "invalid_request", message: "unknown method"}};
     }
 }
-function replyTextFor(requestLine) {
-    const request = JSON.parse(requestLine);
-    const params = request.params ?? {};
-    requestLines.push(`${request.method} ${JSON.stringify(params)}`);
+function logRequest(request) {
+    requestLines.push(`${request.method} ${JSON.stringify(request.params ?? {})}`);
     GLib.file_set_contents(requestLogPath, `${requestLines.join("\n")}\n`);
-    return JSON.stringify({id: request.id, ...answerFor(request.method, params)});
+}
+function replyTextFor(request) {
+    logRequest(request);
+    return JSON.stringify({id: request.id, ...answerFor(request.method, request.params ?? {})});
 }
 const socketService = new Gio.SocketService();
 socketService.add_address(Gio.UnixSocketAddress.new(socketPath), Gio.SocketType.STREAM, Gio.SocketProtocol.DEFAULT,
@@ -2423,7 +2442,13 @@ socketService.connect("incoming", (_service, connection) => {
         let replyText = "";
         try {
             const [requestLine] = lineReader.read_line_finish_utf8(readResult);
-            replyText = replyTextFor(requestLine);
+            const request = JSON.parse(requestLine);
+            if (SILENT_METHODS.has(request.method)) {
+                logRequest(request);
+                heldConnections.push(connection);
+                return;
+            }
+            replyText = replyTextFor(request);
         } catch (error) {
             printerr(`fake herdr: cannot answer: ${error.message}`);
         }
@@ -2453,7 +2478,10 @@ new GLib.MainLoop(null, false).run();
 # herdr saw for it; then the fake herdr stopped and one more FocusSession, which
 # finds herdr unreachable; then SIGTERM. The /proc-fault run: its own fake herdr,
 # the faulty copy of the service, one FocusSession, SIGTERM; then the fake herdr
-# client is stopped (and by the EXIT trap on every other path). The fixture run:
+# client is stopped (and by the EXIT trap on every other path). The silent-herdr
+# run: its own fake herdr, which answers the sessions source's requests and
+# never a focus request, then the service, one timed FocusSession on a row with
+# a workspace and one on a row in none, SIGTERM. The fixture run:
 # GetState, two FocusSessions, then the fixture renamed over twice (the network
 # rewrite, then the layout one), each followed by GetState for up to 3 s, with
 # the Changed signals watched on the bus; then SIGTERM; then a fixture that does
@@ -2469,6 +2497,7 @@ fixture_path="${14}" fixture_network_rewrite="${15}" fixture_layout_rewrite="${1
 bad_fixture_log="${18}" refused_fixture_path="${19}" refused_fixture_log="${20}"
 fake_client_path="${21}" fake_client_pid_file="${22}" fake_client_log="${23}"
 proc_fault_main="${24}" proc_fault_log="${25}" proc_fault_request_log="${26}"
+silent_herdr_log="${27}" silent_herdr_request_log="${28}" silent_herdr_methods="${29}"
 is_private_bus_address "${DBUS_SESSION_BUS_ADDRESS:-}" "${RESOURCE_PULSE_TEST_BUS_DIR:-}" \
   || { printf "refused: %s is not the private bus\n" "${DBUS_SESSION_BUS_ADDRESS:-unset}"; exit 97; }
 USEC_PER_SECOND=1000000
@@ -2610,12 +2639,18 @@ stop_process() {
 # prints, under "focus <label>" (the id by default), the reply as the decoding
 # <decoding> of the decoder gives it (client-reply, against the fake herdr
 # client running now, by default) and the focus requests the fake herdr saw for
-# it in request_log, joined by |.
+# it in request_log, joined by |; sets focus_call_ms, how long the gdbus call
+# took.
 focus_session() {
   local session_id="$1" label="${2:-$1}" reply_decoding="${3:-client-reply}" requests_before reply decoded requests
+  local call_started_usec call_status
   requests_before="$(grep -c -E "$FOCUS_REQUEST_PATTERN" "$request_log")"
-  if reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
-      --method "$bus_name.FocusSession" "\"$session_id\"" --timeout 5 2>&1)"; then
+  call_started_usec="$(now_usec)"
+  reply="$(gdbus call --session --dest "$bus_name" --object-path "$object_path" \
+    --method "$bus_name.FocusSession" "\"$session_id\"" --timeout 5 2>&1)"
+  call_status=$?
+  focus_call_ms=$(( ($(now_usec) - call_started_usec) / 1000 ))
+  if (( call_status == 0 )); then
     decoded="$(gjs -c "$decoder_js" "$reply_decoding" "$reply" "$fake_client_pid" "$fake_client_script_pid")"
   else
     decoded="D-Bus error: ${reply%%$'"'"'\n'"'"'*}"
@@ -2714,6 +2749,28 @@ kill -TERM "$proc_fault_herdr_pid" 2>/dev/null
 wait "$proc_fault_herdr_pid" 2>/dev/null
 stop_fake_herdr_client
 
+request_log="$silent_herdr_request_log"
+silent_herdr_socket="$run_dir/silent-herdr-config/herdr/herdr.sock"
+gjs -c "$fake_herdr_js" "$silent_herdr_socket" "$request_log" "$silent_herdr_methods" >>"$fake_herdr_log" 2>&1 &
+silent_herdr_pid=$!
+for (( attempt = 0; attempt < 50; attempt++ )); do
+  [[ -S "$silent_herdr_socket" ]] && break
+  sleep 0.1
+done
+silent_herdr_environment=(env -u RESOURCE_PULSE_COCKPIT_FIXTURE HOME="$run_dir/silent-herdr-home"
+  XDG_CONFIG_HOME="$run_dir/silent-herdr-config" XDG_STATE_HOME="$run_dir/silent-herdr-state"
+  DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
+"${silent_herdr_environment[@]}" gjs -m "$cockpit_main" >>"$silent_herdr_log" 2>&1 &
+silent_herdr_service_pid=$!
+printf "silent-herdr-ready=%s\n" "$(probe_state 15 "sessionRows=4" herdrRunning sessionRows)"
+for session_id in w1:p1 p3; do
+  focus_session "$session_id" "silent-herdr $session_id" reply
+  printf "silent-herdr-call-ms %s=%s\n" "$session_id" "$focus_call_ms"
+done
+stop_process silent-herdr-exit "$silent_herdr_service_pid"
+kill -TERM "$silent_herdr_pid" 2>/dev/null
+wait "$silent_herdr_pid" 2>/dev/null
+
 fixture_environment=(env HOME="$run_dir/fixture-home" XDG_CONFIG_HOME="$run_dir/fixture-config"
   XDG_STATE_HOME="$run_dir/fixture-state" DBUS_SYSTEM_BUS_ADDRESS="$no_system_bus")
 "${fixture_environment[@]}" RESOURCE_PULSE_COCKPIT_FIXTURE="$fixture_path" gjs -m "$cockpit_main" \
@@ -2754,7 +2811,8 @@ printf "refused-fixture-exit=%s\n" "$?"
   "$COCKPIT_FIXTURE_LAYOUT_REWRITE" "$COCKPIT_FIXTURE_LOG" "$COCKPIT_BAD_FIXTURE_LOG" \
   "$COCKPIT_REFUSED_FIXTURE_PATH" "$COCKPIT_REFUSED_FIXTURE_LOG" "$COCKPIT_FAKE_CLIENT_PATH" \
   "$COCKPIT_FAKE_CLIENT_PID_FILE" "$COCKPIT_FAKE_CLIENT_LOG" "$COCKPIT_PROC_FAULT_MAIN_PATH" \
-  "$COCKPIT_PROC_FAULT_LOG" "$COCKPIT_PROC_FAULT_HERDR_REQUEST_LOG" 2>&1)"
+  "$COCKPIT_PROC_FAULT_LOG" "$COCKPIT_PROC_FAULT_HERDR_REQUEST_LOG" "$COCKPIT_SILENT_HERDR_LOG" \
+  "$COCKPIT_SILENT_HERDR_REQUEST_LOG" "$COCKPIT_SILENT_HERDR_METHODS" 2>&1)"
 declare -A cockpit_driver_said=()
 while IFS= read -r driver_line; do
   [[ "$driver_line" == *=* ]] && cockpit_driver_said["${driver_line%%=*}"]="${driver_line#*=}"
@@ -2785,9 +2843,10 @@ check "SIGTERM ends service/cockpit.js with exit 0, in all three runs" \
   "serve=0 focus=0 fixture=0"
 check "service/cockpit.js logged its serving line once, with the protocol" \
   "$(grep -c -F "cockpit: serving $COCKPIT_BUS_NAME (protocol 1)" "$COCKPIT_SERVE_LOG")" 1
-check "service/cockpit.js logged no gjs or GLib warning, critical or uncaught error, in any run (the fixture's, the bad and refused fixtures' and the /proc-fault run's included)" \
+check "service/cockpit.js logged no gjs or GLib warning, critical or uncaught error, in any run (the fixture's, the bad and refused fixtures', the /proc-fault run's and the silent herdr's included)" \
   "$(cat "$COCKPIT_SERVE_LOG" "$COCKPIT_FOCUS_LOG" "$COCKPIT_FIXTURE_LOG" "$COCKPIT_BAD_FIXTURE_LOG" \
-    "$COCKPIT_REFUSED_FIXTURE_LOG" "$COCKPIT_PROC_FAULT_LOG" | grep -c -E "$ENGINE_WARNING_PATTERN")" 0
+    "$COCKPIT_REFUSED_FIXTURE_LOG" "$COCKPIT_PROC_FAULT_LOG" "$COCKPIT_SILENT_HERDR_LOG" \
+    | grep -c -E "$ENGINE_WARNING_PATTERN")" 0
 # A focused reply's windowPidCandidates come from /proc: every herdr client (a
 # process named herdr with a terminal) and its parents. The driver's own fake
 # client is one on any machine, CI included, so the decoder prints
@@ -2813,6 +2872,20 @@ check "an unknown id, and a row with no pane, answer focused false with the code
 check "with the fake herdr stopped, a row answers focused false and the code herdr-unreachable, and herdr's text goes to the journal" \
   "${cockpit_driver_said[focus w1:p1 without herdr]-} logged=$(grep -c -F 'cockpit: focus: w1:p1: herdr: ' "$COCKPIT_FOCUS_LOG")" \
   'reply={"focused":false,"windowPid":null,"error":"herdr-unreachable","windowPidCandidates":[]} requests=[] logged=1'
+# FocusSession bounds each of its two herdr requests by a timeout of its own, shorter than a sample's, so that a herdr
+# that takes the connection and never answers is answered herdr-unreachable before the shell's client gives up on
+# the call: for a row with a workspace (its workspace.focus goes unanswered) and one in none (its pane.focus). The
+# requests the silent herdr took show that each call reached it, not a socket that refused it.
+# silent_herdr_focus <session id> prints the reply and requests, and whether the call came back within the timeout.
+silent_herdr_focus() {
+  local call_ms="${cockpit_driver_said[silent-herdr-call-ms $1]-}" within_call_timeout
+  within_call_timeout="no ($call_ms ms)"
+  [[ "$call_ms" =~ ^[0-9]+$ ]] && (( call_ms < COCKPIT_CLIENT_CALL_TIMEOUT_MS )) && within_call_timeout=yes
+  printf '%s within-call-timeout=%s' "${cockpit_driver_said[focus silent-herdr $1]-}" "$within_call_timeout"
+}
+check "FocusSession against a herdr that takes the connection and never answers a focus request answers focused false and herdr-unreachable within the shell's call timeout ($COCKPIT_CLIENT_CALL_TIMEOUT_MS ms), for a row with a workspace and for one in none; the service still ends with 0 on SIGTERM" \
+  "ready=${cockpit_driver_said[silent-herdr-ready]-} w1:p1: $(silent_herdr_focus w1:p1) p3: $(silent_herdr_focus p3) exit=${cockpit_driver_said[silent-herdr-exit]-}" \
+  'ready=herdrRunning=true sessionRows=4 w1:p1: reply={"focused":false,"windowPid":null,"error":"herdr-unreachable","windowPidCandidates":[]} requests=[workspace.focus {"workspace_id":"w1"}] within-call-timeout=yes p3: reply={"focused":false,"windowPid":null,"error":"herdr-unreachable","windowPidCandidates":[]} requests=[pane.focus {"pane_id":"p3"}] within-call-timeout=yes exit=0'
 # The /proc-fault copy throws a plain Error listing /proc, once herdr focused
 # the pane. The pane is focused all the same, so the reply must say so, naming
 # no window (the fake client still runs, so the scan would otherwise name it),
@@ -2854,6 +2927,7 @@ if (( FAIL > cockpit_fail_count_before )); then
   sed 's/^/    bad fixture log: /' "$COCKPIT_BAD_FIXTURE_LOG"
   sed 's/^/    refused fixture log: /' "$COCKPIT_REFUSED_FIXTURE_LOG"
   sed 's/^/    \/proc-fault log: /' "$COCKPIT_PROC_FAULT_LOG"
+  sed 's/^/    silent herdr log: /' "$COCKPIT_SILENT_HERDR_LOG"
   sed 's/^/    fake herdr client log: /' "$COCKPIT_FAKE_CLIENT_LOG"
 fi
 
@@ -6993,7 +7067,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1188
+EXPECTED_ROWS=1190
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
