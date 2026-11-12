@@ -1227,21 +1227,14 @@ test('extension.js: a cockpit client event adds, removes or rebuilds the layer a
     }, {
         onEvent: ['this._syncCockpitLayer(event.type === CockpitClientEventType.LAYOUT);'],
         sync: [
-            'const layerChange = cockpitLayerChange({',
-            'isLayerShown: this._layer !== null,',
-            'clientState: this._cockpitClient.state,',
-            'layout: this._cockpitClient.layout,',
-            'isLayoutEvent,',
-            'failedLayout: this._failedCockpitLayout,',
-            '});',
-            'if (layerChange === CockpitLayerChange.NONE)',
-            'return;',
+            'const layerChange = this._cockpitLayerChangeNow(isLayoutEvent);',
             'if (layerChange === CockpitLayerChange.REMOVE) {',
             'this._removeCockpitLayer();',
             'this._placeAfterLayerChange();',
-            '} else {',
+            '} else if (layerChange !== CockpitLayerChange.NONE) {',
             'this._drawCockpitLayer(layerChange);',
             '}',
+            'return layerChange;',
         ],
         holdHidden: [
             'const isHeldHidden = isPulseCardHeldHidden({',
@@ -1332,7 +1325,7 @@ test('extension.js: the layer goes on the monitor cockpitMonitorIndexFor chooses
     'work-area change and a new answer do; the later never throws out of its callback', () => {
     const extensionCode = codeOf(EXTENSION_SOURCE_FILE);
     const queueStatements = extensionMethodStatements('_queueCardPlacement() {');
-    const placeIndex = queueStatements.indexOf('this._placeCard();');
+    const placeIndex = queueStatements.indexOf('this._placeCardsAgain();');
     assertEqual({
         place: extensionMethodStatements('_placeCockpitLayer() {'),
         onMonitorsChanged: extensionMethodStatements('_onMonitorsChanged() {'),
@@ -1365,10 +1358,77 @@ test('extension.js: the layer goes on the monitor cockpitMonitorIndexFor chooses
         connects: [1, 1],
         // Logged, never swallowed in silence.
         laterGuarded: [
-            'try {', 'this._placeCard();', '} catch (error) {', 'const errorText = describeErrorWithStack(error);',
+            'try {', 'this._placeCardsAgain();', '} catch (error) {',
+            'const errorText = describeErrorWithStack(error);',
             'this._errorLog.log(`could not place the cards: ${errorText}`);',
         ],
     });
+});
+
+test('extension.js: the layer is decided with the grid\'s fit on its monitor (ruling D36): the work area of the ' +
+    'monitor _placeCockpitLayer would choose, drawable when the grid fits it or while DisplayConfig\'s answer could ' +
+    'still move it; held back, one warning as that begins, under its own template key, naming the work area', () => {
+    const extensionCode = codeOf(EXTENSION_SOURCE_FILE);
+    assertEqual({
+        decide: extensionMethodStatements('_cockpitLayerChangeNow(isLayoutEvent) {'),
+        fit: extensionMethodStatements('_cockpitGridFit(layout) {'),
+        note: extensionMethodStatements('_noteCockpitGridHeldBack(isHeldBack, workArea) {'),
+        logKey: occurrenceCount(extensionCode,
+            "const COCKPIT_GRID_TOO_SMALL_LOG_KEY = 'the cockpit grid needs a larger work area';"),
+        noLayoutFit: occurrenceCount(extensionCode,
+            'const NO_LAYOUT_GRID_FIT = Object.freeze({workArea: null, isGridDrawable: true});'),
+    }, {
+        decide: [
+            'const clientState = this._cockpitClient.state;',
+            'const layout = this._cockpitClient.layout;',
+            'const failedLayout = this._failedCockpitLayout;',
+            'const {workArea, isGridDrawable} = layout === null ? NO_LAYOUT_GRID_FIT : this._cockpitGridFit(layout);',
+            'const isHeldBack = isCockpitGridHeldBack({clientState, layout, failedLayout, isGridDrawable});',
+            'this._noteCockpitGridHeldBack(isHeldBack, workArea);',
+            'return cockpitLayerChange({',
+            'isLayerShown: this._layer !== null, clientState, layout, isLayoutEvent, failedLayout, isGridDrawable,',
+            '});',
+        ],
+        fit: [
+            'const monitors = shellMonitors();',
+            'const displayConfigState = this._displayConfigState;',
+            'const monitorRule = layout.monitor;',
+            'const monitorIndex = cockpitMonitorIndexFor({monitors, displayConfigState, monitorRule});',
+            'const workArea = monitorIndex === null ? null : Main.layoutManager.getWorkAreaForMonitor(monitorIndex);',
+            'const isMonitorChoiceSettled =',
+            'isCockpitMonitorChoiceSettled({monitorCount: monitors.length, displayConfigState, monitorRule});',
+            'return {workArea, isGridDrawable: isCockpitGridDrawableNow({workArea, isMonitorChoiceSettled})};',
+        ],
+        note: [
+            'if (isHeldBack && !this._isCockpitGridHeldBack)',
+            'this._clientLog.log(cockpitGridTooSmallLine(workArea), COCKPIT_GRID_TOO_SMALL_LOG_KEY);',
+            'this._isCockpitGridHeldBack = isHeldBack;',
+        ],
+        logKey: 1,
+        noLayoutFit: 1,
+    });
+});
+
+test('extension.js: every placement the monitors, a work area, DisplayConfig\'s answer or the v2 card\'s width ' +
+    'queue decides the layer again first (ruling D36: a dock brings the grid back, an undock puts the card top ' +
+    'right), and places what is drawn itself only when that changed nothing', () =>
+    assertEqual(extensionMethodStatements('_placeCardsAgain() {'), [
+        'const layerChange = this._syncCockpitLayer(false);',
+        'if (layerChange === CockpitLayerChange.NONE)',
+        'this._placeCard();',
+    ]));
+
+test('extension.js: whether the grid is held back by its work area is kept across enables, as the layout is, so its ' +
+    'line is not written again at each unlock while it lasts: set in the constructor and by the note alone, never ' +
+    'cleared by teardown', () => {
+    const extensionCode = codeOf(EXTENSION_SOURCE_FILE);
+    assertEqual({
+        assignments: occurrenceCount(extensionCode, 'this._isCockpitGridHeldBack ='),
+        inTheConstructor: extensionMethodStatements('constructor(metadata) {')
+            .includes('this._isCockpitGridHeldBack = false;'),
+        inTeardown: extensionMethodStatements('_tearDown() {')
+            .some(statement => statement.includes('_isCockpitGridHeldBack')),
+    }, {assignments: 2, inTheConstructor: true, inTeardown: false});
 });
 
 test('extension.js: the cockpit\'s watch and its subscription get the same answer, isCockpitWatchWanted\'s, from ' +

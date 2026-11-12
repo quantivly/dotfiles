@@ -139,3 +139,20 @@ export function cockpitMonitorIndexFor({monitors, displayConfigState, monitorRul
     const identifiedMonitors = matchDescriptorsToMonitors({monitors, logicalMonitors, descriptors});
     return chooseCockpitMonitorIndex({monitors: identifiedMonitors, rule: completeMonitorRule(monitorRule)});
 }
+
+/**
+ * Says whether the cockpit monitor's choice is settled: no DisplayConfig answer still to come could move it to another
+ * monitor. It could only with several monitors, a layout that names one by vendor and product, and no answer since the
+ * monitors last changed: until then cockpitMonitorIndexFor falls back to the largest non-primary, which may not be the
+ * monitor named. The extension asks for an answer whenever it adds the layer and on each monitors change while one is
+ * shown.
+ *
+ * @param {object} options - The inputs.
+ * @param {number} options.monitorCount - How many monitors the shell has.
+ * @param {*} options.displayConfigState - DisplayConfig's unpacked GetCurrentState reply, or null for none yet.
+ * @param {{vendor: string|null, product: string|null}|null} options.monitorRule - The layout's monitor rule.
+ * @returns {boolean} True when the choice cannot change with an answer.
+ */
+export function isCockpitMonitorChoiceSettled({monitorCount, displayConfigState, monitorRule}) {
+    return monitorCount <= 1 || completeMonitorRule(monitorRule) === null || displayConfigState !== null;
+}

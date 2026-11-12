@@ -11,10 +11,15 @@
 // since from another layout is removed when it comes back) nor kept for the next enable. "Holds it" is the client's
 // own notion of the same layout, the same JSON (lib/jsonFields.js isSameAsJson): the client holds a new object after
 // every answer, and tells a layout event only when the JSON differs.
+//
+// Nor is the layer drawn on a cockpit monitor whose work area is too small for the cards' content (ruling D36,
+// lib/cockpitGrid.js isCockpitGridDrawable): the v2 card stays top right, as with no layout, until the work area is
+// large enough again, which the extension asks on every placement (a dock brings the grid back).
 import {
     COCKPIT_SNAPSHOT_CARD_IDS, COCKPIT_SOURCE_NAMES_BY_CARD_ID, COCKPIT_SYSTEM_CARD_ID, CockpitClientEventType,
     CockpitClientState, CockpitSourcesCause,
 } from './constants.js';
+import {isCockpitGridDrawable} from './cockpitGrid.js';
 import {COCKPIT_SOURCE_NAMES} from './cockpitProtocol.js';
 import {isSameAsJson} from './jsonFields.js';
 import {isFrozenRepaintDue} from './visibility.js';
@@ -75,16 +80,30 @@ export function isCockpitLayerWanted({clientState, layout}) {
  * @returns {object|null} The layout to seed the next client with, or null.
  */
 export function cockpitLayoutToKeep({clientState, layout, failedLayout}) {
-    const isKept = isCockpitLayerWanted({clientState, layout}) && !isSameAsJson(layout, failedLayout);
-    return isKept ? layout : null;
+    return isLayoutToDraw({clientState, layout, failedLayout}) ? layout : null;
 }
 
 /**
- * What a cockpit client event does to the layer: removes it once it is not wanted, or while the client holds the layout
- * that failed to draw in this enable (ruling D25: that one is not tried again until the client holds another, and a
- * layer drawn since from another layout goes when it comes back, so the v2 card is drawn top right, as when it first
- * failed, never the grid of a layout the client no longer holds); otherwise adds it if it is not shown, rebuilds a
- * shown layer's grid on a layout event (its cards kept, re-placed), and otherwise nothing.
+ * Says whether a layout is one to draw: wanted (isCockpitLayerWanted) and not the one that failed to draw in this
+ * enable (ruling D25), whatever its monitor's work area.
+ *
+ * @param {object} situation - The client and the extension.
+ * @param {string} situation.clientState - The client's CockpitClientState.
+ * @param {object|null} situation.layout - The client's layout, or null.
+ * @param {object|null} situation.failedLayout - The layout that failed in this enable, or null.
+ * @returns {boolean} True for a layout to draw.
+ */
+function isLayoutToDraw({clientState, layout, failedLayout}) {
+    return isCockpitLayerWanted({clientState, layout}) && !isSameAsJson(layout, failedLayout);
+}
+
+/**
+ * What a cockpit client event, or a placement, does to the layer: removes it once it is not wanted, while the client
+ * holds the layout that failed to draw in this enable (ruling D25: that one is not tried again until the client holds
+ * another, and a layer drawn since from another layout goes when it comes back, so the v2 card is drawn top right, as
+ * when it first failed, never the grid of a layout the client no longer holds), or while the grid does not fit its
+ * monitor's work area (ruling D36: the v2 card top right, as with no layout); otherwise adds it if it is not shown,
+ * rebuilds a shown layer's grid on a layout event (its cards kept, re-placed), and otherwise nothing.
  *
  * @param {object} situation - The layer, the client and the extension.
  * @param {boolean} situation.isLayerShown - The layer exists now.
@@ -93,15 +112,49 @@ export function cockpitLayoutToKeep({clientState, layout, failedLayout}) {
  * @param {boolean} situation.isLayoutEvent - The event is a layout event.
  * @param {object|null} situation.failedLayout - The layout the layer could not be built, rebuilt or placed with in
  *     this enable, or null.
+ * @param {boolean} situation.isGridDrawable - The grid may be drawn on the cockpit monitor's work area
+ *     (isCockpitGridDrawableNow).
  * @returns {string} One of CockpitLayerChange's values.
  */
-export function cockpitLayerChange({isLayerShown, clientState, layout, isLayoutEvent, failedLayout}) {
-    const isLayerWanted = isCockpitLayerWanted({clientState, layout}) && !isSameAsJson(layout, failedLayout);
+export function cockpitLayerChange({isLayerShown, clientState, layout, isLayoutEvent, failedLayout, isGridDrawable}) {
+    const isLayerWanted = isLayoutToDraw({clientState, layout, failedLayout}) && isGridDrawable;
     if (!isLayerWanted)
         return isLayerShown ? CockpitLayerChange.REMOVE : CockpitLayerChange.NONE;
     if (!isLayerShown)
         return CockpitLayerChange.ADD;
     return isLayoutEvent ? CockpitLayerChange.REBUILD : CockpitLayerChange.NONE;
+}
+
+/**
+ * Says whether the grid is held back by its work area (ruling D36): a layout would be drawn (wanted, and not the one
+ * that failed in this enable) but the grid does not fit its monitor's work area, so the v2 card is drawn top right
+ * instead. The extension writes one journal line as this becomes true.
+ *
+ * @param {object} situation - The client, the extension and the grid's fit.
+ * @param {string} situation.clientState - The client's CockpitClientState.
+ * @param {object|null} situation.layout - The client's layout, or null.
+ * @param {object|null} situation.failedLayout - The layout that failed in this enable, or null.
+ * @param {boolean} situation.isGridDrawable - The grid may be drawn on the cockpit monitor's work area.
+ * @returns {boolean} True while the grid is held back by its work area alone.
+ */
+export function isCockpitGridHeldBack({clientState, layout, failedLayout, isGridDrawable}) {
+    return isLayoutToDraw({clientState, layout, failedLayout}) && !isGridDrawable;
+}
+
+/**
+ * Says whether the grid may be drawn on the cockpit monitor as the extension knows it now (ruling D36): when its work
+ * area holds the grid (lib/cockpitGrid.js isCockpitGridDrawable); with no monitor at all, since the layer is then not
+ * placed and stays as it is; and while DisplayConfig's answer could still move it to another monitor
+ * (lib/cockpitMonitor.js isCockpitMonitorChoiceSettled), so the layer is added on the fallback monitor, the add asks
+ * for the answer, and the placement that answer brings decides.
+ *
+ * @param {object} monitor - The cockpit monitor as chosen now.
+ * @param {{width: number, height: number}|null} monitor.workArea - Its work area, or null with no monitor.
+ * @param {boolean} monitor.isMonitorChoiceSettled - No DisplayConfig answer could move the grid to another monitor.
+ * @returns {boolean} True when the grid may be drawn.
+ */
+export function isCockpitGridDrawableNow({workArea, isMonitorChoiceSettled}) {
+    return workArea === null || !isMonitorChoiceSettled || isCockpitGridDrawable(workArea);
 }
 
 /**

@@ -119,3 +119,20 @@ test('cockpitMonitor: a DisplayConfig answer of an unexpected shape identifies n
         }),
     }, {malformed: [1, 1, 1, 1], noMonitors: null});
 });
+
+test('cockpitMonitor: the choice is settled (DisplayConfig\'s answer cannot move it) with one monitor or none, ' +
+    'with a layout that names no monitor, or once an answer is in; with several monitors, a named one and no ' +
+    'answer yet, it is not (the fallback may not be the monitor named)', () => {
+    const isSettled = (monitorCount, displayConfigState, monitorRule) =>
+        cockpitMonitor.isCockpitMonitorChoiceSettled({monitorCount, displayConfigState, monitorRule});
+    assertEqual({
+        oneMonitor: isSettled(1, null, RULE),
+        noMonitor: isSettled(0, null, RULE),
+        noRule: isSettled(2, null, null),
+        ruleNamingNeither: isSettled(2, null, {vendor: null, product: null}),
+        answered: isSettled(2, DISPLAY_CONFIG_STATE, RULE),
+        notYetAnswered: isSettled(2, null, RULE),
+    }, {
+        oneMonitor: true, noMonitor: true, noRule: true, ruleNamingNeither: true, answered: true, notYetAnswered: false,
+    });
+});

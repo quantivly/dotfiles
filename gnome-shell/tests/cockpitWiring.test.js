@@ -77,7 +77,7 @@ test('cockpitWiring: the layer is drawn while a layout is known (cached or recei
 test('cockpitWiring: a client event adds the layer once it is wanted, removes it once it is not, rebuilds a shown ' +
     'layer on a layout event, and otherwise changes nothing (CockpitLayerChange, frozen)', () => {
     const change = (isLayerShown, clientState, layout, isLayoutEvent) =>
-        wiring.cockpitLayerChange({isLayerShown, clientState, layout, isLayoutEvent});
+        wiring.cockpitLayerChange({isLayerShown, clientState, layout, isLayoutEvent, isGridDrawable: true});
     assertEqual({
         changes: wiring.CockpitLayerChange, isFrozen: Object.isFrozen(wiring.CockpitLayerChange),
         cachedAtEnable: change(false, STARTING, LAYOUT, false),
@@ -112,7 +112,9 @@ test('cockpitWiring: the layout that failed to build in this enable is not tried
     '(the same JSON in a new object, as the client tells a changed layout), on any event; another layout is added ' +
     'or rebuilt as usual, and a layer no longer wanted is still removed (ruling D25)', () => {
     const change = (isLayerShown, clientState, layout, isLayoutEvent) =>
-        wiring.cockpitLayerChange({isLayerShown, clientState, layout, isLayoutEvent, failedLayout: LAYOUT});
+        wiring.cockpitLayerChange({
+            isLayerShown, clientState, layout, isLayoutEvent, failedLayout: LAYOUT, isGridDrawable: true,
+        });
     assertEqual({
         failedOneOnAState: change(false, LIVE, layoutFromALaterAnswer(), false),
         failedOneOnALayoutEvent: change(false, LIVE, layoutFromALaterAnswer(), true),
@@ -131,6 +133,7 @@ test('cockpitWiring: the layout that failed comes back while a layer drawn from 
     'longer holds (ruling D25)', () => {
     const change = isLayoutEvent => wiring.cockpitLayerChange({
         isLayerShown: true, clientState: LIVE, layout: layoutFromALaterAnswer(), isLayoutEvent, failedLayout: LAYOUT,
+        isGridDrawable: true,
     });
     assertEqual({onItsLayoutEvent: change(true), onALaterEvent: change(false)},
         {onItsLayoutEvent: 'remove', onALaterEvent: 'remove'});
@@ -144,6 +147,56 @@ test('cockpitWiring: the layout that failed to build in this enable is not kept 
         anotherAfterAFailure: kept(EDITED_LAYOUT, LAYOUT),
         noFailure: kept(LAYOUT, null),
     }, {failedOne: null, anotherAfterAFailure: EDITED_LAYOUT, noFailure: LAYOUT});
+});
+
+test('cockpitWiring: a work area too small for the grid keeps the layer away (ruling D36): never added, removed ' +
+    'while shown on any event, and added again once the grid fits, as when no layout is known', () => {
+    const change = (isLayerShown, clientState, layout, isLayoutEvent, isGridDrawable) => wiring.cockpitLayerChange({
+        isLayerShown, clientState, layout, isLayoutEvent, failedLayout: null, isGridDrawable,
+    });
+    assertEqual({
+        cachedAtEnable: change(false, STARTING, LAYOUT, false, false),
+        firstLayoutArrives: change(false, LIVE, LAYOUT, true, false),
+        shownOnAPlacement: change(true, LIVE, LAYOUT, false, false),
+        shownOnALayoutEvent: change(true, LIVE, LAYOUT, true, false),
+        fitsAgain: change(false, LIVE, LAYOUT, false, true),
+        skippedAndTooSmall: change(true, SKIPPED, LAYOUT, false, false),
+    }, {
+        cachedAtEnable: 'none', firstLayoutArrives: 'none', shownOnAPlacement: 'remove', shownOnALayoutEvent: 'remove',
+        fitsAgain: 'add', skippedAndTooSmall: 'remove',
+    });
+});
+
+test('cockpitWiring: the grid is held back by its work area only while a layout would be drawn (wanted, not the one ' +
+    'that failed) and does not fit; the journal line is written as that begins (ruling D36)', () => {
+    const isHeldBack = (clientState, layout, failedLayout, isGridDrawable) =>
+        wiring.isCockpitGridHeldBack({clientState, layout, failedLayout, isGridDrawable});
+    assertEqual({
+        tooSmall: isHeldBack(LIVE, LAYOUT, null, false),
+        cachedAndTooSmall: isHeldBack(STARTING, LAYOUT, null, false),
+        fits: isHeldBack(LIVE, LAYOUT, null, true),
+        noLayout: isHeldBack(LIVE, null, null, false),
+        skipped: isHeldBack(SKIPPED, LAYOUT, null, false),
+        theLayoutThatFailed: isHeldBack(LIVE, layoutFromALaterAnswer(), LAYOUT, false),
+    }, {
+        tooSmall: true, cachedAndTooSmall: true, fits: false, noLayout: false, skipped: false,
+        theLayoutThatFailed: false,
+    });
+});
+
+test('cockpitWiring: the grid may be drawn on its monitor\'s work area when it fits there, with no monitor at all ' +
+    '(the layer stays as it is), and while DisplayConfig\'s answer could still move it to another monitor (the add ' +
+    'asks for that answer, which decides); a settled choice too small holds it back', () => {
+    const laptop = {x: 0, y: 32, width: 1536, height: 928};
+    const external = {x: 1536, y: 32, width: 1920, height: 1048};
+    const isDrawableNow = (workArea, isMonitorChoiceSettled) =>
+        wiring.isCockpitGridDrawableNow({workArea, isMonitorChoiceSettled});
+    assertEqual({
+        settledAndTooSmall: isDrawableNow(laptop, true),
+        settledAndFits: isDrawableNow(external, true),
+        unsettledAndTooSmall: isDrawableNow(laptop, false),
+        noMonitor: isDrawableNow(null, true),
+    }, {settledAndTooSmall: false, settledAndFits: true, unsettledAndTooSmall: true, noMonitor: true});
 });
 
 test('cockpitWiring: the v2 card is held hidden (not drawn, kept frozen) only while the layer is shown and draws no ' +

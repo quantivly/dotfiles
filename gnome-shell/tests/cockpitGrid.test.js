@@ -4,6 +4,7 @@ import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
 import * as cockpitGrid from '../extensions/resource-pulse@dotfiles/lib/cockpitGrid.js';
 import * as cockpitConfig from '../extensions/resource-pulse@dotfiles/lib/cockpitConfig.js';
+import * as constantsModule from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const REPO_ROOT_URI = GLib.uri_resolve_relative(import.meta.url, '../../', GLib.UriFlags.NONE);
 const [REPO_ROOT] = GLib.filename_from_uri(REPO_ROOT_URI);
@@ -102,3 +103,49 @@ test('cockpitGrid: a card past what its group\'s block holds gets no cell, so it
     const groups = [{id: 'g', caption: 'G', columns: 1, cards: ['health', 'seats', 'sol', 'sessions']}];
     assertEqual(cockpitGrid.drawnCockpitCardIds(groups), []);
 });
+
+/**
+ * @param {number} width - A work area's width.
+ * @param {number} height - Its height.
+ * @returns {boolean} isCockpitGridDrawable for that work area, at the stage's origin.
+ */
+function isDrawableAt(width, height) {
+    return cockpitGrid.isCockpitGridDrawable({x: 0, y: 0, width, height});
+}
+
+test('cockpitGrid: the grid is drawn only where a scaled cell and its inner gutter are at least the widest card ' +
+    'content, COCKPIT_CARD_CONTENT_WIDTH_PX (ruling D36): at the 1920x1080 reference and at the nested run\'s ' +
+    '3072x1920 it is; on the undocked laptop\'s 1536x960 (a scale of 0.8: a 336 px cell and a 19 px gutter), with or ' +
+    'without its top bar, it is not', () => {
+    assertEqual({
+        contentWidthPx: constantsModule.COCKPIT_CARD_CONTENT_WIDTH_PX,
+        reference: isDrawableAt(1920, 1080),
+        nestedRun: isDrawableAt(3072, 1920),
+        laptop: isDrawableAt(1536, 960),
+        laptopUnderItsTopBar: isDrawableAt(1536, 928),
+    }, {contentWidthPx: 416, reference: true, nestedRun: true, laptop: false, laptopUnderItsTopBar: false});
+});
+
+test('cockpitGrid: the limit is a work area of 1802x1014, a scale of about 0.94 whose 394 px cell and 22 px gutter ' +
+    'make 416; one pixel less in either length is under it, and leastDrawableWorkArea names that size', () => {
+    const atTheLimit = cockpitGrid.cockpitGridGeometry({
+        workArea: {x: 0, y: 0, width: 1802, height: 1014}, groups: TEMPLATE_GROUPS,
+    });
+    const system = cellOf(atTheLimit, 'system');
+    assertEqual({
+        atTheLimit: isDrawableAt(1802, 1014),
+        oneNarrower: isDrawableAt(1801, 1014),
+        oneShorter: isDrawableAt(1802, 1013),
+        cellAndGutterAtTheLimit: [system.width, cellOf(atTheLimit, 'apps').x - system.x - system.width],
+        least: cockpitGrid.leastDrawableWorkArea(),
+    }, {
+        atTheLimit: true, oneNarrower: false, oneShorter: false, cellAndGutterAtTheLimit: [394, 22],
+        least: {width: 1802, height: 1014},
+    });
+});
+
+test('cockpitGrid: the journal line for a work area too small for the grid names its size and the size needed, so ' +
+    'the card is drawn top right', () =>
+    assertEqual(cockpitGrid.cockpitGridTooSmallLine({x: 0, y: 32, width: 1536, height: 928}),
+        'the cockpit grid needs a larger work area than 1536x928 (at least 1802x1014), ' +
+        'so the card is drawn top right'));

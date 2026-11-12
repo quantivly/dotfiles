@@ -322,12 +322,16 @@ where they are.
 **Where.** The cockpit monitor is the one the config's `monitor` block names, its `vendor` and `product`
 both equal to what Mutter's DisplayConfig reports; else the only monitor; else the largest one that is not
 primary. It is chosen again whenever the monitors change, so an undock moves the grid to the monitor that is
-left. At a login's first enable the desktop card sits top right until the service's layout arrives (a first
-answer that fails or does not come in 2 s is asked for again after 5 s, then 30 s, then every 300 s), then the
-grid replaces it; from then on the extension keeps the last layout across disables, so an unlock or a blank
-draws the grid at once. A layout that names no `system` card draws no system card. The overview hides the
-grid as it hides the card. The lock screen draws none of it, since GNOME turns the extension off there: it
-shows the lock screen's own background, the solid colour below once applied.
+left. On a screen whose work area is too small for the cards (the grid needs at least 1802×1014; the laptop's
+own panel at its default scaling is 1536×960), the desktop card is drawn top right instead, as with no layout,
+and the journal says so once (`the cockpit grid needs a larger work area than …`); the grid comes back when the
+work area is large enough again, at a dock. At a login's first enable the desktop card sits top right until
+the service's layout arrives (a first answer that fails or does not come in 2 s is asked for again after 5 s,
+then 30 s, then every 300 s), then the grid replaces it; from then on the extension keeps the last layout
+across disables, so an unlock or a blank draws the grid at once. A layout that names no `system` card draws
+no system card. The overview hides the grid as it hides the card. The lock screen draws none of it, since
+GNOME turns the extension off there: it shows the lock screen's own background, the solid colour below once
+applied.
 
 **The grid.** Four columns by three rows, centred on the cockpit monitor's work area. The groups sit left to
 right, each `columns` cells wide under its caption, and fill their cells left to right, then down. At a work
@@ -507,6 +511,9 @@ journal:
 
 - `resource-pulse: could not draw the cockpit layer, so the card is drawn top right: <error>`: the grid
   could not be built, rebuilt or placed from the service's layout ([Drawing the cockpit](#drawing-the-cockpit)).
+- `resource-pulse: the cockpit grid needs a larger work area than <width>x<height> (at least 1802x1014), so the
+  card is drawn top right`: the cockpit monitor's work area is too small for the cards, written once as that
+  begins.
 - `resource-pulse: cockpit: focus: <reason>`: a session row's click brought no window forward. The reason is
   one of `FocusSession`'s five error codes ([The cockpit service](#the-cockpit-service); `internal` also when
   the call itself failed or got no answer in 2 s), `not focused`, or `no window for pids [<pids>]` when herdr
@@ -707,7 +714,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1165 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1175 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's

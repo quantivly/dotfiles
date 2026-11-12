@@ -338,6 +338,15 @@ export const COCKPIT_GRID_REFERENCE = Object.freeze({
 export const COCKPIT_GRID_MIN_SCALE = 0.5;
 /** The largest factor the cockpit grid grows to, however large the monitor. */
 export const COCKPIT_GRID_MAX_SCALE = 2;
+/**
+ * The widest a cockpit card's content draws, in logical pixels, its cell's padding and border included. The grid's
+ * cells scale with the work area and the cards' content does not: the v2 card's rows, which the system cell adopts,
+ * need about 25.8em in its font, 374 to 378 px (the CPU graph alone is 150 px; stylesheet.css .rp-card-fixed), so 412
+ * to 416 px with the cell's 18 px side padding and 1 px border; the larger is taken. Where a scaled cell and its inner
+ * gutter are narrower, a card runs into the next one, so the grid is not drawn (lib/cockpitGrid.js
+ * isCockpitGridDrawable, ruling D36).
+ */
+export const COCKPIT_CARD_CONTENT_WIDTH_PX = 416;
 /** The card ids the cockpit draws; any other id in the layout still gets a cell, which stays empty. */
 export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'sessions'];
 /** The system card's id: the v2 card's cell. With no cockpit layout the v2 card, top right, is checked under it. */

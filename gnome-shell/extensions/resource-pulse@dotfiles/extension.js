@@ -7,9 +7,11 @@
 // service sent) and the cockpit is not SKIPPED, the cockpit's layer (cockpitLayer.js) holds a grid of cards on the
 // cockpit monitor (lib/cockpitMonitor.js: the monitor the layout names, as Mutter's DisplayConfig identifies it, else
 // the only one, else the largest non-primary), and the v2 card sits in its system cell; with none, the v2 card sits
-// top right of the primary monitor's work area, as it always has. Both live in the layout manager's background group
-// (above the wallpaper, below every window) and follow their work area as monitors and panels change, placed in one
-// later before the next frame.
+// top right of the primary monitor's work area, as it always has. So it does too while the cockpit monitor's work
+// area is too small for the cards' content (ruling D36, lib/cockpitGrid.js isCockpitGridDrawable: the undocked
+// laptop's panel), with one journal line as that begins. Both live in the layout manager's background group (above
+// the wallpaper, below every window) and follow their work area as monitors and panels change, placed in one later
+// before the next frame, which first decides the layer again, so a dock brings the grid back.
 //
 // Only a card can show apps, so the pulse client asks the service for its detail watch (the faster app scan) only while
 // a card that draws the sampler's snapshot can be seen (lib/wiring.js isDetailWatchWanted: the v2 card, the system or
@@ -81,10 +83,11 @@ import {
 import {
     DESKTOP_WINDOW_TYPE, focusSessionOutcome, isCockpitWatchWanted, isDesktopInteractive, pickWindowToActivate,
 } from './lib/cockpitInteraction.js';
-import {cockpitMonitorIndexFor} from './lib/cockpitMonitor.js';
+import {cockpitGridTooSmallLine} from './lib/cockpitGrid.js';
+import {cockpitMonitorIndexFor, isCockpitMonitorChoiceSettled} from './lib/cockpitMonitor.js';
 import {
     CockpitLayerChange, cockpitLayerChange, cockpitLayoutToKeep, cockpitSurfacesSeen, frozenCardsDueRepaint,
-    isPulseCardHeldHidden,
+    isCockpitGridDrawableNow, isCockpitGridHeldBack, isPulseCardHeldHidden,
 } from './lib/cockpitWiring.js';
 import {RateLimitedLogger, describeErrorWithStack} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
@@ -111,6 +114,10 @@ const COVERING_WINDOW_TYPES = new Set([Meta.WindowType.NORMAL, Meta.WindowType.D
 const NO_WINDOWS_ON_MONITOR = Object.freeze({metaWindows: [], frameRects: [], desktopWindows: []});
 /** The template key of the journal line for a layer that could not be built, rebuilt or placed (lib/errorLog.js). */
 const COCKPIT_LAYER_FAILURE_LOG_KEY = 'could not draw the cockpit layer';
+/** The template key of the journal line for a grid its work area is too small for (lib/errorLog.js, ruling D36). */
+const COCKPIT_GRID_TOO_SMALL_LOG_KEY = 'the cockpit grid needs a larger work area';
+/** The grid's fit while there is no layout to draw: nothing is held back. */
+const NO_LAYOUT_GRID_FIT = Object.freeze({workArea: null, isGridDrawable: true});
 /**
  * The window types a session row's click may bring forward: ordinary windows and dialogs. Never an override-redirect
  * window (a menu, a tooltip), which Mutter neither activates nor orders by stacking, nor a desktop, dock or panel.
@@ -238,6 +245,9 @@ export default class ResourcePulseExtension extends Extension {
         // Kept the same way: the cockpit's layout the layer was drawn from (lib/cockpitWiring.js cockpitLayoutToKeep),
         // seeded into the next cockpit client, so after an unlock or a blank the grid is drawn at once.
         this._lastCockpitLayout = null;
+        // Kept the same way: whether the grid was held back by its work area at the last decision (ruling D36), so its
+        // journal line is written as that begins, and not again at each unlock or blank while it lasts.
+        this._isCockpitGridHeldBack = false;
     }
 
     /**
@@ -920,11 +930,11 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Places the cards before the next frame: the v2 card's notify::width comes during allocation, and moving an actor
-     * then leaves it needing an allocation, which Clutter warns about; a monitors or work-area change comes in a burst.
-     * A BEFORE_REDRAW later places them before the next frame instead, as the shell's own layout.js does, once however
-     * many calls come before then. It forgets its id first and never throws out of its callback, which runs inside the
-     * compositor's frame (a failure is logged, rate-limited).
+     * Places the cards before the next frame (_placeCardsAgain): the v2 card's notify::width comes during allocation,
+     * and moving an actor then leaves it needing an allocation, which Clutter warns about; a monitors or work-area
+     * change comes in a burst. A BEFORE_REDRAW later places them before the next frame instead, as the shell's own
+     * layout.js does, once however many calls come before then. It forgets its id first and never throws out of its
+     * callback, which runs inside the compositor's frame (a failure is logged, rate-limited).
      *
      * @returns {void}
      */
@@ -934,13 +944,27 @@ export default class ResourcePulseExtension extends Extension {
         this._cardPlacementLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
             this._cardPlacementLaterId = null;
             try {
-                this._placeCard();
+                this._placeCardsAgain();
             } catch (error) {
                 const errorText = describeErrorWithStack(error);
                 this._errorLog.log(`could not place the cards: ${errorText}`);
             }
             return GLib.SOURCE_REMOVE;
         });
+    }
+
+    /**
+     * Places what is drawn again, as the monitors, a work area, DisplayConfig's answer or the v2 card's width changed:
+     * first decides the layer again (_syncCockpitLayer), since the cockpit monitor's work area may now hold the grid or
+     * no longer does (ruling D36: a dock brings the grid back, an undock puts the card top right), which places
+     * whatever it changed; with nothing changed, places what is drawn as it is.
+     *
+     * @returns {void}
+     */
+    _placeCardsAgain() {
+        const layerChange = this._syncCockpitLayer(false);
+        if (layerChange === CockpitLayerChange.NONE)
+            this._placeCard();
     }
 
     /**
@@ -960,7 +984,8 @@ export default class ResourcePulseExtension extends Extension {
      * Follows the cockpit: makes the DisplayConfig reader the cockpit monitor's rule needs (asked when a layer is
      * shown and on each monitors change), follows the cockpit client's events, and draws the layer at once when the
      * cached layout says so (a login's first enable has none, so the v2 card sits top right until the service's
-     * layout comes; a layer that cannot be built from it or placed leaves the v2 card top right too, ruling D25).
+     * layout comes; a layer that cannot be built from it or placed leaves the v2 card top right too, ruling D25, and
+     * so does a cockpit monitor whose work area is too small for the grid, ruling D36).
      *
      * @returns {void}
      */
@@ -984,31 +1009,84 @@ export default class ResourcePulseExtension extends Extension {
     }
 
     /**
-     * Adds, removes or rebuilds the layer as lib/cockpitWiring.js cockpitLayerChange says (ruling D19; never from the
-     * layout that failed to draw in this enable, and away from a layer when that layout comes back, ruling D25).
-     * After a removal the v2 card is held frozen if nothing draws it and the cards are placed again, unguarded, as
-     * with no cockpit; an add or a rebuild does the same inside its own guard (_drawCockpitLayer). Nothing else
-     * changes nothing.
+     * Adds, removes or rebuilds the layer as lib/cockpitWiring.js cockpitLayerChange says (_cockpitLayerChangeNow:
+     * ruling D19; never from the layout that failed to draw in this enable, and away from a layer when that layout
+     * comes back, ruling D25; never on a work area too small for the grid, ruling D36). After a removal the v2 card is
+     * held frozen if nothing draws it and the cards are placed again, unguarded, as with no cockpit; an add or a
+     * rebuild does the same inside its own guard (_drawCockpitLayer). Nothing else changes nothing.
      *
      * @param {boolean} isLayoutEvent - The event is a layout event (a shown layer is rebuilt from it).
-     * @returns {void}
+     * @returns {string} The CockpitLayerChange made: anything but NONE placed what is drawn.
      */
     _syncCockpitLayer(isLayoutEvent) {
-        const layerChange = cockpitLayerChange({
-            isLayerShown: this._layer !== null,
-            clientState: this._cockpitClient.state,
-            layout: this._cockpitClient.layout,
-            isLayoutEvent,
-            failedLayout: this._failedCockpitLayout,
-        });
-        if (layerChange === CockpitLayerChange.NONE)
-            return;
+        const layerChange = this._cockpitLayerChangeNow(isLayoutEvent);
         if (layerChange === CockpitLayerChange.REMOVE) {
             this._removeCockpitLayer();
             this._placeAfterLayerChange();
-        } else {
+        } else if (layerChange !== CockpitLayerChange.NONE) {
             this._drawCockpitLayer(layerChange);
         }
+        return layerChange;
+    }
+
+    /**
+     * What the layer is to do now (lib/cockpitWiring.js cockpitLayerChange), from the cockpit client, the layout that
+     * failed in this enable and the grid's fit on its monitor (_cockpitGridFit; with no layout there is nothing to
+     * fit); first writes the journal line if the grid has just become held back by its work area
+     * (_noteCockpitGridHeldBack).
+     *
+     * @param {boolean} isLayoutEvent - The event is a layout event.
+     * @returns {string} One of CockpitLayerChange's values.
+     */
+    _cockpitLayerChangeNow(isLayoutEvent) {
+        const clientState = this._cockpitClient.state;
+        const layout = this._cockpitClient.layout;
+        const failedLayout = this._failedCockpitLayout;
+        const {workArea, isGridDrawable} = layout === null ? NO_LAYOUT_GRID_FIT : this._cockpitGridFit(layout);
+        const isHeldBack = isCockpitGridHeldBack({clientState, layout, failedLayout, isGridDrawable});
+        this._noteCockpitGridHeldBack(isHeldBack, workArea);
+        return cockpitLayerChange({
+            isLayerShown: this._layer !== null, clientState, layout, isLayoutEvent, failedLayout, isGridDrawable,
+        });
+    }
+
+    /**
+     * The grid's fit on the monitor a layout is drawn on (ruling D36): that monitor's work area, chosen as
+     * _placeCockpitLayer chooses it, and whether the grid may be drawn there now (lib/cockpitWiring.js
+     * isCockpitGridDrawableNow: it fits; or there is no monitor; or DisplayConfig's answer could still move it to
+     * another monitor, lib/cockpitMonitor.js isCockpitMonitorChoiceSettled, which the layer's add asks for).
+     *
+     * @param {object} layout - The client's layout (lib/cockpitProtocol.js parseLayout's shape).
+     * @returns {{workArea: object|null, isGridDrawable: boolean}} The monitor's work area (null with no monitor) and
+     *     whether the grid may be drawn there.
+     */
+    _cockpitGridFit(layout) {
+        const monitors = shellMonitors();
+        const displayConfigState = this._displayConfigState;
+        const monitorRule = layout.monitor;
+        const monitorIndex = cockpitMonitorIndexFor({monitors, displayConfigState, monitorRule});
+        const workArea = monitorIndex === null ? null : Main.layoutManager.getWorkAreaForMonitor(monitorIndex);
+        const isMonitorChoiceSettled =
+            isCockpitMonitorChoiceSettled({monitorCount: monitors.length, displayConfigState, monitorRule});
+        return {workArea, isGridDrawable: isCockpitGridDrawableNow({workArea, isMonitorChoiceSettled})};
+    }
+
+    /**
+     * Writes one journal line as the grid becomes held back by its work area (ruling D36): a warning on the client log,
+     * under its own template key (so rate-limited too), naming the work area and the size the grid needs
+     * (lib/cockpitGrid.js cockpitGridTooSmallLine); then remembers whether it is held back, across enables, so the line
+     * is not written again at each unlock while it lasts.
+     *
+     * @param {boolean} isHeldBack - The grid is held back by its work area now (lib/cockpitWiring.js
+     *     isCockpitGridHeldBack).
+     * @param {{width: number, height: number}|null} workArea - The cockpit monitor's work area: never null while held
+     *     back.
+     * @returns {void}
+     */
+    _noteCockpitGridHeldBack(isHeldBack, workArea) {
+        if (isHeldBack && !this._isCockpitGridHeldBack)
+            this._clientLog.log(cockpitGridTooSmallLine(workArea), COCKPIT_GRID_TOO_SMALL_LOG_KEY);
+        this._isCockpitGridHeldBack = isHeldBack;
     }
 
     /**
@@ -1197,8 +1275,9 @@ export default class ResourcePulseExtension extends Extension {
     /**
      * Undoes enable(), whatever it got to, and never throws: keeps the client's last good clock label and the
      * cockpit's layout for the next enable (getter reads, before anything is destroyed, guarded as each step is: on a
-     * failure what is already kept stays; never a layout that failed to draw); clears every field (the failed layout
-     * too, so each enable tries the layout it is sent, and the activation in flight, whose answer is then ignored);
+     * failure what is already kept stays; never a layout that failed to draw), and leaves whether the grid is held back
+     * by its work area as it is (ruling D36); clears every other field (the failed layout too, so each enable tries the
+     * layout it is sent, and the activation in flight, whose answer is then ignored);
      * then disconnects from the overview, the layout manager, the display, the window manager, the workspace manager,
      * the card, the dropdown menu and the covering windows, removes both client listeners, the pending cover check,
      * the fallback timeout and a pending placement, and cancels the DisplayConfig read; then destroys the layer (which
