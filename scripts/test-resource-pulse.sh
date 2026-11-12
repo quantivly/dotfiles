@@ -5532,8 +5532,10 @@ check "nested: the run's fixture is rewritten in one rename, left as it was by a
 # extension (its prefix with a CRITICAL or ERROR mark; console.warn's WARNING
 # lines are not faults), a JS ERROR whose stack names the extension (another
 # component's is not), Clutter's reparenting warnings and Mutter's activation
-# warnings, each only of the kinds asked for and only past the offset. A log it
-# cannot read fails: never no faults.
+# warnings (a focus time ahead of the comparison timestamp included; "This
+# shouldn't happen", a text libmutter-18 does not hold, is no needle), each only
+# of the kinds asked for and only past the offset. A log it cannot read fails:
+# never no faults.
 SHELL_FAULTS_LOG="$WIRING_TMP/shell-faults.log"
 {
   printf '%s\n' '(gnome-shell:7): Gjs-Console-WARNING **: 10:00:00.000: resource-pulse: could not start resource-pulse.service'
@@ -5546,6 +5548,8 @@ SHELL_FAULTS_LOG="$WIRING_TMP/shell-faults.log"
   printf '%s\n' 'Window manager warning: Buggy client sent a _NET_ACTIVE_WINDOW message with a timestamp of 0 for 0x1'
   printf '%s\n' 'Window manager warning: last_user_time (9) is greater than comparison timestamp (0)'
   printf '%s\n' "Window manager warning: last_user_time (9) of the probe is more recent than the focus window's"
+  printf '%s\n' 'Window manager warning: last_focus_time (9) is greater than comparison timestamp (0).  Trying to work around...'
+  printf '%s\n' "Window manager warning: a state of the window it did not expect. This shouldn't happen"
 } >"$SHELL_FAULTS_LOG"
 shell_faults_offset_past_extension="$(head -n 6 "$SHELL_FAULTS_LOG" | wc -c)"
 # shell_fault_kinds_found <offset> <kinds> prints how many faults of each kind it reports, or its failure.
@@ -5560,13 +5564,113 @@ shell_faults_summary+=" mutter-only=$(shell_fault_kinds_found 0 mutter)"
 shell_faults_summary+=" past-offset=$(shell_fault_kinds_found "$shell_faults_offset_past_extension" extension,clutter)"
 shell_faults_summary+=" js-error-named=$(nested_call shell_log_faults "$SHELL_FAULTS_LOG" 0 extension | grep -c -x -F \
   'extension: JS ERROR: TypeError: this._layer is null')"
+# Each Mutter line by name: the count of mutter faults alone stays the same when a needle is swapped for another.
+shell_faults_mutter_report="$(nested_call shell_log_faults "$SHELL_FAULTS_LOG" 0 mutter)"
+shell_faults_summary+=" last-focus-time=$(grep -c -F 'mutter: Window manager warning: last_focus_time (9) is greater' \
+  <<<"$shell_faults_mutter_report")"
+shell_faults_summary+=" not-a-mutter-text=$(grep -c -F "This shouldn't happen" <<<"$shell_faults_mutter_report")"
 if nested_call shell_log_faults "$WIRING_TMP/no-such-shell.log" 0 extension >/dev/null 2>&1
 then shell_faults_summary+=" unreadable=passed"
 else shell_faults_summary+=" unreadable=failed"; fi
 shell_faults_summary+=" counted=$(nested_call count_log_lines_since "$SHELL_FAULTS_LOG" 0 'Window manager warning:')"
-check "nested: the check finds the extension's error lines and a JS ERROR naming it (not a warning, not another's JS ERROR), Clutter's reparenting and Mutter's activation warnings, each of the kinds asked for past the offset; an unreadable log fails" \
+check "nested: the check finds the extension's error lines and a JS ERROR naming it (not a warning, not another's JS ERROR), Clutter's reparenting and Mutter's activation warnings (last_focus_time ahead of the comparison included, a text Mutter does not print not), each of the kinds asked for past the offset; an unreadable log fails" \
   "$shell_faults_summary" \
-  "all=extension:2,clutter:1,mutter:3 mutter-only=extension:0,clutter:0,mutter:3 past-offset=extension:0,clutter:1,mutter:0 js-error-named=1 unreadable=failed counted=3"
+  "all=extension:2,clutter:1,mutter:4 mutter-only=extension:0,clutter:0,mutter:4 past-offset=extension:0,clutter:1,mutter:0 js-error-named=1 last-focus-time=1 not-a-mutter-text=0 unreadable=failed counted=5"
+
+# The stacks the shell prints (shell_log_faults): a stack header is any line
+# holding JS ERROR, "Unhandled promise rejection" or a GLib "-CRITICAL **" mark,
+# and it is the extension's when a line of its stack (the lines up to the next
+# header or log record, at most JS_ERROR_STACK_LINES) names the extension's
+# uuid. A Gjs, GLib, GLib-GObject, Clutter or St critical that no stack ties
+# to the extension is unattributed (the check cannot judge it, never ok and
+# never bad), and only where the extension's faults are asked for. The stock
+# shell's own startup noise (its criticals about login1 and CalendarServer, its
+# own rejection in screenShield.js) names no uuid and stays clean, also with a
+# line of the extension's (a JS WARNING naming its file) right after a stack.
+# Each case is a log of its own, in the shapes GNOME Shell 50 prints, with
+# blank lines where it prints them.
+LOG_READER_DIR="$WIRING_TMP/log-reader"
+mkdir -p "$LOG_READER_DIR" || fatal "cannot create $LOG_READER_DIR"
+LOG_READER_FRAME_DIR='file:///run/data/gnome-shell/extensions/resource-pulse@dotfiles'
+LOG_READER_DISPOSED_TEXT='has been already disposed — impossible to set any property on it. This might be caused by the object having been destroyed from C code using something such as destroy(), dispose(), or remove() vfuncs.'
+LOG_READER_REJECTION_TEXT='Unhandled promise rejection. To suppress this warning, add an error handler to your promise chain with .catch() or a try-catch block around your await expression. Stack trace of the failed promise:'
+# log_reader_case <case> <kinds> <line...> writes the lines to the case's own log and prints
+# <case>=extension:<n>,unattributed:<n> as shell_log_faults reads it with those kinds, or <case>=failed.
+log_reader_case() {
+  local case_name="$1" fault_kinds="$2" case_log fault_report
+  shift 2
+  case_log="$LOG_READER_DIR/$case_name.log"
+  printf '%s\n' "$@" >"$case_log"
+  fault_report="$(nested_call shell_log_faults "$case_log" 0 "$fault_kinds")" || { printf '%s=failed' "$case_name"; return 0; }
+  printf '%s=extension:%s,unattributed:%s' "$case_name" "$(grep -c '^extension: ' <<<"$fault_report")" \
+    "$(grep -c '^unattributed: ' <<<"$fault_report")"
+}
+log_reader_summary="$(log_reader_case rejection extension,clutter '' \
+  "(gnome-shell:7): Gjs-WARNING **: 10:00:00.000: $LOG_READER_REJECTION_TEXT" \
+  "_readState@$LOG_READER_FRAME_DIR/cockpitClient.js:120:9" '@resource:///org/gnome/shell/ui/init.js:21:20' '' '')"
+log_reader_summary+=" $(log_reader_case disposed extension,clutter '' \
+  "(gnome-shell:7): Gjs-CRITICAL **: 10:00:01.000: Object St.Label (0x5a1b2c3d4e50), $LOG_READER_DISPOSED_TEXT" \
+  '== Stack trace for context 0x5a1b2c000f00 ==' \
+  "#0   5a1b2c3d4000 i   $LOG_READER_FRAME_DIR/cockpitCards.js:88 (1c1f98c2bab0 @ 58)" \
+  '#1   5a1b2c3d3f00 i   resource:///org/gnome/shell/ui/init.js:21 (16f6826fb7e0 @ 119)')"
+LOG_READER_TOOLKIT_LINES=('' '(gnome-shell:7): GLib-CRITICAL **: 10:00:02.000: Source ID 4242 was not found when attempting to remove it'
+  '' "(gnome-shell:7): Clutter-CRITICAL **: 10:00:02.100: clutter_actor_set_child_above_sibling: assertion 'sibling->priv->parent == self' failed"
+  '' "(gnome-shell:7): St-CRITICAL **: 10:00:02.200: st_drawing_area_get_surface_size: assertion 'priv->in_repaint' failed"
+  '' "(gnome-shell:7): GLib-GObject-CRITICAL **: 10:00:02.300: g_object_unref: assertion 'G_IS_OBJECT (object)' failed")
+log_reader_summary+=" $(log_reader_case toolkit extension,clutter "${LOG_READER_TOOLKIT_LINES[@]}")"
+log_reader_summary+=" $(log_reader_case toolkit-mutter-only mutter "${LOG_READER_TOOLKIT_LINES[@]}")"
+log_reader_summary+=" $(log_reader_case another-stack extension,clutter '' \
+  "(gnome-shell:7): Gjs-CRITICAL **: 10:00:03.000: Object St.BoxLayout (0x5a1b2c3d5000), $LOG_READER_DISPOSED_TEXT" \
+  '== Stack trace for context 0x5a1b2c000f00 ==' \
+  '#0   5a1b2c3d4000 i   resource:///org/gnome/shell/ui/ibusCandidatePopup.js:327 (1c1f98c2bab0 @ 58)')"
+log_reader_summary+=" $(log_reader_case stock extension,clutter '' \
+  '(gnome-shell:7): GNOME Shell-CRITICAL **: 10:00:04.000: Could not get a proxy for user 1000: Gio.DBusError: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name org.freedesktop.login1 was not provided by any .service files' \
+  '' 'Stack trace:' '  asyncCallback@resource:///org/gnome/gjs/modules/core/overrides/Gio.js:115:23' \
+  '  @resource:///org/gnome/shell/ui/init.js:20:20' '  ' '' \
+  "(gnome-shell:7): Gjs-WARNING **: 10:00:04.100: $LOG_READER_REJECTION_TEXT" \
+  '_getLoginSession@resource:///org/gnome/shell/ui/screenShield.js:163:27' \
+  'ScreenShield@resource:///org/gnome/shell/ui/screenShield.js:114:14' '@resource:///org/gnome/shell/ui/init.js:20:20' \
+  '' '' \
+  '(gnome-shell:7): GNOME Shell-CRITICAL **: 10:00:04.200: Gio.DBusError: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name org.gnome.Shell.CalendarServer was not provided by any .service files' \
+  '' 'Stack trace:' '  asyncCallback@resource:///org/gnome/gjs/modules/core/overrides/Gio.js:115:23' \
+  '  @resource:///org/gnome/shell/ui/init.js:20:20' '  ' \
+  "Gjs-Message: 10:00:04.300: JS WARNING: [$LOG_READER_FRAME_DIR/cockpitLayer.js 40]: Too many arguments to method Clutter.Actor.destroy: expected 0, got 1" \
+  '' '(gnome-shell:7): GNOME Shell-WARNING **: 10:00:04.400: resource-pulse: StartUnit cockpit.service failed: GDBus.Error:org.freedesktop.DBus.Error.NameHasNoOwner: Name "org.freedesktop.systemd1" does not exist')"
+log_reader_summary+=" $(log_reader_case after-a-critical extension,clutter '' \
+  '(gnome-shell:7): GLib-CRITICAL **: 10:00:05.000: Source ID 77 was not found when attempting to remove it' \
+  '(gnome-shell:7): Gjs-CRITICAL **: 10:00:05.100: JS ERROR: TypeError: this._cells is undefined' \
+  "_layOut@$LOG_READER_FRAME_DIR/cockpitLayer.js:77:5")"
+log_reader_summary+=" named=$(nested_call shell_log_faults "$LOG_READER_DIR/after-a-critical.log" 0 extension | grep -c -x -F \
+  'extension: (gnome-shell:7): Gjs-CRITICAL **: 10:00:05.100: JS ERROR: TypeError: this._cells is undefined')"
+check "nested: the check's log reader takes an unhandled rejection and a disposed object's critical as the extension's when their stack names its uuid; a toolkit critical (Gjs, GLib, Clutter, St) no stack names it in, another's stack included, is unattributed where the extension's faults are asked for; the stock shell's startup noise is neither; a header ends the stack before it" \
+  "$log_reader_summary" \
+  "rejection=extension:1,unattributed:0 disposed=extension:1,unattributed:0 toolkit=extension:0,unattributed:4 toolkit-mutter-only=extension:0,unattributed:0 another-stack=extension:0,unattributed:1 stock=extension:0,unattributed:0 after-a-critical=extension:1,unattributed:1 named=1"
+
+# A log step over unattributed toolkit criticals could not be judged, never ok
+# and never bad: its line gives how many, and the first
+# SHOWN_UNATTRIBUTED_LOG_LINES_LIMIT of them.
+UNATTRIBUTED_LOG_RUN="$WIRING_TMP/unattributed-log-run"
+mkdir -p "$UNATTRIBUTED_LOG_RUN/log" || fatal "cannot lay out $UNATTRIBUTED_LOG_RUN"
+for unattributed_source_id in 1 2 3 4; do
+  printf '(gnome-shell:7): GLib-CRITICAL **: 10:00:0%s.000: Source ID %s was not found when attempting to remove it\n' \
+    "$unattributed_source_id" "$unattributed_source_id"
+done >"$UNATTRIBUTED_LOG_RUN/log/shell.log"
+# shellcheck disable=SC2016  # Expanded by the child bash.
+unattributed_log_line="$(bash -c '
+  source "$1" || exit 99
+  CHECK_RUN_DIR="$2"
+  begin_check_step
+  note_shell_log_faults 0 extension,clutter
+  end_check_step early-log "no fault found"
+' unattributed-log "$NESTED_SCRIPT" "$UNATTRIBUTED_LOG_RUN" 2>/dev/null)"
+UNATTRIBUTED_SHOWN_LINES=''
+for unattributed_source_id in 1 2 3; do
+  UNATTRIBUTED_SHOWN_LINES+="(gnome-shell:7): GLib-CRITICAL **: 10:00:0$unattributed_source_id.000: Source ID"
+  UNATTRIBUTED_SHOWN_LINES+=" $unattributed_source_id was not found when attempting to remove it | "
+done
+check "nested: a log step over toolkit criticals no stack ties to the extension could not be judged, giving how many and the first three" \
+  "$unattributed_log_line" \
+  "could not judge early-log: 4 critical line(s) of the toolkit (Gjs, GLib, Clutter, St) in log/shell.log that no stack ties to the extension, so they may be its own: $UNATTRIBUTED_SHOWN_LINES"
 
 # probe-window.js, the window `window` opens, refuses before Gtk is even loaded
 # unless it runs in a nested run's own environment (the run named, its runtime
@@ -6794,7 +6898,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1183
+EXPECTED_ROWS=1185
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1

@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cannot exist and one fixed time zone.
 
   Guide: `docs/GNOME_CONFIGURATION_GUIDE.md` ("Drawing the cockpit"). `scripts/test-resource-pulse.sh`
-  goes from 798 to 1183 checks.
+  goes from 798 to 1185 checks.
 
 - **`scripts/host-sync` is truthful on a host that serves no work tenant, and reports when the
   host's GitHub token expires (DO-900).** For step 8 of the shared-configuration design

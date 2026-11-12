@@ -514,8 +514,11 @@ readonly UNKNOWN_TIME_WORD='unknown'
 readonly CHECK_PERF_OUTPUT_RELATIVE_PATH='log/check-cockpit-perf.log'
 # The shell log: the focus lines the click steps provoke (the extension's console.warn), and what shell_log_faults
 # reports: an error line of the extension (its prefixes beside a CRITICAL or ERROR mark: console.error is GLib's
-# CRITICAL), a JS ERROR whose stack names the extension within JS_ERROR_STACK_LINES lines, Clutter's warnings from a
-# reparenting, and Mutter's from an activation with no timestamp.
+# CRITICAL), a stack header (a JS ERROR, an unhandled promise rejection, a GLib critical) whose stack names the
+# extension within JS_ERROR_STACK_LINES lines, Clutter's warnings from a reparenting, Mutter's from an activation
+# with no timestamp, and, as UNATTRIBUTED_LOG_LINE_KIND, a toolkit critical no stack ties to the extension (a step
+# cannot judge it: it may be the extension's or another's), of which a step shows the first
+# SHOWN_UNATTRIBUTED_LOG_LINES_LIMIT.
 readonly EXTENSION_LOG_PREFIX='resource-pulse:'
 readonly COCKPIT_LOG_PREFIX='cockpit:'
 readonly FOCUS_LOG_PREFIX="$EXTENSION_LOG_PREFIX $COCKPIT_LOG_PREFIX focus:"
@@ -525,7 +528,9 @@ readonly JS_ERROR_STACK_LINES=30
 readonly EXTENSION_LOG_FAULT_KIND='extension'
 readonly CLUTTER_LOG_FAULT_KIND='clutter'
 readonly MUTTER_LOG_FAULT_KIND='mutter'
+readonly UNATTRIBUTED_LOG_LINE_KIND='unattributed'
 readonly SHOWN_LOG_FAULTS_LIMIT=5
+readonly SHOWN_UNATTRIBUTED_LOG_LINES_LIMIT=3
 
 readonly EXIT_REQUEST_FAILED=1
 readonly EXIT_REFUSED=2
@@ -3019,14 +3024,21 @@ perf_subcommand() {
 #######################################
 # Print the shell log's faults past a byte offset, one per line, each led by
 # its kind: an extension error (a line with the extension's or the cockpit's
-# prefix and a CRITICAL or ERROR mark, or a JS ERROR whose stack names the
-# extension within JS_ERROR_STACK_LINES lines), a Clutter warning from a
-# reparenting ("already has a parent", "needs an allocation"), or a Mutter
-# warning from an activation with no timestamp ("timestamp of 0", "This
-# shouldn't happen", "META_CURRENT_TIME used to choose focus window",
-# "last_user_time" with "more recent" or "greater than comparison timestamp").
-# Only the kinds asked for. Fails when the
-# log cannot be read: never no faults for a log it did not read.
+# prefix and a CRITICAL or ERROR mark, or a stack header whose stack names the
+# extension), a Clutter warning from a reparenting ("already has a parent",
+# "needs an allocation"), or a Mutter warning from an activation with no
+# timestamp ("timestamp of 0", "META_CURRENT_TIME used to choose focus
+# window", "last_user_time" with "more recent" or "greater than comparison
+# timestamp", "last_focus_time" with "greater than comparison timestamp").
+# A stack header is a line holding "JS ERROR", "Unhandled promise rejection"
+# or a GLib "-CRITICAL **" mark; its stack is the lines after it up to the next
+# header or log record, at most JS_ERROR_STACK_LINES. Where the extension's
+# faults are asked for, a Gjs, GLib, GLib-GObject, Clutter or St critical that
+# no stack ties to the extension is printed as UNATTRIBUTED_LOG_LINE_KIND: it
+# may be the extension's or another's. The shell's own startup criticals and
+# its own rejection name no uuid, so they are neither. Only the kinds asked
+# for. Fails when the log cannot be read: never no faults for a log it did not
+# read.
 # Arguments:
 #   $1 - log path
 #   $2 - the byte offset to read from
@@ -3037,7 +3049,8 @@ shell_log_faults() {
     [[ -r "$log_path" ]] || return 1
     tail -c "+$(( start_offset + 1 ))" "$log_path" | awk -v fault_kinds=",$fault_kinds," \
         -v extension_prefix="$EXTENSION_LOG_PREFIX" -v cockpit_prefix="$COCKPIT_LOG_PREFIX" \
-        -v extension_uuid="$EXTENSION_UUID" -v stack_lines="$JS_ERROR_STACK_LINES" '
+        -v extension_uuid="$EXTENSION_UUID" -v stack_lines="$JS_ERROR_STACK_LINES" \
+        -v unattributed_kind="$UNATTRIBUTED_LOG_LINE_KIND" '
         function wants(kind) { return index(fault_kinds, "," kind ",") > 0 }
         function is_extension_error_line() {
             return (index($0, extension_prefix) || index($0, cockpit_prefix)) &&
@@ -3047,27 +3060,65 @@ shell_log_faults() {
             return index($0, "already has a parent") || index($0, "needs an allocation")
         }
         function is_mutter_warning_line() {
-            return index($0, "timestamp of 0") || index($0, "This shouldn\047t happen") ||
+            return index($0, "timestamp of 0") ||
                 index($0, "META_CURRENT_TIME used to choose focus window") ||
                 (index($0, "last_user_time") &&
-                    (index($0, "more recent") || index($0, "greater than comparison timestamp")))
+                    (index($0, "more recent") || index($0, "greater than comparison timestamp"))) ||
+                (index($0, "last_focus_time") && index($0, "greater than comparison timestamp"))
         }
-        index($0, "JS ERROR") {
-            pending_js_error = $0
+        # A line that may open a stack: a JS error, a rejected promise, a critical of any GLib domain.
+        function is_stack_header_line() {
+            return index($0, "JS ERROR") || index($0, "Unhandled promise rejection") || index($0, "-CRITICAL **")
+        }
+        # A critical of the toolkit: only a stack that names the extension makes it a fault of the extension.
+        function is_toolkit_critical_line() {
+            return $0 ~ /(^|[ :])(Gjs|GLib|GLib-GObject|Clutter|St)-CRITICAL \*\*/
+        }
+        # A line that begins another log record ("(prgname:pid): " from GLib, a message of a domain, a warning of
+        # Mutter), which ends the stack before it: a line of the extension after a stack is not of that stack.
+        function is_log_record_line() {
+            return $0 ~ /^\([^()]*:[0-9]+\): / || $0 ~ /^[A-Za-z][A-Za-z0-9 _.-]*-(Message|INFO|DEBUG): / ||
+                $0 ~ /^\*\* (Message|INFO|DEBUG): / || index($0, "Window manager warning:") == 1
+        }
+        # Ends the stack under way: a toolkit critical none of its lines tied to the extension is unattributed.
+        function close_stack() {
+            if (pending_header != "" && pending_is_toolkit_critical && wants("extension"))
+                print unattributed_kind ": " pending_header
+            pending_header = ""
+            stack_lines_left = 0
+        }
+        is_stack_header_line() {
+            close_stack()
+            if (wants("extension") && (is_extension_error_line() || index($0, extension_uuid))) {
+                print "extension: " $0
+                next
+            }
+            if (is_clutter_warning_line()) {
+                if (wants("clutter"))
+                    print "clutter: " $0
+                next
+            }
+            pending_header = $0
+            pending_is_toolkit_critical = is_toolkit_critical_line()
             stack_lines_left = stack_lines
-            if (wants("extension") && index($0, extension_uuid)) { print "extension: " $0; pending_js_error = "" }
             next
         }
+        stack_lines_left > 0 && is_log_record_line() { close_stack() }
         stack_lines_left > 0 {
             stack_lines_left--
-            if (wants("extension") && pending_js_error != "" && index($0, extension_uuid)) {
-                print "extension: " pending_js_error
-                pending_js_error = ""
+            if (index($0, extension_uuid)) {
+                if (wants("extension"))
+                    print "extension: " pending_header
+                pending_header = ""
+                stack_lines_left = 0
+            } else if (stack_lines_left == 0) {
+                close_stack()
             }
         }
         wants("extension") && is_extension_error_line() { print "extension: " $0; next }
         wants("clutter") && is_clutter_warning_line() { print "clutter: " $0; next }
-        wants("mutter") && is_mutter_warning_line() { print "mutter: " $0; next }'
+        wants("mutter") && is_mutter_warning_line() { print "mutter: " $0; next }
+        END { close_stack() }'
 }
 
 #######################################
@@ -3307,24 +3358,43 @@ print_unjudged_steps() {
 }
 
 #######################################
-# Note each fault of the shell log past an offset, of the kinds asked for, as a
-# bad part of the step (the first SHOWN_LOG_FAULTS_LIMIT, then how many more);
-# a log it cannot read could not be judged, and it then fails.
+# Note the faults of the shell log past an offset, of the kinds asked for, as a
+# bad part of the step (how many, and the first SHOWN_LOG_FAULTS_LIMIT), and
+# its toolkit criticals that no stack ties to the extension as a part that
+# could not be judged (how many, and the first
+# SHOWN_UNATTRIBUTED_LOG_LINES_LIMIT); a log it cannot read could not be
+# judged, and it then fails.
 # Arguments:
 #   $1 - the byte offset to read from
 #   $2 - the kinds, comma-separated
 #######################################
 note_shell_log_faults() {
-    local fault_text
-    local -a fault_lines
+    local fault_text fault_line shown_fault_lines shown_unattributed_lines unattributed_note
+    local -a fault_lines=() unattributed_lines=()
     # Captured with its status: a read that failed (the log unreadable, tail or awk failing) is never "no faults".
     if ! fault_text="$(shell_log_faults "$CHECK_RUN_DIR/log/shell.log" "$1" "$2")"; then
         note_unjudged "cannot read $CHECK_RUN_DIR/log/shell.log past byte $1"
         return 1
     fi
     [[ -n "$fault_text" ]] || return 0
-    mapfile -t fault_lines <<<"$fault_text"
-    note_bad "${#fault_lines[@]} line(s) in log/shell.log: $(printf '%s | ' "${fault_lines[@]:0:SHOWN_LOG_FAULTS_LIMIT}")"
+    while IFS= read -r fault_line; do
+        if [[ "$fault_line" == "$UNATTRIBUTED_LOG_LINE_KIND: "* ]]; then
+            unattributed_lines+=("${fault_line#"$UNATTRIBUTED_LOG_LINE_KIND: "}")
+        else
+            fault_lines+=("$fault_line")
+        fi
+    done <<<"$fault_text"
+    if (( ${#fault_lines[@]} > 0 )); then
+        shown_fault_lines="$(printf '%s | ' "${fault_lines[@]:0:SHOWN_LOG_FAULTS_LIMIT}")"
+        note_bad "${#fault_lines[@]} line(s) in log/shell.log: $shown_fault_lines"
+    fi
+    if (( ${#unattributed_lines[@]} > 0 )); then
+        shown_unattributed_lines="$(printf '%s | ' "${unattributed_lines[@]:0:SHOWN_UNATTRIBUTED_LOG_LINES_LIMIT}")"
+        unattributed_note="${#unattributed_lines[@]} critical line(s) of the toolkit (Gjs, GLib, Clutter, St) in"
+        unattributed_note+=" log/shell.log that no stack ties to the extension, so they may be its own:"
+        note_unjudged "$unattributed_note $shown_unattributed_lines"
+    fi
+    return 0
 }
 
 #######################################
