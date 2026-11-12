@@ -51,7 +51,13 @@ const ROW_ICON_SIZE_PX = 16;
 const QUOTED_STYLE_CLASSES_PATTERN = /'((?:rp-cockpit|resource-pulse)-[\w -]*)'/g;
 /** A static import statement, its clause possibly over several lines, and its specifier. */
 const IMPORT_STATEMENT_PATTERN = /^import\s[^;]*?from\s+'([^']+)';/gm;
+/** A static import of named bindings: its clause's names (possibly over several lines), and its specifier. */
+const NAMED_IMPORT_STATEMENT_PATTERN = /^import\s*\{([^}]*)\}\s*from\s+'([^']+)';/gm;
+const IMPORT_NAME_SEPARATOR = ',';
 const RELATIVE_SPECIFIER_PREFIX = './';
+const CARDS_IMPORT_SPECIFIER = './cockpitCards.js';
+/** The Resources helpers cockpitCards.js holds once (ruling D10). */
+const RESOURCES_HELPER_NAMES = ['findResourcesApp', 'openResourcesApp'];
 /** The apps card's divider, between its CPU rows and its memory rows: the faint row bar's line, across the card. */
 const APPS_DIVIDER_STATEMENT = 'rowsBox.add_child(new St.Widget({style_class: ROW_BAR_STYLE_CLASS, x_expand: true}));';
 
@@ -124,6 +130,21 @@ function classBody(sourceText, className) {
         return '';
     const endIndex = lines.findIndex((line, lineIndex) => lineIndex > startIndex && line === CLASS_CLOSING_LINE);
     return lines.slice(startIndex, endIndex < 0 ? undefined : endIndex + 1).join('\n');
+}
+
+/**
+ * The names a file imports from one module by its named-import statements, whatever else each statement names.
+ *
+ * @param {string} sourceText - The file's text.
+ * @param {string} specifier - The module, as the statement names it, for example './cockpitCards.js'.
+ * @returns {string[]} The imported names, in order; none when no named import has that specifier.
+ */
+function importedNames(sourceText, specifier) {
+    return [...sourceText.matchAll(NAMED_IMPORT_STATEMENT_PATTERN)]
+        .filter(([, , statementSpecifier]) => statementSpecifier === specifier)
+        .flatMap(([, importClause]) => importClause.split(IMPORT_NAME_SEPARATOR))
+        .map(importedName => importedName.trim())
+        .filter(importedName => importedName !== '');
 }
 
 /**
@@ -837,15 +858,15 @@ test('cockpitCards.js imports nothing from indicator.js, extension.js or cockpit
     const indicatorCode = codeOf(INDICATOR_SOURCE_FILE);
     const relativeSpecifiers = [...cardsSource.matchAll(IMPORT_STATEMENT_PATTERN)].map(([, specifier]) => specifier)
         .filter(specifier => specifier.startsWith(RELATIVE_SPECIFIER_PREFIX));
+    const namesTakenFromTheCards = importedNames(readExtensionFile(INDICATOR_SOURCE_FILE), CARDS_IMPORT_SPECIFIER);
     assertEqual({
         relativeSpecifiers,
-        indicatorImportsThem: occurrenceCount(readExtensionFile(INDICATOR_SOURCE_FILE),
-            "\nimport {SessionsCockpitCard, findResourcesApp, openResourcesApp} from './cockpitCards.js';\n"),
+        indicatorImportsThem: RESOURCES_HELPER_NAMES.filter(name => namesTakenFromTheCards.includes(name)),
         indicatorCopies: ['_findResourcesApp', '_openResources()', 'Shell.AppSystem', 'lookup_app(']
             .filter(needle => indicatorCode.includes(needle)),
     }, {
         relativeSpecifiers: ['./lib/constants.js', './lib/cockpitFormat.js', './lib/cockpitProtocol.js'],
-        indicatorImportsThem: 1,
+        indicatorImportsThem: RESOURCES_HELPER_NAMES,
         indicatorCopies: [],
     });
 });
@@ -1476,16 +1497,21 @@ function indicatorMethodStatements(declarationLine) {
 
 /** The open step's statement that gives the sessions card the system card's width (ruling D29). */
 const SIZE_TO_SYSTEM_CARD_STATEMENT = 'this._sizeSessionsCardToSystemCard();';
+/** The indicator's constructor: the pulse client, then the cockpit's options (the dropdown's sessions card). */
+const INDICATOR_INIT_DECLARATION = '_init(client, {cockpitClient, errorLog, onSessionActivated}) {';
+/** A statement that puts an item into the indicator's menu: an add method of the menu, or a child of its box. */
+const MENU_ADDITION_PATTERN = /\bthis\.menu\.(?:add\w*|box\.(?:add|insert)\w*)\(/;
 
 test('indicator.js: takes the pulse client, then one options object (the cockpit client, the shared error log and ' +
     'the session activation), and sets every new field _onDestroy reads before anything can throw', () => {
-    const initStatements = indicatorMethodStatements('_init(client, {cockpitClient, errorLog, onSessionActivated}) {');
+    const initStatements = indicatorMethodStatements(INDICATOR_INIT_DECLARATION);
     const firstThrowingIndex = initStatements.indexOf('const graphBox = new St.BoxLayout({style_class: ' +
         'GRAPH_BOX_STYLE_CLASS});');
     const earlyFields = [
         'this._cockpitClient = cockpitClient;', 'this._errorLog = errorLog;',
-        'this._activateSession = onSessionActivated;', 'this._sessionsItem = null;', 'this._sessionsCard = null;',
-        'this._sessionsTooltip = null;', 'this._sessionsPacing = null;', 'this._cockpitListenerId = null;',
+        'this._activateSessionInExtension = onSessionActivated;', 'this._sessionsItem = null;',
+        'this._sessionsCard = null;', 'this._sessionsTooltip = null;', 'this._sessionsPacing = null;',
+        'this._cockpitListenerId = null;',
     ];
     assertEqual(earlyFields.map(field => {
         const fieldIndex = initStatements.indexOf(field);
@@ -1494,35 +1520,34 @@ test('indicator.js: takes the pulse client, then one options object (the cockpit
 });
 
 test('indicator.js: the sessions item is added last in _init, after every step that can throw (it adds its tooltip ' +
-    'to the chrome), and goes into the menu right under the system card\'s item, above "Open Resources"; it is built ' +
-    'under a guard (ruling D25): a failure is logged, whatever was half-built is destroyed and the item is left out, ' +
-    'so the dropdown is v2\'s', () => {
-    const buildStatements = indicatorMethodStatements('_buildDropdown() {');
-    const cardItemAddedIndex = buildStatements.indexOf('this.menu.addMenuItem(cardItem);');
+    'to the chrome), and goes into the menu right under the system card\'s item, which is the menu\'s first (the ' +
+    'menu\'s only additions: the system card\'s item, "Open Resources", then the sessions item at position 1); it is ' +
+    'built under a guard (ruling D25): a failure first destroys whatever was half-built, then is logged, and the ' +
+    'item is left out, so the dropdown is v2\'s', () =>
     assertEqual({
-        lastInInit: indicatorMethodStatements('_init(client, {cockpitClient, errorLog, onSessionActivated}) {').at(-1),
-        cardItemThenOpenResources: cardItemAddedIndex < 0 ? []
-            : buildStatements.slice(cardItemAddedIndex, cardItemAddedIndex + 2),
+        lastInInit: indicatorMethodStatements(INDICATOR_INIT_DECLARATION).at(-1),
+        menuAdditions: statementsOf(codeOf(INDICATOR_SOURCE_FILE))
+            .filter(statement => MENU_ADDITION_PATTERN.test(statement)),
         positionUnderTheCardItem: occurrenceCount(codeOf(INDICATOR_SOURCE_FILE),
             'const SESSIONS_ITEM_MENU_POSITION = 1;'),
         guard: indicatorMethodStatements('_addSessionsItem() {'),
     }, {
         lastInInit: 'this._addSessionsItem();',
-        cardItemThenOpenResources: [
+        menuAdditions: [
             'this.menu.addMenuItem(cardItem);',
-            'this._openResourcesItem = new PopupMenu.PopupMenuItem(OPEN_RESOURCES_LABEL);',
+            'this.menu.addMenuItem(this._openResourcesItem);',
+            'this.menu.addMenuItem(this._sessionsItem, SESSIONS_ITEM_MENU_POSITION);',
         ],
         positionUnderTheCardItem: 1,
         guard: [
             'try {',
             'this._buildSessionsItem();',
             '} catch (error) {',
-            "this._logCockpitFailure('be built, so the dropdown shows the system card alone', error);",
             'this._destroySessionsItem();',
+            "this._logCockpitFailure('be built, so the dropdown shows the system card alone', error);",
             '}',
         ],
-    });
-});
+    }));
 
 test('indicator.js: the sessions item is a non-reactive, unfocusable PopupBaseMenuItem of class ' +
     'rp-cockpit-menu-sessions-item holding a SessionsCockpitCard with its own CockpitTooltip, whose row click ' +
@@ -1656,17 +1681,19 @@ test('indicator.js: each Sample (the indicator\'s history listener) ends, after 
         wantedWhileOpen: 1,
     }));
 
-test('indicator.js: a session row\'s click closes the menu first, then asks the extension to activate the session ' +
-    '(Review Focus 3: the menu closes whatever the activation does); each step guarded, so neither throws into the ' +
-    'row\'s click handler and a failed close still activates; a failure is logged by its own context', () =>
+test('indicator.js: a session row\'s click closes the menu first, as an activated menu item does (itemActivated: ' +
+    'the stock fade, ruling D30; the menu\'s state and its grab change at once), then asks the extension to activate ' +
+    'the session (Review Focus 3: the menu closes whatever the activation does); each step guarded, so neither ' +
+    'throws into the row\'s click handler and a failed close still activates; a failure is logged by its own ' +
+    'context', () =>
     assertEqual({
         activated: indicatorMethodStatements('_onSessionActivated(sessionId) {'),
         guard: indicatorMethodStatements('_runCockpitStep(stepName, step) {'),
         log: indicatorMethodStatements('_logCockpitFailure(stepName, error) {'),
     }, {
         activated: [
-            "this._runCockpitStep('close the menu for a session', () => this.menu.close());",
-            "this._runCockpitStep('activate a session', () => this._activateSession(sessionId));",
+            "this._runCockpitStep('close the menu for a session', () => this.menu.itemActivated());",
+            "this._runCockpitStep('activate a session', () => this._activateSessionInExtension(sessionId));",
         ],
         guard: ['try {', 'step();', '} catch (error) {', 'this._logCockpitFailure(stepName, error);', '}'],
         log: [

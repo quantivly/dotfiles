@@ -21,6 +21,14 @@ const STARTING = 'starting';
 const SKIPPED = 'skipped';
 /** COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS (3), written out. */
 const FALLBACK_SECONDS = 3;
+/**
+ * Where a real fallback's ready time may fall, from now: GLib.timeout_add_seconds coalesces it to the second (moving
+ * it by less than a second, by a perturbation fixed per session), so a 3 s timeout is ready more than 2 s and at most
+ * 4 s after it is armed, and a timeout of 0 s or 1 s, or of 3 ms, never is.
+ */
+const FALLBACK_READY_AFTER_MORE_THAN_SECONDS = FALLBACK_SECONDS - 1;
+const FALLBACK_READY_AT_MOST_SECONDS = FALLBACK_SECONDS + 1;
+const MICROSECONDS_PER_SECOND = 1_000_000;
 const FALLBACK_TIMEOUT_NAME = '[resource-pulse] draw the pending cockpit sources';
 /** GLib.SOURCE_REMOVE, written out: a one-shot callback's answer. */
 const SOURCE_REMOVE = false;
@@ -312,7 +320,8 @@ test('cockpitSourceDrawing: a fallback whose draw throws never throws out of its
 });
 
 test('cockpitSourceDrawing: the default timeouts are GLib\'s: a Changed arms a real source of the default priority, ' +
-    'named, and destroy() removes it from the main context', () => {
+    'named, ready in the fallback\'s 3 s (more than 2 s and at most 4 s from now: GLib coalesces a seconds timeout ' +
+    'to the second), and destroy() removes it from the main context', () => {
     const pacing = new sourceDrawingModule.CockpitSourcePacing({
         cockpitClient: {pullIfSuspicious: () => Promise.resolve({pulled: false})}, drawnCardIds: () => GRID_CARD_IDS,
         drawCard: () => {}, errorLog: new RateLimitedLogger({nowUsec: () => START_USEC, write: () => {}}),
@@ -322,11 +331,18 @@ test('cockpitSourceDrawing: the default timeouts are GLib\'s: a Changed arms a r
         pacing.onCockpitEvent(sourcesEvent(['sessions'], CHANGED));
         const sourceId = pacing._fallbackSourceId;
         const armedSource = GLib.MainContext.default().find_source_by_id(sourceId);
-        const armed = {name: armedSource?.get_name() ?? null, priority: armedSource?.get_priority() ?? null};
+        const secondsUntilReady = armedSource === null ? null
+            : (armedSource.get_ready_time() - GLib.get_monotonic_time()) / MICROSECONDS_PER_SECOND;
+        const armed = {
+            name: armedSource?.get_name() ?? null, priority: armedSource?.get_priority() ?? null,
+            isReadyInTheFallbackSeconds: secondsUntilReady > FALLBACK_READY_AFTER_MORE_THAN_SECONDS &&
+                secondsUntilReady <= FALLBACK_READY_AT_MOST_SECONDS,
+        };
         pacing.destroy();
         const isGoneAfterDestroy = GLib.MainContext.default().find_source_by_id(sourceId) === null;
         assertEqual({armed, isGoneAfterDestroy}, {
-            armed: {name: FALLBACK_TIMEOUT_NAME, priority: GLib.PRIORITY_DEFAULT}, isGoneAfterDestroy: true,
+            armed: {name: FALLBACK_TIMEOUT_NAME, priority: GLib.PRIORITY_DEFAULT, isReadyInTheFallbackSeconds: true},
+            isGoneAfterDestroy: true,
         });
     } finally {
         pacing.destroy();

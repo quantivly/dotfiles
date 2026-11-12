@@ -1,8 +1,9 @@
 // gnome-shell/tests/liveSessionBarrier.js: the plain-gjs rows run only in a process started with every message bus
 // address naming a bus that cannot exist and a config home that cannot exist, so a fake a row leaves out (an injected
 // connection, link, config home or herdr socket path) falls through to nothing, never to the live session or system
-// bus or the live herdr socket. No row here opens a connection: each reads what GIO or GLib would use, what the
-// process was started with, or run.js's text.
+// bus or the live herdr socket. The process is also started in one fixed time zone (ruling D31), so a row that reads a
+// local time reads it in one known zone on every machine. No row here opens a connection: each reads what GIO or GLib
+// would use, what the process was started with, the zone both clocks read, or run.js's text.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
@@ -22,6 +23,17 @@ const BARRED_VALUES_BY_VARIABLE_NAME = Object.freeze({
     DBUS_SYSTEM_BUS_ADDRESS: BARRIER_ADDRESS,
     XDG_CONFIG_HOME: BARRIER_CONFIG_HOME,
 });
+/**
+ * The rows' time zone, written out: Asia/Kolkata, 5 h 30 min east of UTC with no daylight saving time, so a row whose
+ * oracle reads a local time can tell it from UTC (and from a whole-hour offset) on a UTC machine too.
+ */
+const ROWS_TIME_ZONE_VARIABLE_NAME = 'TZ';
+const ROWS_TIME_ZONE = 'Asia/Kolkata';
+const ROWS_TIME_ZONE_UTC_OFFSET_MINUTES = 5 * 60 + 30;
+/** A wall-clock instant both clocks place in the rows' zone: 2026-11-06 21:20:01 UTC. */
+const ZONE_PROBE_UNIX_SECONDS = 1_794_000_001;
+const MILLISECONDS_PER_SECOND = 1000;
+const MICROSECONDS_PER_MINUTE = 60_000_000;
 /** The process's environment as it was at exec: setenv() in the process never changes it (Linux). */
 const EXEC_ENVIRONMENT_PATH = '/proc/self/environ';
 const ENVIRONMENT_ENTRY_SEPARATOR = '\0';
@@ -46,17 +58,43 @@ function busAddressGioWouldUse(busType) {
 }
 
 /**
+ * The entries of the environment this process was started with, each 'NAME=value'.
+ *
+ * @returns {string[]} The entries at exec.
+ */
+function environmentEntriesAtExec() {
+    const [, environmentBytes] = GLib.file_get_contents(EXEC_ENVIRONMENT_PATH);
+    return new TextDecoder().decode(environmentBytes).split(ENVIRONMENT_ENTRY_SEPARATOR);
+}
+
+/**
  * Whether each variable the barrier sets had the barrier's value when this process started. Only that answer is read
  * out of the environment, never a value, so no failure can print one.
  *
  * @returns {Object<string, boolean>} By variable name: true when it had the barrier's value at exec.
  */
 function barredVariablesAtExec() {
-    const [, environmentBytes] = GLib.file_get_contents(EXEC_ENVIRONMENT_PATH);
-    const environmentEntries = new TextDecoder().decode(environmentBytes).split(ENVIRONMENT_ENTRY_SEPARATOR);
+    const environmentEntries = environmentEntriesAtExec();
     return Object.fromEntries(Object.entries(BARRED_VALUES_BY_VARIABLE_NAME).map(([variableName, barredValue]) => [
         variableName, environmentEntries.includes(`${variableName}=${barredValue}`),
     ]));
+}
+
+/**
+ * The rows' time zone as each clock a row reads places one instant in it: GLib's DateTime and JavaScript's Date (two
+ * readers of TZ that need not agree: SpiderMonkey's Date keeps the machine's zone for a POSIX rule string such as
+ * XST-5:30, measured on gjs 1.88, where GLib follows it).
+ *
+ * @returns {{glibUtcOffsetMinutes: number, dateUtcOffsetMinutes: number}} Each clock's offset east of UTC.
+ */
+function utcOffsetMinutesOfEachClock() {
+    const glibLocalTime = GLib.DateTime.new_from_unix_local(ZONE_PROBE_UNIX_SECONDS);
+    const dateLocalTime = new Date(ZONE_PROBE_UNIX_SECONDS * MILLISECONDS_PER_SECOND);
+    return {
+        glibUtcOffsetMinutes: glibLocalTime.get_utc_offset() / MICROSECONDS_PER_MINUTE,
+        // getTimezoneOffset() counts west of UTC.
+        dateUtcOffsetMinutes: -dateLocalTime.getTimezoneOffset(),
+    };
 }
 
 test('liveSessionBarrier.js: the session bus GIO would connect to in the rows\' process is the barrier\'s, which ' +
@@ -81,6 +119,17 @@ test('liveSessionBarrier.js: the rows\' process was STARTED with every variable 
     'line of JavaScript, and Gio.bus_get hands that session connection back whatever the variables say afterwards',
 () => assertEqual(barredVariablesAtExec(),
     {DBUS_SESSION_BUS_ADDRESS: true, DBUS_SYSTEM_BUS_ADDRESS: true, XDG_CONFIG_HOME: true}));
+
+test('liveSessionBarrier.js: the rows\' process was STARTED in one fixed time zone, Asia/Kolkata (5 h 30 min east ' +
+    'of UTC, no daylight saving time), and both clocks a row reads, GLib\'s and Date\'s, place an instant in it: a ' +
+    'row whose oracle reads a local time is then never hollow on a UTC machine, CI included (ruling D31)', () =>
+    assertEqual({
+        startedInTheZone: environmentEntriesAtExec().includes(`${ROWS_TIME_ZONE_VARIABLE_NAME}=${ROWS_TIME_ZONE}`),
+        ...utcOffsetMinutesOfEachClock(),
+    }, {
+        startedInTheZone: true, glibUtcOffsetMinutes: ROWS_TIME_ZONE_UTC_OFFSET_MINUTES,
+        dateUtcOffsetMinutes: ROWS_TIME_ZONE_UTC_OFFSET_MINUTES,
+    }));
 
 test('liveSessionBarrier.js: run.js imports the barrier first, so no test module is evaluated in a process that can ' +
     'reach the live session (static imports are evaluated in order)', () => {

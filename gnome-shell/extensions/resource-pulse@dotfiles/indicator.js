@@ -134,7 +134,7 @@ class PulseIndicator extends PanelMenu.Button {
         this._client = client;
         this._cockpitClient = cockpitClient;
         this._errorLog = errorLog;
-        this._activateSession = onSessionActivated;
+        this._activateSessionInExtension = onSessionActivated;
         this._hoverLabel = null;
         this._isHoverLabelShown = false;
         this._showHoverLabelTimeoutId = null;
@@ -202,8 +202,9 @@ class PulseIndicator extends PanelMenu.Button {
 
     /**
      * Adds the sessions item under the card item, under a guard (ruling D25: the cockpit never takes the indicator
-     * down): on a failure it is logged, whatever was half-built is destroyed and the item is left out, so the dropdown
-     * is v2's. It runs last in _init, after every step that can throw, as everything that adds to the shell does.
+     * down): on a failure whatever was half-built is destroyed first (so a throw from the log cannot leave the
+     * tooltip's label in the chrome), then the failure is logged, and the item is left out, so the dropdown is v2's.
+     * It runs last in _init, after every step that can throw, as everything that adds to the shell does.
      *
      * @returns {void}
      */
@@ -211,8 +212,8 @@ class PulseIndicator extends PanelMenu.Button {
         try {
             this._buildSessionsItem();
         } catch (error) {
-            this._logCockpitFailure('be built, so the dropdown shows the system card alone', error);
             this._destroySessionsItem();
+            this._logCockpitFailure('be built, so the dropdown shows the system card alone', error);
         }
     }
 
@@ -357,15 +358,18 @@ class PulseIndicator extends PanelMenu.Button {
 
     /**
      * A session row of the dropdown's card was clicked: the menu closes first, whatever the activation then does
-     * (Review Focus 3), then the extension's activation path takes the user to the session. Neither step throws into
-     * the row's click handler (ruling D25): each failure is logged, and a failed close still activates.
+     * (Review Focus 3), then the extension's activation path takes the user to the session. It closes as an activated
+     * menu item closes it (itemActivated, ruling D30): with the stock fade, while the menu's state, its
+     * open-state-changed and the release of its grab all happen at once (GNOME Shell 50's popupMenu.js), so the
+     * activation runs with the menu closed and the grab gone. Neither step throws into the row's click handler (ruling
+     * D25): each failure is logged, and a failed close still activates.
      *
      * @param {string} sessionId - The clicked session's id.
      * @returns {void}
      */
     _onSessionActivated(sessionId) {
-        this._runCockpitStep('close the menu for a session', () => this.menu.close());
-        this._runCockpitStep('activate a session', () => this._activateSession(sessionId));
+        this._runCockpitStep('close the menu for a session', () => this.menu.itemActivated());
+        this._runCockpitStep('activate a session', () => this._activateSessionInExtension(sessionId));
     }
 
     /**
@@ -754,7 +758,7 @@ class PulseIndicator extends PanelMenu.Button {
         this._isHoverLabelShown = false;
         this._client = null;
         this._cockpitClient = null;
-        this._activateSession = null;
+        this._activateSessionInExtension = null;
         super._onDestroy();
     }
 });

@@ -17,6 +17,12 @@
 // the first process are gjs's own, made before any code here runs; start the runner with the barrier's variables
 // already set to avoid them too. The restart passes on the entry and its arguments but not gjs's own options (-I,
 // --coverage-prefix and the like): no caller of the runner passes one.
+//
+// The barrier is only that. The rows' process is started with one more variable, which bars nothing: a fixed time zone
+// (TZ, ruling D31), so a row that reads a local time reads it in one known zone on every machine, never in a UTC that
+// would make it hollow (CI). It is required at exec as the barrier's variables are, and a runner started without it
+// starts itself again with it too, since both clocks a row reads, GLib's and Date's, take the zone as the process
+// starts.
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import System from 'system';
@@ -34,6 +40,15 @@ const BARRED_VALUES_BY_VARIABLE_NAME = Object.freeze({
     DBUS_SYSTEM_BUS_ADDRESS: UNREACHABLE_BUS_ADDRESS,
     XDG_CONFIG_HOME: UNREACHABLE_CONFIG_HOME,
 });
+/**
+ * The rows' time zone: non-UTC, with a half-hour offset, so a row whose oracle reads a local time tells it from UTC
+ * (and from a whole-hour offset) on a UTC machine too. Asia/Kolkata is 5 h 30 min east of UTC, with no daylight saving
+ * time. An IANA name, since both clocks the rows read follow one: GLib's, and SpiderMonkey's Date, which keeps the
+ * machine's zone for a POSIX rule string such as XST-5:30 (measured, gjs 1.88), where GLib follows it.
+ */
+const ROWS_TIME_ZONE = 'Asia/Kolkata';
+/** Every variable the rows' process is started with, each with its value: the barrier's, then the rows' time zone. */
+const STARTED_WITH_VALUES_BY_VARIABLE_NAME = Object.freeze({...BARRED_VALUES_BY_VARIABLE_NAME, TZ: ROWS_TIME_ZONE});
 /** Set in the runner started again, so one that can still reach the live session stops rather than start another. */
 const RESTARTED_BEHIND_BARRIER_VARIABLE_NAME = 'RESOURCE_PULSE_RESTARTED_BEHIND_LIVE_SESSION_BARRIER';
 const RESTARTED_BEHIND_BARRIER_VALUE = '1';
@@ -44,25 +59,27 @@ const MODULE_FLAG = '-m';
 const EXIT_CODE_HARNESS_ERROR = 2;
 
 /**
- * Says whether this process was given every variable the barrier sets at the barrier's value.
+ * Says whether this process was given every variable the rows' process is started with at its value: the barrier's,
+ * and the rows' time zone.
  *
- * @returns {boolean} True when each variable of BARRED_VALUES_BY_VARIABLE_NAME has its value.
+ * @returns {boolean} True when each variable of STARTED_WITH_VALUES_BY_VARIABLE_NAME has its value.
  */
-function isEveryLiveDefaultBarred() {
-    return Object.entries(BARRED_VALUES_BY_VARIABLE_NAME)
-        .every(([variableName, barredValue]) => GLib.getenv(variableName) === barredValue);
+function isStartedAsTheRowsNeed() {
+    return Object.entries(STARTED_WITH_VALUES_BY_VARIABLE_NAME)
+        .every(([variableName, requiredValue]) => GLib.getenv(variableName) === requiredValue);
 }
 
 /**
- * Starts the runner again, under the same gjs, with the same entry and arguments and every variable the barrier sets
- * at its value, inheriting this process's standard input, output and error; waits for it.
+ * Starts the runner again, under the same gjs, with the same entry and arguments and every variable the rows' process
+ * is started with at its value (the barrier's, and the rows' time zone), inheriting this process's standard input,
+ * output and error; waits for it.
  *
  * @returns {number} Its exit status, or EXIT_CODE_HARNESS_ERROR when it could not be started or did not exit itself.
  */
 function runAgainBehindBarrier() {
     const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.STDIN_INHERIT});
-    for (const [variableName, barredValue] of Object.entries(BARRED_VALUES_BY_VARIABLE_NAME))
-        launcher.setenv(variableName, barredValue, true);
+    for (const [variableName, requiredValue] of Object.entries(STARTED_WITH_VALUES_BY_VARIABLE_NAME))
+        launcher.setenv(variableName, requiredValue, true);
     launcher.setenv(RESTARTED_BEHIND_BARRIER_VARIABLE_NAME, RESTARTED_BEHIND_BARRIER_VALUE, true);
     let restartedRunner;
     try {
@@ -77,18 +94,18 @@ function runAgainBehindBarrier() {
 }
 
 /**
- * Lets the rows run in this process only when it was started behind the barrier; otherwise runs them again behind it
- * and exits with that run's status. A runner already started again that still finds the live session reachable (a bus
- * or the config home unbarred) exits 2.
+ * Lets the rows run in this process only when it was started behind the barrier, in the rows' time zone; otherwise
+ * runs them again so and exits with that run's status. A runner already started again that still finds the live
+ * session reachable (a bus or the config home unbarred), or is not in the rows' time zone, exits 2.
  *
  * @returns {void}
  */
 function runOnlyBehindBarrier() {
-    if (isEveryLiveDefaultBarred())
+    if (isStartedAsTheRowsNeed())
         return;
     if (GLib.getenv(RESTARTED_BEHIND_BARRIER_VARIABLE_NAME) === RESTARTED_BEHIND_BARRIER_VALUE) {
         printerr('harness error: the runner started again behind the live-session barrier can still reach the live ' +
-            'session (a bus or the config home)');
+            'session (a bus or the config home), or is not in the rows\' time zone');
         System.exit(EXIT_CODE_HARNESS_ERROR);
     }
     System.exit(runAgainBehindBarrier());

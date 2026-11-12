@@ -999,12 +999,15 @@ sorted_closure() {
 # thirty-two modules and the service side's seventeen, seven of them
 # (constants, errorLog, history, jsonFields, pressure, protocol, teardown) on
 # both. The shell side reaches cockpitCards.js and its three lib modules
-# (cockpitFormat, cockpitProtocol, cockpitStaleness) through indicator.js's
-# Resources helpers, and through extension.js the cockpit's nine: its client
-# (cockpitClient.js), its layer (cockpitLayer.js, with cockpitTooltip.js and the
-# pacing and data-card drawing it shares, cockpitSourceDrawing.js), the
-# DisplayConfig reader (displayConfig.js), and lib/'s cockpitGrid,
-# cockpitInteraction, cockpitMonitor and cockpitWiring.
+# (cockpitFormat, cockpitProtocol, cockpitStaleness) through indicator.js (the
+# Resources helpers and the dropdown's sessions card) and through the layer. The
+# cockpit's nine are its client (cockpitClient.js), its layer (cockpitLayer.js),
+# cockpitTooltip.js, the pacing and data-card drawing (cockpitSourceDrawing.js),
+# the DisplayConfig reader (displayConfig.js), and lib/'s cockpitGrid,
+# cockpitInteraction, cockpitMonitor and cockpitWiring. extension.js reaches all
+# nine; indicator.js imports three of them itself, for the dropdown's sessions
+# card (cockpitSourceDrawing.js, cockpitTooltip.js and lib/cockpitWiring.js),
+# with lib/teardown.js, one of the seven both sides share.
 EXPECTED_SHELL_CLOSURE='card.js cockpitCards.js cockpitClient.js cockpitLayer.js cockpitSourceDrawing.js '
 EXPECTED_SHELL_CLOSURE+='cockpitTooltip.js displayConfig.js '
 EXPECTED_SHELL_CLOSURE+='extension.js graph.js indicator.js lib/cardRepaint.js lib/cockpitFormat.js '
@@ -5128,7 +5131,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1061
+EXPECTED_ROWS=1062
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
