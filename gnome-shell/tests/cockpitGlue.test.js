@@ -31,6 +31,7 @@ const COCKPIT_CLASS_NAMES = [
     'rp-cockpit-no-data', 'rp-cockpit-menu-sessions-item',
 ];
 const OPACITY_PROPERTY_PATTERN = /(?:^|[\s{;])opacity\s*:/;
+const TEXT_TRANSFORM_PROPERTY_PATTERN = /(?:^|[\s{;])text-transform\s*:/;
 const CSS_COMMENT_PATTERN = /\/\*[\s\S]*?\*\//g;
 const JS_COMMENT_PATTERN = /\/\*[\s\S]*?\*\/|\/\/[^\n]*/g;
 const COCKPIT_BLOCK_MARKER = 'Added in the cockpit drawing release.';
@@ -193,7 +194,12 @@ test('cockpitTooltip.js: takes the shell\'s Main, adds its label through addTopC
         usesPlacementRule: occurrenceCount(methodBody(source, '_placeLabel() {'), 'tooltipPosition({'),
         styleClassUsedByTheLabel: occurrenceCount(source, 'style_class: TOOLTIP_STYLE_CLASS'),
         styleClassDefined: occurrenceCount(source, "TOOLTIP_STYLE_CLASS = 'rp-cockpit-tooltip'"),
-    }, {importsMain: 1, addsToChrome: 1, usesPlacementRule: 1, styleClassUsedByTheLabel: 1, styleClassDefined: 1});
+        ellipsizedAtItsEnd: occurrenceCount(methodBody(source, 'constructor() {'),
+            'this._label.clutter_text.ellipsize = Pango.EllipsizeMode.END;'),
+    }, {
+        importsMain: 1, addsToChrome: 1, usesPlacementRule: 1, styleClassUsedByTheLabel: 1, styleClassDefined: 1,
+        ellipsizedAtItsEnd: 1,
+    });
 });
 
 test('cockpitTooltip.js: one GLib.timeout_add, named at its use, and removed again in destroy()', () => {
@@ -307,6 +313,22 @@ function cockpitStylesheetBlockText() {
 
 test('stylesheet.css: no rule of the cockpit block declares opacity (St reads none; the card sets the actor\'s)', () =>
     assertEqual(OPACITY_PROPERTY_PATTERN.test(cockpitStylesheetBlockText()), false));
+
+test('stylesheet.css: no rule of the cockpit block declares text-transform (St reads none; the layer upper-cases ' +
+    'the caption in code), and the guard sees one', () =>
+    assertEqual({
+        inTheBlock: TEXT_TRANSFORM_PROPERTY_PATTERN.test(cockpitStylesheetBlockText()),
+        guardSeesOne: [' text-transform: uppercase;', '{text-transform:none'].map(text =>
+            TEXT_TRANSFORM_PROPERTY_PATTERN.test(text)),
+    }, {inTheBlock: false, guardSeesOne: [true, true]}));
+
+test('stylesheet.css: the tooltip is at most 40em wide (St reads max-width), so its label\'s ellipsize cuts a long ' +
+    'line (a mount point, a group key) rather than drawing it across the monitor\'s edge', () => {
+    const block = cockpitStylesheetBlockText();
+    const tooltipRule = block.split('.rp-cockpit-tooltip {')[1]?.split('}')[0] ?? '';
+    const maxWidthDeclarations = statementsOf(tooltipRule).filter(declaration => declaration.startsWith('max-width'));
+    assertEqual(maxWidthDeclarations, ['max-width: 40em;']);
+});
 
 test('stylesheet.css: the opacity guard sees a bare opacity but not -rp-graph-opacity', () =>
     assertEqual([' opacity: 140;', '{opacity:140', ' -rp-graph-opacity: 0.4;'].map(text => OPACITY_PROPERTY_PATTERN.test(text)),
@@ -617,6 +639,24 @@ test('cockpitCards.js: a label\'s text, an icon\'s name and the hovered row\'s t
     });
 });
 
+test('cockpitCards.js: a hovered row whose tooltip lines changed shows its new lines, as entering it does, or, when ' +
+    'its new content has none, hides the tooltip rather than showing an empty one or what the row showed before', () =>
+    assertEqual({
+        showRowTellsIt: occurrenceCount(cardMethodBody('CockpitCardBase', '_showRow('),
+            'this._showHoveredRowTooltip(row, content.tooltipLines);'),
+        hovered: statementsOf(cardMethodBody('CockpitCardBase', '_showHoveredRowTooltip(')),
+    }, {
+        showRowTellsIt: 1,
+        hovered: [
+            '_showHoveredRowTooltip(row, tooltipLines) {',
+            'if (tooltipLines.length > 0)',
+            'this._tooltip.showFor(row.actor, tooltipLines);',
+            'else',
+            'this._tooltip.hide();',
+            '}',
+        ],
+    }));
+
 test('cockpitCards.js: frozen, a card only records its latest render; unfreezing undims and draws it, the frozen ' +
     'repaint draws it still dimmed, and every update and no-data line goes through that record', () => {
     const renderThroughTheRecord = /this\._renderUnlessFrozen\(\(\) => this\._render\w+\(/;
@@ -642,7 +682,8 @@ test('cockpitCards.js: frozen, a card only records its latest render; unfreezing
     });
 });
 
-test('cockpitCards.js: each card\'s update takes exactly what it draws, with no clock (ruling D9); a source it ' +
+test('cockpitCards.js: each card\'s update takes exactly what it draws, with no clock (ruling D9), the apps card the ' +
+    'system card\'s clock label too, so with no apps it says no data since when the system card does; a source it ' +
     'cannot draw is no data, and a sessions source with herdr down says so, each returning before any render', () => {
     const source = codeOf(CARDS_SOURCE_FILE);
     const updateDeclarations = CARD_CLASS_NAMES.map(className =>
@@ -654,11 +695,12 @@ test('cockpitCards.js: each card\'s update takes exactly what it draws, with no 
         dataCardUpdates: DATA_CARD_CLASS_NAMES.map(className => statementsOf(cardMethodBody(className, 'update('))),
         herdrLine: statementsOf(cardMethodBody('CockpitCardBase', 'showHerdrNotRunning(')),
     }, {
-        updateDeclarations: ['update(snapshot, lastGoodClockLabel) {', 'update(apps) {', 'update(network, mounts) {',
-            'update(sessions) {'],
+        updateDeclarations: ['update(snapshot, lastGoodClockLabel) {', 'update(apps, lastGoodClockLabel) {',
+            'update(network, mounts) {', 'update(sessions) {'],
         clocks: 0,
         dataCardUpdates: [
-            ['update(apps) {', ...noDataBranch('if (!canDrawApps(apps)) {'),
+            ['update(apps, lastGoodClockLabel) {', 'if (!canDrawApps(apps)) {',
+                'this.showNoData(appsNoDataText(lastGoodClockLabel));', 'return;', '}',
                 'this._renderUnlessFrozen(() => this._renderApps(apps));', '}'],
             ['update(network, mounts) {', ...noDataBranch('if (!canDrawConnections(network, mounts)) {'),
                 'this._renderUnlessFrozen(() => this._renderConnections(network, mounts));', '}'],
@@ -743,12 +785,12 @@ test('cockpitCards.js: the connections card draws connectionsRows and below them
         rowsAndOverflow: occurrenceCount(renderBody, 'const {rows, overflowText} = connectionsRows(network, mounts);'),
         overflowDrawn: occurrenceCount(renderBody, "setOptionalLabelText(this._overflowLabel, overflowText ?? '');"),
         cutInTheCard: occurrenceCount(renderBody, '.slice('),
-        connectionContent: ['iconName: connectionRow.icon,', 'name: connectionRow.text,',
-            'fraction: connectionRow.fraction,', 'tooltipLines: connectionRow.tooltip,']
+        connectionContent: ['iconName: connectionRow.icon,', 'iconStyleClass: connectionRow.iconStyleClass,',
+            'name: connectionRow.text,', 'fraction: connectionRow.fraction,', 'tooltipLines: connectionRow.tooltip,']
             .map(field => occurrenceCount(methodBody(source, 'function connectionRowContent('), field)),
     }, {
         title: 1, overflowLabelBelowTheRows: true, overflowLabelAdded: [1, 1], rowsAndOverflow: 1, overflowDrawn: 1,
-        cutInTheCard: 0, connectionContent: [1, 1, 1, 1],
+        cutInTheCard: 0, connectionContent: [1, 1, 1, 1, 1],
     });
 });
 
@@ -971,6 +1013,7 @@ test('cockpitLayer.js: placeOnMonitor lays the grid out from cockpitGridGeometry
             "const CAPTION_STYLE_CLASS = 'rp-cockpit-caption';"),
         captionsUseIt: occurrenceCount(layerMethodBody('_syncCaptions('),
             'new St.Label({style_class: CAPTION_STYLE_CLASS})'),
+        captionText: layerMethodStatements('_syncCaptions(').slice(-6),
     }, {
         place: [
             'this._monitorIndex = monitorIndex;',
@@ -987,6 +1030,14 @@ test('cockpitLayer.js: placeOnMonitor lays the grid out from cockpitGridGeometry
             'return this._drawnCells.map(({cardId, x, y, width, height}) => ({cardId, rect: {x, y, width, height}}));',
         ],
         layoutMakesTheDrawnIds: 1, captionStyleClassDefined: 1, captionsUseIt: 1,
+        captionText: [
+            'groups.forEach((group, groupIndex) => {',
+            'const captionLabel = this._captionLabels[groupIndex];',
+            'const captionText = cockpitCaptionText(group.caption);',
+            'if (captionLabel.text !== captionText)',
+            'captionLabel.text = captionText;',
+            '});',
+        ],
     }));
 
 test('cockpitLayer.js: a layout change keeps the cards it still names (never remade for a re-placement), destroys ' +
@@ -1112,7 +1163,8 @@ test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snap
         onSnapshot: layerMethodStatements('_onSnapshot('),
         snapshotDrawers: [
             'system: (card, pulseClient) => card.update(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel),',
-            'apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null),',
+            'apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null, ' +
+                'pulseClient.lastGoodClockLabel),',
         ].map(needle => occurrenceCount(source, needle)),
         ownDataCardDrawing: ownDataCardNeedles.filter(needle => source.includes(needle)),
     }, {
@@ -1125,7 +1177,9 @@ test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snap
             'this._guardCardDraw(() => drawCockpitDataCard({cardId, card, cockpitClient: this._cockpitClient}));',
         ],
         onSnapshot: [
-            'this._guardCardDraw(() => this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null));',
+            'const appsCard = this._cardsById.get(COCKPIT_APPS_CARD_ID);',
+            'this._guardCardDraw(() => appsCard?.update(snapshot?.apps ?? null, ' +
+                'this._pulseClient.lastGoodClockLabel));',
         ],
         snapshotDrawers: [1, 1], ownDataCardDrawing: [],
     });

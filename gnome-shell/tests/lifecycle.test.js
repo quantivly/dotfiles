@@ -107,12 +107,19 @@ test('runLoggingFailure: a card whose draw throws is logged under its context on
         errorLog,
         context: 'cockpit layer could not draw a card',
     }));
-    const firstResults = drawEveryCard(1);
-    clock.nowUsec += ONE_SECOND_USEC;
-    drawEveryCard(2);
+    let firstResults = null;
+    let thrownMessage = null;
+    try {
+        firstResults = drawEveryCard(1);
+        clock.nowUsec += ONE_SECOND_USEC;
+        drawEveryCard(2);
+    } catch (error) {
+        thrownMessage = error.message;
+    }
     assertEqual({
-        firstResults, drawnCardIds, firstLines: written.map(line => line.split('\n')[0]),
+        thrownMessage, firstResults, drawnCardIds, firstLines: written.map(line => line.split('\n')[0]),
     }, {
+        thrownMessage: null,
         firstResults: [true, false, true],
         drawnCardIds: ['system', 'sessions', 'system', 'sessions'],
         firstLines: [`${LOG_PREFIX} cockpit layer could not draw a card: apps exploded (1)`],

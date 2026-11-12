@@ -398,7 +398,7 @@ export const COCKPIT_ICON_NAMES = Object.freeze({
     working: 'media-playback-start-symbolic',
     blocked: 'dialog-warning-symbolic',
     idle: 'media-playback-pause-symbolic',
-    done: 'emblem-ok-symbolic',
+    done: 'object-select-symbolic',
     unknown: 'dialog-question-symbolic',
     wired: 'network-wired-symbolic',
     wifi: 'network-wireless-symbolic',

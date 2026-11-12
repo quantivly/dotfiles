@@ -9,6 +9,7 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
+import Pango from 'gi://Pango';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -29,12 +30,15 @@ const STAGE_ORIGIN_PX = 0;
 
 export class CockpitTooltip {
     /**
-     * Builds the hidden label and adds it to the top chrome.
+     * Builds the hidden label and adds it to the top chrome. The label ellipsizes each line at its end, so with the
+     * stylesheet's max-width a long line (a mount point, an app's group key) is cut rather than drawn across the
+     * monitor's edge.
      */
     constructor() {
         this._label = new St.Label({
             style_class: TOOLTIP_STYLE_CLASS, visible: false, opacity: TRANSPARENT_OPACITY, reactive: false,
         });
+        this._label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
         this._anchor = null;
         this._anchorDestroyId = null;
         this._text = '';

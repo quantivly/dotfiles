@@ -33,9 +33,9 @@ import {
     SESSIONS_CARD_ROW_LIMIT,
 } from './lib/constants.js';
 import {
-    appsCardTitle, appsRows, canDrawApps, canDrawConnections, canDrawSessions, connectionsCardTitle, connectionsRows,
-    herdrNotRunningText, noDataText, rowBarWidthPx, sessionRows, sessionsCardTitle, sessionsHeader, stateIconName,
-    stateStyleClass,
+    appsCardTitle, appsNoDataText, appsRows, canDrawApps, canDrawConnections, canDrawSessions, connectionsCardTitle,
+    connectionsRows, herdrNotRunningText, noDataText, rowBarWidthPx, sessionRows, sessionsCardTitle, sessionsHeader,
+    stateIconName, stateStyleClass,
 } from './lib/cockpitFormat.js';
 import {SESSION_STATES} from './lib/cockpitProtocol.js';
 
@@ -199,16 +199,18 @@ function appRowContent(name, valueText, fraction, tooltipLines) {
 }
 
 /**
- * What a row of the connections card shows: lib/cockpitFormat.js's connections row.
+ * What a row of the connections card shows: lib/cockpitFormat.js's connections row, its icon's state class with it
+ * (the VPN's: working when up, idle when down or unknown; none for the other rows).
  *
- * @param {{icon: string, text: string, tooltip: string[], fraction: number|null}} connectionRow - One row of
- *     connectionsRows.
+ * @param {{icon: string, iconStyleClass: string|null, text: string, tooltip: string[], fraction: number|null}}
+ *     connectionRow - One row of connectionsRows.
  * @returns {RowContent} The row's content.
  */
 function connectionRowContent(connectionRow) {
     return {
         ...EMPTY_ROW_CONTENT,
         iconName: connectionRow.icon,
+        iconStyleClass: connectionRow.iconStyleClass,
         name: connectionRow.text,
         fraction: connectionRow.fraction,
         tooltipLines: connectionRow.tooltip,
@@ -266,8 +268,9 @@ export function openResourcesApp() {
 /**
  * What every cockpit card shares: the cell's surface and size, the frozen state, the interactive state, the no-data
  * line, and rows with their hover tooltip and click. Each card defines update() with exactly what it draws (ruling
- * D9): the system card a pulse snapshot and its clock label, the apps card a snapshot's apps, the connections card
- * the network and mounts sources, the sessions card the sessions source.
+ * D9): the system card a pulse snapshot and its clock label, the apps card a snapshot's apps and that clock label (for
+ * its no-data line, as the system card's), the connections card the network and mounts sources, the sessions card
+ * the sessions source.
  */
 export const CockpitCardBase = GObject.registerClass(
 class CockpitCardBase extends St.BoxLayout {
@@ -529,9 +532,25 @@ class CockpitCardBase extends St.BoxLayout {
         this._showRowBar(row);
         this._showRowState(row, content);
         if (row.actor.hover && !areSameLines(row.tooltipLines, content.tooltipLines))
-            this._tooltip.showFor(row.actor, content.tooltipLines);
+            this._showHoveredRowTooltip(row, content.tooltipLines);
         row.tooltipLines = content.tooltipLines;
         row.sessionId = content.sessionId;
+    }
+
+    /**
+     * Tells the tooltip a hovered row's new lines: shows them, as entering the row does (_onRowEntered), or, for new
+     * content with none, hides it, rather than showing an empty tooltip or one that describes what the row showed
+     * before.
+     *
+     * @param {CardRow} row - The hovered row.
+     * @param {string[]} tooltipLines - Its new tooltip lines.
+     * @returns {void}
+     */
+    _showHoveredRowTooltip(row, tooltipLines) {
+        if (tooltipLines.length > 0)
+            this._tooltip.showFor(row.actor, tooltipLines);
+        else
+            this._tooltip.hide();
     }
 
     /**
@@ -815,15 +834,17 @@ class AppsCockpitCard extends CockpitCardBase {
     }
 
     /**
-     * Shows the sampler's apps rankings (lib/protocol.js parseAppRanking, in the pulse snapshot).
+     * Shows the sampler's apps rankings (lib/protocol.js parseAppRanking, in the pulse snapshot), or, with none, the
+     * system card's no-data words from the same clock label (lib/cockpitFormat.js appsNoDataText).
      *
      * @param {{cpuRanking: Array<object>|null, memoryRanking: Array<object>|null}|null} apps - The snapshot's apps;
      *     null shows no data.
+     * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data, for "no data since".
      * @returns {void}
      */
-    update(apps) {
+    update(apps, lastGoodClockLabel) {
         if (!canDrawApps(apps)) {
-            this.showNoData(NO_SOURCE_TEXT);
+            this.showNoData(appsNoDataText(lastGoodClockLabel));
             return;
         }
         this._renderUnlessFrozen(() => this._renderApps(apps));

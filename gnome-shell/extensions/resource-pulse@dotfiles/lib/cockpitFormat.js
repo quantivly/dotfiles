@@ -8,7 +8,7 @@ import {
 } from './constants.js';
 import {SESSION_STATES} from './cockpitProtocol.js';
 import {noDataSinceLabel} from './cockpitStaleness.js';
-import {formatGibibytes, formatWholePercent} from './format.js';
+import {formatGibibytes, formatWholePercent, noDataSince} from './format.js';
 
 const MEBIBYTES_PER_GIBIBYTE = 1024;
 const BYTES_PER_MEBIBYTE = 1024 * 1024;
@@ -399,6 +399,27 @@ export function connectionsRows(network, mounts, {limit = CONNECTIONS_CARD_ROW_L
     ];
     const rows = allRows.slice(0, limit);
     return {rows, overflowText: overflowLine(allRows.length - rows.length)};
+}
+
+/**
+ * What the apps card says with no apps to draw: the system card's words (lib/format.js), from the same clock label,
+ * the pulse client's last snapshot with data, so the two cards side by side agree.
+ *
+ * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data, or null before any.
+ * @returns {string} 'no data since HH:MM', or 'no data'.
+ */
+export function appsNoDataText(lastGoodClockLabel) {
+    return noDataSince(lastGoodClockLabel);
+}
+
+/**
+ * A group's caption as the grid draws it: upper-cased in code, since St reads no CSS text-transform.
+ *
+ * @param {string} caption - The layout's caption, in any case.
+ * @returns {string} The caption upper-cased.
+ */
+export function cockpitCaptionText(caption) {
+    return caption.toUpperCase();
 }
 
 /**

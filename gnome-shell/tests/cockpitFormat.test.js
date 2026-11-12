@@ -351,6 +351,16 @@ test('cockpitFormat: the VPN row\'s icon carries the working state\'s class whil
     });
 });
 
+test('cockpitFormat: the apps card with no apps says the system card\'s words from the same clock label: no data ' +
+    'since HH:MM, or no data before any', () =>
+    assertEqual([cockpitFormat.appsNoDataText('14:02'), cockpitFormat.appsNoDataText(null)],
+        ['no data since 14:02', 'no data']));
+
+test('cockpitFormat: a group\'s caption is drawn upper-cased, whatever case the layout gives it (St reads no CSS ' +
+    'text-transform)', () =>
+    assertEqual(['machine', 'Agents', 'WORK', 'Ops · 2'].map(caption => cockpitFormat.cockpitCaptionText(caption)),
+        ['MACHINE', 'AGENTS', 'WORK', 'OPS · 2']));
+
 test('cockpitFormat: noDataText goes through the stub clock; the herdr line is fixed', () => {
     const clock = usec => `T${usec}`;
     assertEqual(cockpitFormat.noDataText(null, clock), 'no data');
@@ -389,6 +399,6 @@ test('cockpitFormat: the connections card draws both sources with the uplink, th
 test('cockpitFormat: state icons and style classes for the five states', () => {
     assertEqual(['working', 'blocked', 'idle', 'done', 'unknown'].map(cockpitFormat.stateIconName), [
         'media-playback-start-symbolic', 'dialog-warning-symbolic', 'media-playback-pause-symbolic',
-        'emblem-ok-symbolic', 'dialog-question-symbolic']);
+        'object-select-symbolic', 'dialog-question-symbolic']);
     assertEqual(cockpitFormat.stateStyleClass('blocked'), 'rp-cockpit-state-blocked');
 });

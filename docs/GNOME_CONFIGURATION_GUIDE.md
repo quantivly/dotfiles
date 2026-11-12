@@ -357,9 +357,10 @@ rested on it for 300 ms.
   NetworkManager reaches the internet only in part; `wired · no internet`, with the offline icon, when not at
   all; `online` when the primary connection is neither, such as a VPN on a full tunnel or a tethered phone
   (its tooltip says so); `offline` with no link; and `uplink unknown` without NetworkManager. Its tooltip
-  gives NetworkManager's verdict, `internet: <connectivity>`. Then the VPN (`VPN up (tun0)` or `VPN down`),
-  the SSH masters (`3 live ssh masters`), then one row per mount: its label and free space, with a bar of the
-  space used, and its mount point, filesystem type and size in the tooltip. Five mounts at most; the rest are
+  gives NetworkManager's verdict, `internet: <connectivity>`. Then the VPN (`VPN up (tun0)` or `VPN down`,
+  its icon teal while up and grey while down or unknown), the SSH masters (`3 live ssh masters`), then one
+  row per mount: its label and free space, with a bar of the space used, and its mount point, filesystem type
+  and size in the tooltip, a line too long for the tooltip cut at its end. Five mounts at most; the rest are
   counted on a `+N more` line.
 - **Sessions** has a header (`SESSIONS`, how many, each state's icon with its count, and their memory in
   all), then up to six sessions, the largest memory first, the rest counted on a `+N more` line. A row shows
@@ -717,7 +718,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1178 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1183 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's

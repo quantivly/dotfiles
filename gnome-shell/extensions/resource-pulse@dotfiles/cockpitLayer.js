@@ -37,6 +37,7 @@ import {AppsCockpitCard, ConnectionsCockpitCard, SessionsCockpitCard, SystemCock
 import {CockpitSourcePacing, drawCockpitDataCard} from './cockpitSourceDrawing.js';
 import {CockpitTooltip} from './cockpitTooltip.js';
 import {COCKPIT_APPS_CARD_ID} from './lib/constants.js';
+import {cockpitCaptionText} from './lib/cockpitFormat.js';
 import {cockpitGridGeometry, drawnCockpitCardIds, drawnCockpitCells} from './lib/cockpitGrid.js';
 import {describeErrorWithStack, runLoggingFailure} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
@@ -56,17 +57,21 @@ const CARD_MAKERS_BY_ID = Object.freeze({
     sessions: ({tooltip, onSessionActivated}) => new SessionsCockpitCard({tooltip, onRowActivated: onSessionActivated}),
 });
 
-/** Gives each card that draws the sampler's snapshot the pulse client's latest, through its update (ruling D9). */
+/**
+ * Gives each card that draws the sampler's snapshot the pulse client's latest, through its update (ruling D9), with the
+ * client's last good clock label, so either card with no data says since when.
+ */
 const SNAPSHOT_CARD_DRAWERS_BY_ID = Object.freeze({
     system: (card, pulseClient) => card.update(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel),
-    apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null),
+    apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null, pulseClient.lastGoodClockLabel),
 });
 
 /**
- * Places an actor at a rectangle of the grid, in the layer's coordinates (the stage's: the layer sits at the
- * background group's origin, which is the stage's).
+ * Places a group's caption at its rectangle of the grid, in the layer's coordinates (the stage's: the layer sits at
+ * the background group's origin, which is the stage's). A card is placed by placeOnMonitor and sized by its own
+ * setCellSize instead.
  *
- * @param {Clutter.Actor} actor - A caption.
+ * @param {St.Label} actor - A group's caption.
  * @param {{x: number, y: number, width: number, height: number}} rect - Its rectangle, in logical pixels.
  * @returns {void}
  */
@@ -302,7 +307,8 @@ class CockpitLayer extends St.Widget {
     }
 
     /**
-     * Keeps one caption per group, each showing its group's caption (set only when it changed).
+     * Keeps one caption per group, each showing its group's caption upper-cased (lib/cockpitFormat.js
+     * cockpitCaptionText; set only when it changed).
      *
      * @param {Array<{caption: string}>} groups - The layout's groups.
      * @returns {void}
@@ -317,8 +323,9 @@ class CockpitLayer extends St.Widget {
         }
         groups.forEach((group, groupIndex) => {
             const captionLabel = this._captionLabels[groupIndex];
-            if (captionLabel.text !== group.caption)
-                captionLabel.text = group.caption;
+            const captionText = cockpitCaptionText(group.caption);
+            if (captionLabel.text !== captionText)
+                captionLabel.text = captionText;
         });
     }
 
@@ -340,14 +347,16 @@ class CockpitLayer extends St.Widget {
     }
 
     /**
-     * Gives the apps card a pulse snapshot's apps, guarded (_guardCardDraw; the client tells snapshot listeners only
-     * while the detail watch is wanted, and the latest once when it becomes wanted).
+     * Gives the apps card a pulse snapshot's apps and the client's last good clock label, guarded (_guardCardDraw;
+     * the client tells snapshot listeners only while the detail watch is wanted, and the latest once when it becomes
+     * wanted).
      *
      * @param {import('./pulseClient.js').Snapshot|null} snapshot - The latest snapshot.
      * @returns {void}
      */
     _onSnapshot(snapshot) {
-        this._guardCardDraw(() => this._cardsById.get(COCKPIT_APPS_CARD_ID)?.update(snapshot?.apps ?? null));
+        const appsCard = this._cardsById.get(COCKPIT_APPS_CARD_ID);
+        this._guardCardDraw(() => appsCard?.update(snapshot?.apps ?? null, this._pulseClient.lastGoodClockLabel));
     }
 
     /**
