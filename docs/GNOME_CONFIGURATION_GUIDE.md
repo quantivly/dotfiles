@@ -162,10 +162,9 @@ top bar is shown. The card is drawn through an offscreen texture, so a window dr
 repaint it. Whether the card is covered is checked again on window changes, on the covering window's own
 moves, and on a sample: every one while the card is visible, every fifteenth while it is covered. Only
 while the service is silent and the card covered (with the cockpit, every card of the grid) does a
-10-second check run. The cockpit adds no repeating timer: its service's `Changed` reaches the shell only
-while a card of the grid or the dropdown can be seen, and waits for the next sample; a one-shot 3-second
-timeout, which that sample removes, draws it only when the sampler is silent. The budgets, and the request
-that checks them: [What it costs](#what-it-costs).
+10-second check run. The cockpit adds no repeating timer; when it draws a change is under "Freshness" in
+[Drawing the cockpit](#drawing-the-cockpit). The budgets, and the request that checks them:
+[What it costs](#what-it-costs).
 
 **The dropdown.** Clicking the top-bar graphs opens a dropdown holding a second card, live while it is
 open; under it, once the cockpit service has answered, the cockpit's sessions card
@@ -183,8 +182,9 @@ service owns its name). A unit systemd skips for want of the config file, or has
 until the next enable.
 
 **What it serves.** `cockpit.service` (`gjs -m service/cockpit.js`) is a second systemd user unit, apart
-from the sampler, so a cockpit deploy never restarts the sampler or resets its histories. It serves JSON on
-the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
+from the sampler, so a cockpit deploy leaves the sampler and its histories alone, unless the change touches
+a module the sampler imports too, such as `lib/constants.js`: `./install` then restarts both. It serves JSON
+on the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
 `/io/github/quantivly/dotfiles/Cockpit1`:
 
 - `GetState`: the layout, the config error (null when there is none), and three sources, each stamped with
@@ -319,6 +319,25 @@ With the cockpit service configured, the extension draws its layout as a grid of
 desktop, behind every window, and the desktop card moves into the grid. The top bar and its dropdown stay
 where they are.
 
+**Turning it on**, in this order:
+
+1. Fast-forward the checkout: `git -C ~/.dotfiles fetch origin main`, then
+   `git -C ~/.dotfiles merge --ff-only origin/main`.
+2. `bash ~/.dotfiles/install`. It links the cockpit's unit and restarts each running service whose code
+   changed, the sampler too when a module it imports changed ([The cockpit service](#the-cockpit-service)).
+3. Make the config from the template: `mkdir -p ~/.config/resource-pulse`, then
+   `cp ~/.dotfiles/examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json`.
+4. In `~/.gnome-settings.local`, uncomment the template's "Cockpit" block: `gdisable_extension
+   ding@rastersoft.com` and the background `gset` lines.
+5. `gnome-apply`. ding goes and the background turns solid at this step, not at the login; until the login
+   the desktop card stays top right.
+6. Log out and in.
+7. `gnome-status` says `cockpit: active, protocol 1, …`.
+
+A file made after the login needs no new login: `systemctl --user start cockpit.service` draws the grid
+([Opt-in by file](#the-cockpit-service)). The template's layout names cards of later stages, so four of its
+eight cells are empty by design.
+
 **Where.** The cockpit monitor is the one the config's `monitor` block names, its `vendor` and `product`
 both equal to what Mutter's DisplayConfig reports; else the only monitor; else the largest one that is not
 primary. It is chosen again whenever the monitors change, so an undock moves the grid to the monitor that is
@@ -384,28 +403,28 @@ most once in 10 minutes for each reason ([Checking that it runs](#checking-that-
 
 **Freshness.** Each card is judged covered on its own, as the desktop card is, on the cockpit monitor. A
 covered card is frozen and dimmed, and repainted, still dimmed, at most every 30 seconds; a revealed card
-(`Super+D` reveals them all) draws the latest at once. Only while a card of the grid can be seen outside
-the overview, or while the dropdown is open, does the extension hold the cockpit service's watch (which
-samples the sessions at once, then every 10 s rather than 60: the sessions a reveal draws at once give way
-to those sampled at the reveal from the next sample on) and follow its `Changed`. A change is drawn on the
-next sample, about 2 seconds later, or by itself after 3 seconds if the sampler is silent. A source the service
-stopped refreshing reads `no data since HH:MM` on its card, the time of its last sample. If the cockpit
-service goes away the grid stays: the system and apps cards keep drawing from the sampler, the others say
-`no data since HH:MM`, and the extension starts the service again at its next enable (systemd restarts
-one that crashed before then).
+(`Super+D` reveals them all) draws at once the latest the extension holds. Only while a card of the grid
+can be seen outside the overview, or while the dropdown is open, does the extension hold the cockpit
+service's watch (which samples the sessions at once, then every 10 s rather than 60: the sessions a reveal
+draws at once give way to those sampled at the reveal from the next sample on) and follow its `Changed`. A
+change is drawn on the next sample, about 2 seconds later, or, by a one-shot timeout, after 3 seconds if the
+sampler is silent. A source the service stopped refreshing makes its whole card give way to
+`no data since HH:MM`, the oldest last sample of the card's sources: a stale mounts source hides the uplink,
+VPN and SSH rows too. If the cockpit service goes away the grid stays: the system and apps cards keep drawing
+from the sampler, the others say `no data since HH:MM`, and the extension starts the service again at its next
+enable (systemd restarts one that crashed before then).
 
 **The dropdown** shows the sessions card under its system card once the cockpit service has answered, with
-the same rows and tooltips, live while the menu is open. A row's click closes the menu, then takes you to
-the session.
+the same rows and tooltips, live while the menu is open: it opens on the sessions the extension holds, and
+those sampled as it opens follow within a few seconds. A row's click closes the menu, then takes you to the
+session.
 
 **Hover, clicks and ding.** The cards take the pointer only while no desktop-icons window (ding's) shows on
 the cockpit monitor, since that window would take the clicks. With ding on they are display-only: no
-tooltip, no click, and frozen while covered, as the desktop card always was. To turn ding off, and the
-wallpaper into a solid `#121a1a` on the desktop and the lock screen, put
-`gdisable_extension ding@rastersoft.com` and the background `gset` lines in `~/.gnome-settings.local` (the
-template's "Cockpit" block has them, commented), run `gnome-apply`, and log out and in once.
-`gdisable_extension` appends the uuid to `disabled-extensions` and removes it from `enabled-extensions`.
-Turning ding off costs the desktop's right-click menu.
+tooltip and no click. Turning ding off, and the wallpaper into a solid `#121a1a` on the desktop and the lock
+screen, are steps 4 and 5 of turning the cockpit on (above). `gdisable_extension` appends the uuid to
+`disabled-extensions` and removes it from `enabled-extensions`. Turning ding off costs the desktop's
+right-click menu.
 
 **Without the file,** a colleague sees the previous release exactly: the card top right of the primary
 monitor, and the dropdown with its system card and **Open Resources**. systemd skips the unit at each
@@ -507,8 +526,8 @@ Resource Pulse: linked=yes enabled=yes state=ACTIVE
 The service logs to its unit's journal, `journalctl --user -u resource-pulse.service`; the extension
 logs under `resource-pulse:` in the shell's, `journalctl --user -b -g resource-pulse`. Each distinct
 message appears at most once per 10 minutes. The cockpit service logs to its own unit's journal,
-`journalctl --user -u cockpit.service`, every line prefixed `cockpit:`. The cockpit's lines in the shell's
-journal:
+`journalctl --user -u cockpit.service`, every line prefixed `cockpit:`. Among the cockpit's lines in the
+shell's journal:
 
 - `resource-pulse: could not draw the cockpit layer, so the card is drawn top right: <error>`: the grid
   could not be built, rebuilt or placed from the service's layout ([Drawing the cockpit](#drawing-the-cockpit)).

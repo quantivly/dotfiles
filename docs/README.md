@@ -102,4 +102,6 @@ skill rather than reading the records end to end.
 ## Not indexed
 
 `docs/plans/` and `docs/superpowers/` hold working material rather than reference pages, and the
-reachability guard skips them deliberately.
+reachability guard skips them deliberately. One design is linked from here because it asks to be, Resource
+Pulse's desktop cockpit:
+[2026-11-09-desktop-cockpit-design.md](superpowers/specs/2026-11-09-desktop-cockpit-design.md).
