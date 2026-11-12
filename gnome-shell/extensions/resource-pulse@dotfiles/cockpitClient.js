@@ -62,8 +62,9 @@
 // - Staleness is decided by pulling, not by a timer (ruling R14): pullIfSuspicious(name) asks GetState once per
 //   interval while lib/cockpitStaleness.js suspects a source, stamping when it asked and when the answer came; a pull
 //   that answers the same old stamp makes the source stale. A GetState that fails completes the pull too (ruling D6),
-//   so a service that keeps its name but hangs reads stale. With no owner a pull asks nobody and completes at once,
-//   and an owner leaving while a pull waits completes that pull as a failed GetState does.
+//   so a service that keeps its name but hangs reads stale. With no owner a pull asks nobody and completes at once
+//   (and is told only while the source did not read stale already), and an owner leaving while a pull waits completes
+//   that pull as a failed GetState does.
 //   A source whose stamp changes, by any answer or Changed, has both pull stamps cleared (ruling D5): a refreshed
 //   source starts a new suspicion cycle, and reads stale only after a pull of that cycle answers its new stamp. A stamp
 //   that moved back (the wall clock stepped back) counts as a change too: the old pull stamps, taken on the old clock,
@@ -75,8 +76,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {
-    CockpitClientEventType, CockpitClientState, CockpitSourcesCause, DBUS_CALL_TIMEOUT_MS, LOG_PREFIX,
-    START_CONFIRMATION_TIMEOUT_SECONDS,
+    COCKPIT_SESSION_ID_MAX_CHARS, CockpitClientEventType, CockpitClientState, CockpitSourcesCause,
+    DBUS_CALL_TIMEOUT_MS, LOG_PREFIX, START_CONFIRMATION_TIMEOUT_SECONDS,
 } from './lib/constants.js';
 import {
     COCKPIT_BUS_NAME, COCKPIT_CHANGED_SIGNAL_NAME, COCKPIT_CHANGED_SIGNAL_SIGNATURE, COCKPIT_FOCUS_ERROR,
@@ -699,7 +700,8 @@ export class CockpitClient {
      * after a later pull answers that same stamp. With no owner it asks nobody: the pull completes at once, so a
      * suspect source reads stale. A GetState that fails, or answers no readable state, completes the pull too (ruling
      * D6): it is logged once per key, the completion is stamped and the source told, so a service that keeps its name
-     * but hangs reads stale; the next interval asks again.
+     * but hangs reads stale; the next interval asks again. With no owner, a source that already reads stale is not
+     * told again: nothing about it changed, so its card is not redrawn every interval while the service is gone.
      *
      * @param {string} sourceName - One of COCKPIT_SOURCE_NAMES.
      * @returns {Promise<{pulled: boolean}>} Settles once the pull did (never rejects): pulled is true when one was
@@ -711,10 +713,14 @@ export class CockpitClient {
         const pullStamps = this._pullStampsBySourceName.get(sourceName);
         pullStamps.requestedAtUsec = this._nowRealUsec();
         if (this._nameOwner === null) {
+            // Read before the completion is stamped, which is what makes a suspect source stale.
+            const wasStale = this.sourceFreshness(sourceName).isStale;
             pullStamps.completedAtUsec = pullStamps.requestedAtUsec;
-            this._notifyListeners({
-                type: CockpitClientEventType.SOURCES, names: [sourceName], cause: CockpitSourcesCause.PULL,
-            });
+            if (!wasStale) {
+                this._notifyListeners({
+                    type: CockpitClientEventType.SOURCES, names: [sourceName], cause: CockpitSourcesCause.PULL,
+                });
+            }
             return Promise.resolve({pulled: true});
         }
         return new Promise(resolve => {
@@ -730,12 +736,14 @@ export class CockpitClient {
      * @param {string} sessionId - The session row's id.
      * @returns {Promise<{focused: boolean|null, windowPid: number|null, error: string|null,
      *     windowPidCandidates: number[]}>} The reply as lib/cockpitProtocol.js parseFocusSessionReply reads it. Never
-     *     rejects: a call that fails (no owner included), a reply that cannot be read, no link yet, an id that is not
-     *     a string or a destroyed client give the internal reply, the failures logged at most once per 10 minutes.
+     *     rejects: a call that fails (no owner included), a reply that cannot be read, no link yet, an id that no
+     *     session row can have (not a string, or longer than COCKPIT_SESSION_ID_MAX_CHARS) or a destroyed client give
+     *     the internal reply, the failures logged at most once per 10 minutes.
      */
     focusSession(sessionId) {
-        if (this._isDestroyed || this._link === null || typeof sessionId !== 'string') {
-            this._logFocusSessionFailure('the client is not following the cockpit, or the id is not a string');
+        const isSessionRowId = typeof sessionId === 'string' && [...sessionId].length <= COCKPIT_SESSION_ID_MAX_CHARS;
+        if (this._isDestroyed || this._link === null || !isSessionRowId) {
+            this._logFocusSessionFailure('the client is not following the cockpit, or the id is no session row\'s');
             return Promise.resolve(internalFocusSessionReply());
         }
         const focusSessionParameters = new GLib.Variant(FOCUS_SESSION_PARAMETERS_SIGNATURE, [sessionId]);
@@ -1226,8 +1234,8 @@ export class CockpitClient {
     /**
      * Takes a state whole: the layout, the config error and every source replace the client's (a source the answer
      * refreshed has both pull stamps cleared), the pulled sources' completion is stamped (except where that clearing
-     * ended the pull's cycle), a first read's retry is removed, and the client is LIVE. Then tells, in order, the state,
-     * the layout (if it changed) and the sources that changed or were pulled, with the call's cause.
+     * ended the pull's cycle), a first read's retry is removed, and the client is LIVE. Then tells, in order, the
+     * state, the layout (if it changed) and the sources that changed or were pulled, with the call's cause.
      *
      * @param {object} state - lib/cockpitProtocol.js parseCockpitStatePayload's result.
      * @param {string[]} pulledSourceNames - The sources whose pulls this answer completes.

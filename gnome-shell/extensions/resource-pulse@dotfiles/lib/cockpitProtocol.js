@@ -14,13 +14,16 @@
 // - a field that is missing, or not of its type, is null for that field alone, so only its own row shows no data;
 // - a list entry without what identifies and names it (a session row, a mount row, a layout group) is dropped, and
 //   the rest of the list kept;
-// - an id longer than COCKPIT_ID_MAX_CHARS reads as null, and a mount row whose mount point is longer than
-//   COCKPIT_PATH_MAX_CHARS is dropped;
+// - a session row's workspace or pane id longer than COCKPIT_ID_MAX_CHARS reads as null; a session row whose own id
+//   is longer than COCKPIT_SESSION_ID_MAX_CHARS, and a mount row whose mount point is longer than
+//   COCKPIT_PATH_MAX_CHARS, are dropped;
 // - a FocusSession reply's window candidates keep their counts, at most FOCUS_WINDOW_PID_CANDIDATES_MAX of them, and
 //   read as none when missing or not a list;
 // - text that is not JSON, or JSON that is not an object, parses to null as a whole.
 // A breaking change needs a new interface, Cockpit2, served beside this one.
-import {COCKPIT_ID_MAX_CHARS, COCKPIT_PATH_MAX_CHARS, FOCUS_WINDOW_PID_CANDIDATES_MAX} from './constants.js';
+import {
+    COCKPIT_ID_MAX_CHARS, COCKPIT_PATH_MAX_CHARS, COCKPIT_SESSION_ID_MAX_CHARS, FOCUS_WINDOW_PID_CANDIDATES_MAX,
+} from './constants.js';
 import {
     booleanOrNull, countOrNull, enumOrNull, finiteNumberOrNull, isPlainObject, nonNegativeNumberOrNull, parseJsonObject,
     stringOrNull,
@@ -414,14 +417,14 @@ function parseSessionStateCounts(value) {
  * @param {*} value - A parsed JSON value.
  * @returns {{id: string, name: string, state: string, idleSeconds: number|null, idleFromProcessAge: boolean|null,
  *     memoryBytes: number|null, workspaceId: string|null, paneId: string|null, account: string|null,
- *     contextPercent: number|null}|null} The row; null unless an object with a non-empty string id, a non-empty
- *     string name and a state from SESSION_STATES. `workspaceId` and `paneId` are null when longer than
- *     COCKPIT_ID_MAX_CHARS.
+ *     contextPercent: number|null}|null} The row; null unless an object with a non-empty string id of at most
+ *     COCKPIT_SESSION_ID_MAX_CHARS, a non-empty string name and a state from SESSION_STATES. `workspaceId` and
+ *     `paneId` are null when longer than COCKPIT_ID_MAX_CHARS.
  */
 function parseSessionRow(value) {
     if (!isPlainObject(value))
         return null;
-    const id = nonEmptyStringOrNull(value.id);
+    const id = nonEmptyStringOrNull(boundedStringOrNull(value.id, COCKPIT_SESSION_ID_MAX_CHARS));
     const name = nonEmptyStringOrNull(value.name);
     const state = enumOrNull(value.state, SESSION_STATES);
     if (id === null || name === null || state === null)

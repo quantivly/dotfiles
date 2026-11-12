@@ -1,8 +1,8 @@
 // Typed readers of untrusted JSON values, shared by every protocol module. Each returns the value when it is of its
 // type and range, and null otherwise, so a reader can treat a missing or mistyped field as no data for that field alone.
 // Also isSameAsJson: how the cockpit client tells a layout or a source that changed, which the extension's wiring
-// (lib/cockpitWiring.js) uses to tell the layout that failed to build. Pure: no Gio and no Shell import, so it runs
-// under plain gjs.
+// (lib/cockpitWiring.js) uses to tell the layout that failed to build, and the cockpit service a fixture's change.
+// Pure: no Gio and no Shell import, so it runs under plain gjs.
 
 /**
  * Parses JSON text whose top level must be an object.

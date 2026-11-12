@@ -503,6 +503,27 @@ test('herdrSocket: a server that never answers rejects at the timeout (timeout),
             'the client closed its connection');
     }));
 
+test('herdrSocket: a request given its own timeoutMs is bounded by it rather than by the client\'s', () =>
+    withFakeHerdr({isSilent: true}, async server => {
+        const client = new herdrSocket.HerdrSocketClient({socketPath: server.socketPath, timeoutMs: LONG_TIMEOUT_MS});
+        const {errorMessage, errorCode, elapsedMs} =
+            await outcomeOf(client.request(SNAPSHOT_METHOD, {}, {timeoutMs: SHORT_TIMEOUT_MS}));
+        assertEqual([errorMessage, errorCode], [`herdr: timed out after ${SHORT_TIMEOUT_MS} ms`, 'timeout']);
+        assertEqual(elapsedMs < PROMPT_FAILURE_BOUND_MS, true, `rejected after ${elapsedMs} ms`);
+    }));
+
+test('herdrSocket: FocusSession\'s two herdr requests, each at HERDR_FOCUS_REQUEST_TIMEOUT_MS, and the margin left ' +
+    'for its /proc scan and the bus fit under the client\'s DBUS_CALL_TIMEOUT_MS, so a slow herdr is answered ' +
+    'herdr-unreachable before the client gives up', () => {
+    const {HERDR_FOCUS_REQUEST_TIMEOUT_MS, FOCUS_SESSION_REPLY_MARGIN_MS, DBUS_CALL_TIMEOUT_MS} = constants;
+    const focusSessionBudgetMs = 2 * HERDR_FOCUS_REQUEST_TIMEOUT_MS + FOCUS_SESSION_REPLY_MARGIN_MS;
+    assertEqual({
+        areWholePositiveMs: [HERDR_FOCUS_REQUEST_TIMEOUT_MS, FOCUS_SESSION_REPLY_MARGIN_MS]
+            .map(valueMs => Number.isSafeInteger(valueMs) && valueMs > 0),
+        fitsUnderTheClientsTimeout: focusSessionBudgetMs < DBUS_CALL_TIMEOUT_MS,
+    }, {areWholePositiveMs: [true, true], fitsUnderTheClientsTimeout: true});
+});
+
 test('herdrSocket: no socket file rejects at once (no-socket) with a herdr: error naming the path', async () => {
     const paths = makeFakeConfigHome();
     try {

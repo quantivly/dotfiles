@@ -223,6 +223,12 @@ export const COCKPIT_REDACTED_NAME = '—';
  * reads as null, so another program's runaway string cannot ride an id onto the bus.
  */
 export const COCKPIT_ID_MAX_CHARS = 128;
+/**
+ * Longest session row id, in characters, a cockpit reader passes: the id is "<workspace>:<pane>" at its longest (the
+ * pane id alone, or a Claude session id, when herdr gives less), so two COCKPIT_ID_MAX_CHARS ids and the colon. A row
+ * with a longer id is dropped, and the client's focusSession refuses one.
+ */
+export const COCKPIT_SESSION_ID_MAX_CHARS = 2 * COCKPIT_ID_MAX_CHARS + 1;
 /** Longest path, in characters, a cockpit reader passes (a mount row's mount point); a longer one drops its row. */
 export const COCKPIT_PATH_MAX_CHARS = 1024;
 /** Prefix of every journal line the cockpit service writes. */
@@ -249,6 +255,17 @@ export const ROUTE_FLAG_GATEWAY = 0x0002;
  * instead of stalling the service.
  */
 export const HERDR_REQUEST_TIMEOUT_MS = 2000;
+/**
+ * Milliseconds the cockpit service waits for herdr to answer each of FocusSession's two focus requests (workspace, then
+ * pane): shorter than HERDR_REQUEST_TIMEOUT_MS, so that twice it, with FOCUS_SESSION_REPLY_MARGIN_MS, fits under the
+ * client's DBUS_CALL_TIMEOUT_MS and a slow herdr is answered herdr-unreachable before the client gives up.
+ */
+export const HERDR_FOCUS_REQUEST_TIMEOUT_MS = 750;
+/**
+ * Milliseconds FocusSession leaves, after its two focus requests and under the client's DBUS_CALL_TIMEOUT_MS, for its
+ * /proc scan for the window candidates and the bus's round trips.
+ */
+export const FOCUS_SESSION_REPLY_MARGIN_MS = 400;
 /** herdr's API socket's path under the user's config home (XDG_CONFIG_HOME). */
 export const HERDR_SOCKET_RELATIVE_PATH = 'herdr/herdr.sock';
 /** Where the kernel lists its processes: one directory per pid, named by the pid. */
@@ -321,7 +338,7 @@ export const COCKPIT_GRID_REFERENCE = Object.freeze({
 export const COCKPIT_GRID_MIN_SCALE = 0.5;
 /** The largest factor the cockpit grid grows to, however large the monitor. */
 export const COCKPIT_GRID_MAX_SCALE = 2;
-/** The card ids the cockpit draws; any other id in the layout still gets a cell, drawn as a placeholder. */
+/** The card ids the cockpit draws; any other id in the layout still gets a cell, which stays empty. */
 export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'sessions'];
 /** The system card's id: the v2 card's cell. With no cockpit layout the v2 card, top right, is checked under it. */
 export const COCKPIT_SYSTEM_CARD_ID = 'system';
@@ -377,6 +394,7 @@ export const COCKPIT_ICON_NAMES = Object.freeze({
     wired: 'network-wired-symbolic',
     wifi: 'network-wireless-symbolic',
     offline: 'network-offline-symbolic',
+    online: 'network-transmit-receive-symbolic',
     vpn: 'network-vpn-symbolic',
     ssh: 'utilities-terminal-symbolic',
     mountRemovable: 'drive-removable-media-symbolic',

@@ -88,7 +88,7 @@ export function cockpitGridGeometry({workArea, groups}) {
 
 /**
  * @param {string} cardId - A card id from the layout.
- * @returns {boolean} True when the cockpit draws this card (COCKPIT_DRAWN_CARD_IDS); other ids get a placeholder cell.
+ * @returns {boolean} True when the cockpit draws this card (COCKPIT_DRAWN_CARD_IDS); other ids get a cell left empty.
  */
 export function isKnownCockpitCard(cardId) {
     return COCKPIT_DRAWN_CARD_IDS.includes(cardId);

@@ -10,14 +10,29 @@ import {SESSION_STATES} from './cockpitProtocol.js';
 import {noDataSinceLabel} from './cockpitStaleness.js';
 import {formatGibibytes, formatWholePercent} from './format.js';
 
+const MEBIBYTES_PER_GIBIBYTE = 1024;
 const BYTES_PER_MEBIBYTE = 1024 * 1024;
-const BYTES_PER_GIBIBYTE = 1024 * BYTES_PER_MEBIBYTE;
 const NO_VALUE_TEXT = COCKPIT_REDACTED_NAME;
 const MEMORY_TOOLTIP_NOTE = 'memory: process only; MCP servers and tool shells not counted';
 const PROCESS_AGE_MARK = '*';
 const STATES_THAT_DIM_WHEN_LONG_IDLE = ['idle', 'done'];
+/** A session state's word where the spec's differs from herdr's enum word; any other state reads as herdr's word. */
+const SESSION_STATE_WORD_BY_STATE = Object.freeze({blocked: 'waiting on you'});
 const CONNECTIVITY_UNKNOWN = 'unknown';
 const SEPARATOR = ' · ';
+/** NetworkManager's connectivity verdicts that reach the internet only in part: named after the link's kind. */
+const PARTIAL_CONNECTIVITY_STATES = ['limited', 'portal'];
+/** NetworkManager's connectivity verdicts that reach the internet, fully or in part. */
+const REACHABLE_CONNECTIVITY_STATES = ['full', ...PARTIAL_CONNECTIVITY_STATES];
+/** What a wired or Wi-Fi uplink says, after its kind, when NetworkManager finds no route to the internet. */
+const NO_INTERNET_TEXT = 'no internet';
+/** What an uplink that is neither wired nor Wi-Fi says while it reaches the internet. */
+const ONLINE_TEXT = 'online';
+const OFFLINE_TEXT = 'offline';
+/** What the uplink row says when nothing is known of it (no NetworkManager on the system bus). */
+const UPLINK_UNKNOWN_TEXT = 'uplink unknown';
+/** The uplink tooltip's line for a primary connection that is neither wired nor Wi-Fi (a VPN, a tethered phone). */
+const OTHER_PRIMARY_CONNECTION_NOTE = 'primary connection: neither wired nor Wi-Fi';
 /** What the sessions card says when herdr is not running. */
 export const herdrNotRunningText = 'herdr not running';
 /** The apps card's title. */
@@ -28,17 +43,18 @@ export const connectionsCardTitle = 'CONNECTIONS';
 export const sessionsCardTitle = 'SESSIONS';
 
 /**
- * Formats a memory size: GiB with one decimal from 1 GiB up, whole MiB below.
+ * Formats a memory size: GiB with one decimal from what rounds to 1024 MiB up, whole MiB below.
  *
  * @param {number|null} bytes - Size in bytes.
- * @returns {string} '1.2G', '340M', or '—' when unknown.
+ * @returns {string} '1.2G', '340M', or '—' when unknown; never '1024M'.
  */
 function memoryText(bytes) {
     if (bytes === null)
         return NO_VALUE_TEXT;
-    if (bytes >= BYTES_PER_GIBIBYTE)
+    const roundedMebibytes = Math.round(bytes / BYTES_PER_MEBIBYTE);
+    if (roundedMebibytes >= MEBIBYTES_PER_GIBIBYTE)
         return `${formatGibibytes(bytes)}G`;
-    return `${Math.round(bytes / BYTES_PER_MEBIBYTE)}M`;
+    return `${roundedMebibytes}M`;
 }
 
 /**
@@ -198,10 +214,11 @@ export function sessionRows(sessions) {
  * @param {{state: string}} row - A session row.
  * @param {{account: string|null, contextPercent: number|null, paneId: string|null}} details - What the source
  *     published.
- * @returns {string[]} The state word, the pane, the account and context when known, and the memory caveat.
+ * @returns {string[]} The state's word (sessionStateWord), the pane, the account and context when known, and the
+ *     memory caveat.
  */
 export function sessionTooltip(row, {account, contextPercent, paneId}) {
-    const lines = [row.state];
+    const lines = [sessionStateWord(row.state)];
     if (isPresent(paneId))
         lines.push(`pane ${paneId}`);
     if (isPresent(account))
@@ -242,27 +259,69 @@ export function appsRows(apps, {limit = APPS_CARD_ROW_LIMIT} = {}) {
 }
 
 /**
- * The uplink row: wired, wifi or offline, with the connectivity word in the tooltip.
+ * How a wired or Wi-Fi uplink looks, from its kind and NetworkManager's connectivity verdict: full (or no verdict) is
+ * the kind alone, docked reading 'wired · wifi off'; limited and portal keep the kind's icon and name the verdict after
+ * it; none is the offline icon and '<kind> · no internet'.
  *
- * @param {{kind: string, connectivity: string|null, wifiEnabled: boolean|null}} uplink - The uplink.
- * @returns {object} A connections row of kind 'uplink'.
+ * @param {{kind: string, connectivity: string|null, wifiEnabled: boolean|null}} uplink - A wired or Wi-Fi uplink.
+ * @returns {{icon: string, text: string, tooltipNote: null}} The row's icon and words; no tooltip note.
  */
-function uplinkRow(uplink) {
-    let icon = COCKPIT_ICON_NAMES.offline;
-    let text = 'offline';
-    if (uplink.kind === 'wired') {
-        icon = COCKPIT_ICON_NAMES.wired;
-        text = uplink.wifiEnabled === false ? `wired${SEPARATOR}wifi off` : 'wired';
-    } else if (uplink.kind === 'wifi') {
-        icon = COCKPIT_ICON_NAMES.wifi;
-        text = 'wifi';
+function linkedUplinkLook(uplink) {
+    const kindIcon = uplink.kind === 'wired' ? COCKPIT_ICON_NAMES.wired : COCKPIT_ICON_NAMES.wifi;
+    if (uplink.connectivity === 'none') {
+        const noInternetText = `${uplink.kind}${SEPARATOR}${NO_INTERNET_TEXT}`;
+        return {icon: COCKPIT_ICON_NAMES.offline, text: noInternetText, tooltipNote: null};
     }
-    const connectivityWord = uplink.connectivity ?? CONNECTIVITY_UNKNOWN;
-    return {kind: 'uplink', icon, text, tooltip: [`internet: ${connectivityWord}`], fraction: null};
+    if (PARTIAL_CONNECTIVITY_STATES.includes(uplink.connectivity))
+        return {icon: kindIcon, text: `${uplink.kind}${SEPARATOR}${uplink.connectivity}`, tooltipNote: null};
+    const isDockedWithWifiOff = uplink.kind === 'wired' && uplink.wifiEnabled === false;
+    return {icon: kindIcon, text: isDockedWithWifiOff ? `wired${SEPARATOR}wifi off` : uplink.kind, tooltipNote: null};
 }
 
 /**
- * The VPN row.
+ * How an uplink that is neither wired nor Wi-Fi looks (kind none: a VPN on a full tunnel, a tethered phone; or a
+ * kind the reader did not know): 'online' while the verdict says the internet is reachable, the part named when it is
+ * limited or portal, and offline otherwise.
+ *
+ * @param {{kind: string|null, connectivity: string|null}} uplink - The uplink.
+ * @returns {{icon: string, text: string, tooltipNote: string|null}} The row's icon and words, and the tooltip line
+ *     that says the primary connection is neither wired nor Wi-Fi (kind none, online only).
+ */
+function otherUplinkLook(uplink) {
+    if (!REACHABLE_CONNECTIVITY_STATES.includes(uplink.connectivity))
+        return {icon: COCKPIT_ICON_NAMES.offline, text: OFFLINE_TEXT, tooltipNote: null};
+    const isPartial = PARTIAL_CONNECTIVITY_STATES.includes(uplink.connectivity);
+    const text = isPartial ? `${ONLINE_TEXT}${SEPARATOR}${uplink.connectivity}` : ONLINE_TEXT;
+    const tooltipNote = uplink.kind === 'none' ? OTHER_PRIMARY_CONNECTION_NOTE : null;
+    return {icon: COCKPIT_ICON_NAMES.online, text, tooltipNote};
+}
+
+/**
+ * The uplink row: what kind of link it is and whether the internet is reachable over it (linkedUplinkLook,
+ * otherUplinkLook), or 'uplink unknown' when nothing is known of it; NetworkManager's verdict in the tooltip.
+ *
+ * @param {{kind: string|null, connectivity: string|null, wifiEnabled: boolean|null}} uplink - The uplink.
+ * @returns {object} A connections row of kind 'uplink'.
+ */
+function uplinkRow(uplink) {
+    const connectivityWord = uplink.connectivity ?? CONNECTIVITY_UNKNOWN;
+    const tooltip = [`internet: ${connectivityWord}`];
+    if (uplink.kind === null && uplink.connectivity === null) {
+        return {
+            kind: 'uplink', icon: COCKPIT_ICON_NAMES.unknown, text: UPLINK_UNKNOWN_TEXT, tooltip, fraction: null,
+            iconStyleClass: null,
+        };
+    }
+    const isWiredOrWifi = uplink.kind === 'wired' || uplink.kind === 'wifi';
+    const {icon, text, tooltipNote} = isWiredOrWifi ? linkedUplinkLook(uplink) : otherUplinkLook(uplink);
+    if (tooltipNote !== null)
+        tooltip.push(tooltipNote);
+    return {kind: 'uplink', icon, text, tooltip, fraction: null, iconStyleClass: null};
+}
+
+/**
+ * The VPN row. Its icon carries a state's class, so up and down differ by more than their words: the working state's
+ * while the tunnel is up, the idle state's while it is down or unknown.
  *
  * @param {{isUp: boolean|null, interfaceName: string|null}} vpn - The VPN state.
  * @returns {object} A connections row of kind 'vpn'.
@@ -273,7 +332,8 @@ function vpnRow(vpn) {
         text = vpn.interfaceName ? `VPN up (${vpn.interfaceName})` : 'VPN up';
     else if (vpn.isUp === false)
         text = 'VPN down';
-    return {kind: 'vpn', icon: COCKPIT_ICON_NAMES.vpn, text, tooltip: [text], fraction: null};
+    const iconStyleClass = stateStyleClass(vpn.isUp === true ? 'working' : 'idle');
+    return {kind: 'vpn', icon: COCKPIT_ICON_NAMES.vpn, text, tooltip: [text], fraction: null, iconStyleClass};
 }
 
 /**
@@ -291,11 +351,12 @@ function sshRow(sshMasterCount) {
         text = 'no ssh masters';
     else if (sshMasterCount === 1)
         text = '1 live ssh master';
-    return {kind: 'ssh', icon: COCKPIT_ICON_NAMES.ssh, text, tooltip: [text], fraction: null};
+    return {kind: 'ssh', icon: COCKPIT_ICON_NAMES.ssh, text, tooltip: [text], fraction: null, iconStyleClass: null};
 }
 
 /**
- * One mount's row: label and free space, the used share as its fraction.
+ * One mount's row: label and free space, the used share as its fraction. The tooltip gives the mount point, the
+ * filesystem type when known, and the sizes when known.
  *
  * @param {object} mount - A mount row of a mounts source.
  * @returns {object} A connections row of kind 'mount'.
@@ -303,7 +364,9 @@ function sshRow(sshMasterCount) {
 function mountRow(mount) {
     const areSizesKnown = mount.freeBytes !== null && mount.totalBytes !== null && mount.totalBytes > 0;
     const freeText = mount.freeBytes === null ? null : `${formatGibibytes(mount.freeBytes)}G`;
-    const tooltip = [mount.mountPoint, mount.filesystemType];
+    const tooltip = [mount.mountPoint];
+    if (isPresent(mount.filesystemType))
+        tooltip.push(mount.filesystemType);
     if (areSizesKnown)
         tooltip.push(`${freeText} free of ${formatGibibytes(mount.totalBytes)}G`);
     return {
@@ -312,6 +375,7 @@ function mountRow(mount) {
         text: freeText === null ? mount.label : `${mount.label}${SEPARATOR}${freeText} free`,
         tooltip,
         fraction: areSizesKnown ? (mount.totalBytes - mount.freeBytes) / mount.totalBytes : null,
+        iconStyleClass: null,
     };
 }
 
@@ -322,8 +386,9 @@ function mountRow(mount) {
  * @param {object} network - A network source.
  * @param {object} mounts - A mounts source.
  * @param {{limit: number}} [options] - The most rows the card draws.
- * @returns {{rows: Array<{kind: string, icon: string, text: string, tooltip: string[], fraction: number|null}>,
- *   overflowText: string|null}} The rows; `overflowText` is '+N more' for the rows beyond, else null.
+ * @returns {{rows: Array<{kind: string, icon: string, text: string, tooltip: string[], fraction: number|null,
+ *   iconStyleClass: string|null}>, overflowText: string|null}} The rows, each with the state class its icon carries
+ *   (the VPN row's; null for the others); `overflowText` is '+N more' for the rows beyond, else null.
  */
 export function connectionsRows(network, mounts, {limit = CONNECTIONS_CARD_ROW_LIMIT} = {}) {
     const allRows = [
@@ -345,6 +410,16 @@ export function connectionsRows(network, mounts, {limit = CONNECTIONS_CARD_ROW_L
  */
 export function noDataText(sampledAtUsec, formatClock) {
     return noDataSinceLabel(sampledAtUsec, formatClock);
+}
+
+/**
+ * The word a session state is told by: the spec's where it has one ('waiting on you' for blocked), herdr's otherwise.
+ *
+ * @param {string} state - One of SESSION_STATES.
+ * @returns {string} The word, as a tooltip's first line.
+ */
+export function sessionStateWord(state) {
+    return SESSION_STATE_WORD_BY_STATE[state] ?? state;
 }
 
 /**

@@ -23,7 +23,7 @@ const TOOLTIP_TIMEOUT_NAME = '[resource-pulse] show the cockpit tooltip';
 const TOOLTIP_RAISE_STATEMENT = 'label.get_parent()?.set_child_above_sibling(label, null);';
 const SYMBOLIC_SUFFIX = '-symbolic';
 const SESSION_STATES = ['working', 'blocked', 'idle', 'done', 'unknown'];
-const CONNECTION_KINDS = ['wired', 'wifi', 'offline', 'vpn', 'ssh', 'mountRemovable', 'mountNetwork'];
+const CONNECTION_KINDS = ['wired', 'wifi', 'offline', 'online', 'vpn', 'ssh', 'mountRemovable', 'mountNetwork'];
 const COCKPIT_CLASS_NAMES = [
     'rp-cockpit-layer', 'rp-cockpit-caption', 'rp-cockpit-cell', 'rp-cockpit-row', 'rp-cockpit-row-bar',
     'rp-cockpit-state-working', 'rp-cockpit-state-blocked', 'rp-cockpit-state-idle', 'rp-cockpit-state-done',

@@ -46,11 +46,11 @@ import {
     COCKPIT_BUS_NAME, COCKPIT_FOCUS_ERROR, COCKPIT_PROTOCOL_VERSION, COCKPIT_SOURCE_NAMES,
 } from '../lib/cockpitProtocol.js';
 import {
-    COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE, COCKPIT_LOG_PREFIX, HERDR_REQUEST_TIMEOUT_MS, PROC_PID_STAT_FILE_NAME,
-    PROC_ROOT_PATH,
+    COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE, COCKPIT_LOG_PREFIX, HERDR_FOCUS_REQUEST_TIMEOUT_MS, HERDR_REQUEST_TIMEOUT_MS,
+    PROC_PID_STAT_FILE_NAME, PROC_ROOT_PATH,
 } from '../lib/constants.js';
 import {RateLimitedLogger, describeError, describeErrorWithStack} from '../lib/errorLog.js';
-import {isPlainObject, parseJsonObject, stringOrNull} from '../lib/jsonFields.js';
+import {isPlainObject, isSameAsJson, parseJsonObject, stringOrNull} from '../lib/jsonFields.js';
 import {focusWindowPidCandidates, parseProcStat} from '../lib/processTree.js';
 import {runEveryStep} from '../lib/teardown.js';
 import {COCKPIT_LAYOUT_CHANGE_NAME, CockpitDBusService} from './cockpitDbusService.js';
@@ -103,6 +103,11 @@ const SESSIONS_SOURCE_NAME = 'sessions';
 /** herdr's methods for focusing, and their parameters (from `herdr api schema --json`: WorkspaceTarget, PaneTarget). */
 const WORKSPACE_FOCUS_METHOD = 'workspace.focus';
 const PANE_FOCUS_METHOD = 'pane.focus';
+/**
+ * How each focus request is bounded: by HERDR_FOCUS_REQUEST_TIMEOUT_MS rather than a sample's timeout, so that a slow
+ * herdr is answered herdr-unreachable before the client's FocusSession call gives up.
+ */
+const FOCUS_REQUEST_OPTIONS = Object.freeze({timeoutMs: HERDR_FOCUS_REQUEST_TIMEOUT_MS});
 /**
  * FocusSession's error code for each code a HerdrSocketClient rejection carries (ruling R18): herdr not there or not
  * answering is unreachable; herdr answering with an error, or with nothing it could read, is rejected. A rejection
@@ -203,15 +208,6 @@ function readCockpitFixtureFile(fixturePath) {
 }
 
 /**
- * @param {*} left - A value.
- * @param {*} right - Another.
- * @returns {boolean} Whether the two have the same JSON text.
- */
-function hasSameJsonText(left, right) {
-    return JSON.stringify(left) === JSON.stringify(right);
-}
-
-/**
  * What a fixture's new reading changed, as a cockpit listener names it.
  *
  * @param {CockpitFixtureContent} previousFixture - The reading served until now.
@@ -221,11 +217,11 @@ function hasSameJsonText(left, right) {
  *     (a new focus reply alone).
  */
 function changedFixtureNames(previousFixture, fixture) {
-    const isLayoutSame = hasSameJsonText([previousFixture.layout, previousFixture.configError],
+    const isLayoutSame = isSameAsJson([previousFixture.layout, previousFixture.configError],
         [fixture.layout, fixture.configError]);
     const layoutChangeNames = isLayoutSame ? [] : [COCKPIT_LAYOUT_CHANGE_NAME];
     const changedSourceNames = COCKPIT_SOURCE_NAMES.filter(sourceName =>
-        !hasSameJsonText(previousFixture.sourcesByName[sourceName], fixture.sourcesByName[sourceName]));
+        !isSameAsJson(previousFixture.sourcesByName[sourceName], fixture.sourcesByName[sourceName]));
     return [...layoutChangeNames, ...changedSourceNames];
 }
 
@@ -602,7 +598,8 @@ class CockpitServiceProcess {
 
     /**
      * Brings a session's herdr pane to the front: finds the row with this id in the latest sessions sample, asks
-     * herdr to focus its workspace (when the row has one), then its pane, with the ids the row carries; then names
+     * herdr to focus its workspace (when the row has one), then its pane, with the ids the row carries, each request
+     * bounded by HERDR_FOCUS_REQUEST_TIMEOUT_MS; then names
      * the windows that may show herdr's client (_readFocusWindowPidCandidates), for the shell to activate. windowPid
      * stays null: which of those windows to bring forward is the shell's to decide. In fixture mode it answers the
      * fixture's focusReply instead, whatever the id.
@@ -627,8 +624,9 @@ class CockpitServiceProcess {
         const workspaceId = stringOrNull(sessionRow.workspaceId);
         try {
             if (workspaceId !== null)
-                await this._herdrClient.request(WORKSPACE_FOCUS_METHOD, {workspace_id: workspaceId});
-            await this._herdrClient.request(PANE_FOCUS_METHOD, {pane_id: paneId});
+                await this._herdrClient.request(WORKSPACE_FOCUS_METHOD, {workspace_id: workspaceId},
+                    FOCUS_REQUEST_OPTIONS);
+            await this._herdrClient.request(PANE_FOCUS_METHOD, {pane_id: paneId}, FOCUS_REQUEST_OPTIONS);
         } catch (error) {
             const focusErrorCode = FOCUS_ERROR_BY_HERDR_ERROR_CODE.get(error?.code);
             if (focusErrorCode === undefined)

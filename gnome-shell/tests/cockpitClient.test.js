@@ -20,6 +20,8 @@ const USEC_PER_SECOND = 1_000_000;
 const START_CONFIRMATION_SECONDS = 15;
 /** START_RETRY_DELAYS_SECONDS (5, 30, 300), then 300 again, written out. */
 const RETRY_DELAYS_SECONDS = [5, 30, 300, 300];
+/** COCKPIT_ID_MAX_CHARS (128), written out: the longest workspace or pane id, two of which make a session row's id. */
+const ID_PART_MAX_CHARS = 128;
 const START_USEC = 1_000_000_000;
 const OWNER = ':1.42';
 const NEXT_OWNER = ':1.77';
@@ -1232,6 +1234,20 @@ test('cockpitClient: once VANISHED, a suspect source\'s pull asks nobody and com
     });
 });
 
+test('cockpitClient: while VANISHED, a source already read stale tells no more sources events: two intervals of ' +
+    'pulls tell one, and the source stays stale', async () => {
+    const {client, clock, link, events} = makeLiveClientFixture();
+    link.setNameOwner(null);
+    clock.nowRealUsec = usecAfter(SAMPLED_AT_USEC, MOUNTS_SUSPECT_AFTER_SECONDS + 1);
+    const firstPull = await valueOnceSettled(client.pullIfSuspicious('mounts'));
+    clock.nowRealUsec = usecAfter(clock.nowRealUsec, MOUNTS_INTERVAL_SECONDS + 1);
+    const secondPull = await valueOnceSettled(client.pullIfSuspicious('mounts'));
+    assertEqual({firstPull, secondPull, isStale: client.sourceFreshness('mounts').isStale, events}, {
+        firstPull: {pulled: true}, secondPull: {pulled: true}, isStale: true,
+        events: [{type: 'state', state: VANISHED}, {type: 'sources', names: ['mounts'], cause: PULL}],
+    });
+});
+
 // How each call goes out (to the owner's unique name, with DBUS_CALL_TIMEOUT_MS) is the link's, pinned by the link rows
 // in cockpit-client-dbus.test.js.
 test('cockpitClient: setWatchWanted(true) before the owner exists sends WatchCockpit once it appears; only a change ' +
@@ -1328,6 +1344,20 @@ test('cockpitClient: focusSession resolves (never rejects) to the internal reply
         failed: await valueOnceSettled(failedPromise), unreadable: await valueOnceSettled(unreadablePromise),
         focusLogLines: logged.filter(line => line.includes(FOCUS_SESSION)).length,
     }, {failed: INTERNAL_FOCUS_REPLY, unreadable: INTERNAL_FOCUS_REPLY, focusLogLines: 1});
+});
+
+test('cockpitClient: focusSession refuses an id longer than a session row\'s id may be (2 × 128 + 1 characters), as ' +
+    'it refuses a non-string: the internal reply, no FocusSession sent, the refusal logged; an id of that length is ' +
+    'sent', async () => {
+    const {client, link, logged} = makeLiveClientFixture();
+    const idAtCap = `${'w'.repeat(ID_PART_MAX_CHARS)}:${'p'.repeat(ID_PART_MAX_CHARS)}`;
+    const refusedReply = await valueOnceSettled(client.focusSession(`${idAtCap}x`));
+    const focusCallsAfterRefusal = link.callsOf(FOCUS_SESSION).length;
+    const loggedRefusal = logged.some(line => line.startsWith(`resource-pulse: ${FOCUS_SESSION} failed`));
+    client.focusSession(idAtCap);
+    const sentIds = link.callsOf(FOCUS_SESSION).map(call => call.parameters.deepUnpack()[0]);
+    assertEqual({refusedReply, focusCallsAfterRefusal, loggedRefusal, sentIds},
+        {refusedReply: INTERNAL_FOCUS_REPLY, focusCallsAfterRefusal: 0, loggedRefusal: true, sentIds: [idAtCap]});
 });
 
 test('cockpitClient: a listener that throws is logged and the next still runs; a removed one is not called', () => {

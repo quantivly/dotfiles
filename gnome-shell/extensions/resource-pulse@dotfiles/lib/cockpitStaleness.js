@@ -21,7 +21,8 @@ function effectiveIntervalSeconds(intervalSeconds) {
  * Decide whether a source is fresh, whether to pull its state now, and whether it is stale.
  *
  * @param {object} input
- * @param {number|null} input.sampledAtUsec The source's wall-clock stamp; null if never sampled or absent.
+ * @param {number|null} input.sampledAtUsec The source's wall-clock stamp; null if never sampled or absent. Anything
+ *   that is not a finite number (undefined, NaN) counts as null, never as a stamp that stays fresh for ever.
  * @param {number|null} input.intervalSeconds The source's sampling interval; null or 0 uses the fallback.
  * @param {number} input.nowRealUsec The wall clock now.
  * @param {number|null} input.lastPullRequestedAtUsec When the shell last asked for GetState, or null.
@@ -33,7 +34,7 @@ function effectiveIntervalSeconds(intervalSeconds) {
 export function sourceFreshness({
     sampledAtUsec, intervalSeconds, nowRealUsec, lastPullRequestedAtUsec, lastPullCompletedAtUsec,
 }) {
-    if (sampledAtUsec === null)
+    if (!Number.isFinite(sampledAtUsec))
         return {isStale: true, shouldPull: false, ageSeconds: null};
     const interval = effectiveIntervalSeconds(intervalSeconds);
     const ageSeconds = (nowRealUsec - sampledAtUsec) / MICROSECONDS_PER_SECOND;

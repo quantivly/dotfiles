@@ -42,6 +42,16 @@ test('cockpitStaleness: a clock that stepped back gives a negative age and a fre
         {isStale: false, shouldPull: false, ageSeconds: -10});
 });
 
+test('cockpitStaleness: a stamp that is not a finite number (undefined, NaN, Infinity) reads as no stamp: stale, ' +
+    'never pulled, never fresh for ever', () => {
+    assertEqual([undefined, NaN, Infinity].map(sampledAtUsec =>
+        staleness.sourceFreshness({...BASE_INPUT, sampledAtUsec, nowRealUsec: 40e6})), [
+        {isStale: true, shouldPull: false, ageSeconds: null},
+        {isStale: true, shouldPull: false, ageSeconds: null},
+        {isStale: true, shouldPull: false, ageSeconds: null},
+    ]);
+});
+
 test('cockpitStaleness: the no-data label uses the injected clock, and says so when nothing was ever sampled', () => {
     const formatClock = usec => `clock(${usec})`;
     assertEqual(staleness.noDataSinceLabel(7e6, formatClock), 'no data since clock(7000000)');

@@ -382,15 +382,18 @@ export class HerdrSocketClient {
     }
 
     /**
-     * Sends one request and waits for herdr's reply, at most timeoutMs.
+     * Sends one request and waits for herdr's reply, at most the client's timeoutMs or the request's own.
      *
      * @param {string} method - The request's kind, as herdr's schema names it: `session.snapshot`,
      *     `pane.process_info`, `pane.focus` and so on.
      * @param {object} [params] - Its parameters; herdr requires the field, so an empty object for a method with none.
+     * @param {object} [options] - How this request is bounded.
+     * @param {number} [options.timeoutMs] - Milliseconds this request may take, connect to reply, in place of the
+     *     client's timeoutMs (FocusSession's requests wait less than a sample's).
      * @returns {Promise<object>} The reply's `result`, exactly as herdr sent it (it carries a `type` naming its kind).
      *     Rejects with an Error whose message starts with 'herdr: ' and whose `code` is one of HERDR_ERROR_CODES.
      */
-    request(method, params = {}) {
+    request(method, params = {}, {timeoutMs = this._timeoutMs} = {}) {
         if (this._isClosed)
             return Promise.reject(herdrError(HERDR_ERROR_CODES.CLOSED, CLOSED_DESCRIPTION));
         const requestId = `${REQUEST_ID_PREFIX}${nextRequestNumber++}`;
@@ -404,11 +407,11 @@ export class HerdrSocketClient {
         return new Promise((resolve, reject) => {
             const pendingRequest = {cancellable: new Gio.Cancellable(), timeoutSourceId: 0, reject};
             this._pendingRequests.add(pendingRequest);
-            pendingRequest.timeoutSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, this._timeoutMs, () => {
+            pendingRequest.timeoutSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeoutMs, () => {
                 // Cleared first: the source is ending by returning SOURCE_REMOVE, so it must not also be removed.
                 pendingRequest.timeoutSourceId = 0;
                 this._abandon(pendingRequest,
-                    herdrError(HERDR_ERROR_CODES.TIMEOUT, `timed out after ${this._timeoutMs} ms`));
+                    herdrError(HERDR_ERROR_CODES.TIMEOUT, `timed out after ${timeoutMs} ms`));
                 return GLib.SOURCE_REMOVE;
             });
             exchangeOneRequest(this._socketPath, requestLine, pendingRequest.cancellable).then(replyLine => {

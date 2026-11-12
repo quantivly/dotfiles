@@ -198,8 +198,9 @@ the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
 - `FocusSession(id)`: focuses that session's herdr workspace, then its pane, and answers whether it did. A
   failure is an answer, never a D-Bus error: `focused: false` and an `error` code, one of `unknown-session`
   (no row has that id), `no-pane` (the row has no herdr pane), `herdr-rejected` (herdr refused, or its
-  reply could not be read), `herdr-unreachable` (no socket, a refused connection, or no reply in 2 s) and
-  `internal` (a fault in the service). herdr's own message goes to the journal, never to the bus:
+  reply could not be read), `herdr-unreachable` (no socket, a refused connection, or no reply to either
+  request in 0.75 s, so the answer comes before the shell's 2 s call gives up) and `internal` (a fault in the
+  service). herdr's own message goes to the journal, never to the bus:
   `cockpit: focus: <id>: <message>`. Once herdr focused the pane, the answer also names
   `windowPidCandidates`, for the shell to bring the window showing herdr forward: herdr's API lists no
   clients, so the service finds them in `/proc` (a `herdr` process with a controlling terminal; the server
@@ -347,20 +348,24 @@ rested on it for 300 ms.
   memory, each with a bar against the largest: the sampler's rankings
   ([Every number, defined](#every-number-defined)). A row's tooltip names the group it was ranked as, such
   as `unit:docker.service`.
-- **Connections** lists the uplink (`wired`, `wired · wifi off`, `wifi` or `offline`; its tooltip
-  `internet: <connectivity>`), the VPN (`VPN up (tun0)` or `VPN down`), the SSH masters
-  (`3 live ssh masters`), then one row per mount: its label and free space, with a bar of the space used,
-  and its mount point, filesystem type and size in the tooltip. Five mounts at most; the rest are counted on
-  a `+N more` line.
+- **Connections** lists the uplink, what kind of link it is and whether the internet is reachable over it:
+  `wired` (`wired · wifi off` when docked) or `wifi`; `wired · limited` or `wifi · portal` when
+  NetworkManager reaches the internet only in part; `wired · no internet`, with the offline icon, when not at
+  all; `online` when the primary connection is neither, such as a VPN on a full tunnel or a tethered phone
+  (its tooltip says so); `offline` with no link; and `uplink unknown` without NetworkManager. Its tooltip
+  gives NetworkManager's verdict, `internet: <connectivity>`. Then the VPN (`VPN up (tun0)` or `VPN down`),
+  the SSH masters (`3 live ssh masters`), then one row per mount: its label and free space, with a bar of the
+  space used, and its mount point, filesystem type and size in the tooltip. Five mounts at most; the rest are
+  counted on a `+N more` line.
 - **Sessions** has a header (`SESSIONS`, how many, each state's icon with its count, and their memory in
   all), then up to six sessions, the largest memory first, the rest counted on a `+N more` line. A row shows
   its state's icon (working: a teal play; blocked, waiting on you: an amber warning; idle: a grey pause;
   done: a green check; unknown: a grey question mark), the name, the idle age (`*` when only the Claude
   process's age is known), the memory and a bar against the largest. An idle or done session idle 30
-  minutes or more is dimmed, and a blocked one's name is tinted amber. The tooltip gives the state, the
-  herdr pane, the account and the context used when they are known, and says the memory is the Claude
-  process's alone (MCP servers and tool shells not counted). Without herdr the card says
-  `herdr not running`.
+  minutes or more is dimmed, and a blocked one's name is tinted amber. The tooltip gives the state (a
+  blocked one's as `waiting on you`), the herdr pane, the account and the context used when they are known,
+  and says the memory is the Claude process's alone (MCP servers and tool shells not counted). Without herdr
+  the card says `herdr not running`.
 
 **Take me there.** A click on a session row asks the cockpit service to focus that session's herdr pane,
 then brings forward the window that shows it, as a dock click does: it switches to the window's workspace,
@@ -702,7 +707,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1152 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1165 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's

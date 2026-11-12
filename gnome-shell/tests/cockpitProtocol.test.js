@@ -274,6 +274,15 @@ test('cockpitProtocol: a workspace or pane id over 128 characters reads as null,
     const parsed = cockpitProtocol.parseSessionsSource({...FULL_STATE.sources.sessions, rows});
     assertEqual(parsed.rows.map(row => [row.workspaceId, row.paneId]), [[null, null], [idAtCap, wideIdAtCap]]);
 });
+test('cockpitProtocol: a session row whose id is over 257 characters (a "<workspace>:<pane>" of two 128-character ' +
+    'ids) is dropped, the others kept; one of 257 passes', () => {
+    const [firstRow] = FULL_STATE.sources.sessions.rows;
+    const sessionIdAtCap = `${'w'.repeat(ID_MAX_CHARS)}:${WIDE_CHARACTER.repeat(ID_MAX_CHARS)}`;
+    const sessionIdOverCap = `${sessionIdAtCap}x`;
+    const rows = [{...firstRow, id: sessionIdOverCap}, {...firstRow, id: sessionIdAtCap}];
+    const parsed = cockpitProtocol.parseSessionsSource({...FULL_STATE.sources.sessions, rows});
+    assertEqual(parsed.rows.map(row => row.id), [sessionIdAtCap]);
+});
 test('cockpitProtocol: a mount row whose mount point is over 1024 characters is dropped, the others kept', () => {
     const [firstMount] = FULL_STATE.sources.mounts.rows;
     const mountPointAtCap = `/${'m'.repeat(PATH_MAX_CHARS - 1)}`;
