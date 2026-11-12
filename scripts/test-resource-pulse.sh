@@ -60,7 +60,41 @@ for required_tool in gjs zsh find timeout dbus-run-session gdbus script; do
 done
 # Every fixture this run writes lives here, from the placement rows on; removed on exit.
 WIRING_TMP="$(mktemp -d)" || fatal "mktemp -d failed"
-trap 'rm -rf "$WIRING_TMP"' EXIT
+# The table's stand-ins are processes it starts that block until they are ended (a fake gnome-shell, a probe window's
+# gjs). A table run that stops early would leave them beside the live session, where `pgrep -x gnome-shell` would then
+# count a fake one. Each is registered as it starts (its pid, the script it runs, and, for one the table starts itself,
+# its parent's pid), and the table's exit ends every one still running as itself, on every path its EXIT trap covers (a
+# fatal, an exit, TERM, INT, HUP). One left by a KILL of the table alone, which runs no trap, ends by itself after
+# STAND_IN_LIFETIME_SECONDS: far above the table's longest run (minutes), so no row loses its stand-in.
+STAND_IN_LIFETIME_SECONDS=3600
+TABLE_STAND_IN_REGISTRY="$WIRING_TMP/stand-ins"
+# register_stand_in <pid> <script> [parent pid] records one stand-in for end_table_stand_ins.
+register_stand_in() {
+  printf '%s %s %s\n' "$1" "$2" "${3:--}" >>"$TABLE_STAND_IN_REGISTRY"
+}
+# end_table_stand_ins sends TERM to each registered stand-in still running as itself: its bash still runs the stand-in's
+# own script (bash keeps the script it runs open on fd 255) and, when it was registered with a parent, it is still that
+# process's child. Nothing else is signalled.
+end_table_stand_ins() {
+  local stand_in_pid stand_in_script stand_in_parent stand_in_script_path stat_line
+  local -a stat_fields
+  [[ -r "$TABLE_STAND_IN_REGISTRY" ]] || return 0
+  while read -r stand_in_pid stand_in_script stand_in_parent; do
+    stand_in_script_path="$(readlink -f -- "$stand_in_script")" || continue
+    [[ "$(readlink "/proc/$stand_in_pid/fd/255" 2>/dev/null)" == "$stand_in_script_path" ]] || continue
+    if [[ "$stand_in_parent" != - ]]; then
+      read -r stat_line 2>/dev/null <"/proc/$stand_in_pid/stat" || continue
+      read -r -a stat_fields <<<"${stat_line##*) }"
+      [[ "${stat_fields[1]}" == "$stand_in_parent" ]] || continue
+    fi
+    kill -TERM "$stand_in_pid" 2>/dev/null
+  done <"$TABLE_STAND_IN_REGISTRY"
+}
+# install_table_exit_trap: on every exit, the stand-ins still running are ended, then the temporary directory removed.
+install_table_exit_trap() {
+  trap 'end_table_stand_ins; rm -rf "$WIRING_TMP"' EXIT
+}
+install_table_exit_trap
 
 JS_OUTPUT="$(gjs -m "$RUNNER" 2>&1)"
 JS_EXIT=$?
@@ -3793,12 +3827,13 @@ NEVER_RUNNING_PID=4194305
 # A process whose comm is gnome-shell: the kernel names a #! script's process after the script file.
 FAKE_SHELL_DIR="$WIRING_TMP/fake-shell"
 mkdir -p "$FAKE_SHELL_DIR" && mkfifo "$FAKE_SHELL_DIR/block"
-# shellcheck disable=SC2016  # The fake shell's own source: its $1 expands when it runs.
-printf '#!/bin/bash\n# Stands in for a running gnome-shell; blocks until signalled.\nread -r _ <>"$1"\n' \
-  >"$FAKE_SHELL_DIR/gnome-shell"
+# shellcheck disable=SC2016  # The fake shell's own source: its $1 and $2 expand when it runs.
+printf '#!/bin/bash\n# Stands in for a running gnome-shell; blocks until signalled, for $2 seconds at most.\n%s\n' \
+  'read -r -t "$2" _ <>"$1"' >"$FAKE_SHELL_DIR/gnome-shell"
 chmod +x "$FAKE_SHELL_DIR/gnome-shell"
-"$FAKE_SHELL_DIR/gnome-shell" "$FAKE_SHELL_DIR/block" &
+"$FAKE_SHELL_DIR/gnome-shell" "$FAKE_SHELL_DIR/block" "$STAND_IN_LIFETIME_SECONDS" &
 fake_shell_pid=$!
+register_stand_in "$fake_shell_pid" "$FAKE_SHELL_DIR/gnome-shell" "$$"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   [[ "$(cat "/proc/$fake_shell_pid/comm" 2>/dev/null)" == gnome-shell ]] && break
   sleep 0.2
@@ -4333,6 +4368,8 @@ PERF_COCKPIT_GRID_SEEN_WHILE_COVERED="perf: could not measure covered-busy: it w
 PERF_COCKPIT_GRID_SEEN_WHILE_COVERED+=" of the grid visible, and sessions can be seen"
 PERF_COCKPIT_GRID_PART_COVERED="perf: could not measure visible-busy: it was not set up as named: expected every card"
 PERF_COCKPIT_GRID_PART_COVERED+=" it draws visible (apps,connections,sessions,system), and only apps,system can be seen"
+PERF_COCKPIT_NONE_SEEN="perf: could not measure visible-busy: it was not set up as named: expected every card it"
+PERF_COCKPIT_NONE_SEEN+=" draws visible (apps,connections,sessions,system), and none can be seen"
 PERF_COCKPIT_NO_GRID="perf: could not measure covered-idle: it was not set up as named: expected the layer to draw"
 PERF_COCKPIT_NO_GRID+=" the fixture's cards (apps,connections,sessions,system), and there is no layer: no grid is drawn"
 PERF_COCKPIT_PART_DRAWN="perf: could not measure covered-busy: it was not set up as named: expected the layer to draw"
@@ -4351,6 +4388,9 @@ perf_cockpit_setup_summary+=" grid-seen-while-covered: $(perf_cockpit_setup_verd
   "$PERF_GRID_CARD_IDS_JSON" "$PERF_COCKPIT_GRID_SEEN_WHILE_COVERED")"
 perf_cockpit_setup_summary+=" grid-partly-covered: $(perf_cockpit_setup_verdict visible-busy '["apps","system"]' \
   "$PERF_GRID_CARD_IDS_JSON" "$PERF_COCKPIT_GRID_PART_COVERED")"
+# The whole grid drawn and none of it seen: perf's uncover did not land.
+perf_cockpit_setup_summary+=" none-seen: $(perf_cockpit_setup_verdict visible-busy '[]' "$PERF_GRID_CARD_IDS_JSON" \
+  "$PERF_COCKPIT_NONE_SEEN")"
 perf_cockpit_setup_summary+=" no-grid: $(perf_cockpit_setup_verdict covered-idle '[]' null "$PERF_COCKPIT_NO_GRID")"
 perf_cockpit_setup_summary+=" $(perf_cockpit_setup_verdict visible-busy '["system"]' null "$PERF_COCKPIT_SETUP_NOT_SET_UP")"
 perf_cockpit_setup_summary+=" part-drawn: $(perf_cockpit_setup_verdict covered-busy '[]' '["apps","system"]' \
@@ -4376,9 +4416,9 @@ perf_fixture_grid_word() {
   ' fixture-grid "$NESTED_SCRIPT"
 }
 perf_cockpit_setup_summary+=" fixture-cards=$(perf_fixture_grid_word)"
-check "nested: perf takes an enabled state's grid as set up only when the layer draws the fixture's cards (no layer, or a part of them, is no grid), no card of it can be seen in the covered states and every one in visible-busy; a mismatch, or facts not of their types, is exit 2 naming the state and what was expected (needs jq)" \
+check "nested: perf takes an enabled state's grid as set up only when the layer draws the fixture's cards (no layer, or a part of them, is no grid), no card of it can be seen in the covered states and every one in visible-busy (none seen there is an uncover that did not land); a mismatch, or facts not of their types, is exit 2 naming the state and what was expected (needs jq)" \
   "$perf_cockpit_setup_summary" \
-  "set-up: 0/0/1 0/0/1 0/0/1 0/0/1 grid-seen-while-covered: 2/1/0 grid-partly-covered: 2/1/0 no-grid: 2/1/0 2/1/0 part-drawn: 2/1/0 2/1/0 not-of-types: 2/1/0 2/1/0 2/1/0 fixture-cards=same"
+  "set-up: 0/0/1 0/0/1 0/0/1 0/0/1 grid-seen-while-covered: 2/1/0 grid-partly-covered: 2/1/0 none-seen: 2/1/0 no-grid: 2/1/0 2/1/0 part-drawn: 2/1/0 2/1/0 not-of-types: 2/1/0 2/1/0 2/1/0 fixture-cards=same"
 
 # perf's cockpit verdict, a pure function of each enabled state's record
 # "<redirects> <armed fallbacks>": the layer and the system cell's wrapper draw
@@ -5619,9 +5659,111 @@ install_stub "$CHECK_STUB_BIN" busctl "$CHECK_BUSCTL_STAND_IN_SOURCE"
   CHECK_WINDOW_VALUES_LINE+=' "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS-unset}"'
   CHECK_WINDOW_VALUES_LINE+=' "WAYLAND_DISPLAY=${WAYLAND_DISPLAY-unset}" "GDK_BACKEND=${GDK_BACKEND-unset}" >%q\n'
 }
-# shellcheck disable=SC2016  # The stand-in's own source: its $* expands when it runs.
-install_stub "$CHECK_STUB_BIN" gjs "$(printf '#!/bin/bash\n# Stands in for the probe window: records how it was started, then waits until signalled.\nprintf "%%s\\n" "$*" >>%q\ncompgen -e | LC_ALL=C sort >%q\n'"$CHECK_WINDOW_VALUES_LINE"'read -r _ <>%q\n' \
-  "$CHECK_WINDOW_LAUNCHES" "$CHECK_WINDOW_ENV_NAMES" "$CHECK_WINDOW_ENV_VALUES" "$CHECK_WINDOW_BLOCK")"
+# check_window_stand_in_source <launches> <env names> <env values> <block> <lifetime seconds> <registry> prints the
+# probe window's stand-in gjs: it registers itself as one of the table's stand-ins (its pid, its own path), records how
+# it was started, then waits until signalled, for its lifetime at most.
+check_window_stand_in_source() {
+  # shellcheck disable=SC2016  # The stand-in's own source: its $$, $0 and $* expand when it runs.
+  printf '#!/bin/bash\n# Stands in for the probe window: records how it was started, then waits until signalled.\nprintf "%%s %%s -\\n" "$$" "$0" >>%q\nprintf "%%s\\n" "$*" >>%q\ncompgen -e | LC_ALL=C sort >%q\n'"$CHECK_WINDOW_VALUES_LINE"'read -r -t %q _ <>%q\n' \
+    "$6" "$1" "$2" "$3" "$5" "$4"
+}
+install_stub "$CHECK_STUB_BIN" gjs "$(check_window_stand_in_source "$CHECK_WINDOW_LAUNCHES" "$CHECK_WINDOW_ENV_NAMES" \
+  "$CHECK_WINDOW_ENV_VALUES" "$CHECK_WINDOW_BLOCK" "$STAND_IN_LIFETIME_SECONDS" "$TABLE_STAND_IN_REGISTRY")"
+# Each of the table's stand-ins bounds its own life, for a KILL of the table
+# alone, which runs no trap: a fake gnome-shell and a probe window's stand-in,
+# started here with a lifetime of a second, must each be gone within a few, by
+# itself; the window's stand-in registers itself as it starts. One still running
+# then is ended here.
+STAND_IN_BOUND_DIR="$WIRING_TMP/stand-in-bound"
+STAND_IN_BOUND_LIFETIME_SECONDS=1
+STAND_IN_GONE_WAIT_TENTHS=50
+if ! mkdir -p "$STAND_IN_BOUND_DIR" ||
+  ! mkfifo "$STAND_IN_BOUND_DIR/shell-block" "$STAND_IN_BOUND_DIR/window-block"; then
+  fatal "cannot lay out $STAND_IN_BOUND_DIR"
+fi
+install_stub "$STAND_IN_BOUND_DIR/bin" gjs "$(check_window_stand_in_source "$STAND_IN_BOUND_DIR/launches" \
+  "$STAND_IN_BOUND_DIR/env-names" "$STAND_IN_BOUND_DIR/env-values" "$STAND_IN_BOUND_DIR/window-block" \
+  "$STAND_IN_BOUND_LIFETIME_SECONDS" "$STAND_IN_BOUND_DIR/registry")"
+# stand_in_fate <pid> <script> prints ended once that stand-in is gone within STAND_IN_GONE_WAIT_TENTHS; else
+# left-running, and ends it while its bash still runs that script.
+stand_in_fate() {
+  local gone_tenth
+  [[ "$1" =~ ^[0-9]+$ ]] || { printf no-stand-in; return 0; }
+  for (( gone_tenth = 0; gone_tenth < STAND_IN_GONE_WAIT_TENTHS; gone_tenth++ )); do
+    is_running "$1" || { printf ended; return 0; }
+    sleep 0.1
+  done
+  [[ "$(readlink "/proc/$1/fd/255" 2>/dev/null)" == "$(readlink -f -- "$2")" ]] && kill -TERM "$1" 2>/dev/null
+  printf left-running
+}
+"$FAKE_SHELL_DIR/gnome-shell" "$STAND_IN_BOUND_DIR/shell-block" "$STAND_IN_BOUND_LIFETIME_SECONDS" &
+bound_shell_pid=$!
+register_stand_in "$bound_shell_pid" "$FAKE_SHELL_DIR/gnome-shell" "$$"
+"$STAND_IN_BOUND_DIR/bin/gjs" -m probe-window.js bound-probe </dev/null >/dev/null 2>&1 &
+bound_window_pid=$!
+register_stand_in "$bound_window_pid" "$STAND_IN_BOUND_DIR/bin/gjs" "$$"
+stand_in_bound_summary="gnome-shell=$(stand_in_fate "$bound_shell_pid" "$FAKE_SHELL_DIR/gnome-shell")"
+stand_in_bound_summary+=" gjs=$(stand_in_fate "$bound_window_pid" "$STAND_IN_BOUND_DIR/bin/gjs")"
+wait "$bound_shell_pid" "$bound_window_pid" 2>/dev/null
+read -r bound_registered_pid bound_registered_script _ 2>/dev/null <"$STAND_IN_BOUND_DIR/registry"
+stand_in_bound_summary+=" registered-itself=$([[ "${bound_registered_pid:-}" == "$bound_window_pid" &&
+  "${bound_registered_script:-}" == "$STAND_IN_BOUND_DIR/bin/gjs" ]] && printf yes || printf no)"
+check "the table's stand-ins (a fake gnome-shell, a probe window's gjs) end by themselves after their lifetime, for a KILL of the table alone; the window's registers itself as it starts" \
+  "$stand_in_bound_summary" "gnome-shell=ended gjs=ended registered-itself=yes"
+# The table's exit ends the stand-ins it registered, on every path: an early
+# fatal or exit, and a TERM, INT or HUP. Each case's own bash runs the table's
+# own exit (install_table_exit_trap, end_table_stand_ins, register_stand_in, as
+# the table defines them) on a temporary directory of its own, starts a fake
+# gnome-shell with the table's lifetime (its fifo outside that directory, which
+# the exit removes), registers it, waits until it runs as itself, as the
+# table's own have for minutes when it stops, then leaves by that path (INT
+# reaching it as a terminal's would: a background job ignores it). The
+# stand-in must be gone at once; one still running is ended here.
+STAND_IN_EXIT_DEFINITIONS="$(declare -f fatal register_stand_in end_table_stand_ins install_table_exit_trap)"
+# stand_in_exit_case <fatal, exit, TERM, INT or HUP> prints what became of that case's stand-in.
+stand_in_exit_case() {
+  local exit_path="$1" case_dir="$WIRING_TMP/stand-in-exit-$1" case_child_pid case_stand_in_pid="" gone_tenth
+  if ! mkdir -p "$case_dir/tmp" || ! mkfifo "$case_dir/block" "$case_dir/tmp/hold"; then
+    fatal "cannot lay out $case_dir"
+  fi
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  env --default-signal=INT STAND_IN_LIFETIME_SECONDS="$STAND_IN_LIFETIME_SECONDS" bash -c '
+    eval "$1"
+    WIRING_TMP="$2"
+    TABLE_STAND_IN_REGISTRY="$WIRING_TMP/stand-ins"
+    install_table_exit_trap
+    "$3" "$6" "$STAND_IN_LIFETIME_SECONDS" &
+    register_stand_in "$!" "$3" "$$"
+    for (( started_tenth = 0; started_tenth < 50; started_tenth++ )); do
+      [[ "$(readlink "/proc/$!/fd/255")" == "$(readlink -f -- "$3")" ]] && break
+      sleep 0.1
+    done
+    printf "%s\n" "$!" >"$4"
+    case "$5" in
+      fatal) fatal "an early exit, injected" ;;
+      exit) exit 2 ;;
+      *) read -r -t 30 _ <>"$WIRING_TMP/hold" ;;
+    esac
+  ' stand-in-exit "$STAND_IN_EXIT_DEFINITIONS" "$case_dir/tmp" "$FAKE_SHELL_DIR/gnome-shell" "$case_dir/stand-in.pid" \
+    "$exit_path" "$case_dir/block" </dev/null >/dev/null 2>&1 &
+  case_child_pid=$!
+  for (( gone_tenth = 0; gone_tenth < STAND_IN_GONE_WAIT_TENTHS; gone_tenth++ )); do
+    [[ -s "$case_dir/stand-in.pid" ]] && break
+    sleep 0.1
+  done
+  case "$exit_path" in
+    TERM | INT | HUP) kill "-$exit_path" "$case_child_pid" 2>/dev/null ;;
+  esac
+  wait "$case_child_pid" 2>/dev/null
+  read -r case_stand_in_pid 2>/dev/null <"$case_dir/stand-in.pid"
+  stand_in_fate "$case_stand_in_pid" "$FAKE_SHELL_DIR/gnome-shell"
+}
+stand_in_exit_summary=""
+for stand_in_exit_path in fatal exit TERM INT HUP; do
+  stand_in_exit_summary+="$stand_in_exit_path=$(stand_in_exit_case "$stand_in_exit_path") "
+done
+check "the table's exit ends every stand-in it registered and still runs, whether it stops at a fatal, an exit, a TERM, an INT or a HUP" \
+  "$stand_in_exit_summary" "fatal=ended exit=ended TERM=ended INT=ended HUP=ended "
 printf '%s\n' "$CHECK_OK_ANSWER" >"$CHECK_ANSWERS/default"
 printf '%s\n' '{"verdict":"ok","detail":"0 normal windows","count":0}' \
   >"$CHECK_ANSWERS/resourcePulseCockpitCheck.window-count"
@@ -5650,8 +5792,9 @@ answers_with() {
   done
   printf '%s' "$answers_dir"
 }
-"$FAKE_SHELL_DIR/gnome-shell" "$FAKE_SHELL_DIR/block" &
+"$FAKE_SHELL_DIR/gnome-shell" "$FAKE_SHELL_DIR/block" "$STAND_IN_LIFETIME_SECONDS" &
 check_fake_shell_pid=$!
+register_stand_in "$check_fake_shell_pid" "$FAKE_SHELL_DIR/gnome-shell" "$$"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   [[ "$(cat "/proc/$check_fake_shell_pid/comm" 2>/dev/null)" == gnome-shell ]] && break
   sleep 0.2
@@ -6496,7 +6639,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1137
+EXPECTED_ROWS=1139
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
