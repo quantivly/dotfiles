@@ -114,6 +114,19 @@ class FakeActor {
         return this._parent;
     }
 
+    /**
+     * Clutter's restacking among siblings: the child is painted right above the sibling, or above every other child
+     * when the sibling is null.
+     *
+     * @param {FakeActor} child - A child of this actor.
+     * @param {FakeActor|null} sibling - Another child, or null.
+     */
+    set_child_above_sibling(child, sibling) {
+        this._children = this._children.filter(existing => existing !== child);
+        const siblingIndex = sibling === null ? this._children.length - 1 : this._children.indexOf(sibling);
+        this._children.splice(siblingIndex + 1, 0, child);
+    }
+
     get_children() {
         return [...this._children];
     }
@@ -330,8 +343,11 @@ function buildExtensionParts(shell) {
     const menu = {
         isOpen: false,
         actor: menuActor,
+        // GNOME Shell 50.1's PopupMenu.open() (js/ui/popupMenu.js) raises the menu's actor to the top of its parent,
+        // Main.uiGroup, on every open: above the top chrome a tooltip's label was added to when it was made.
         open() {
             this.isOpen = true;
+            this.actor.get_parent().set_child_above_sibling(this.actor, null);
             dropdownSessionsCard._isFrozen = false;
         },
         close() {
@@ -711,30 +727,46 @@ test('cockpit check: session-row-point gives the middle of the first session row
 });
 
 /**
- * Shows a surface's tooltip with a text, as the tooltip's own show does.
+ * Shows a surface's tooltip with a text, as the tooltip's own show does (CockpitTooltip._show(), which raises its
+ * label above its siblings first).
  *
  * @param {object} shell - From makeHealthyShell.
  * @param {string} surface - 'layer' or 'dropdown'.
  * @param {string} text - Its text.
+ * @param {{isRaised?: boolean}} [how] - isRaised false shows it as the extension did before it raised the label.
  * @returns {object} The tooltip.
  */
-function showTooltip(shell, surface, text) {
+function showTooltip(shell, surface, text, {isRaised = true} = {}) {
     const tooltip = surface === 'layer' ? shell.stateObj._layer._tooltip : shell.stateObj._indicator._sessionsTooltip;
     tooltip._isShown = true;
+    if (isRaised)
+        tooltip._label.get_parent()?.set_child_above_sibling(tooltip._label, null);
     tooltip._label.visible = true;
     tooltip._label.text = text;
     return tooltip;
 }
 
+/**
+ * Opens the dropdown as the shell does (the fake's open() raises the menu's actor, as PopupMenu.open() does).
+ *
+ * @param {object} shell - From makeHealthyShell.
+ * @returns {void}
+ */
+function openDropdown(shell) {
+    shell.stateObj._indicator.menu.open(false);
+}
+
 test('cockpit check: tooltip-shown is ok for the row\'s text drawn above the card or the open menu; bad when not ' +
-    'shown, off screen, with another text, or under the card or the menu; could-not-judge when the stacking cannot ' +
-    'be told; tooltip-hidden judges the reverse', async () => {
+    'shown, off screen, with another text, or under the card or the menu (a label not raised since the menu opened ' +
+    'raised itself); could-not-judge when the stacking cannot be told; tooltip-hidden judges the reverse', async () => {
     const shownText = 'alpha-sync\npane p1';
     const shownOptions = surface => ({surface, tooltipText: shownText});
     assertEqual(await verdictsOfCases('tooltip-shown', {
         'layer-shown': {breakShell: shell => showTooltip(shell, 'layer', shownText), options: shownOptions('layer')},
-        'dropdown-shown': {breakShell: shell => showTooltip(shell, 'dropdown', shownText),
-            options: shownOptions('dropdown')},
+        'dropdown-shown': {breakShell: shell => {
+            openDropdown(shell);
+            showTooltip(shell, 'dropdown', shownText);
+        }, options: shownOptions('dropdown')},
         'not-shown': {options: shownOptions('layer'), needle: "the layer's tooltip is not shown"},
         'off-screen': {breakShell: shell => {
             showTooltip(shell, 'layer', shownText)._label.mapped = false;
@@ -748,10 +780,8 @@ test('cockpit check: tooltip-shown is ok for the row\'s text drawn above the car
             shell.windowGroup.add_child(shell.backgroundGroup);
         }, options: shownOptions('layer'), needle: 'drawn under the card'},
         'under-the-menu': {breakShell: shell => {
-            showTooltip(shell, 'dropdown', shownText);
-            const menuActor = shell.stateObj._indicator.menu.actor;
-            shell.uiGroup.remove_child(menuActor);
-            shell.uiGroup.add_child(menuActor);
+            openDropdown(shell);
+            showTooltip(shell, 'dropdown', shownText, {isRaised: false});
         }, options: shownOptions('dropdown'), needle: 'drawn under the menu'},
         'no-shared-ancestor': {breakShell: shell => {
             const label = showTooltip(shell, 'layer', shownText)._label;

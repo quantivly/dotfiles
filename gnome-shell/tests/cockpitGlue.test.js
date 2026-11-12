@@ -19,6 +19,8 @@ const [EXTENSION_DIRECTORY_PATH] = GLib.filename_from_uri(EXTENSION_DIRECTORY_UR
 const TOOLTIP_SOURCE_FILE = 'cockpitTooltip.js';
 const STYLESHEET_FILE = 'stylesheet.css';
 const TOOLTIP_TIMEOUT_NAME = '[resource-pulse] show the cockpit tooltip';
+/** The tooltip's raise in _show(): its label on top of its parent (the top chrome's uiGroup), above an open menu. */
+const TOOLTIP_RAISE_STATEMENT = 'label.get_parent()?.set_child_above_sibling(label, null);';
 const SYMBOLIC_SUFFIX = '-symbolic';
 const SESSION_STATES = ['working', 'blocked', 'idle', 'done', 'unknown'];
 const CONNECTION_KINDS = ['wired', 'wifi', 'offline', 'vpn', 'ssh', 'mountRemovable', 'mountNetwork'];
@@ -218,6 +220,16 @@ test('cockpitTooltip.js: arms its timer with the top bar\'s delay and eases with
         fadeIn: occurrenceCount(methodBody(source, '_show() {'), 'duration: HOVER_LABEL_FADE_IN_MS'),
         fadeOut: occurrenceCount(methodBody(source, 'hide() {'), 'duration: HOVER_LABEL_FADE_OUT_MS'),
     }, {delayAtTheTimer: 1, fadeIn: 1, fadeOut: 1});
+});
+
+test('cockpitTooltip.js: _show() raises its label above its siblings before it shows it, so a menu opened since (GNOME ' +
+    'Shell raises the menu on every open) cannot cover it', () => {
+    const showStatements = statementsOf(methodBody(readExtensionFile(TOOLTIP_SOURCE_FILE), '_show() {'));
+    const raiseIndex = showStatements.indexOf(TOOLTIP_RAISE_STATEMENT);
+    assertEqual({
+        raises: showStatements.filter(statement => statement === TOOLTIP_RAISE_STATEMENT).length,
+        raisedBeforeShown: raiseIndex >= 0 && raiseIndex < showStatements.indexOf('label.show();'),
+    }, {raises: 1, raisedBeforeShown: true});
 });
 
 test('cockpitTooltip.js: holds one destroy handler on its anchor, which hides the tooltip', () => {

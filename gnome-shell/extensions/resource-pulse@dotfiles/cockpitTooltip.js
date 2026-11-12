@@ -161,13 +161,16 @@ export class CockpitTooltip {
     }
 
     /**
-     * Sets the text, places the label and fades it in.
+     * Raises the label above its siblings, sets the text, places the label and fades it in. The raise is on every
+     * show: the label joined the top chrome once, when it was made, and GNOME Shell's PopupMenu.open() raises the
+     * menu to the top of the same group on every open, so the dropdown's tooltip would be drawn under its own menu.
      *
      * @returns {void}
      */
     _show() {
         const label = this._label;
         this._isShown = true;
+        label.get_parent()?.set_child_above_sibling(label, null);
         label.text = this._text;
         label.opacity = TRANSPARENT_OPACITY;
         label.show();
