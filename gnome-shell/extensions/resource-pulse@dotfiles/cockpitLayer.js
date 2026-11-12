@@ -37,7 +37,7 @@ import {AppsCockpitCard, ConnectionsCockpitCard, SessionsCockpitCard, SystemCock
 import {CockpitSourcePacing, drawCockpitDataCard} from './cockpitSourceDrawing.js';
 import {CockpitTooltip} from './cockpitTooltip.js';
 import {COCKPIT_APPS_CARD_ID} from './lib/constants.js';
-import {cockpitCaptionText} from './lib/cockpitFormat.js';
+import {appsNoDataSinceClockLabel, cockpitCaptionText} from './lib/cockpitFormat.js';
 import {cockpitGridGeometry, drawnCockpitCardIds, drawnCockpitCells} from './lib/cockpitGrid.js';
 import {describeErrorWithStack, runLoggingFailure} from './lib/errorLog.js';
 import {runEveryStep} from './lib/teardown.js';
@@ -59,11 +59,13 @@ const CARD_MAKERS_BY_ID = Object.freeze({
 
 /**
  * Gives each card that draws the sampler's snapshot the pulse client's latest, through its update (ruling D9), with the
- * client's last good clock label, so either card with no data says since when.
+ * client's last good clock label, so either card with no data says since when: the apps card only while the snapshot
+ * carries no numbers, as the system card does (lib/cockpitFormat.js appsNoDataSinceClockLabel).
  */
 const SNAPSHOT_CARD_DRAWERS_BY_ID = Object.freeze({
     system: (card, pulseClient) => card.update(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel),
-    apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null, pulseClient.lastGoodClockLabel),
+    apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null,
+        appsNoDataSinceClockLabel(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel)),
 });
 
 /**
@@ -347,16 +349,17 @@ class CockpitLayer extends St.Widget {
     }
 
     /**
-     * Gives the apps card a pulse snapshot's apps and the client's last good clock label, guarded (_guardCardDraw;
-     * the client tells snapshot listeners only while the detail watch is wanted, and the latest once when it becomes
-     * wanted).
+     * Gives the apps card a pulse snapshot's apps and the client's last good clock label while the snapshot carries no
+     * numbers (appsNoDataSinceClockLabel), guarded (_guardCardDraw; the client tells snapshot listeners only while the
+     * detail watch is wanted, and the latest once when it becomes wanted).
      *
      * @param {import('./pulseClient.js').Snapshot|null} snapshot - The latest snapshot.
      * @returns {void}
      */
     _onSnapshot(snapshot) {
         const appsCard = this._cardsById.get(COCKPIT_APPS_CARD_ID);
-        this._guardCardDraw(() => appsCard?.update(snapshot?.apps ?? null, this._pulseClient.lastGoodClockLabel));
+        this._guardCardDraw(() => appsCard?.update(snapshot?.apps ?? null,
+            appsNoDataSinceClockLabel(snapshot, this._pulseClient.lastGoodClockLabel)));
     }
 
     /**

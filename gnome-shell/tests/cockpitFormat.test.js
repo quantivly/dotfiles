@@ -364,6 +364,24 @@ test('cockpitFormat: the apps card with no apps says the system card\'s words fr
     assertEqual([cockpitFormat.appsNoDataText('14:02'), cockpitFormat.appsNoDataText(null)],
         ['no data since 14:02', 'no data']));
 
+test('cockpitFormat: the apps card names since when only while the sampler\'s snapshot carries no numbers, when the ' +
+    'system card says no data since too; a live snapshot with no apps (before the first scan, after one that threw) ' +
+    'reads the bare no data', () => {
+    const lastGoodClockLabel = '14:02';
+    const appsTextFor = snapshot => cockpitFormat.appsNoDataText(
+        cockpitFormat.appsNoDataSinceClockLabel(snapshot, lastGoodClockLabel));
+    const liveSnapshotWithoutApps = {cpuBusyPercent: 12, memory: {usedBytes: 1, totalBytes: 2}, apps: null};
+    const noNumbersSnapshot = {cpuBusyPercent: null, memory: null, apps: null};
+    assertEqual({
+        live: appsTextFor(liveSnapshotWithoutApps),
+        liveMemoryOnly: appsTextFor({...liveSnapshotWithoutApps, cpuBusyPercent: null}),
+        noNumbers: appsTextFor(noNumbersSnapshot),
+        noSnapshotYet: appsTextFor(null),
+    }, {
+        live: 'no data', liveMemoryOnly: 'no data', noNumbers: 'no data since 14:02', noSnapshotYet: 'no data since 14:02',
+    });
+});
+
 test('cockpitFormat: a group\'s caption is drawn upper-cased, whatever case the layout gives it (St reads no CSS ' +
     'text-transform)', () =>
     assertEqual(['machine', 'Agents', 'WORK', 'Ops · 2'].map(caption => cockpitFormat.cockpitCaptionText(caption)),

@@ -839,7 +839,9 @@ class AppsCockpitCard extends CockpitCardBase {
      *
      * @param {{cpuRanking: Array<object>|null, memoryRanking: Array<object>|null}|null} apps - The snapshot's apps;
      *     null shows no data.
-     * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data, for "no data since".
+     * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data, for "no data since"; the
+     *     layer passes it only while the snapshot carries no numbers (lib/cockpitFormat.js appsNoDataSinceClockLabel),
+     *     null otherwise, so a live snapshot with no apps reads the bare "no data".
      * @returns {void}
      */
     update(apps, lastGoodClockLabel) {

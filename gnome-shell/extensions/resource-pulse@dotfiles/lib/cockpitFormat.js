@@ -429,6 +429,22 @@ export function appsNoDataText(lastGoodClockLabel) {
 }
 
 /**
+ * The clock label the apps card names when it has no apps, under the system card's own condition (lib/format.js
+ * cardText): the pulse client's last good label while the sampler's snapshot carries neither CPU nor memory (no
+ * snapshot yet, or the client no longer live), when the system card says "no data since" too; null while it carries
+ * numbers, so apps missing from a live snapshot (before the sampler's first scan, or after a scan that threw) read
+ * the bare "no data", not "no data since" the current minute.
+ *
+ * @param {{cpuBusyPercent: number|null, memory: object|null}|null} snapshot - The pulse client's latest snapshot.
+ * @param {string|null} lastGoodClockLabel - 'HH:MM' of the client's last snapshot with data, or null before any.
+ * @returns {string|null} The label to pass to appsNoDataText, or null for the bare "no data".
+ */
+export function appsNoDataSinceClockLabel(snapshot, lastGoodClockLabel) {
+    const isSnapshotLive = (snapshot?.cpuBusyPercent ?? null) !== null || (snapshot?.memory ?? null) !== null;
+    return isSnapshotLive ? null : lastGoodClockLabel;
+}
+
+/**
  * A group's caption as the grid draws it: upper-cased in code, since St reads no CSS text-transform.
  *
  * @param {string} caption - The layout's caption, in any case.

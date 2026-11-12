@@ -1152,7 +1152,8 @@ test('cockpitLayer.js: a card revealed is first drawn from what the clients hold
 });
 
 test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snapshot listener), the system card the ' +
-    'pulse client\'s latest, each through its own update (ruling D9), dispatched by _drawCard: a card of the ' +
+    'pulse client\'s latest, each through its own update (ruling D9), the apps card with the clock label only while ' +
+    'the snapshot carries no numbers (appsNoDataSinceClockLabel), dispatched by _drawCard: a card of the ' +
     'snapshot through its drawer, else drawCockpitDataCard (cockpitSourceDrawing.js, shared with the dropdown: ' +
     'ruling D22); the layer keeps no data-card drawing of its own', () => {
     const source = codeOf(LAYER_SOURCE_FILE);
@@ -1163,8 +1164,8 @@ test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snap
         onSnapshot: layerMethodStatements('_onSnapshot('),
         snapshotDrawers: [
             'system: (card, pulseClient) => card.update(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel),',
-            'apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null, ' +
-                'pulseClient.lastGoodClockLabel),',
+            'apps: (card, pulseClient) => card.update(pulseClient.latestSnapshot?.apps ?? null,',
+            'appsNoDataSinceClockLabel(pulseClient.latestSnapshot, pulseClient.lastGoodClockLabel)),',
         ].map(needle => occurrenceCount(source, needle)),
         ownDataCardDrawing: ownDataCardNeedles.filter(needle => source.includes(needle)),
     }, {
@@ -1178,10 +1179,10 @@ test('cockpitLayer.js: the apps card draws the pulse client\'s snapshots (a snap
         ],
         onSnapshot: [
             'const appsCard = this._cardsById.get(COCKPIT_APPS_CARD_ID);',
-            'this._guardCardDraw(() => appsCard?.update(snapshot?.apps ?? null, ' +
-                'this._pulseClient.lastGoodClockLabel));',
+            'this._guardCardDraw(() => appsCard?.update(snapshot?.apps ?? null,',
+            'appsNoDataSinceClockLabel(snapshot, this._pulseClient.lastGoodClockLabel)));',
         ],
-        snapshotDrawers: [1, 1], ownDataCardDrawing: [],
+        snapshotDrawers: [1, 1, 1], ownDataCardDrawing: [],
     });
 });
 
