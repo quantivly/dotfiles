@@ -61,7 +61,7 @@ commands are all `backup-*`.
   - **A failure resticprofile did see is reported twice.** The ping is idempotent and the alert is
     deduplicated on state change, so the second call is silent.
   - **`scripts/test-backup-units.sh` (29 checks, root-free) pins this**, in the CI job
-    `backup-external-test`. Ten mutants, each killed by at least one row; the list is in its header.
+    `backup-external-test`. Eleven mutants, each killed by at least one row; the list is in its header.
 
 Commands: `backup-init`, `backup-setup`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-snapshots`, `backup-check`, `backup-restore`, `backup-restore-system`, `backup-mount`, `backup-unlock`, `backup-prune`, `backup-luks-header`, `backup-kit`.
 

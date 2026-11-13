@@ -32,6 +32,8 @@
 #   M8  the reporter skips its executable check-> "hook not executable: exit 1", "…says UNREPORTED"
 #   M9  the reporter reports `success`         -> every "reports as …" row
 #   M10 the external unit loses OnFailure=     -> "restic-backup-external.service names the reporter"
+#   M11 the reporter unit gains a key systemd  -> "systemd accepts the reporter unit under a failed
+#       does not know                             unit's full name"
 #
 # Requires: systemd (systemd-analyze). No sudo.
 #
@@ -230,10 +232,18 @@ check "the installer installs the reporter script" \
 # systemd must accept the reporter under the instance name OnFailure= gives it:
 # a full unit name, with its own @ and .service, as the instance. The only
 # complaint allowed is that the script is not installed on the machine running this.
+#
+# Only complaints that NAME this unit are read. `systemd-analyze verify` loads the
+# whole unit set and also reports whatever is wrong with the machine's own units:
+# on the GitHub runner that is a deprecation warning in system-xfs_scrub.slice,
+# which failed the first version of this row and says nothing about this unit.
+# A bad key in the unit, or a name systemd rejects, is reported with the unit's
+# path or name in it, so those still land here.
 verify_dir="$TMPROOT/verify"
 mkdir -p "$verify_dir"
 cp "$REPORTER_UNIT_FILE" "$verify_dir/"
 verify_complaints="$(systemd-analyze verify "$verify_dir/restic-unit-failed@resticprofile-backup@profile-b2.service.service" 2>&1 \
+  | grep -F "restic-unit-failed@" \
   | grep -v -F "$UNIT_FAILURE_REPORTER_BIN is not executable")"
 check "systemd accepts the reporter unit under a failed unit's full name" "$verify_complaints" ""
 
