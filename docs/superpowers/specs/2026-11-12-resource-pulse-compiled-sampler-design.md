@@ -147,13 +147,20 @@ load of 3.5 to 6.8.
 | `zbus` 6.2.1, with its object server | 0.055, 0.087 | 3.3 MiB | 1.3 MiB | 2 | 1.18 MB | 27 | 2026-11-01 |
 | `rustbus` 0.19.3 | 0.050, 0.082 | 2.5 MiB | 0.6 MiB | 1 | 0.49 MB | 15 | 2023-08-29 |
 | The live gjs sampler, same windows | 0.207, 0.122 | 30.5 MiB | 15.5 MiB | 12 | — | — | — |
+| `zbus` 6.3.0 as this design uses it, measured in the build: the bus layer alone, no reads | 0.008, 0.007 | 3.3 MiB | 1.3 MiB | 3 | 1.28 MB | 27 | 6.3.0 |
 
 - **D-Bus costs nothing that can be measured in CPU.** Both libraries read the same as the floor; the two runs
   differ from each other by more than the libraries do.
-- **The `zbus` row is not the configuration this design uses.** The spike declared the interface to `zbus`'s
-  object server, which answers calls on the library's own thread. The design answers them on the sampling
-  thread, with no object server ("The program"). That configuration is measured in the plan's first task,
-  and the library is final only then.
+- **The spike's `zbus` row is not the configuration this design uses.** The spike declared the interface to
+  `zbus`'s object server, which answers calls on the library's own thread. The design answers them on the
+  sampling thread, with no object server ("The program"). The table's last row is that configuration,
+  measured in the build on 2026-11-13.
+- **The library is final: `zbus`.** Both orders held three runs in a row. The reply order was checked over
+  about 8,000 state replies and 500 Samples a run at 20 ms ticks, and each row was seen failing under a
+  change that breaks its rule. Used this way the program has three threads, not two (one of its own only
+  receives), holds 3.3 MiB, and its bus layer is 301 lines of code. The build locked version 6.3.0,
+  released after the spike; the two versions do not differ in anything the four rules rest on. Record:
+  `~/Projects/handoffs/resource-pulse-perf-tools/2026-11-12-stage-two/library-decision/result.md`.
 - **The live sampler's memory:** 30.5 MiB resident counts shared library pages. Its unit is charged 16.6 MiB.
   Its two CPU figures differ because its watch state differed; it was not read.
 - **A libdbus binding was not built:** the C headers are not installed here, and needing them is the cost the
@@ -198,7 +205,7 @@ error for a call it does not know. So the choice is narrower than the first draf
 1. **`zbus`.** Maintained: four releases in the last month. Against it: a helper thread, about 0.8 MiB and 12
    crates more than `rustbus`, a major version four weeks old, and a 0.x runtime crate under it. **Chosen
    (my call), on condition:** the plan's first task proves the two orders it must hold and measures it as
-   used.
+   used. *The condition was met on 2026-11-13: "Measured for this design".*
 2. **`rustbus`.** One thread, the smallest footprint, and a loop that holds the order by construction. Not
    chosen: no release since 2023, built on a 2022 `nix`. If `zbus` fails the first task, this is the
    fallback, and the upkeep of an unreleased library becomes ours knowingly.
@@ -276,6 +283,8 @@ error for a call it does not know. So the choice is narrower than the first draf
   - So the thread that samples also answers the calls, through the library's message-level API, and no
     interface is registered with the library's object server, which would answer in parallel. The review
     read `zbus`'s source for this: a send writes on the caller's own task, so one thread fixes the order.
+    As built, a second thread of the program's own receives incoming messages and hands them over; it
+    never sends.
   - Every call the program does not handle is answered with the standard "unknown method" error, and
     `Introspect` returns the interface's text, as the gjs service does today. Without that, a mistyped call
     or `gdbus introspect` waits out a 25 s timeout.
