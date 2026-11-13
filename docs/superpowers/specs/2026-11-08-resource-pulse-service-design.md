@@ -11,6 +11,10 @@ cockpit, a second service and a grid of cards on the same pattern (2026-11-09).
 extension costs inside gnome-shell and why, the in-shell budget set per state in place of the single 0.1% below,
 and a compiled sampler as a second stage (2026-11-11).
 
+**Extended by** [2026-11-12-resource-pulse-compiled-sampler-design.md](2026-11-12-resource-pulse-compiled-sampler-design.md):
+the sampler as a Rust program on the same interface, and a slow signal for the state where nothing of
+Resource Pulse is visible (approved 2026-11-13).
+
 ## Why
 
 An independent review of v1 (a9ed51e) found nothing that could destabilise the desktop. Its verdicts are in

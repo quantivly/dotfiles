@@ -2,7 +2,8 @@
 
 **Status:** approved by the owner on 2026-11-11. **Stage one is built** (plan:
 [2026-11-11-resource-pulse-performance-stage-one.md](../plans/2026-11-11-resource-pulse-performance-stage-one.md));
-what the build changed, and what it measured, is under "Stage one as built". Stage two is not started.
+what the build changed, and what it measured, is under "Stage one as built". Stage two has its own design,
+approved 2026-11-13: [2026-11-12-resource-pulse-compiled-sampler-design.md](2026-11-12-resource-pulse-compiled-sampler-design.md).
 **Measured:** 2026-11-10.
 **Measured on** `origin/main` at 0b873b8. `main` has since merged the cockpit's data side (#375) and its
 drawing-side plan (#376); "Order of work" below says what that changes.
@@ -462,6 +463,9 @@ These are the rules the cockpit should be built under:
 
 ### Stage two: a compiled sampler (decided: yes, after stage one)
 
+*Stage two has its own design since 2026-11-12: [2026-11-12-resource-pulse-compiled-sampler-design.md](2026-11-12-resource-pulse-compiled-sampler-design.md).
+Where the two differ, that one wins. It does not take the service-rendered top bar listed below.*
+
 - **What it is.** `resource-pulse.service` as a small Rust program: the same reads, the same definitions, the
   same `ResourcePulse1` on the bus. The extension does not change, and cannot tell.
 - **What it is worth** (finding 13): about a quarter of the CPU and a fifteenth of the memory. On the loaded live
@@ -788,13 +792,15 @@ description, so it travels with the merge.
 5. **The cockpit's drawing-side plan,** amended for the four conflicts under "The cockpit".
 6. **The second live reading,** after the login that loads stage one. The first is finding 12. *Taken
    2026-11-11, with two traces: "Measured on the live shell". For the owner to close.*
-7. **Stage two, the compiled sampler** (decided): its own design and plan, after stage one.
+7. **Stage two, the compiled sampler** (decided): its own design and plan, after stage one. *Designed
+   2026-11-12: [2026-11-12-resource-pulse-compiled-sampler-design.md](2026-11-12-resource-pulse-compiled-sampler-design.md).*
 8. **The watched service's burst scans** under a bursty load (finding 13). With stage two, or as one constant
-   before it.
+   before it. *Taken into the stage-two design: measured first, capped only if over budget.*
 9. **Nothing visible: no Samples at all** (added 2026-11-11, during the build). Stage one keeps the
    subscription under a fullscreen window, so a covered card stays fresh. Taking that state to zero needs a
    way to keep the covered card's 30 s repaint fresh without the 2 s Samples: with stage two, from the service
-   side (a slow signal for a covered card). See "Stage one as built".
+   side (a slow signal for a covered card). See "Stage one as built". *Decided by the owner on 2026-11-12:
+   a slow signal every 30 s, in the stage-two design.*
 10. **The glue checks, in the repository** (added 2026-11-11, by the whole-branch review). The shell-side
     glue cannot run under plain `gjs`; its behaviour was proved by four scripts run in the nested shell
     (listeners, the watchdog, the top bar's repaints, the cover check with a real window), which live with
@@ -805,10 +811,12 @@ description, so it travels with the merge.
     0.15 of it is the frame each Sample draws. Needs the owner's decision: accept it as the price of a top
     bar that moves every 2 s, or draw the top bar every 4 s while the card is covered, which halves the
     frames. A live reading on a machine at rest, wired and charged, would show what stage one gains where
-    it was designed to.
+    it was designed to. *Decided by the owner on 2026-11-12: the live cost is accepted and no code
+    changes. The reading at rest is wanted, and is taken on his word.*
 12. **The stock shell's own collections** (added 2026-11-11). Its network and power indicators make it
     force a full collection about every 10 s on Wi-Fi or battery, with no extension. Not this
-    extension's to fix; worth a report to GJS and gnome-shell with the traces.
+    extension's to fix; worth a report to GJS and gnome-shell with the traces. *Decided by the owner on
+    2026-11-12: a report, drafted for him to file.*
 
 ## My calls (for the owner to check)
 
