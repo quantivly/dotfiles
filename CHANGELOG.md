@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     bus goes away, with one logged line saying the connection closed; a row fails if `zbus` is built with
     its object server (`service`). The private-bus guard moved to `gnome-shell/tests/privateBus.js`, which
     registers no rows; `service-dbus.test.js` re-exports it.
+  - **The pure modules (pull request C).** The sampler's reading and arithmetic, ported function by function
+    from `lib/` with the gjs rows carried over as Rust tests: the file parsers (`src/parsers/`, matched by
+    hand to the gjs regular expressions, with no regex crate), CPU, memory, pressure and the history buffer
+    (`cpu.rs`, `memory.rs`, `pressure.rs`, `history.rs`), JavaScript's string order and the naming and
+    ranking of apps (`js_string.rs`, `apps.rs`), and the scan cadence (`cadence.rs`). 115 of the 179 gjs
+    titles are now ported; the other 64 wait for the sampler core. An expected value that is not a gjs
+    row's own was taken by running the gjs function. Two deliberate differences from gjs, each pinned by a
+    test and neither reachable from a real kernel: a number too large for its integer type reads as no
+    data, and a CPU list naming a CPU above 65,535 is refused. The carried-rows check now matches its
+    marker only as a doc comment, and refuses a marker whose title is not in the list.
 
 - **The fingerprint reader, without ever putting a fingerprint wait in front of a password:
   `fingerprint-setup` (`--check`, `--remove`).**
