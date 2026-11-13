@@ -216,7 +216,7 @@ unit and a "now" of zero passes every one of them. Both are exit 2. Mutant **M14
 
 ## The state table
 
-`scripts/test-timer-health.sh` (142 checks, hermetic, run in CI, job
+`scripts/test-timer-health.sh` (156 checks, hermetic, run in CI, job
 "Repo-Owned Timer Health State Table").
 
 **Hermetic means a recording `systemctl` stub at the front of `PATH`**, never "systemctl happens to
@@ -557,6 +557,52 @@ had their `OnBootSec=3min` in the past on that boot and kept running; neither se
 so on a monotonic timer it catches nothing up and leaves only this hazard. A timer here may set it
 only alongside `OnCalendar=`, and `scripts/test-timer-health.sh` enforces that for every unit under
 `systemd/`.
+
+## Everything the ownership list cannot see (2026-11-13)
+
+The checker's scope was the user units this checkout links, by design. Measured on cilantro on
+2026-11-13, that scope had a cost nobody had priced:
+
+```
+$ systemctl --failed --plain --no-legend
+resticprofile-backup@profile-b2.service loaded failed failed …
+resticprofile-check@profile-b2.service  loaded failed failed …
+$ cat ~/.local/state/timer-health/status
+rc=0
+faults=0
+```
+
+Both units had failed on every run since 2026-09-20: 398 backup runs, 54 days with no offsite
+backup. They are **system** units, so the status file was telling the truth about what it had been
+asked. `backup-doctor` would have said so; it needs sudo and somebody to think of running it. The
+same hole covered the seven `nanoclaw-*` user units, which are plain files and not links into this
+checkout: `nanoclaw-fleet-agent` failed 212 times in three days that week.
+
+`scripts/check-failed-units.sh` is that missing half, and `check-timer-health.sh` runs it after its
+own check and counts its ✗ lines in the same verdict.
+
+- **Root-free, because the reader is a shell prompt.** `systemctl list-units --state=failed` works
+  for any user, and `restic-notify` writes `/var/lib/restic-notify/<profile>-<command>.state`
+  world-readable.
+- **A state that still says `success` proves little; its age is what is judged.** A unit that never
+  started writes nothing. The b2 state read `success` throughout the 54 days.
+- **Only a state a success rewrites is judged.** `b2-check.state` has read `fail` since 2026-08-30,
+  through three later checks that passed. The check profile has `run-after-fail` and no success
+  hook, so nothing clears it. Counting it would be the permanently red checker; it is printed as a
+  `·` line instead.
+- **An age is judged only after a day of uptime.** A laptop that was off has an old backup and
+  nothing wrong with it. A recorded `fail` is not gated: that backup ran, and failed. An uptime
+  that cannot be read excuses nothing.
+- **A manager that cannot be reached is `○`, not `✓`.** The same call as "no user manager" above.
+- **No unit is reported twice.** The units this script actually judged are passed to the delegate.
+  Not the ones it owns: a unit it skipped, or never reached because it returned early, is still
+  the delegate's to report.
+- **What it cannot see.** A unit that fails and then succeeds leaves no failed state behind; the
+  fleet agent's 212 failures were of that kind, and this does not catch them.
+
+`scripts/test-check-failed-units.sh` (36 checks) pins the checker; eleven mutants, each killed. The
+delegation has 14 rows in the table above; eight mutants, each killed, including the one that runs
+the delegate in a subshell and so loses its verdict.
 
 ## What this does not do
 

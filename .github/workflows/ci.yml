@@ -508,6 +508,12 @@ jobs:
       - name: Run the timer-health state table
         run: ./scripts/test-timer-health.sh
 
+      # What the ownership list above cannot see: failed SYSTEM units, failed
+      # user units nobody else judged, and a backup that stopped succeeding.
+      # Hermetic behind its own systemctl stub and a fixture state directory.
+      - name: Run the failed-units state table
+        run: ./scripts/test-check-failed-units.sh
+
   vpn-failfast-test:
     name: VPN Fail-Fast State Table
     runs-on: ubuntu-latest

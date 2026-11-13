@@ -34,7 +34,8 @@
 set -uo pipefail
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-SUT="$DOTFILES/scripts/check-timer-health.sh"
+# Overridable so a mutation sweep can point the table at a mutated copy.
+SUT="${SUT:-$DOTFILES/scripts/check-timer-health.sh}"
 RECONCILER="$DOTFILES/scripts/reconcile-systemd-units.sh"
 
 PASS=0; FAIL=0
@@ -143,6 +144,18 @@ STUB_RESOLVED="$(PATH="$STUBBIN:$PATH" bash -c 'command -v systemctl')"
 check "systemctl resolves to the stub" "$STUB_RESOLVED" "$STUBBIN/systemctl"
 [[ "$STUB_RESOLVED" == "$STUBBIN/systemctl" ]] || \
   fatal "the stub is not first on PATH; rows would query the REAL user manager"
+
+# Everything this suite pins is check-timer-health.sh's OWN logic. For the rest
+# it delegates to scripts/check-failed-units.sh, which reads the REAL
+# /var/lib/restic-notify: left in place, every row here would depend on whether
+# the machine running it has a stale backup (cilantro did, and 28 rows failed).
+# A quiet stand-in is exported for the whole suite; the delegation itself is
+# pinned in its own section below, against a recording stub, and
+# check-failed-units.sh has its own state table.
+QUIET_FAILED_UNITS_CHECKER="$STUBBIN/quiet-failed-units-checker"
+printf '#!/bin/sh\nexit 0\n' > "$QUIET_FAILED_UNITS_CHECKER" || fatal "setup"
+chmod +x "$QUIET_FAILED_UNITS_CHECKER" || fatal "setup"
+export TIMER_HEALTH_FAILED_UNITS_CHECKER="$QUIET_FAILED_UNITS_CHECKER"
 
 # A PATH with every tool the checker and the reconciler need EXCEPT jq, for the
 # "could not run" row. Built by symlink, so jq is genuinely absent rather than
@@ -865,9 +878,66 @@ check "no timer sets Persistent=true without OnCalendar= (it wedges on a late bo
       "$persistent_without_calendar" ""
 
 # ---------------------------------------------------------------------------
+printf '\neverything the ownership list cannot see\n'
+
+# A stand-in for check-failed-units.sh that records what it was told and answers
+# as the row says: STUB_CHECKER_STATUS is its exit status, STUB_CHECKER_LINE the
+# one ✗ line it prints.
+RECORDING_CHECKER="$STUBBIN/recording-failed-units-checker"
+JUDGED_ELSEWHERE_RECORD="$T/judged-elsewhere"
+cat > "$RECORDING_CHECKER" <<STUB || fatal "setup"
+#!/bin/sh
+printf '%s\n' "\$FAILED_UNITS_JUDGED_ELSEWHERE" > "$JUDGED_ELSEWHERE_RECORD"
+[ -n "\${STUB_CHECKER_LINE:-}" ] && printf '  ✗ %s\n' "\$STUB_CHECKER_LINE"
+exit "\${STUB_CHECKER_STATUS:-0}"
+STUB
+chmod +x "$RECORDING_CHECKER" || fatal "setup"
+FAILED_SYSTEM_UNIT_LINE='system unit failed: resticprofile-backup@profile-b2.service'
+
+healthy
+OUT="$(TIMER_HEALTH_FAILED_UNITS_CHECKER="$RECORDING_CHECKER" run)"; RC=$?
+check "delegate clean, timers healthy: exit 0" "$RC" 0
+check "the delegate is told exactly the units judged here" \
+      "$(tr '\n' ' ' < "$JUDGED_ELSEWHERE_RECORD")" "precompute.timer precompute.service "
+
+healthy
+OUT="$(TIMER_HEALTH_FAILED_UNITS_CHECKER="$RECORDING_CHECKER" STUB_CHECKER_STATUS=1 \
+       STUB_CHECKER_LINE="$FAILED_SYSTEM_UNIT_LINE" run)"; RC=$?
+check "delegate reports a fault, timers healthy: exit 1" "$RC" 1
+grep_ok "$OUT" "$FAILED_SYSTEM_UNIT_LINE" "delegate reports a fault: its line is in the report"
+
+healthy
+OUT="$(TIMER_HEALTH_FAILED_UNITS_CHECKER="$RECORDING_CHECKER" STUB_CHECKER_STATUS=2 run)"; RC=$?
+check "delegate could not run: exit 1, never a pass" "$RC" 1
+grep_ok "$OUT" 'could not run (exit 2)' "delegate could not run: says UNCHECKED and why"
+
+healthy
+OUT="$(TIMER_HEALTH_FAILED_UNITS_CHECKER="$T/no-such-checker" run)"; RC=$?
+check "delegate missing: exit 1, never a pass" "$RC" 1
+grep_ok "$OUT" 'failed units and backup freshness UNCHECKED' "delegate missing: says UNCHECKED"
+
+# This script returning early must not take the delegate with it: a machine that
+# links none of these units still has system units and backups.
+reset
+OUT="$(TIMER_HEALTH_FAILED_UNITS_CHECKER="$RECORDING_CHECKER" STUB_CHECKER_STATUS=1 \
+       STUB_CHECKER_LINE="$FAILED_SYSTEM_UNIT_LINE" run)"; RC=$?
+check "nothing linked here, delegate reports a fault: exit 1" "$RC" 1
+check "nothing linked here: no unit is claimed as judged" "$(tr -d '\n' < "$JUDGED_ELSEWHERE_RECORD")" ""
+
+# The prompt reads the state file, so the delegate's fault has to reach it.
+healthy
+check "write-state with a delegate fault: verdict recorded" \
+      "$(TIMER_HEALTH_FAILED_UNITS_CHECKER="$RECORDING_CHECKER" STUB_CHECKER_STATUS=1 \
+         STUB_CHECKER_LINE="$FAILED_SYSTEM_UNIT_LINE" ws)" 0
+check "write-state with a delegate fault: rc recorded as 1" "$(wskey rc)" 1
+check "write-state with a delegate fault: counted" "$(wskey faults)" 1
+check "write-state with a delegate fault: it is the summary the prompt shows" \
+      "$(wskey summary)" "$FAILED_SYSTEM_UNIT_LINE"
+
+# ---------------------------------------------------------------------------
 # The suite asserts its own size: a row silently deleted (or a fixture helper
 # that stopped emitting one) is otherwise indistinguishable from a clean run.
-EXPECTED_ROWS=142
+EXPECTED_ROWS=156
 
 # --- the count this suite is documented as running ---------------------------
 # docs_claim pins the number the prose quotes to EXPECTED_ROWS above: it greps

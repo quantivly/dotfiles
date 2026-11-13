@@ -929,7 +929,9 @@ _timer_health_warn() {
       # printed a trailing "\033[0m" at the prompt. Introduced while replacing
       # raw ESC bytes in this file with escapes, and invisible to every row that
       # greps for the message text rather than for a stray escape.
-      print -ru2 -- $'\033[0;33m⚠ timer health: '"${faults}"$' repo-owned timer(s) unhealthy\033[0m'
+      # "unit health", not "timer health": since check-failed-units.sh the count
+      # also covers failed system units and a backup that stopped succeeding.
+      print -ru2 -- $'\033[0;33m⚠ unit health: '"${faults}"$' fault(s) in timers, failed units or backups\033[0m'
       [[ -n "$summary" ]] && print -ru2 -- "  ${summary}"
       print -ru2 -- '  scripts/verify-tools.sh for the full report; TIMER_HEALTH_QUIET=1 to silence.'
     fi

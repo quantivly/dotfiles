@@ -175,8 +175,8 @@ thstatus 'rc=1
 faults=2
 summary=wt-gc-sweep.service armed but SKIPPED since 2026-09-23
 detail=/x'
-check "rc=1: warns"                    "$(th | grep -c 'timer health')"           "1"
-check "rc=1: names the count"          "$(th | grep -c '2 repo-owned')"           "1"
+check "rc=1: warns"                    "$(th | grep -c 'unit health')"           "1"
+check "rc=1: names the count"          "$(th | grep -c '2 fault(s)')"           "1"
 check "rc=1: carries the summary"      "$(th | grep -c 'wt-gc-sweep.service')"    "1"
 check "rc=1: names the mute switch"    "$(th | grep -c 'TIMER_HEALTH_QUIET')"     "1"
 # A literal backslash-033 in the output means a colour escape landed in a plain
@@ -187,7 +187,7 @@ check "rc=1: no literal escape sequence" "$(th | grep -c '\\033')"              
 # warning would land inside a captured value.
 # Not merely "stdout is empty": the SAME fixture must warn on stderr, or this
 # row would pass for any reason that produces no output at all.
-check "rc=1: warns (stderr folded in)" "$(th | grep -c 'timer health')"  "1"
+check "rc=1: warns (stderr folded in)" "$(th | grep -c 'unit health')"  "1"
 check "rc=1: nothing on stdout"        "$(th_stdout_only)"               ""
 
 # rc=2 is "the checker could not run", whose commonest cause here is a worktree
@@ -216,11 +216,11 @@ th_via_guard() {
   zrun "HOME='$WARNHOME_TH' XDG_STATE_HOME='$THSTATE' DOTFILES_ROOT='$THROOT' ${1:-} _dotfiles_live_config_warn"
 }
 check "DOTFILES_GUARD_QUIET does NOT silence timer health" \
-      "$(th_via_guard "DOTFILES_GUARD_QUIET=1" | grep -c 'timer health')"  "1"
+      "$(th_via_guard "DOTFILES_GUARD_QUIET=1" | grep -c 'unit health')"  "1"
 check "... while still silencing the dotfiles guard itself" \
       "$(th_via_guard "DOTFILES_GUARD_QUIET=1" | grep -c 'dotfiles:')"     "0"
 check "TIMER_HEALTH_QUIET through the guard too" \
-      "$(th_via_guard "TIMER_HEALTH_QUIET=1" | grep -c 'timer health')"    "0"
+      "$(th_via_guard "TIMER_HEALTH_QUIET=1" | grep -c 'unit health')"    "0"
 
 # THE BLOCKER. `[[ -r $f ]]` is TRUE for a FIFO and the read then blocks forever:
 # a new terminal hangs at its first prompt, no output, no timeout. Measured on
@@ -248,12 +248,12 @@ thstatus 'rc=1
 faults=notanumber
 summary=s
 detail=/x'
-check "non-numeric count: still warns" "$(th | grep -c 'timer health')"      "1"
+check "non-numeric count: still warns" "$(th | grep -c 'unit health')"      "1"
 check "non-numeric count: no math error" "$(th | grep -c 'bad math')"        "0"
 # The contract is that the DISPLAYED count is a number. Asserting only "it still
 # warns" passed whether or not the guard existed, which let the mutant live.
 check "non-numeric count: shown as a number" \
-      "$(th | sed -n 's/.*health: \([^ ]*\) repo-owned.*/\1/p' | grep -c '^[0-9][0-9]*$')" "1"
+      "$(th | sed -n 's/.*health: \([^ ]*\) fault(s).*/\1/p' | grep -c '^[0-9][0-9]*$')" "1"
 
 thstatus 'rc=0
 faults=0
