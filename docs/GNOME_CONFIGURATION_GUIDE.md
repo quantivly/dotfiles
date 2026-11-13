@@ -544,7 +544,10 @@ shell's journal:
   could not read `cockpit.json`, as `gnome-status` says it. Among the errors: `missing` with no file or one
   that cannot be read, `config: malformed JSON` for text that is not JSON (a half-typed save included),
   `config: expected a JSON object` for JSON that is not an object, or the first field it found wrong, such as
-  `groups[1].caption: expected a non-empty string`; the grid goes until the file reads again.
+  `groups[1].caption: expected a non-empty string`; the grid goes. Once the file reads again the grid comes back
+  the next time the extension reads the cockpit's state, which is when the dropdown opens, when the screen comes
+  back from a lock or a blank, or when `cockpit.service` starts again: it does not come back by itself while only
+  the card top right is on screen.
 - `resource-pulse: cockpit: focus: <reason>`: a session row's click brought no window forward. The reason is
   one of `FocusSession`'s five error codes ([The cockpit service](#the-cockpit-service); `internal` also when
   the call itself failed or got no answer in 2 s), `not focused`, or `no window for pids [<pids>]` when herdr
@@ -615,9 +618,10 @@ rows are in the suite below.
   against the rankings the replay sends; hover; the clicks, with two windows of its own (from another
   window's focus, from every window minimized, a reply naming no window, one not focused, two quick
   clicks); cover and reveal; a source made stale and put back; the layout taken away (an unreadable
-  `cockpit.json`, so the card goes back top right) and given back (the grid at its cells again); the
-  dropdown; the lock path (disable, then enable); a screenshot, `shots/cockpit-<pass>.png`, once window
-  effects are over; the log; and the count budgets through `perf`, about nine minutes more. Exit 1 when a
+  `cockpit.json`, so the card goes back top right) and given back (the grid at its cells again once the
+  dropdown has opened, which reads it, and closed); the dropdown; the lock path (disable, then enable); a
+  screenshot, `shots/cockpit-<pass>.png`, once window effects are over; the log; and the count budgets
+  through `perf`, about nine minutes more. Exit 1 when a
   step is bad, else 2 when one could not be judged. It rewrites only the run's copy of the fixture. It may
   run again in the same run:
   each pass judges the log from where the last one stopped reading, and cannot judge the clicks whose one
@@ -713,7 +717,8 @@ scripts/resource-pulse-nested.sh stop
   runs of three; covered and busy 0.181 to 0.217 (0.185), the median under the 0.20 it gives a covered card
   on a busy machine, one run of three over it; top bar hidden and covered 0.093 to 0.110 (0.110); the
   cockpit visible and busy 0.288 to 0.320 (0.289), within its 0.5. The `perf` pass that ends each of the
-  three `check cockpit` passes read covered and busy at 0.189, 0.285 and 0.347. The main
+  three `check cockpit` passes read covered with idle input at 0.208, 0.286 and 0.113, all three over the
+  0.08, and covered and busy at 0.189, 0.285 and 0.347, two of them over the 0.20. The main
   thread's median per tick, the median of the three: 0.81 ms covered and idle, 2.93 ms covered and busy,
   4.86 ms visible. Every count and cockpit budget held in each run.
 
