@@ -611,12 +611,15 @@ rows are in the suite below.
   when asked, clicks the primary button there. A pointer that never arrives is exit 2.
 - `check cockpit` judges the cockpit, in a run started with `--gc-log --replay` whose session has no window
   yet, one line a step: `ok`, `bad` or `could not judge`, never `ok` for a step it could not judge. The
-  steps: the extension active and its log free of errors; the layer and the grid; hover; the clicks, with
-  two windows of its own (from another window's focus, from every window minimized, a reply naming no
-  window, one not focused, two quick clicks); cover and reveal; a source made stale and put back; the
-  dropdown; the lock path (disable, then enable); a screenshot, `shots/cockpit-<pass>.png`; the log; and
-  the count budgets through `perf`, about nine minutes more. Exit 1 when a step is bad, else 2 when one
-  could not be judged. It rewrites only the run's copy of the fixture. It may run again in the same run:
+  steps: the extension active and its log free of errors; the layer and the grid; the apps card's rows
+  against the rankings the replay sends; hover; the clicks, with two windows of its own (from another
+  window's focus, from every window minimized, a reply naming no window, one not focused, two quick
+  clicks); cover and reveal; a source made stale and put back; the layout taken away (an unreadable
+  `cockpit.json`, so the card goes back top right) and given back (the grid at its cells again); the
+  dropdown; the lock path (disable, then enable); a screenshot, `shots/cockpit-<pass>.png`, once window
+  effects are over; the log; and the count budgets through `perf`, about nine minutes more. Exit 1 when a
+  step is bad, else 2 when one could not be judged. It rewrites only the run's copy of the fixture. It may
+  run again in the same run:
   each pass judges the log from where the last one stopped reading, and cannot judge the clicks whose one
   journal line the extension's 10-minute limit still holds from an earlier pass, and says how long is left.
   A pass takes about 9 minutes, its `perf` pass included (9 min 6 s and 9 min 9 s in the nested shell on
@@ -706,9 +709,11 @@ scripts/resource-pulse-nested.sh stop
   desktop reads above the nested figures, as the bullet on it says, and has no percentage to pass.
 - **Measured in the nested shell on 2026-11-12**, three `perf` runs with the fixture's grid drawn in every
   enabled state, in % of one core over the disabled state (lowest to highest, then the median): covered with
-  idle input 0.074 to 0.113 (0.109), above the 0.08 the first table gives a covered card; covered and busy
-  0.181 to 0.217 (0.185); top bar hidden and covered 0.093 to 0.110 (0.110); the cockpit visible and busy
-  0.288 to 0.320 (0.289), within its 0.5. The main
+  idle input 0.074 to 0.113 (0.109), the median above the 0.08 the first table gives a covered card, in two
+  runs of three; covered and busy 0.181 to 0.217 (0.185), the median under the 0.20 it gives a covered card
+  on a busy machine, one run of three over it; top bar hidden and covered 0.093 to 0.110 (0.110); the
+  cockpit visible and busy 0.288 to 0.320 (0.289), within its 0.5. The `perf` pass that ends each of the
+  three `check cockpit` passes read covered and busy at 0.189, 0.285 and 0.347. The main
   thread's median per tick, the median of the three: 0.81 ms covered and idle, 2.93 ms covered and busy,
   4.86 ms visible. Every count and cockpit budget held in each run.
 
