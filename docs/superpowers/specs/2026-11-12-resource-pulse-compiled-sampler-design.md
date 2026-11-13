@@ -1,7 +1,8 @@
 # Resource Pulse stage two: a compiled sampler
 
 **Status:** approved by the owner on 2026-11-13. Proposed 2026-11-12 and revised 2026-11-13. Nothing is
-built; the plan comes next.
+built. The plan for its first two pull requests:
+[2026-11-13-resource-pulse-compiled-sampler.md](../plans/2026-11-13-resource-pulse-compiled-sampler.md).
 **Read twice before it reached him:** a builder check (seven points) and an independent review ("sound with
 changes": no critical finding, eight important, twelve minor). Both are folded in and marked under "My calls".
 The review's report: `~/Projects/handoffs/resource-pulse-perf-tools/2026-11-12-stage-two/design-review/`.
