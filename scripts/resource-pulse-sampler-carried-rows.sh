@@ -8,15 +8,17 @@
 # resource-pulse-sampler/tests/carried-rows.txt (regenerate it with
 # scripts/resource-pulse-sampler-carried-rows-generate.py). Each title must be
 # found EXACTLY ONCE, as one of:
-#   - a `/// row: <title>` comment on a Rust test, anywhere under the crate; or
+#   - a `/// row: <title>` doc comment, at the start of a line (indentation allowed), on a Rust test,
+#     anywhere under the crate; or
 #   - a line `<title><TAB><reason>` in resource-pulse-sampler/tests/carried-rows-exempt.txt.
 # A title found nowhere, twice, or both ported and exempt fails; so does an
-# exempt line naming a title the list does not have.
+# exempt line, or a `/// row:` marker, naming a title the list does not have (a port under a
+# misspelled title would otherwise pass while the real title still reads as exempt).
 #
 # Output: one line per finding, `CARRIED-ROW pass|fail <what>: <title>`, which
 # scripts/test-resource-pulse-sampler.sh counts.
 # Exit: 0 all carried; 1 a title is missing, duplicated, double-counted or
-# unknown; 2 a file cannot be read (never a pass).
+# unknown (in the exempt file or in a marker); 2 a file cannot be read (never a pass).
 #
 # Flags (for the state table's fixtures; the defaults are the crate's own):
 #   --crate-dir <dir>   --list <file>   --exempt <file>
@@ -28,8 +30,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 CRATE_DIR="$HERE/../resource-pulse-sampler"
 LIST_FILE=""
 EXEMPT_FILE=""
-# The marker a Rust test carries to say which gjs row it ports.
-PORTED_ROW_MARKER='/// row: '
+# The marker a Rust test carries to say which gjs row it ports: a doc comment at the start of a line.
+# (A regular expression for rg, and the same text for awk to cut off the title.)
+PORTED_ROW_MARKER_PATTERN='^\s*/// row: '
+PORTED_ROW_MARKER_AWK_PATTERN='^[ \t]*/// row: '
 
 fatal() { printf 'CARRIED-ROWS: %s\n' "$*" >&2; exit 2; }
 
@@ -59,12 +63,12 @@ rg -q -v -e '^#' -e '^$' "$LIST_FILE" || fatal "the list $LIST_FILE holds no tit
 PORTED_LINES_FILE="$(mktemp)" || fatal "mktemp failed"
 trap 'rm -f "$PORTED_LINES_FILE"' EXIT
 # rg exits 1 for "no match" (an empty crate is a valid state) and 2 for an error.
-rg --no-filename --no-line-number --no-messages --glob '*.rs' -F -e "$PORTED_ROW_MARKER" "$CRATE_DIR" >"$PORTED_LINES_FILE"
+rg --no-filename --no-line-number --no-messages --glob '*.rs' -e "$PORTED_ROW_MARKER_PATTERN" "$CRATE_DIR" >"$PORTED_LINES_FILE"
 rg_status=$?
 (( rg_status <= 1 )) || fatal "rg failed (exit $rg_status) reading $CRATE_DIR"
 
 # POSIX awk (mawk here): count each title in the three sources, then judge.
-awk -v marker="$PORTED_ROW_MARKER" '
+awk -v marker_pattern="$PORTED_ROW_MARKER_AWK_PATTERN" '
   BEGIN { FS = "\t" }
   FILENAME == ARGV[1] {
     if ($0 == "" || substr($0, 1, 1) == "#") next
@@ -76,9 +80,9 @@ awk -v marker="$PORTED_ROW_MARKER" '
     exemptCount[$1]++; next
   }
   {
-    position = index($0, marker)
-    if (position == 0) next
-    portedCount[substr($0, position + length(marker))]++
+    title = $0
+    if (!sub(marker_pattern, "", title)) next
+    portedCount[title]++
   }
   END {
     if (malformed != "") { printf "CARRIED-ROWS: exempt line without a reason:%s\n", malformed > "/dev/stderr"; exit 2 }
@@ -95,6 +99,9 @@ awk -v marker="$PORTED_ROW_MARKER" '
     }
     for (title in exemptCount) {
       if (!(title in inList)) { printf "CARRIED-ROW fail unknown-exempt: %s\n", title; failures++ }
+    }
+    for (title in portedCount) {
+      if (!(title in inList)) { printf "CARRIED-ROW fail unknown-ported: %s\n", title; failures++ }
     }
     exit failures > 0 ? 1 : 0
   }

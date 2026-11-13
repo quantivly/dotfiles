@@ -270,6 +270,12 @@ check "a title both ported and exempt: exit 1, named as such" "$FIXTURE_EXIT:$(p
 UNKNOWN_FIXTURE="$(write_carried_fixture unknown $'Beta row\tnot yet ported\nGamma row\tnot yet ported\nDelta row\tnot a gjs row\n' $'/// row: Alpha row\n')"
 run_carried_fixture "$UNKNOWN_FIXTURE"
 check "an exempt title the list lacks: exit 1, named as unknown" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW fail unknown-exempt: Delta row')" "1:1"
+UNKNOWN_PORTED_FIXTURE="$(write_carried_fixture unknown-ported $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n/// row: Delta row\n')"
+run_carried_fixture "$UNKNOWN_PORTED_FIXTURE"
+check "a port under a title the list lacks: exit 1, named as unknown" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW fail unknown-ported: Delta row')" "1:1"
+NOT_A_DOC_COMMENT_FIXTURE="$(write_carried_fixture not-a-doc-comment $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\nlet note = 1; /// row: Beta row\n')"
+run_carried_fixture "$NOT_A_DOC_COMMENT_FIXTURE"
+check "a marker inside a line is not a port: exit 0, Beta still exempt only" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW pass exempt: Beta row')" "0:1"
 run_carried_fixture "$BASELINE_FIXTURE" "$WORK_DIR/no-such-list.txt"
 check "a list that cannot be read: exit 2, no pass line" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg '^CARRIED-ROW ' | wc -l | tr -d ' ')" "2:0"
 
@@ -369,10 +375,11 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
   bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
 fi
 
-# 2 cargo unit tests + 1 build + 1 zbus feature row + 6 program flag rows + 26 constants + 1 comparison tally
-# + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks + 8 carried-check fixtures + 2 runner guards
-# + 1 bus_link guard + 8 bus_link tests + 11 rows of the program on a private bus.
-EXPECTED_ROWS=254
+# 2 cargo unit tests + 1 build + 1 zbus feature row + 6 program flag rows
+# + 26 constants + 1 comparison tally + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks
+# + 10 carried-check fixtures + 2 runner guards + 1 bus_link guard + 8 bus_link tests
+# + 11 rows of the program on a private bus.
+EXPECTED_ROWS=256
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then
