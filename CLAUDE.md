@@ -680,6 +680,7 @@ vpn-doctor           # VPN chain health. Every vpn-* : see the VPN section
 dev-link-doctor      # Can an agent reach dev over SSM now? credential, key age, agent, fresh ssh (--offline)
 dock-lid-setup       # Lid locks, never suspends; COPIED to /etc; reloads logind, NEVER restarts it (--check)
 dock-wifi-setup      # Wi-Fi off while docked on wired (one uplink); --check, --remove turns it back on
+fingerprint-setup    # sudo: password, then a gated finger; COPIED to /etc (--check, --remove)
 ```
 
 Workflow guides: [git](examples/git-workflows.md) | [docker](examples/docker-workflows.md) | [fzf](examples/fzf-recipes.md) | [tmux](examples/tmux-workflows.md)
