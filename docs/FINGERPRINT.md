@@ -288,6 +288,17 @@ covers the following:
 - **The worktree guard.**
 - **The installed stack through the real libpam** (the table above).
 
+**The mutation sweep (2026-11-13, at `d99a10e`) killed all 43 mutants.**
+
+- **Coverage:** 14 mutants in the gate, 5 in the stanza and 24 in the installer.
+- **Applicability:** none was not applicable. Each replaced exactly one text, and its diff
+  was checked.
+- **Stanza mutants:** every one but `quiet_log` fails the libpam rows as well as the
+  exact-text row, so the semantics are pinned and not only the spelling.
+- **Three installer mutants stop the suite rather than fail a row:** a gdm restart, a write
+  in place, and no gate directory. Each breaks the install, the install rows fail, and the
+  baseline install then ends the suite with "could not run".
+
 ### Sources
 
 - [pam_fprintd(8)](https://www.mankier.com/8/pam_fprintd), LIMITATIONS
