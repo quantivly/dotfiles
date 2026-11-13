@@ -311,13 +311,32 @@ if [[ -f "${BASEDIR}/.pre-commit-config.yaml" ]]; then
 
             if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
                 # Install hooks with --install-hooks to download hook dependencies
-                echo "    Installing pre-commit hooks..."
-                if pre-commit install --install-hooks 2>&1 | sed 's/^/      /'; then
-                    echo "    ✓ Pre-commit hooks installed successfully"
+                # `pre-commit install` REFUSES while core.hooksPath is set, and this
+                # repo's gitconfig sets it: the global hook dotbot links at
+                # ~/.config/git/hooks/pre-commit is what runs pre-commit, in every
+                # repository. So with a hooks path set, only fetch the environments.
+                #
+                # The status is read from PIPESTATUS, not from the pipeline: the old
+                # `if pre-commit … | sed …` tested sed, so this step printed "installed
+                # successfully" over pre-commit's own "Cowardly refusing" for as long
+                # as the hooks path has been set.
+                if [[ -n "$(git config --get core.hooksPath 2>/dev/null)" ]]; then
+                    echo "    Fetching pre-commit hook environments (the global git hook runs them)..."
+                    pre-commit install-hooks 2>&1 | sed 's/^/      /'
+                    pre_commit_status="${PIPESTATUS[0]}"
+                    pre_commit_retry_command="pre-commit install-hooks"
+                else
+                    echo "    Installing pre-commit hooks..."
+                    pre-commit install --install-hooks 2>&1 | sed 's/^/      /'
+                    pre_commit_status="${PIPESTATUS[0]}"
+                    pre_commit_retry_command="pre-commit install --install-hooks"
+                fi
+                if (( pre_commit_status == 0 )); then
+                    echo "    ✓ Pre-commit hooks ready"
                     echo "    ℹ Hooks will run automatically before each commit"
                 else
-                    echo "    ⚠ Pre-commit hook installation failed"
-                    echo "      Manual installation: pre-commit install --install-hooks"
+                    echo "    ⚠ Pre-commit hook setup failed (exit $pre_commit_status)"
+                    echo "      Retry by hand: $pre_commit_retry_command"
                 fi
             else
                 echo "    ℹ Skipped pre-commit hooks installation"

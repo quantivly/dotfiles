@@ -686,6 +686,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Global git hooks run again: `install.conf.yaml` links `~/.config/git/hooks` once more.**
+  `gitconfig` sets `core.hooksPath` to that path, and a global hooks path replaces every
+  repository's own `.git/hooks`. The link was deleted as collateral of the GPG removal (`edabe60`,
+  2026-01-28); the hook came back in `26cab05` and the link did not. Until now git ran no hook in
+  any repository that sets no hooks path of its own, so gitleaks, shellcheck and the `CLAUDE.md`
+  budget check never ran at commit time, and nothing was red: a hooks path that does not exist is
+  not an error to git.
+  - **`scripts/check-git-hooks.sh`** asserts the live machine (the directory exists and holds a
+    hook git will run) and, with `--tracked`, the checkout (the path `gitconfig` names is linked
+    to a runnable hook). CI runs `--tracked`, so the commit that deletes the link fails.
+    `verify-tools.sh` runs the live half as its eighth assertion. State table:
+    `scripts/test-check-git-hooks.sh` (hermetic, CI `git-hooks-test`).
+  - **`./install` no longer prints "installed successfully" over a refusal.** `pre-commit install`
+    refuses while `core.hooksPath` is set, and the step tested the exit status of the `sed` after
+    it. With a hooks path set it now fetches the hook environments only, and reports
+    `pre-commit`'s own status.
+  - **Expect it on deploy:** every commit in a repository with a `.pre-commit-config.yaml` runs
+    its hooks again, in every live session.
+
 - **The credential reconciler treats the same grant in two writers' shapes as one login
   (`scripts/claude-account-dirs.sh`).** The equal-expiry tie-break compared the whole
   `claudeAiOauth` block, so `subscriptionTypeSource`, which Claude Code writes and `clauth login`

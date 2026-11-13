@@ -12,7 +12,7 @@
 #   ./scripts/verify-tools.sh
 #   verify-tools  # If symlinked to ~/.local/bin
 #
-# EXIT CODE: non-zero if and only if one of the seven ASSERTION sections FAILs:
+# EXIT CODE: non-zero if and only if one of the eight ASSERTION sections FAILs:
 # "herdr server environment hygiene" — forbidden variables in the running
 # server's environment, a teammux shim dir on its PATH, or session variables the
 # session provides that the server does not have — or "systemd user unit
@@ -43,6 +43,10 @@
 # The SEVENTH is "Claude account dirs": a REAL directory where an account dir's
 # shared link to data belongs, i.e. an account that has forked from ~/.claude
 # (DO-835); a real directory at a name that carries no data is only a ⚠.
+# The EIGHTH, full report only, is "global git hooks": the tracked gitconfig sets
+# core.hooksPath, which replaces every repository's own .git/hooks, and a path
+# that does not exist is not an error to git. It is "no hooks". The link went
+# missing for nine months and gitleaks ran in no repository, with nothing red.
 # Everything else stays informational and exits
 # 0: missing/optional tools, mise drift, a missing LINEAR_API_KEY (a WARN — a
 # keyless machine is degraded, not contaminated), and the hygiene check being
@@ -1126,6 +1130,25 @@ fi
 
 fi  # end of the Claude Code wiring section (skipped when there is nothing to wire)
 
+# The EIGHTH assertion (see EXIT CODE in the header), full report only: a modular
+# herdr adopter links seven files and not this repo's gitconfig, so the hooks
+# path is not theirs to have. Delegated, like the sections above, so the logic
+# has its own state table (scripts/test-check-git-hooks.sh). Its exit 2 means
+# "could not tell", which is a FAIL here and never a pass.
+git_hooks_failed=0
+if [[ "$HERDR_ONLY" != true ]]; then
+    echo ""
+    echo -e "${BLUE}=== Global git hooks ===${NC}"
+    if [[ -x "$DOTFILES_ROOT/scripts/check-git-hooks.sh" ]]; then
+        if ! "$DOTFILES_ROOT/scripts/check-git-hooks.sh"; then
+            git_hooks_failed=1
+        fi
+    else
+        echo -e "${RED}✗ FAIL:${NC} $DOTFILES_ROOT/scripts/check-git-hooks.sh missing — git hooks UNCHECKED"
+        git_hooks_failed=1
+    fi
+fi
+
 echo ""
 echo -e "${BLUE}=== Summary ===${NC}"
 if [[ "$HERDR_ONLY" == true ]]; then
@@ -1149,7 +1172,7 @@ echo ""
 # Non-zero on a herdr ASSERTION failure — see EXIT CODE in the header. Both
 # counters, not just the first: OR-ing them here is what keeps a green tick from
 # one section standing in for the other.
-if (( herdr_hygiene_failed || claude_wiring_failed || tmpdir_clean_failed || account_dirs_failed )); then
+if (( herdr_hygiene_failed || claude_wiring_failed || tmpdir_clean_failed || account_dirs_failed || git_hooks_failed )); then
     exit 1
 fi
 exit 0

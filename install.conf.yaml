@@ -29,6 +29,12 @@
 - link:
     ~/.config/gh/config.yml: gh/config.yml
     ~/.config/git/ignore: config/git/ignore
+    # gitconfig sets core.hooksPath to this path, and a global hooksPath REPLACES
+    # every repository's own .git/hooks. Without this link git runs no hook in
+    # any repository, and says nothing: a hooks path that does not exist is not
+    # an error. It was deleted once as collateral (edabe60) and stayed gone for
+    # nine months. scripts/check-git-hooks.sh --tracked fails CI if it goes again.
+    ~/.config/git/hooks: config/git/hooks
     ~/.config/pypoetry/config.toml: config/pypoetry/config.toml
     ~/.config/Code/User/settings.json: vscode/settings.json
     ~/.config/helix/config.toml: helix/config.toml
