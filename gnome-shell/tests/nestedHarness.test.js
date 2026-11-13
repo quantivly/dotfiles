@@ -4,7 +4,10 @@
 //   and only calls it.
 // - the replay service's generator and scenario requests (replayGenerator.js), which has no gi import: the input
 //   every `start --replay` run publishes, the same in every run of every version of the extension, and when a
-//   `scenario` request restarts it; and the apps its snapshots carry, read as the extension reads them.
+//   `scenario` request restarts it; and the apps its snapshots carry, read as the extension reads them, ranked
+//   afresh as often as the real sampler scans them (ReplayAppScanner, and replay-service.js's use of it, read as text:
+//   the service runs at import, so no row can load it).
+import GLib from 'gi://GLib';
 import {test, assertEqual} from './harness.js';
 import {isNestedRunRuntimeDir} from './nested/resource-pulse-nested-unsafe-mode@local/nestedRun.js';
 import {
@@ -12,10 +15,24 @@ import {
 } from './nested/replayGenerator.js';
 // Read through the namespace, so that a missing export fails its own rows rather than every row of the run.
 import * as replayGeneratorModule from './nested/replayGenerator.js';
-import {APPS_CARD_ROW_LIMIT, BYTES_PER_GIBIBYTE} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
+import {
+    APP_SCAN_INTERVAL_SECONDS, APPS_CARD_ROW_LIMIT, BYTES_PER_GIBIBYTE, SAMPLE_INTERVAL_SECONDS,
+} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 import {buildStatePayload, parseStatePayload} from '../extensions/resource-pulse@dotfiles/lib/protocol.js';
 
 const RUN_DIR = '/run/user/1000/rpn.Abc12345';
+/** The replay service's file, read as text by its row. */
+const REPLAY_SERVICE_URI = GLib.uri_resolve_relative(import.meta.url, './nested/replay-service.js', GLib.UriFlags.NONE);
+/**
+ * The real sampler's app scan interval while a detail watch is held, in its ticks (lib/cadence.js counts it so): the
+ * snapshots a replay's apps are held for.
+ */
+const APP_SCAN_INTERVAL_SNAPSHOTS = APP_SCAN_INTERVAL_SECONDS / SAMPLE_INTERVAL_SECONDS;
+/** How many scan intervals of busy snapshots the pace row reads. */
+const SCAN_INTERVALS_CHECKED = 3;
+/** Intervals ReplayAppScanner must refuse: none is a whole number of snapshots, one or more. */
+const REFUSED_SCAN_INTERVALS = [0, -APP_SCAN_INTERVAL_SNAPSHOTS, 2.5, Number.NaN, String(APP_SCAN_INTERVAL_SNAPSHOTS),
+    null];
 /** The CPU busy percents the apps rows read the replay's rankings at: idle's lowest, busy's highest, and one between. */
 const IDLE_CPU_BUSY_PERCENT = 1;
 const BUSY_CPU_BUSY_PERCENT = 90;
@@ -96,6 +113,28 @@ function repeatedCpuPercentIndexes(scenarioName, valueCount) {
  */
 function roundedForPin(value) {
     return Number(value.toFixed(PINNED_VALUE_DECIMALS));
+}
+
+/**
+ * The replay service's text, every run of whitespace made one space, so a row can find a statement however it wraps.
+ *
+ * @returns {string} The text.
+ */
+function replayServiceTextOnOneLine() {
+    const [servicePath] = GLib.filename_from_uri(REPLAY_SERVICE_URI);
+    const [, contentBytes] = GLib.file_get_contents(servicePath);
+    return new TextDecoder().decode(contentBytes).replace(/\s+/g, ' ');
+}
+
+/**
+ * How many times a text holds a part.
+ *
+ * @param {string} text - The text.
+ * @param {string} part - The part, matched as it is.
+ * @returns {number} The count.
+ */
+function countOf(text, part) {
+    return text.split(part).length - 1;
 }
 
 test('nested helper: unsafe mode only when the runtime dir is exactly <run dir>/run', () => {
@@ -238,4 +277,74 @@ test('replay: the CPU ranking follows the snapshot\'s CPU figure (each entry the
         busyTotalWithinBusy: busyCpuTotal <= BUSY_CPU_BUSY_PERCENT,
         memoryFixed: JSON.stringify(idleApps.memoryRanking) === JSON.stringify(busyApps.memoryRanking),
     }, {sameShares: true, everyShareAboveZero: true, sameOrder: true, busyTotalWithinBusy: true, memoryFixed: true});
+});
+
+test('replay: the apps are ranked afresh as often as the real sampler scans them with a detail watch held (every ' +
+    'APP_SCAN_INTERVAL_SECONDS / SAMPLE_INTERVAL_SECONDS snapshots, from the first, at that snapshot\'s CPU ' +
+    'figure) and held between: inside one scan interval every snapshot carries the same apps, the next interval\'s ' +
+    'differ under busy input; topCpu and topMemory are the first entries at every snapshot', () => {
+    const scanner = new replayGeneratorModule.ReplayAppScanner(APP_SCAN_INTERVAL_SNAPSHOTS);
+    const cpuBusyPercents = firstReplayValues('busy', SCAN_INTERVALS_CHECKED * APP_SCAN_INTERVAL_SNAPSHOTS)
+        .map(values => values.cpuBusyPercent);
+    const appsBySnapshot = cpuBusyPercents.map(cpuBusyPercent => scanner.appsOfNextSnapshot(cpuBusyPercent));
+    const scanSnapshotIndexOf = snapshotIndex => snapshotIndex - (snapshotIndex % APP_SCAN_INTERVAL_SNAPSHOTS);
+    const appsOfScanAt = snapshotIndex =>
+        replayGeneratorModule.replayApps(cpuBusyPercents[scanSnapshotIndexOf(snapshotIndex)]);
+    const intervalIndexes = Array.from({length: SCAN_INTERVALS_CHECKED}, (_, intervalIndex) => intervalIndex);
+    const appsOfInterval = intervalIndex => appsBySnapshot.slice(intervalIndex * APP_SCAN_INTERVAL_SNAPSHOTS,
+        (intervalIndex + 1) * APP_SCAN_INTERVAL_SNAPSHOTS).map(apps => JSON.stringify(apps));
+    const winnersAreFirstEntries = apps => JSON.stringify([apps.topCpu, apps.topMemory]) ===
+        JSON.stringify([apps.cpuRanking[0], apps.memoryRanking[0]]);
+    assertEqual({
+        heldForMoreThanOneSnapshot: APP_SCAN_INTERVAL_SNAPSHOTS > 1,
+        snapshotCount: appsBySnapshot.length,
+        snapshotsNotCarryingTheirScan: appsBySnapshot.flatMap((apps, snapshotIndex) =>
+            (JSON.stringify(apps) === JSON.stringify(appsOfScanAt(snapshotIndex)) ? [] : [snapshotIndex])),
+        distinctAppsInEachInterval: intervalIndexes.map(intervalIndex => new Set(appsOfInterval(intervalIndex)).size),
+        distinctIntervals: new Set(intervalIndexes.map(intervalIndex => appsOfInterval(intervalIndex)[0])).size,
+        winnersAreFirstEntries: appsBySnapshot.every(winnersAreFirstEntries),
+    }, {
+        heldForMoreThanOneSnapshot: true,
+        snapshotCount: SCAN_INTERVALS_CHECKED * APP_SCAN_INTERVAL_SNAPSHOTS,
+        snapshotsNotCarryingTheirScan: [],
+        distinctAppsInEachInterval: intervalIndexes.map(() => 1),
+        distinctIntervals: SCAN_INTERVALS_CHECKED,
+        winnersAreFirstEntries: true,
+    });
+});
+
+test('replay: a scan interval that is not a whole number of snapshots, one or more, is refused, naming it; one ' +
+    'snapshot and the sampler\'s own interval are taken', () => {
+    const outcomeOf = scanIntervalSnapshots => {
+        try {
+            new replayGeneratorModule.ReplayAppScanner(scanIntervalSnapshots);
+            return 'taken';
+        } catch (error) {
+            return error.message.includes(`got ${scanIntervalSnapshots}`) ? 'refused, named' : `refused: ${error}`;
+        }
+    };
+    assertEqual({
+        refused: REFUSED_SCAN_INTERVALS.map(outcomeOf),
+        taken: [1, APP_SCAN_INTERVAL_SNAPSHOTS].map(outcomeOf),
+    }, {
+        refused: REFUSED_SCAN_INTERVALS.map(() => 'refused, named'),
+        taken: ['taken', 'taken'],
+    });
+});
+
+test('replay service: each scenario\'s snapshots take their apps from one ReplayAppScanner made with the ' +
+    'extension\'s own APP_SCAN_INTERVAL_SECONDS / SAMPLE_INTERVAL_SECONDS, never from replayApps on every ' +
+    'snapshot', () => {
+    const serviceText = replayServiceTextOnOneLine();
+    assertEqual({
+        imported: countOf(serviceText, 'REPLAY_TOTAL_MEMORY_BYTES, ReplayAppScanner, ReplayGenerator,'),
+        intervalFromTheExtension: countOf(serviceText, 'const appScanIntervalSnapshots = ' +
+            'this._constants.APP_SCAN_INTERVAL_SECONDS / this._constants.SAMPLE_INTERVAL_SECONDS;'),
+        scannerPerScenario: countOf(serviceText, 'this._generator = new ReplayGenerator(scenarioName); ' +
+            'this._appScanner = new ReplayAppScanner(appScanIntervalSnapshots);'),
+        appsFromTheScanner: countOf(serviceText, 'apps: this._appScanner.appsOfNextSnapshot(cpuBusyPercent),'),
+        rankedEverySnapshot: countOf(serviceText, 'replayApps('),
+    }, {
+        imported: 1, intervalFromTheExtension: 1, scannerPerScenario: 1, appsFromTheScanner: 1, rankedEverySnapshot: 0,
+    });
 });

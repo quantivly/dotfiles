@@ -27,8 +27,8 @@ import GLib from 'gi://GLib';
 import System from 'system';
 
 import {
-    DEFAULT_REPLAY_SCENARIO_NAME, REPLAY_TOTAL_MEMORY_BYTES, ReplayGenerator, isNewScenarioRequest,
-    parseScenarioRequest, replayApps,
+    DEFAULT_REPLAY_SCENARIO_NAME, REPLAY_TOTAL_MEMORY_BYTES, ReplayAppScanner, ReplayGenerator, isNewScenarioRequest,
+    parseScenarioRequest,
 } from './replayGenerator.js';
 
 const LOG_PREFIX = 'replay-service:';
@@ -69,8 +69,8 @@ const DISK_SWAP_BYTES = 0;
 const CPU_PRESSURE_PER_CPU_PERCENT = 0.25;
 const MEMORY_PRESSURE_PERCENT = 0.1;
 const IO_PRESSURE_PERCENT = 0.2;
-// The apps (both winners and both rankings) come from replayGenerator.js replayApps, which a row reads as the
-// extension's reader does.
+// The apps (both winners and both rankings) come from replayGenerator.js ReplayAppScanner, ranked afresh as often as
+// the real sampler scans them and held between; a row reads them as the extension's reader does.
 
 /**
  * Succeeds only for the address of the run's own private session bus, as dbus-run-session hands it over: exactly
@@ -161,6 +161,7 @@ class ReplayService {
         this._tickSourceId = null;
         this._serviceStartedAtUsec = GLib.get_real_time();
         this._generator = null;
+        this._appScanner = null;
         this._sequence = 0;
         this._cpuHistory = [];
         this._memoryHistory = [];
@@ -324,14 +325,19 @@ class ReplayService {
     }
 
     /**
-     * Starts a scenario's sequence from the fixed seed, refills both histories from it and numbers the Samples from 1
-     * again.
+     * Starts a scenario's sequence from the fixed seed, and its apps from a first scan, refills both histories from it
+     * and numbers the Samples from 1 again.
      *
      * @param {string} scenarioName - One of REPLAY_SCENARIO_NAMES.
      * @returns {void}
+     * @throws {Error} When the extension's scan interval is not a whole number of its ticks (ReplayAppScanner).
      */
     _restartWithScenario(scenarioName) {
+        // The real sampler's app scan interval while a detail watch is held, in its ticks: the replay's snapshots.
+        const appScanIntervalSnapshots = this._constants.APP_SCAN_INTERVAL_SECONDS /
+            this._constants.SAMPLE_INTERVAL_SECONDS;
         this._generator = new ReplayGenerator(scenarioName);
+        this._appScanner = new ReplayAppScanner(appScanIntervalSnapshots);
         this._sequence = 0;
         this._cpuHistory = [];
         this._memoryHistory = [];
@@ -367,7 +373,7 @@ class ReplayService {
                 memory: MEMORY_PRESSURE_PERCENT,
                 io: IO_PRESSURE_PERCENT,
             },
-            apps: replayApps(cpuBusyPercent),
+            apps: this._appScanner.appsOfNextSnapshot(cpuBusyPercent),
             isComplete: true,
         };
     }

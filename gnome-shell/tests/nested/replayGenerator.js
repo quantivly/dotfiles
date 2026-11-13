@@ -9,7 +9,8 @@
 //          are the spike's.
 // It also reads the scenario file the harness's `scenario` request writes, and says when a read must restart the
 // replay (parseScenarioRequest, isNewScenarioRequest), and builds the apps each snapshot carries (replayApps): both
-// winners and both rankings, in the real sampler's shape, so the cockpit's apps card has rows to draw.
+// winners and both rankings, in the real sampler's shape, so the cockpit's apps card has rows to draw; ranked afresh
+// only as often as the real sampler scans the apps, and held between (ReplayAppScanner).
 // Pure: no gi import, no clock, no file, so it runs under plain gjs (gnome-shell/tests/nestedHarness.test.js).
 
 const IDLE_SCENARIO_NAME = 'idle';
@@ -199,6 +200,52 @@ export function replayApps(cpuBusyPercent) {
     const memoryRanking = MEMORY_RANKING_GIBIBYTES.map(({app, gibibytes}) =>
         ({...app, memoryBytes: gibibytes * BYTES_PER_GIBIBYTE}));
     return {topCpu: {...cpuRanking[0]}, topMemory: {...memoryRanking[0]}, cpuRanking, memoryRanking};
+}
+
+/**
+ * The apps of each snapshot at the real sampler's pace. service/sampler.js renews its apps only when it scans them
+ * (lib/cadence.js decideAppScan: at its first tick, then every APP_SCAN_INTERVAL_SECONDS while a detail watch is
+ * held), and every Sample between carries the last scan's; ranked afresh on every snapshot, the cockpit's apps card
+ * would redraw its rows on every Sample, and a visible state would read above what the extension costs with a real
+ * sampler. So the replay ranks (replayApps) at its first snapshot and then once every scan interval, from that
+ * snapshot's CPU figure, and holds the apps between. Not replayed: the warm-up scan after the first, the burst scans,
+ * and the longer interval with no watch held.
+ */
+export class ReplayAppScanner {
+    /**
+     * Starts with no scan: the first snapshot's apps are ranked afresh.
+     *
+     * @param {number} scanIntervalSnapshots - Snapshots from one scan to the next: lib/constants.js
+     *     APP_SCAN_INTERVAL_SECONDS / SAMPLE_INTERVAL_SECONDS, the sampler's ticks between two scans.
+     * @throws {Error} For anything but a whole number of snapshots, one or more.
+     */
+    constructor(scanIntervalSnapshots) {
+        if (!Number.isInteger(scanIntervalSnapshots) || scanIntervalSnapshots < 1) {
+            throw new Error('a scan interval is a whole number of snapshots, one or more: ' +
+                `got ${scanIntervalSnapshots}`);
+        }
+        this._scanIntervalSnapshots = scanIntervalSnapshots;
+        // Snapshots since the last scan, the scan's own included; null before the first.
+        this._snapshotsSinceScan = null;
+        this._scannedApps = null;
+    }
+
+    /**
+     * The apps of the next snapshot: ranked afresh from its CPU figure at the first snapshot and at every
+     * scanIntervalSnapshots-th after it, else the last scan's (the same object).
+     *
+     * @param {number} cpuBusyPercent - The snapshot's CPU busy percent, 0–100.
+     * @returns {object} The snapshot's apps, in replayApps' shape.
+     */
+    appsOfNextSnapshot(cpuBusyPercent) {
+        const isScanDue = this._snapshotsSinceScan === null || this._snapshotsSinceScan >= this._scanIntervalSnapshots;
+        if (isScanDue) {
+            this._scannedApps = replayApps(cpuBusyPercent);
+            this._snapshotsSinceScan = 0;
+        }
+        this._snapshotsSinceScan++;
+        return this._scannedApps;
+    }
 }
 
 /** One scenario's sequence of synthetic samples, from the fixed seed. */

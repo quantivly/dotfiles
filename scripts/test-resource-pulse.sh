@@ -5781,7 +5781,9 @@ check "nested: probe-window.js refuses (exit 2) before loading Gtk outside a nes
 # for the Nth click, appends <answers>/click-N.log to the run's shell log, as the extension's focus lines would be,
 # and for a request's first call <answers>/<function>.<request>.log; it keeps a copy of the run's fixture as each
 # request last saw it (CHECK_CALLS.fixture.<request>), and answers GetState with <answers>/GetState (the replay's state
-# JSON), or fails while <answers>/GetState.fails exists; a stand-in gjs stands in for the
+# JSON), or fails while <answers>/GetState.fails exists; it answers the layer's requests itself, where no file of their
+# own does, from a model of the extension's cockpit subscription (described in its source: a layout given back is
+# heard only once the layer is drawn or the dropdown open); a stand-in gjs stands in for the
 # window (it records how it was started and waits); the real jq rewrites the
 # run's fixture. A fake gnome-shell in this session makes the run live.
 CHECK_STUB_BIN="$WIRING_TMP/check-bin"
@@ -5867,7 +5869,69 @@ elif [[ -n "$call_title" && -f "$answer_path.$call_title" ]]; then
 elif [[ ! -f "$answer_path" ]]; then
   answer_path="$CHECK_STUB_ANSWERS/default"
 fi
-jq -cn --rawfile answer "$answer_path" '{type: "bs", data: [true, ($answer | rtrimstr("\n"))]}'
+answer_text="$(<"$answer_path")"
+# The extension's cockpit subscription, as extension.js _syncCockpitWatch and cockpitClient.js setSubscriptionWanted
+# keep it, for the layer's requests (layer-placement, grid-geometry, layer-removed), which it answers itself where no
+# answer file of their own names them: the client hears a Changed only while something of the cockpit is seen (the
+# layer drawn, or the dropdown open); the dropdown opening while nothing else is seen subscribes and asks GetState,
+# whose answer is applied one request late (the call is asynchronous), whatever the dropdown does meanwhile; a state
+# heard with a layout draws the layer (but with <answers>/layer-not-redrawn a layer taken away is never drawn again),
+# one with none takes it away. The dropdown opens or closes only on an ok answer. It begins afresh at a run's first
+# request, keeps its state in $CHECK_STUB_CALLS.extension, and writes how it stood at each request, before the request
+# acts, to $CHECK_STUB_CALLS.extension-log: "<request> layer=<shown|gone> dropdown=<open|closed>".
+if [[ "$function_name" == resourcePulseCockpitCheck ]]; then
+  extension_state_path="$CHECK_STUB_CALLS.extension"
+  layer=shown dropdown=closed served=layout state_read_requests_left=0
+  if (( $(wc -l <"$CHECK_STUB_CALLS") > 1 )) && [[ -f "$extension_state_path" ]]; then
+    source "$extension_state_path"
+  else
+    : >"$CHECK_STUB_CALLS.extension-log"
+  fi
+  hear_served_state() {
+    if [[ "$served" == none ]]; then
+      layer=gone
+    elif [[ "$layer" == shown || ! -f "$CHECK_STUB_ANSWERS/layer-not-redrawn" ]]; then
+      layer=shown
+    fi
+  }
+  served_now="$(jq -r 'if .state.layout == null then "none" else "layout" end' \
+    "${RESOURCE_PULSE_NESTED_DIR:-/nonexistent}/state/cockpit-fixture.json" 2>/dev/null)" || served_now="$served"
+  # The service publishes a Changed when what it serves changed; only a subscribed client hears it.
+  if [[ "$served_now" != "$served" ]]; then
+    served="$served_now"
+    if [[ "$layer" == shown || "$dropdown" == open ]]; then
+      hear_served_state
+    fi
+  fi
+  if (( state_read_requests_left > 0 )); then
+    state_read_requests_left=$((state_read_requests_left - 1))
+    if (( state_read_requests_left == 0 )); then
+      hear_served_state
+    fi
+  fi
+  printf '%s layer=%s dropdown=%s\n' "$request" "$layer" "$dropdown" >>"$CHECK_STUB_CALLS.extension-log"
+  answer_verdict="$(jq -r '.verdict // empty' <<<"$answer_text" 2>/dev/null)"
+  if [[ "$request" == dropdown-open && "$answer_verdict" == ok && "$dropdown" == closed ]]; then
+    # Applied before the request after next: the one right after the open still finds no answer.
+    [[ "$layer" == gone ]] && state_read_requests_left=2
+    dropdown=open
+  elif [[ "$request" == dropdown-close && "$answer_verdict" == ok ]]; then
+    dropdown=closed
+  fi
+  if [[ "$answer_path" == "$CHECK_STUB_ANSWERS/default" ]]; then
+    case "$request:$layer" in
+      layer-placement:gone | grid-geometry:gone)
+        answer_text="$(jq -cn \
+          --arg detail 'no cockpit layer: the grid is not drawn (look for "could not draw the cockpit layer")' \
+          '{verdict: "bad", detail: $detail}')" ;;
+      layer-removed:shown)
+        answer_text='{"verdict":"bad","detail":"the extension still holds a cockpit layer"}' ;;
+    esac
+  fi
+  printf 'layer=%s\ndropdown=%s\nserved=%s\nstate_read_requests_left=%s\n' "$layer" "$dropdown" "$served" \
+    "$state_read_requests_left" >"$extension_state_path"
+fi
+jq -cn --arg answer "$answer_text" '{type: "bs", data: [true, $answer]}'
 STAND_IN
 install_stub "$CHECK_STUB_BIN" busctl "$CHECK_BUSCTL_STAND_IN_SOURCE"
 # Under env -i no variable can name where to record: the paths are written into its source.
@@ -6522,10 +6586,16 @@ check "nested: check cockpit's apps-rows reads the replay's snapshot from GetSta
   "$apps_rows_summary" \
   "protocol-read=yes/1 after-grid=[resourcePulseCockpitCheck grid-geometry GetState $protocol_bus_name $protocol_object_path $protocol_bus_name resourcePulseCockpitCheck apps-rows ] options=$CHECK_REPLAY_APPS_OPTIONS"
 
-# layer-readd, in the same pass: between the stale steps' last request and the dropdown's first, it asks layer-removed,
-# then layer-placement and grid-geometry; the fixture layer-removed saw served no layout and the configError of a
-# cockpit.json the service cannot read (its sources as start wrote them), and the one the second half saw was start's
-# again: put back before the layer is judged back.
+# layer-readd, in the same pass: between the stale steps' last request and the dropdown's first, it asks layer-removed;
+# puts the fixture back; opens the dropdown, since with no layer nothing of the cockpit is seen and the layout given
+# back is heard only once something is (the stand-in's model of the subscription: GetState's answer one request late);
+# waits for the layer (layer-placement asked again past the request that still finds none), then grid-geometry; and
+# closes the dropdown. The fixture layer-removed saw served no layout and the configError of a cockpit.json the service
+# cannot read (its sources as start wrote them), and the one the second half saw was start's again; the step's ok line
+# says the dropdown opened and closed; and the dropdown's steps begin with the layer drawn and the dropdown closed.
+LAYER_READD_OK_LINE="ok layer-readd: taken away: no layer, the v2 card top right, the dropdown's sessions item shown"
+LAYER_READD_OK_LINE+=" (ruling D23); given back and the cockpit seen again (the dropdown opened and closed): one layer,"
+LAYER_READD_OK_LINE+=" the v2 card in the system cell, every card at its cell"
 layer_readd_requests="$(awk '$2 == "stale-card" { is_after_stale = 1; requests = ""; next }
   is_after_stale && $2 == "dropdown-order" { print requests; exit }
   is_after_stale { requests = requests $2 " " }' "$CHECK_CALLS")"
@@ -6535,8 +6605,11 @@ layer_readd_summary+=" sources=$(cmp -s <(jq -S '.state.sources' "$CHECK_CALLS.f
   <(jq -S '.state.sources' "$CHECK_RUN/state/cockpit-fixture.start.json" 2>&1) && printf as-start || printf changed)"
 layer_readd_summary+=" given-back=$(cmp -s "$CHECK_CALLS.fixture.layer-placement" "$CHECK_RUN/state/cockpit-fixture.start.json" \
   && printf start || printf other)"
-check "nested: check cockpit's layer-readd serves the run's fixture with no layout and the configError of a cockpit.json the service cannot read, asks layer-removed, puts the fixture back as start wrote it, then asks layer-placement and grid-geometry" \
-  "$layer_readd_summary" 'requests=[layer-removed layer-placement grid-geometry ] taken-away=[null,"missing"] sources=as-start given-back=start'
+layer_readd_summary+=" ok-line=$(grep -c -x -F "$LAYER_READD_OK_LINE" <<<"$CHECK_STUB_OUTPUT")"
+layer_readd_summary+=" at-dropdown-steps=[$(grep -m 1 '^dropdown-order ' "$CHECK_CALLS.extension-log" | cut -d ' ' -f 2-)]"
+check "nested: check cockpit's layer-readd serves the run's fixture with no layout and the configError of a cockpit.json the service cannot read, asks layer-removed, puts the fixture back as start wrote it, then opens the dropdown, waits for the layer, asks grid-geometry and closes the dropdown, leaving the layer drawn and the dropdown closed" \
+  "$layer_readd_summary" \
+  'requests=[layer-removed dropdown-open layer-placement layer-placement grid-geometry dropdown-close ] taken-away=[null,"missing"] sources=as-start given-back=start ok-line=1 at-dropdown-steps=[layer=shown dropdown=closed]'
 
 BAD_GRID_DETAIL='the apps card is at 600x500+685+80, not its cell 600x500+680+80'
 UNJUDGED_STALE_DETAIL="cannot read the card's no-data line (_noDataLabel)"
@@ -6585,14 +6658,16 @@ check "nested: check cockpit runs every step whatever one answers: a bad step is
 # widths, which need an allocation, are polled after it); and it arms the
 # dropdown's draw watch only once that open is ok: a closed menu's card draws
 # nothing, which would read as the pacing's fault. Each request's options are
-# read from what the stand-in recorded.
+# read from what the stand-in recorded. The first dropdown-open of a pass is
+# layer-readd's own, which opens here: the dropdown's steps make the others.
 FIXTURE_SESSION_NAMES_JSON="$(jq -c '[.state.sources.sessions.rows[].name]' "$COCKPIT_NESTED_FIXTURE")"
 check_cockpit_stubbed "$CHECK_ANSWERS"
 dropdown_sequencing_summary="open-with-names=$(grep -c -x -F \
   "resourcePulseCockpitCheck dropdown-open {\"names\":$FIXTURE_SESSION_NAMES_JSON}" "$CHECK_CALL_OPTIONS")"
 CLOSED_DROPDOWN_DETAIL='the dropdown did not open'
 closed_dropdown_answers="$(answers_with closed-dropdown resourcePulseCockpitCheck.dropdown-open \
-  "{\"verdict\":\"could-not-judge\",\"detail\":\"$CLOSED_DROPDOWN_DETAIL\"}")"
+  "{\"verdict\":\"could-not-judge\",\"detail\":\"$CLOSED_DROPDOWN_DETAIL\"}" \
+  resourcePulseCockpitCheck.dropdown-open.1 "$CHECK_OK_ANSWER")"
 check_cockpit_stubbed "$closed_dropdown_answers"
 dropdown_sequencing_summary+=" closed-arms=$(check_stub_call_count '^resourcePulseCockpitCheck draw-watch-arm$')"
 dropdown_sequencing_summary+=" closed-change=$(grep -c -x -F "could not judge dropdown-change: $CLOSED_DROPDOWN_DETAIL" \
@@ -6842,11 +6917,24 @@ check "nested: check cockpit's windows step could not be judged, and its clicks 
 
 # apps-rows could not be judged when the replay's snapshot cannot be read (its GetState fails) or holds no ranking (a
 # replay from before the rankings): apps-rows is then never asked. layer-readd is bad for either half the extension
-# fails (no layer-removed, or no layer back), its fixture put back as start wrote it all the same. One pass gives the
-# first of each pair, a second the other.
+# fails (no layer-removed, or no layer back even once the dropdown opened: the stand-in's extension never draws the
+# layer again), its fixture put back as start wrote it and the dropdown closed all the same. One pass gives the first
+# of each pair, a second the other.
 LAYER_REMOVED_BAD_DETAIL='the extension still holds a cockpit layer'
-LAYER_NOT_BACK_DETAIL='the background group holds 0 cockpit layers, not one'
+NO_COCKPIT_LAYER_DETAIL='no cockpit layer: the grid is not drawn (look for "could not draw the cockpit layer")'
 APPS_ROWS_UNREADABLE_DETAIL="cannot read the two rankings of the replay's snapshot (GetState of $protocol_bus_name)"
+# layer_readd_requests_seen prints the in-shell requests layer-readd asked in the last pass, from CHECK_CALLS: those
+# after the stale steps' last request, up to the first that is none of its own; one asked again at once is written once
+# with its count (layer-placement*2).
+layer_readd_requests_seen() {
+  awk 'function write_run() { if (run_request != "") requests = requests run_request (run_count > 1 ? "*" run_count : "") " " }
+    $2 == "stale-card" { is_after_stale = 1; requests = ""; run_request = ""; run_count = 0; next }
+    is_after_stale && $2 !~ /^(layer-removed|dropdown-open|layer-placement|grid-geometry|dropdown-close)$/ {
+      write_run(); print requests; is_printed = 1; exit
+    }
+    is_after_stale { if ($2 == run_request) run_count++; else { write_run(); run_request = $2; run_count = 1 } }
+    END { if (is_after_stale && !is_printed) { write_run(); print requests } }' "$CHECK_CALLS"
+}
 readd_removed_bad_answers="$(answers_with readd-removed-bad resourcePulseCockpitCheck.layer-removed \
   "{\"verdict\":\"bad\",\"detail\":\"$LAYER_REMOVED_BAD_DETAIL\"}" GetState.fails '')"
 check_cockpit_stubbed "$readd_removed_bad_answers"
@@ -6858,26 +6946,99 @@ layer_readd_bad_summary+="/$(grep -c -x -F "bad layer-readd: $LAYER_REMOVED_BAD_
 layer_readd_bad_summary+="/placement-asked=$(check_stub_call_count '^resourcePulseCockpitCheck layer-placement$')"
 layer_readd_bad_summary+="/fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
   && printf restored || printf changed)"
-# The layer step asks layer-placement first, so the second call onward is layer-readd's: each answered bad.
-readd_back_bad_answers="$(answers_with readd-back-bad GetState "$CHECK_REPLAY_STATE_WITHOUT_RANKINGS")"
-for layer_placement_call in $(seq 2 21); do
-  printf '%s\n' "{\"verdict\":\"bad\",\"detail\":\"$LAYER_NOT_BACK_DETAIL\"}" \
-    >"$readd_back_bad_answers/resourcePulseCockpitCheck.layer-placement.$layer_placement_call"
-done
+readd_back_bad_answers="$(answers_with readd-back-bad GetState "$CHECK_REPLAY_STATE_WITHOUT_RANKINGS" \
+  layer-not-redrawn '')"
 check_cockpit_stubbed "$readd_back_bad_answers"
 apps_rows_unjudged_summary+=" no-ranking=$(check_step_verdicts apps-rows)"
 apps_rows_unjudged_summary+="/$(grep -c -x -F "could not judge apps-rows: $APPS_ROWS_UNREADABLE_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
 apps_rows_unjudged_summary+="/asked=$(check_stub_call_count '^resourcePulseCockpitCheck apps-rows$')"
 layer_readd_bad_summary+=" back-bad=$(check_step_verdicts layer-readd)"
-layer_readd_bad_summary+="/$(grep -c -x -F "bad layer-readd: $LAYER_NOT_BACK_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
+layer_readd_bad_summary+="/$(grep -c -x -F "bad layer-readd: $NO_COCKPIT_LAYER_DETAIL; $NO_COCKPIT_LAYER_DETAIL" \
+  <<<"$CHECK_STUB_OUTPUT")"
+layer_readd_bad_summary+="/requests=[$(layer_readd_requests_seen)]"
 layer_readd_bad_summary+="/fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
   && printf restored || printf changed)"
+layer_readd_bad_summary+="/at-dropdown-steps=[$(grep -m 1 '^dropdown-order ' "$CHECK_CALLS.extension-log" | cut -d ' ' -f 2-)]"
 check "nested: check cockpit's apps-rows could not be judged, and is not asked, when the replay's snapshot cannot be read or holds no ranking" \
   "$apps_rows_unjudged_summary" \
   "replay-unreadable=apps-rows:unjudged/1/asked=0 no-ranking=apps-rows:unjudged/1/asked=0"
-check "nested: check cockpit's layer-readd is bad when the layout taken away leaves the layer, and when the layout given back brings none; the fixture is put back as start wrote it either way" \
+check "nested: check cockpit's layer-readd is bad when the layout taken away leaves the layer, and when the layout given back brings none even once the dropdown opened and the waits ran out; the fixture is put back as start wrote it and the dropdown closed either way" \
   "$layer_readd_bad_summary" \
-  "removed-bad=layer-readd:bad/1/placement-asked=2/fixture=restored back-bad=layer-readd:bad/1/fixture=restored"
+  "removed-bad=layer-readd:bad/1/placement-asked=3/fixture=restored back-bad=layer-readd:bad/1/requests=[layer-removed dropdown-open layer-placement*20 grid-geometry*20 dropdown-close ]/fixture=restored/at-dropdown-steps=[layer=gone dropdown=closed]"
+
+# The stand-in's model of the extension's subscription fails layer-readd's old second half, as a real shell would: with
+# the layer taken away nothing of the cockpit is seen, so the layout put back is never heard, and judged at once (no
+# dropdown opened) the layer is still absent when the waits run out. The dropdown's steps, which open it, then bring
+# the layer back: it is drawn when lock-path is asked.
+# shellcheck disable=SC2016  # Evaluated by the check's own bash.
+CHECK_STUB_OVERRIDES='judge_layout_given_back() {
+  poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check layer-placement
+  note_answer
+  poll_nested "$STATE_SETTLE_ATTEMPTS" ask_check grid-geometry "$1"
+  note_answer
+}'
+check_cockpit_stubbed "$CHECK_ANSWERS"
+CHECK_STUB_OVERRIDES=""
+old_second_half_summary="$(check_step_verdicts layer-readd)"
+old_second_half_summary+="/$(grep -c -x -F "bad layer-readd: $NO_COCKPIT_LAYER_DETAIL; $NO_COCKPIT_LAYER_DETAIL" \
+  <<<"$CHECK_STUB_OUTPUT")"
+old_second_half_summary+=" requests=[$(layer_readd_requests_seen)]"
+old_second_half_summary+=" fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+  && printf restored || printf changed)"
+old_second_half_summary+=" at-lock-path=[$(grep -m 1 '^lock-path ' "$CHECK_CALLS.extension-log" | cut -d ' ' -f 2)]"
+check "nested: the check rows' stand-in hears no layout given back while nothing of the cockpit is seen, as the extension's client does: layer-readd's old second half (no dropdown opened) is bad, no cockpit layer, and the dropdown's steps bring the layer back" \
+  "$old_second_half_summary" \
+  "layer-readd:bad/1 requests=[layer-removed layer-placement*20 grid-geometry*20 ] fixture=restored at-lock-path=[layer=shown]"
+
+# A dropdown layer-readd could not open (the layout given back then cannot be read) or could not close: the step could
+# not be judged, and nor can the dropdown's six steps after it (as the clicks cannot be without the check's windows);
+# with no open, the layer is not waited for and the steps that need the grid (lock-path, count-budgets) could not be
+# judged either; with no close, they are judged. The step asks to close the dropdown either way, and the fixture is
+# put back as start wrote it.
+DROPDOWN_NOT_OPEN_DETAIL='the dropdown is not open'
+DROPDOWN_NOT_CLOSED_DETAIL='the dropdown is not closed'
+DROPDOWN_NOT_USABLE_DETAIL='the dropdown could not be opened or closed (see the layer-readd step)'
+GRID_NOT_READ_DETAIL='layer-readd could not open the dropdown, which reads the layout given back, so the grid this'
+GRID_NOT_READ_DETAIL+=' step needs may not be drawn'
+# dropdown_steps_unjudged_by_layer_readd prints how many of the dropdown's six steps the last output has as could not
+# be judged for the dropdown layer-readd could not open or close, each line matched whole and literally.
+dropdown_steps_unjudged_by_layer_readd() {
+  local step_name unjudged_count=0
+  for step_name in dropdown-order dropdown-open dropdown-tooltip dropdown-closed dropdown-change dropdown-click; do
+    grep -q -x -F "could not judge $step_name: $DROPDOWN_NOT_USABLE_DETAIL" <<<"$CHECK_STUB_OUTPUT" \
+      && unjudged_count=$((unjudged_count + 1))
+  done
+  printf '%s' "$unjudged_count"
+}
+dropdown_not_open_answers="$(answers_with dropdown-not-open resourcePulseCockpitCheck.dropdown-open.1 \
+  "{\"verdict\":\"bad\",\"detail\":\"$DROPDOWN_NOT_OPEN_DETAIL\"}")"
+check_cockpit_stubbed "$dropdown_not_open_answers"
+dropdown_not_usable_summary="not-open=$CHECK_STUB_EXIT/$(check_step_verdicts layer-readd)"
+dropdown_not_usable_summary+="/$(grep -c -x -F \
+  "could not judge layer-readd: could not open the dropdown, which reads the layout given back (with no layer nothing of the cockpit is seen, so no change of it is heard): $DROPDOWN_NOT_OPEN_DETAIL" \
+  <<<"$CHECK_STUB_OUTPUT")"
+dropdown_not_usable_summary+="/requests=[$(layer_readd_requests_seen)]"
+dropdown_not_usable_summary+="/dropdown-steps=$(dropdown_steps_unjudged_by_layer_readd)"
+dropdown_not_usable_summary+="/grid-steps=$(grep -c -x -E "could not judge (lock-path|count-budgets): $GRID_NOT_READ_DETAIL" \
+  <<<"$CHECK_STUB_OUTPUT")"
+dropdown_not_usable_summary+="/fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+  && printf restored || printf changed)"
+dropdown_not_usable_summary+="/$(grep -c -x -F 'check cockpit: 23 ok, 0 bad, 9 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+dropdown_not_closed_answers="$(answers_with dropdown-not-closed resourcePulseCockpitCheck.dropdown-close.1 \
+  "{\"verdict\":\"bad\",\"detail\":\"$DROPDOWN_NOT_CLOSED_DETAIL\"}")"
+check_cockpit_stubbed "$dropdown_not_closed_answers"
+dropdown_not_usable_summary+=" not-closed=$CHECK_STUB_EXIT/$(check_step_verdicts layer-readd)"
+dropdown_not_usable_summary+="/$(grep -c -x -F \
+  "could not judge layer-readd: could not close the dropdown: $DROPDOWN_NOT_CLOSED_DETAIL" <<<"$CHECK_STUB_OUTPUT")"
+dropdown_not_usable_summary+="/requests=[$(layer_readd_requests_seen)]"
+dropdown_not_usable_summary+="/dropdown-steps=$(dropdown_steps_unjudged_by_layer_readd)"
+dropdown_not_usable_summary+="/$(check_step_verdicts lock-path count-budgets)"
+dropdown_not_usable_summary+="/fixture=$(cmp -s "$CHECK_RUN_FIXTURE" "$CHECK_RUN/state/cockpit-fixture.start.json" \
+  && printf restored || printf changed)"
+dropdown_not_usable_summary+="/$(grep -c -x -F 'check cockpit: 25 ok, 0 bad, 7 could not judge' <<<"$CHECK_STUB_OUTPUT")"
+check "nested: check cockpit's layer-readd could not be judged when it could not open the dropdown (then the layer is not waited for, and the steps that need the grid could not be judged) or close it, the dropdown's six steps after it could not be judged either way, and it asks to close the dropdown and puts the fixture back either way" \
+  "$dropdown_not_usable_summary" \
+  "not-open=2/layer-readd:unjudged/1/requests=[layer-removed dropdown-open dropdown-close ]/dropdown-steps=6/grid-steps=2/fixture=restored/1 not-closed=2/layer-readd:unjudged/1/requests=[layer-removed dropdown-open layer-placement*2 grid-geometry dropdown-close ]/dropdown-steps=6/lock-path:ok count-budgets:ok/fixture=restored/1"
 
 # A fixture layer-readd could not rewrite: the step could not be judged, asks neither half, and leaves the fixture as
 # start wrote it; the later steps that need the grid are judged as ever (the layout never went).
@@ -7308,7 +7469,7 @@ docs_claim() {
     | grep -c -F "\`scripts/test-resource-pulse.sh\` ($EXPECTED_ROWS checks"
 }
 
-EXPECTED_ROWS=1208
+EXPECTED_ROWS=1213
 
 printf '\nthe count this suite is documented as running\n'
 check "docs/GNOME_CONFIGURATION_GUIDE.md says $EXPECTED_ROWS checks" "$(docs_claim docs/GNOME_CONFIGURATION_GUIDE.md)" 1
