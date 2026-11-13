@@ -19,6 +19,7 @@ pub mod bus;
 pub mod constants;
 pub mod cpu;
 pub mod history;
+pub mod js_string;
 pub mod memory;
 pub mod parsers;
 pub mod pressure;
