@@ -1471,3 +1471,37 @@ fn no_leaf_name_made_of_pattern_pieces_panics_the_naming_functions() {
         }
     }
 }
+
+/// Equal values rank by name before group key: the keys `k1`, `k2`, `k3` order one way and their
+/// names `zeta`, `alpha`, `mid` another, in either insertion order. Expected ranking (keys, in
+/// order, k2 k3 k1, for CPU and for memory): `rankApps` run under gjs on the same input.
+#[test]
+fn equal_values_rank_by_name_before_group_key_when_they_order_differently() {
+    let name_of_key = |key: &str| match key {
+        "k1" => "zeta",
+        "k2" => "alpha",
+        _ => "mid",
+    };
+    for insertion_order in [["k1", "k2", "k3"], ["k3", "k2", "k1"]] {
+        let leaves: Vec<LeafSpec> = insertion_order
+            .iter()
+            .map(|key| (*key, Some(0), 1_000_000, Some(5)))
+            .collect();
+        let ranking = rank_apps(&scan_of(&leaves), &mut |path| AppGroup {
+            group_key: path.to_string(),
+            name: name_of_key(path).to_string(),
+        });
+        let cpu_keys: Vec<&str> = ranking
+            .cpu_ranking
+            .iter()
+            .map(|e| e.group_key.as_str())
+            .collect();
+        let memory_keys: Vec<&str> = ranking
+            .memory_ranking
+            .iter()
+            .map(|e| e.group_key.as_str())
+            .collect();
+        assert_eq!(cpu_keys, ["k2", "k3", "k1"], "{insertion_order:?}");
+        assert_eq!(memory_keys, ["k2", "k3", "k1"], "{insertion_order:?}");
+    }
+}
