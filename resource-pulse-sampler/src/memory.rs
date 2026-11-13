@@ -205,6 +205,7 @@ mod tests {
     #[test]
     fn swap_zram_share_is_the_used_of_its_dev_zram_areas_so_an_idle_disk_area_is_no_disk_swap() {
         // The gjs row uses 1.6, 1.4 and 0.4 GiB, fractional bytes; the parsers return whole ones.
+        // Expected values: `swapSummary` run under gjs on these same whole-byte inputs.
         let zram_used = 1_717_986_918;
         let zram_stored = 1_503_238_553;
         let zram_ram = 429_496_729;
@@ -222,6 +223,7 @@ mod tests {
     /// row: swap on disk is the Used of every area that is not zram, summed
     #[test]
     fn swap_on_disk_is_the_used_of_every_area_that_is_not_zram_summed() {
+        // Expected values: `swapSummary` run under gjs on these same inputs.
         let areas = [
             swap_area("/swap.img", GIB / 2),
             swap_area("/dev/zram0", GIB),
@@ -237,6 +239,7 @@ mod tests {
     /// row: swap: a zram device that is not a swap area (no /proc/swaps row) adds nothing to "in RAM"
     #[test]
     fn swap_a_zram_device_that_is_not_a_swap_area_adds_nothing_to_in_ram() {
+        // Expected values: `swapSummary` run under gjs on these same inputs.
         let areas = [swap_area("/dev/zram0", GIB)];
         let devices = [
             zram_device("zram0", GIB, GIB / 4),
@@ -248,6 +251,7 @@ mod tests {
     /// row: swap: no zram swap area puts everything on disk; no area at all is nothing used
     #[test]
     fn swap_no_zram_swap_area_puts_everything_on_disk_no_area_at_all_is_nothing_used() {
+        // Expected values: `swapSummary` run under gjs on these same inputs.
         assert_eq!(
             swap_summary(&[swap_area("/swap.img", GIB)], &[]),
             summary(0, 0, GIB)

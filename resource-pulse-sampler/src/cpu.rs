@@ -14,9 +14,9 @@ use crate::parsers::is_js_whitespace;
 use crate::parsers::parse_all_digits;
 use crate::parsers::proc::CpuTimes;
 
-/// The highest CPU number a kernel CPU list may name. The kernel builds with at most 8192 CPUs;
-/// the gjs `parseCpuList` has no limit and would spend its memory on a range such as
-/// `0-4000000000`, where this refuses it.
+/// The highest CPU number a kernel CPU list may name. No kernel has such a CPU (it builds with
+/// at most 8192); the gjs `parseCpuList` has no limit and would build a list of billions of
+/// numbers for a range such as `0-4000000000`, where this refuses it.
 const MAX_CPU_NUMBER_IN_LIST: u64 = 65_535;
 
 /// A kernel CPU list that [`parse_cpu_list`] cannot read.
@@ -294,6 +294,27 @@ mod tests {
     fn no_delta_is_no_data_not_nan() {
         let same = times(1, 1, 1, 1);
         assert_eq!(cpu_busy_fraction(Some(&same), Some(&same)), None);
+    }
+
+    /// Every counter of the total takes part, except `guest` and `guest_nice`: from zero to
+    /// 1, 2, 3, 4, 5, 6, 7, 8, 9 and 10 in field order, 27 of 36 ticks are busy. Expected value:
+    /// `cpuBusyFraction` run under gjs, 0.75.
+    #[test]
+    fn every_counter_but_guest_and_guest_nice_is_in_the_total() {
+        let current = CpuTimes {
+            user: 1,
+            nice: 2,
+            system: 3,
+            idle: 4,
+            iowait: 5,
+            irq: 6,
+            softirq: 7,
+            steal: 8,
+            guest: 9,
+            guest_nice: 10,
+        };
+        let busy = cpu_busy_fraction(Some(&CpuTimes::default()), Some(&current));
+        assert_eq!(busy, Some(0.75));
     }
 
     /// A total that went backwards is no data; an idle counter that outruns the total (another
