@@ -8,7 +8,9 @@
 //          clamped it instead, and so sat at a bound, repeating itself; the first values, well inside the bounds,
 //          are the spike's.
 // It also reads the scenario file the harness's `scenario` request writes, and says when a read must restart the
-// replay (parseScenarioRequest, isNewScenarioRequest).
+// replay (parseScenarioRequest, isNewScenarioRequest), and builds the apps each snapshot carries (replayApps): both
+// winners and both rankings, in the real sampler's shape, so the cockpit's apps card has rows to draw; ranked afresh
+// only as often as the real sampler scans the apps, and held between (ReplayAppScanner).
 // Pure: no gi import, no clock, no file, so it runs under plain gjs (gnome-shell/tests/nestedHarness.test.js).
 
 const IDLE_SCENARIO_NAME = 'idle';
@@ -52,6 +54,40 @@ const BUSY_CPU_START_PERCENT = 50;
 const BUSY_CPU_STEP_SPAN_PERCENT = 30;
 /** A step is (draw - this) * span: a draw from [0, 1) centred on zero. */
 const STEP_CENTRE = 0.5;
+
+/** The apps the replay ranks, as a ranking entry names one (lib/apps.js): its group key and the name the card shows. */
+const CHROMIUM_APP = Object.freeze({groupKey: 'app.slice/chromium', name: 'Chromium'});
+const HERDR_AGENTS_APP = Object.freeze({groupKey: 'app.slice/herdr-server.service', name: 'herdr agents'});
+const CODE_APP = Object.freeze({groupKey: 'app.slice/app-code.scope', name: 'Code'});
+const TERMINAL_APP = Object.freeze({groupKey: 'app.slice/app-ptyxis.scope', name: 'Terminal'});
+const SLACK_APP = Object.freeze({groupKey: 'app.slice/app-slack.scope', name: 'Slack'});
+const FILES_APP = Object.freeze({groupKey: 'app.slice/app-nautilus.scope', name: 'Files'});
+/**
+ * The CPU ranking, largest first: each app's share of the snapshot's CPU busy percent, so the ranking follows the
+ * scenario (idle's entries near 0 %, busy's tens of percent) and keeps its order; together they stay under the whole.
+ * Six entries: as many as the cockpit's apps card shows (lib/constants.js APPS_CARD_ROW_LIMIT). The first is the
+ * topCpu the replay published before the rankings.
+ */
+const CPU_RANKING_SHARES = Object.freeze([
+    {app: CHROMIUM_APP, shareOfCpuBusy: 0.6},
+    {app: HERDR_AGENTS_APP, shareOfCpuBusy: 0.15},
+    {app: CODE_APP, shareOfCpuBusy: 0.08},
+    {app: TERMINAL_APP, shareOfCpuBusy: 0.05},
+    {app: SLACK_APP, shareOfCpuBusy: 0.04},
+    {app: FILES_APP, shareOfCpuBusy: 0.02},
+]);
+/**
+ * The memory ranking, largest first, in GiB: fixed, as the topMemory the replay published before the rankings (its
+ * first entry) was. Six entries, as the CPU ranking has.
+ */
+const MEMORY_RANKING_GIBIBYTES = Object.freeze([
+    {app: HERDR_AGENTS_APP, gibibytes: 15.7},
+    {app: CHROMIUM_APP, gibibytes: 4.2},
+    {app: CODE_APP, gibibytes: 2.1},
+    {app: SLACK_APP, gibibytes: 0.9},
+    {app: TERMINAL_APP, gibibytes: 0.4},
+    {app: FILES_APP, gibibytes: 0.2},
+]);
 
 /** mulberry32's increment; the shifts and multipliers in createSeededRandom are the algorithm's published ones. */
 const MULBERRY32_INCREMENT = 0x6D2B79F5;
@@ -145,6 +181,71 @@ export function isNewScenarioRequest(lastRequest, readRequest) {
     if (readRequest.requestText !== null)
         return readRequest.requestText !== lastRequest.requestText;
     return readRequest.scenarioName !== lastRequest.scenarioName;
+}
+
+/**
+ * The apps a replay snapshot carries, in the real sampler's shape (lib/apps.js, read by lib/protocol.js
+ * parseAppRanking, field for field): the two winners and the two rankings, each winner its ranking's first entry. The
+ * CPU figures follow the snapshot's CPU busy percent (CPU_RANKING_SHARES); the memory figures are fixed.
+ *
+ * @param {number} cpuBusyPercent - The snapshot's CPU busy percent, 0–100.
+ * @returns {{topCpu: {groupKey: string, name: string, cpuPercent: number},
+ *     topMemory: {groupKey: string, name: string, memoryBytes: number},
+ *     cpuRanking: Array<{groupKey: string, name: string, cpuPercent: number}>,
+ *     memoryRanking: Array<{groupKey: string, name: string, memoryBytes: number}>}} The snapshot's apps.
+ */
+export function replayApps(cpuBusyPercent) {
+    const cpuRanking = CPU_RANKING_SHARES.map(({app, shareOfCpuBusy}) =>
+        ({...app, cpuPercent: cpuBusyPercent * shareOfCpuBusy}));
+    const memoryRanking = MEMORY_RANKING_GIBIBYTES.map(({app, gibibytes}) =>
+        ({...app, memoryBytes: gibibytes * BYTES_PER_GIBIBYTE}));
+    return {topCpu: {...cpuRanking[0]}, topMemory: {...memoryRanking[0]}, cpuRanking, memoryRanking};
+}
+
+/**
+ * The apps of each snapshot at the real sampler's pace. service/sampler.js renews its apps only when it scans them
+ * (lib/cadence.js decideAppScan: at its first tick, then every APP_SCAN_INTERVAL_SECONDS while a detail watch is
+ * held), and every Sample between carries the last scan's; ranked afresh on every snapshot, the cockpit's apps card
+ * would redraw its rows on every Sample, and a visible state would read above what the extension costs with a real
+ * sampler. So the replay ranks (replayApps) at its first snapshot and then once every scan interval, from that
+ * snapshot's CPU figure, and holds the apps between. Not replayed: the warm-up scan after the first, the burst scans,
+ * and the longer interval with no watch held.
+ */
+export class ReplayAppScanner {
+    /**
+     * Starts with no scan: the first snapshot's apps are ranked afresh.
+     *
+     * @param {number} scanIntervalSnapshots - Snapshots from one scan to the next: lib/constants.js
+     *     APP_SCAN_INTERVAL_SECONDS / SAMPLE_INTERVAL_SECONDS, the sampler's ticks between two scans.
+     * @throws {Error} For anything but a whole number of snapshots, one or more.
+     */
+    constructor(scanIntervalSnapshots) {
+        if (!Number.isInteger(scanIntervalSnapshots) || scanIntervalSnapshots < 1) {
+            throw new Error('a scan interval is a whole number of snapshots, one or more: ' +
+                `got ${scanIntervalSnapshots}`);
+        }
+        this._scanIntervalSnapshots = scanIntervalSnapshots;
+        // Snapshots since the last scan, the scan's own included; null before the first.
+        this._snapshotsSinceScan = null;
+        this._scannedApps = null;
+    }
+
+    /**
+     * The apps of the next snapshot: ranked afresh from its CPU figure at the first snapshot and at every
+     * scanIntervalSnapshots-th after it, else the last scan's (the same object).
+     *
+     * @param {number} cpuBusyPercent - The snapshot's CPU busy percent, 0–100.
+     * @returns {object} The snapshot's apps, in replayApps' shape.
+     */
+    appsOfNextSnapshot(cpuBusyPercent) {
+        const isScanDue = this._snapshotsSinceScan === null || this._snapshotsSinceScan >= this._scanIntervalSnapshots;
+        if (isScanDue) {
+            this._scannedApps = replayApps(cpuBusyPercent);
+            this._snapshotsSinceScan = 0;
+        }
+        this._snapshotsSinceScan++;
+        return this._scannedApps;
+    }
 }
 
 /** One scenario's sequence of synthetic samples, from the fixed seed. */

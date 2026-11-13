@@ -193,7 +193,7 @@ export function heaviestRowTexts(apps) {
  * @param {string|null} lastGoodClockLabel - 'HH:MM' of the last snapshot with data.
  * @returns {string} 'no data since 14:02', or 'no data' without a last good time.
  */
-function noDataSince(lastGoodClockLabel) {
+export function noDataSince(lastGoodClockLabel) {
     if (lastGoodClockLabel === null || lastGoodClockLabel === undefined)
         return NO_DATA_TEXT;
     return `${NO_DATA_TEXT} since ${lastGoodClockLabel}`;

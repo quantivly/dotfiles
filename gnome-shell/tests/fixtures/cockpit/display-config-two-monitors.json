@@ -1,0 +1,15 @@
+{
+  "_provenance": "Shape captured read-only from `gdbus call ... org.gnome.Mutter.DisplayConfig.GetCurrentState` on the laptop (one built-in eDP-1 panel, serial blanked); the second monitor, a Dell at x = 1920, is synthetic. Held as the already-unpacked value GLib.Variant.deepUnpack() gives: (serial, monitors, logical_monitors, properties). Mode lists and a{sv} values are trimmed to what the readers never touch.",
+  "state": [
+    11,
+    [
+      [["eDP-1", "CMN", "N140JCN-GT1", ""], [["1920x1200@60.003", 1920, 1200, 60.0028, 1.25, [1.0, 1.25, 2.0], {}]], {}],
+      [["DP-1", "DEL", "DELL U2723QE", ""], [["1920x1080@60.000", 1920, 1080, 60.0, 1.0, [1.0], {}]], {}]
+    ],
+    [
+      [0, 0, 1.25, 0, true, [["eDP-1", "CMN", "N140JCN-GT1", ""]], {}],
+      [1920, 0, 1.0, 0, false, [["DP-1", "DEL", "DELL U2723QE", ""]], {}]
+    ],
+    {}
+  ]
+}

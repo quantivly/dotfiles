@@ -34,6 +34,8 @@ const CHANGED_SIGNAL_NAME = 'Changed';
 const LAYOUT_CHANGE_NAME = 'layout';
 const SINGLE_STRING_TYPE = new GLib.VariantType('(s)');
 const FOCUSABLE_SESSION_ID = 'wL:p1';
+/** The windows a cockpit names for a focused session: a herdr client, then its terminal. */
+const WINDOW_PID_CANDIDATES = [4242, 4100];
 const UNKNOWN_SESSION_ID = 'wL:p99';
 const UNKNOWN_SESSION_ERROR = 'unknown-session';
 /** The code the face answers when the cockpit rejects or throws: its message goes to the journal alone. */
@@ -114,6 +116,8 @@ class FakeCockpit {
         this.focusedSessionIds = [];
         /** @type {Error|null} When set, focusSession rejects with it. */
         this.focusRejection = null;
+        /** @type {number[]} The window candidates focusSession answers for a row it knows. */
+        this.focusWindowPidCandidates = [];
         this._listenersById = new Map();
         this._nextListenerId = 1;
     }
@@ -171,8 +175,8 @@ class FakeCockpit {
      * Records the id, and answers as the real cockpit does for a row it knows or one it does not.
      *
      * @param {string} sessionId - The session row's id.
-     * @returns {Promise<{focused: boolean, windowPid: null, error: string|null}>} The reply; rejects with
-     *     focusRejection when that is set.
+     * @returns {Promise<{focused: boolean, windowPid: null, error: string|null, windowPidCandidates: number[]}>} The
+     *     reply, with focusWindowPidCandidates for a row it knows; rejects with focusRejection when that is set.
      */
     focusSession(sessionId) {
         this.focusedSessionIds.push(sessionId);
@@ -180,8 +184,8 @@ class FakeCockpit {
             return Promise.reject(this.focusRejection);
         const isKnownSession = this._sourcesByName.sessions?.rows?.some(row => row.id === sessionId) ?? false;
         const reply = isKnownSession
-            ? {focused: true, windowPid: null, error: null}
-            : {focused: false, windowPid: null, error: UNKNOWN_SESSION_ERROR};
+            ? {focused: true, windowPid: null, error: null, windowPidCandidates: this.focusWindowPidCandidates}
+            : {focused: false, windowPid: null, error: UNKNOWN_SESSION_ERROR, windowPidCandidates: []};
         return Promise.resolve(reply);
     }
 
@@ -426,14 +430,26 @@ test('cockpit-dbus: FocusSession hands the id to the cockpit and answers its rep
     withExportedCockpit(async ({cockpit, serviceName, openClient}) => {
         const {replyText, dbusError} = await callFocusSession(openClient(), serviceName, FOCUSABLE_SESSION_ID);
         assertEqual({reply: parseFocusSessionReply(replyText), dbusError, ids: cockpit.focusedSessionIds},
-            {reply: {focused: true, windowPid: null, error: null}, dbusError: null, ids: [FOCUSABLE_SESSION_ID]});
+            {reply: {focused: true, windowPid: null, error: null, windowPidCandidates: []}, dbusError: null,
+                ids: [FOCUSABLE_SESSION_ID]});
+    }));
+
+test('cockpit-dbus: FocusSession answers the candidates the cockpit object returns', () =>
+    withExportedCockpit(async ({cockpit, serviceName, openClient}) => {
+        cockpit.focusWindowPidCandidates = WINDOW_PID_CANDIDATES;
+        const {replyText, dbusError} = await callFocusSession(openClient(), serviceName, FOCUSABLE_SESSION_ID);
+        // The reply's text, not its parse: the fields in the reader's order, as the real-entry rows compare them.
+        assertEqual({replyText, dbusError}, {
+            replyText: '{"focused":true,"windowPid":null,"error":null,"windowPidCandidates":[4242,4100]}',
+            dbusError: null,
+        });
     }));
 
 test('cockpit-dbus: FocusSession with an unknown id answers focused false and its code, not a D-Bus error', () =>
     withExportedCockpit(async ({cockpit, serviceName, openClient}) => {
         const {replyText, dbusError} = await callFocusSession(openClient(), serviceName, UNKNOWN_SESSION_ID);
         assertEqual({reply: parseFocusSessionReply(replyText), dbusError, ids: cockpit.focusedSessionIds}, {
-            reply: {focused: false, windowPid: null, error: UNKNOWN_SESSION_ERROR},
+            reply: {focused: false, windowPid: null, error: UNKNOWN_SESSION_ERROR, windowPidCandidates: []},
             dbusError: null,
             ids: [UNKNOWN_SESSION_ID],
         });
@@ -446,7 +462,7 @@ test('cockpit-dbus: a FocusSession the cockpit rejects answers focused false and
     const {replyText, dbusError} = await callFocusSession(openClient(), serviceName, FOCUSABLE_SESSION_ID);
     assertEqual(String(replyText).includes(FOCUS_FAULT_MESSAGE), false, 'the message of the fault stays off the bus');
     assertEqual({reply: parseFocusSessionReply(replyText), dbusError, logLines}, {
-        reply: {focused: false, windowPid: null, error: INTERNAL_FOCUS_ERROR},
+        reply: {focused: false, windowPid: null, error: INTERNAL_FOCUS_ERROR, windowPidCandidates: []},
         dbusError: null,
         logLines: [`cockpit: FocusSession failed: ${FOCUS_FAULT_MESSAGE}`],
     });

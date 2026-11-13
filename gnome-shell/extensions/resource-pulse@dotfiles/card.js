@@ -78,6 +78,8 @@ const FROZEN_PSEUDO_CLASS = 'frozen';
 const GRAPH_OPACITY_PROPERTY = '-rp-graph-opacity';
 /** The graphs' opacity where the stylesheet sets none: undimmed. */
 const FULL_GRAPH_OPACITY = 1;
+/** Clutter's -1 for a width or height: no fixed size, so the card takes its preferred one. */
+const UNSET_SIZE = -1;
 
 // Cells of the meters grid: [column, row], and how many columns a cell spans.
 const LABEL_COLUMN = 0;
@@ -336,6 +338,31 @@ class PulseCard extends St.BoxLayout {
         const {x, y} = cardPosition(workArea, this.width, CARD_MARGIN_PX);
         // Whole logical pixels keep the text sharp.
         this.set_position(Math.floor(x), Math.floor(y));
+    }
+
+    /**
+     * Sizes the card to the cockpit's system cell (cockpitCards.js SystemCockpitCard): drops the fixed width
+     * (rp-card-fixed) and takes the cell's width and height, so the cell draws this one card surface. clearCellSize()
+     * undoes it.
+     *
+     * @param {number} widthPx - The cell's width.
+     * @param {number} heightPx - The cell's height.
+     * @returns {void}
+     */
+    setCellSize(widthPx, heightPx) {
+        this.remove_style_class_name(FIXED_WIDTH_STYLE_CLASS);
+        this.set_size(widthPx, heightPx);
+    }
+
+    /**
+     * Undoes setCellSize, for the card's own place top right on the primary monitor (the cockpit not configured): its
+     * fixed width again, and its natural height. placeOnPrimaryMonitor() only moves the card, so it cannot do this.
+     *
+     * @returns {void}
+     */
+    clearCellSize() {
+        this.add_style_class_name(FIXED_WIDTH_STYLE_CLASS);
+        this.set_size(UNSET_SIZE, UNSET_SIZE);
     }
 
     /**

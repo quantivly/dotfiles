@@ -14,11 +14,16 @@
 // - a field that is missing, or not of its type, is null for that field alone, so only its own row shows no data;
 // - a list entry without what identifies and names it (a session row, a mount row, a layout group) is dropped, and
 //   the rest of the list kept;
-// - an id longer than COCKPIT_ID_MAX_CHARS reads as null, and a mount row whose mount point is longer than
-//   COCKPIT_PATH_MAX_CHARS is dropped;
+// - a session row's workspace or pane id longer than COCKPIT_ID_MAX_CHARS reads as null; a session row whose own id
+//   is longer than COCKPIT_SESSION_ID_MAX_CHARS, and a mount row whose mount point is longer than
+//   COCKPIT_PATH_MAX_CHARS, are dropped;
+// - a FocusSession reply's window candidates keep their counts, at most FOCUS_WINDOW_PID_CANDIDATES_MAX of them, and
+//   read as none when missing or not a list;
 // - text that is not JSON, or JSON that is not an object, parses to null as a whole.
 // A breaking change needs a new interface, Cockpit2, served beside this one.
-import {COCKPIT_ID_MAX_CHARS, COCKPIT_PATH_MAX_CHARS} from './constants.js';
+import {
+    COCKPIT_ID_MAX_CHARS, COCKPIT_PATH_MAX_CHARS, COCKPIT_SESSION_ID_MAX_CHARS, FOCUS_WINDOW_PID_CANDIDATES_MAX,
+} from './constants.js';
 import {
     booleanOrNull, countOrNull, enumOrNull, finiteNumberOrNull, isPlainObject, nonNegativeNumberOrNull, parseJsonObject,
     stringOrNull,
@@ -45,13 +50,14 @@ export const COCKPIT_CHANGED_SIGNAL_NAME = 'Changed';
 /** The Changed signal's parameters as a GLib.Variant type: one string, the changed JSON. */
 export const COCKPIT_CHANGED_SIGNAL_SIGNATURE = '(s)';
 /**
- * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side and a proxy on the client side:
+ * The interface, for Gio.DBusExportedObject.wrapJSObject on the service side; the client's link (cockpitClient.js's
+ * createCockpitLink, on serviceLink.js) calls and subscribes by the names above:
  * - GetState() → s: the state JSON (buildCockpitStatePayload), for a client that has just connected, and for
  *   gnome-status;
  * - WatchCockpit() and UnwatchCockpit(): a caller holds a watch while the cockpit monitor is visible; the service
  *   counts them per caller and drops a caller's watches when its connection closes;
  * - FocusSession(s sessionId) → s: the reply JSON (buildFocusSessionReply) for focusing one session row's pane,
- *   its error a code from COCKPIT_FOCUS_ERROR_CODES;
+ *   its error a code from COCKPIT_FOCUS_ERROR_CODES, and the pids of the windows that may show herdr;
  * - Changed(s): the changed JSON (buildChangedPayload), once per change.
  */
 export const COCKPIT_INTERFACE_XML = `<node>
@@ -163,10 +169,13 @@ export function buildChangedPayload({publishedAtUsec, sources, layout, configErr
  * @param {object} reply - What focusing found.
  * @param {boolean|null} reply.focused - Whether herdr focused the session's pane.
  * @param {number|null} reply.windowPid - The process of the herdr client's window; null when not known (focused in
- *     herdr, window unknown).
+ *     herdr, window unknown). The service always answers null: it names candidates instead.
  * @param {string|null} reply.error - Why focusing failed, a code from COCKPIT_FOCUS_ERROR_CODES; null when it did
  *     not.
- * @returns {string} The JSON.
+ * @param {number[]} [reply.windowPidCandidates] - The pids whose windows may show herdr's client (its processes and
+ *     their parents, nearest first): the shell activates the topmost window whose pid is among them. Missing reads as
+ *     none.
+ * @returns {string} The JSON, its fields in the order focused, windowPid, error, windowPidCandidates.
  */
 export function buildFocusSessionReply(reply) {
     return JSON.stringify(readFocusSessionReply(reply));
@@ -202,9 +211,9 @@ export function parseChangedPayload(text) {
  * Reads FocusSession's reply JSON, skew-tolerantly (see the file header).
  *
  * @param {*} text - The JSON text.
- * @returns {{focused: boolean|null, windowPid: number|null, error: string|null}|null} The reply, each field null when
- *     missing or mistyped, and `error` null unless a code from COCKPIT_FOCUS_ERROR_CODES; null for text that is not a
- *     JSON object.
+ * @returns {{focused: boolean|null, windowPid: number|null, error: string|null, windowPidCandidates: number[]}|null}
+ *     The reply, each field null when missing or mistyped, `error` null unless a code from COCKPIT_FOCUS_ERROR_CODES,
+ *     and `windowPidCandidates` as parseWindowPidCandidates reads it; null for text that is not a JSON object.
  */
 export function parseFocusSessionReply(text) {
     const payload = parseJsonObject(text);
@@ -319,15 +328,31 @@ function readChanged(changed) {
  * Reads a FocusSession reply's fields.
  *
  * @param {object} reply - The reply to read: a parsed payload, or the service's reply.
- * @returns {{focused: boolean|null, windowPid: number|null, error: string|null}} Each field of its type or null;
- *     `error` a code from COCKPIT_FOCUS_ERROR_CODES or null, so no other program's text passes.
+ * @returns {{focused: boolean|null, windowPid: number|null, error: string|null, windowPidCandidates: number[]}} Each
+ *     field of its type or null; `error` a code from COCKPIT_FOCUS_ERROR_CODES or null, so no other program's text
+ *     passes; `windowPidCandidates` always a list.
  */
 function readFocusSessionReply(reply) {
     return {
         focused: booleanOrNull(reply.focused),
         windowPid: countOrNull(reply.windowPid),
         error: enumOrNull(reply.error, COCKPIT_FOCUS_ERROR_CODES),
+        windowPidCandidates: parseWindowPidCandidates(reply.windowPidCandidates),
     };
+}
+
+/**
+ * Reads a FocusSession reply's window candidates.
+ *
+ * @param {*} value - A parsed JSON value.
+ * @returns {number[]} The entries that are counts, in order, the first FOCUS_WINDOW_PID_CANDIDATES_MAX of them; empty
+ *     unless the value is an array.
+ */
+function parseWindowPidCandidates(value) {
+    if (!Array.isArray(value))
+        return [];
+    const candidatePids = value.map(entry => countOrNull(entry)).filter(candidatePid => candidatePid !== null);
+    return candidatePids.slice(0, FOCUS_WINDOW_PID_CANDIDATES_MAX);
 }
 
 /**
@@ -392,14 +417,14 @@ function parseSessionStateCounts(value) {
  * @param {*} value - A parsed JSON value.
  * @returns {{id: string, name: string, state: string, idleSeconds: number|null, idleFromProcessAge: boolean|null,
  *     memoryBytes: number|null, workspaceId: string|null, paneId: string|null, account: string|null,
- *     contextPercent: number|null}|null} The row; null unless an object with a non-empty string id, a non-empty
- *     string name and a state from SESSION_STATES. `workspaceId` and `paneId` are null when longer than
- *     COCKPIT_ID_MAX_CHARS.
+ *     contextPercent: number|null}|null} The row; null unless an object with a non-empty string id of at most
+ *     COCKPIT_SESSION_ID_MAX_CHARS, a non-empty string name and a state from SESSION_STATES. `workspaceId` and
+ *     `paneId` are null when longer than COCKPIT_ID_MAX_CHARS.
  */
 function parseSessionRow(value) {
     if (!isPlainObject(value))
         return null;
-    const id = nonEmptyStringOrNull(value.id);
+    const id = nonEmptyStringOrNull(boundedStringOrNull(value.id, COCKPIT_SESSION_ID_MAX_CHARS));
     const name = nonEmptyStringOrNull(value.name);
     const state = enumOrNull(value.state, SESSION_STATES);
     if (id === null || name === null || state === null)

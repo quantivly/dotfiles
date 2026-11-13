@@ -1,6 +1,16 @@
 // The top-bar indicator: two mini area graphs, CPU then memory, with no text. The numbers appear in a label
 // below it once the pointer has rested on it for HOVER_LABEL_DELAY_MS (never while the menu is open). A click opens a
-// dropdown: a second card (card.js), unfrozen exactly while the menu is open, and an "Open Resources" item.
+// dropdown: a second card (card.js), unfrozen exactly while the menu is open; under it, once the cockpit has answered
+// (ruling D23), a second copy of the cockpit's sessions card (cockpitCards.js), live exactly while the menu is open,
+// whose row click closes the menu and takes the user to the session, as wide as the card above it (ruling D29); and an
+// "Open Resources" item (cockpitCards.js finds and opens the app, as the cockpit's system card does).
+//
+// The sessions card is paced as the cockpit layer's own copy is, by the one CockpitSourcePacing and data-card drawing
+// they share (cockpitSourceDrawing.js, ruling D22): opening the menu draws it at once from what the cockpit client
+// holds; while it is open a read is drawn at once and a Changed on the next Sample (this indicator's history listener);
+// closed, it is frozen and nothing waits. The cockpit's part never takes the indicator down (ruling D25): it is built
+// under a guard (a failure leaves v2's dropdown), and its every draw, event and click logs a failure on the shared
+// error log rather than throw it into a menu signal handler, a client's listener loop or a row's click handler.
 //
 // Shell glue only: every number comes from the client, every string from lib/format.js, every shape from graph.js
 // and every column from lib/topbarColumns.js. A graph asks for a repaint only when its columns, in whole device
@@ -14,20 +24,26 @@ import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
-import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {PulseCard} from './card.js';
+import {SessionsCockpitCard, findResourcesApp, openResourcesApp} from './cockpitCards.js';
+import {CockpitSourcePacing, drawCockpitDataCard} from './cockpitSourceDrawing.js';
+import {CockpitTooltip} from './cockpitTooltip.js';
 import {drawAreaGraph, padWithLeadingGaps} from './graph.js';
 import {
-    BASELINE_RGBA, CPU_GRAPH_RGBA, HOVER_LABEL_DELAY_MS, HOVER_LABEL_FADE_IN_MS, HOVER_LABEL_FADE_OUT_MS,
-    MEMORY_GRAPH_RGBA, RESOURCES_APP_IDS, TOPBAR_GRAPH_HEIGHT_PX, TOPBAR_GRAPH_WIDTH_PX, TOPBAR_HISTORY_SAMPLES,
+    BASELINE_RGBA, COCKPIT_SESSIONS_CARD_ID, CPU_GRAPH_RGBA, CockpitClientEventType, HOVER_LABEL_DELAY_MS,
+    HOVER_LABEL_FADE_IN_MS, HOVER_LABEL_FADE_OUT_MS, MEMORY_GRAPH_RGBA, TOPBAR_GRAPH_HEIGHT_PX, TOPBAR_GRAPH_WIDTH_PX,
+    TOPBAR_HISTORY_SAMPLES,
 } from './lib/constants.js';
+import {isDropdownSessionsItemShown} from './lib/cockpitWiring.js';
+import {describeErrorWithStack} from './lib/errorLog.js';
 import {hoverLabel} from './lib/format.js';
 import {hoverLabelPosition} from './lib/layout.js';
+import {runEveryStep} from './lib/teardown.js';
 import {columnFractions, deviceLevelCount, isGraphRepaintNeeded, quantisedColumns} from './lib/topbarColumns.js';
 
 const ACCESSIBLE_NAME = 'Resource Pulse';
@@ -38,6 +54,21 @@ const OPEN_RESOURCES_LABEL = 'Open Resources';
 const CARD_ITEM_STYLE_CLASS = 'resource-pulse-menu-card-item';
 /** The card item is display-only: it takes neither focus nor clicks. */
 const CARD_ITEM_PROPERTIES = {reactive: false, can_focus: false, style_class: CARD_ITEM_STYLE_CLASS};
+/** The dropdown's sessions item: the stylesheet gives it its padding. */
+const SESSIONS_ITEM_STYLE_CLASS = 'rp-cockpit-menu-sessions-item';
+/** The sessions item takes neither focus nor clicks itself: its card's rows take the pointer. */
+const SESSIONS_ITEM_PROPERTIES = {reactive: false, can_focus: false, style_class: SESSIONS_ITEM_STYLE_CLASS};
+/** The sessions item's place in the menu: right under the card item (the first), above "Open Resources". */
+const SESSIONS_ITEM_MENU_POSITION = 1;
+/** The one cockpit card the dropdown draws: its pacing's drawn card ids. */
+const DROPDOWN_COCKPIT_CARD_IDS = Object.freeze([COCKPIT_SESSIONS_CARD_ID]);
+/** The dropdown, as its pacing's journal line names it (cockpitSourceDrawing.js). */
+const PACING_SURFACE_NAME = 'the dropdown';
+/**
+ * The open dropdown holds the cockpit's subscription (lib/cockpitInteraction.js isCockpitWatchWanted counts it), so a
+ * Sample while it is open pulls the sessions card's suspect sources.
+ */
+const IS_COCKPIT_SUBSCRIPTION_WANTED_WHILE_OPEN = true;
 const GRAPH_BOX_STYLE_CLASS = 'resource-pulse-graphs';
 const HOVER_LABEL_STYLE_CLASS = 'resource-pulse-hover-label';
 /** The stylesheet's gap between the indicator's bottom edge and the label's top, as the dash's labels use. */
@@ -49,7 +80,10 @@ const GRAPH_HEIGHT_STYLE = `height: ${TOPBAR_GRAPH_HEIGHT_PX}px;`;
 const GRAPH_SIZE_STYLE = `${GRAPH_WIDTH_STYLE} ${GRAPH_HEIGHT_STYLE}`;
 const TRANSPARENT_OPACITY = 0;
 const OPAQUE_OPACITY = 255;
-/** Clutter's for_height of -1: the label's width for its own height, with no height constraint. */
+/**
+ * Clutter's for_height of -1: an actor's width for its own height, with no height constraint (the hover label's, and
+ * the dropdown's system card's).
+ */
 const UNCONSTRAINED_HEIGHT = -1;
 /** The stage's left edge, for the fallback when the indicator is on no monitor. */
 const STAGE_LEFT_EDGE_PX = 0;
@@ -80,21 +114,40 @@ class PulseIndicator extends PanelMenu.Button {
     /**
      * Builds the graphs, the dropdown and the hover label, and starts listening to the client and to the display
      * scale. The hover label is added to the chrome, and the outside signals connected, only after everything
-     * that could throw, so a failed construction leaves nothing in the shell.
+     * that could throw, so a failed construction leaves nothing in the shell. The dropdown's sessions card is built
+     * last, since it adds to the chrome too (its tooltip), under its own guard (ruling D25): it never throws, and its
+     * failure leaves v2's dropdown.
      *
      * @param {import('./pulseClient.js').PulseClient} client - The one client; the indicator draws its histories.
+     * @param {object} cockpit - The cockpit's part of the dropdown.
+     * @param {import('./cockpitClient.js').CockpitClient} cockpit.cockpitClient - The cockpit client: the sessions
+     *     card's source, its state and its events.
+     * @param {import('./lib/errorLog.js').RateLimitedLogger} cockpit.errorLog - The extension's shared error log, where
+     *     the cockpit part's failures go.
+     * @param {function(string): void} cockpit.onSessionActivated - Called with a session's id when its row is clicked,
+     *     once the menu is closed: the extension's activation path.
      * @returns {void}
      */
-    _init(client) {
+    _init(client, {cockpitClient, errorLog, onSessionActivated}) {
         super._init(MENU_ALIGNMENT, ACCESSIBLE_NAME);
         // Every field _onDestroy reads is set before anything below can throw.
         this._client = client;
+        this._cockpitClient = cockpitClient;
+        this._errorLog = errorLog;
+        this._activateSessionInExtension = onSessionActivated;
         this._hoverLabel = null;
         this._isHoverLabelShown = false;
         this._showHoverLabelTimeoutId = null;
         this._placeHoverLabelLaterId = null;
         this._historyListenerId = null;
         this._dropdownCard = null;
+        // The dropdown's sessions card, its item, its own tooltip and its pacing, and its cockpit client listener;
+        // all null while it is not built (or its build failed: ruling D25).
+        this._sessionsItem = null;
+        this._sessionsCard = null;
+        this._sessionsTooltip = null;
+        this._sessionsPacing = null;
+        this._cockpitListenerId = null;
         this._openResourcesItem = null;
 
         const graphBox = new St.BoxLayout({style_class: GRAPH_BOX_STYLE_CLASS});
@@ -125,11 +178,13 @@ class PulseIndicator extends PanelMenu.Button {
         this._historyListenerId = client.addHistoryListener(() => this._onHistoriesChanged());
         St.ThemeContext.get_for_stage(global.stage).connectObject(
             'notify::scale-factor', () => this._queuePlaceShownHoverLabel(), this);
+        this._addSessionsItem();
     }
 
     /**
      * Fills the menu: a second card, in a non-reactive item (it is display-only, and takes neither focus nor
-     * clicks), and the "Open Resources" item. The card is not placed on a monitor: the menu lays it out.
+     * clicks), and the "Open Resources" item; the sessions item goes between them, added last (_addSessionsItem). The
+     * card is not placed on a monitor: the menu lays it out.
      *
      * @returns {void}
      */
@@ -140,23 +195,181 @@ class PulseIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(cardItem);
 
         this._openResourcesItem = new PopupMenu.PopupMenuItem(OPEN_RESOURCES_LABEL);
-        this._openResourcesItem.connect('activate', () => this._openResources());
+        this._openResourcesItem.connect('activate', () => openResourcesApp());
         this.menu.addMenuItem(this._openResourcesItem);
         this._syncOpenResourcesVisibility();
     }
 
     /**
+     * Adds the sessions item under the card item, under a guard (ruling D25: the cockpit never takes the indicator
+     * down): on a failure whatever was half-built is destroyed first (so a throw from the log cannot leave the
+     * tooltip's label in the chrome), then the failure is logged, and the item is left out, so the dropdown is v2's.
+     * It runs last in _init, after every step that can throw, as everything that adds to the shell does.
+     *
+     * @returns {void}
+     */
+    _addSessionsItem() {
+        try {
+            this._buildSessionsItem();
+        } catch (error) {
+            this._destroySessionsItem();
+            this._logCockpitFailure('be built, so the dropdown shows the system card alone', error);
+        }
+    }
+
+    /**
+     * Builds the sessions item: a SessionsCockpitCard with its own tooltip, whose row click reaches
+     * _onSessionActivated, in a non-reactive, unfocusable item, put in the menu right under the card item. The card
+     * always takes the pointer (the open menu is above every window) and is frozen until the menu opens, as the system
+     * card is; its own CockpitSourcePacing paces it (ruling D22). The item is shown or hidden by the client's state
+     * (ruling D23); the client listener is added last.
+     *
+     * @returns {void}
+     * @throws {Error} Whatever a step threw; _addSessionsItem destroys what was built.
+     */
+    _buildSessionsItem() {
+        this._sessionsTooltip = new CockpitTooltip();
+        this._sessionsCard = new SessionsCockpitCard({
+            tooltip: this._sessionsTooltip, onRowActivated: sessionId => this._onSessionActivated(sessionId),
+        });
+        this._sessionsCard.setInteractive(true);
+        this._sessionsCard.setFrozen(true);
+        this._sessionsItem = new PopupMenu.PopupBaseMenuItem(SESSIONS_ITEM_PROPERTIES);
+        this._sessionsItem.add_child(this._sessionsCard);
+        this.menu.addMenuItem(this._sessionsItem, SESSIONS_ITEM_MENU_POSITION);
+        this._sessionsPacing = new CockpitSourcePacing({
+            cockpitClient: this._cockpitClient, drawnCardIds: () => DROPDOWN_COCKPIT_CARD_IDS,
+            drawCard: () => this._drawSessionsCard(), errorLog: this._errorLog, surfaceName: PACING_SURFACE_NAME,
+        });
+        this._syncSessionsItemVisibility();
+        this._cockpitListenerId = this._cockpitClient.addListener(event => this._onCockpitEvent(event));
+    }
+
+    /**
+     * Shows the sessions item only once the cockpit has answered (lib/cockpitWiring.js isDropdownSessionsItemShown,
+     * ruling D23).
+     *
+     * @returns {void}
+     */
+    _syncSessionsItemVisibility() {
+        this._sessionsItem.visible = isDropdownSessionsItemShown(this._cockpitClient.state);
+    }
+
+    /**
+     * A cockpit client event: a state event shows or hides the sessions item; while the menu is open, the pacing acts
+     * on every event (a read drawn at once, a Changed or a pull on the next Sample); closed, nothing else. Never thrown
+     * into the client's listener loop (ruling D25).
+     *
+     * @param {object} event - The client's event.
+     * @returns {void}
+     */
+    _onCockpitEvent(event) {
+        this._runCockpitStep('follow a cockpit event', () => {
+            if (event.type === CockpitClientEventType.STATE)
+                this._syncSessionsItemVisibility();
+            if (this.menu.isOpen)
+                this._sessionsPacing.onCockpitEvent(event);
+        });
+    }
+
+    /**
      * Reacts to the menu opening or closing: the dropdown card is unfrozen (and repaints at once) while the menu
-     * is open and frozen while it is closed, "Open Resources" is shown only if an app is installed (checked at
-     * every change, since apps come and go), and the hover label is hidden on open and may come back on close.
+     * is open and frozen while it is closed, and so is the sessions card; "Open Resources" is shown only if an app is
+     * installed (checked at every change, since apps come and go), and the hover label is hidden on open and may come
+     * back on close.
      *
      * @param {boolean} isOpen - True once the menu is open, false once it is closed.
      * @returns {void}
      */
     _onMenuOpenStateChanged(isOpen) {
         this._dropdownCard.setFrozen(!isOpen);
+        this._followMenuWithSessionsCard(isOpen);
         this._syncOpenResourcesVisibility();
         this._syncHoverLabel();
+    }
+
+    /**
+     * The sessions card follows the menu: opening shows the latest at once (_showLatestSessions), closing freezes it
+     * (_freezeSessionsCard). Nothing when it was not built; never thrown into the menu's signal handler (ruling D25).
+     *
+     * @param {boolean} isOpen - True once the menu is open, false once it is closed.
+     * @returns {void}
+     */
+    _followMenuWithSessionsCard(isOpen) {
+        if (this._sessionsCard === null)
+            return;
+        if (isOpen)
+            this._runCockpitStep('be drawn as the menu opens', () => this._showLatestSessions());
+        else
+            this._runCockpitStep('be frozen as the menu closes', () => this._freezeSessionsCard());
+    }
+
+    /**
+     * Gives the sessions card the system card's width (_sizeSessionsCardToSystemCard), then draws it from what the
+     * cockpit client holds now, while it is still frozen (so it only records it), then unfreezes it, which draws that
+     * record: the latest at once, drawn once, waiting for no event (the layer's reveal, setCardFrozen, does the same).
+     * The read the open dropdown's subscription asks for is drawn when it comes.
+     *
+     * @returns {void}
+     */
+    _showLatestSessions() {
+        this._sizeSessionsCardToSystemCard();
+        this._drawSessionsCard();
+        this._sessionsCard.setFrozen(false);
+    }
+
+    /**
+     * Gives the sessions card the system card's width (ruling D29), so the two cards line up, a long session name
+     * ellipsizes at that width rather than widen the menu, and the rows' bars get their track. The system card's width
+     * comes from the stylesheet, so its preferred (natural) width is known as the menu opens; its allocated width is
+     * not, until the open menu is laid out on the next frame. Only the width: the card's height stays its content's.
+     *
+     * @returns {void}
+     */
+    _sizeSessionsCardToSystemCard() {
+        const [, systemCardNaturalWidthPx] = this._dropdownCard.get_preferred_width(UNCONSTRAINED_HEIGHT);
+        this._sessionsCard.setCardWidth(systemCardNaturalWidthPx);
+    }
+
+    /**
+     * Forgets what the pacing holds (the pending sources and the fallback timeout), freezes the sessions card and hides
+     * its tooltip: no leave-event reaches a row whose menu closed under the pointer, and a pending show would bring the
+     * tooltip up over a closed menu.
+     *
+     * @returns {void}
+     */
+    _freezeSessionsCard() {
+        this._sessionsPacing.reset();
+        this._sessionsCard.setFrozen(true);
+        this._sessionsTooltip.hide();
+    }
+
+    /**
+     * Draws the sessions card from the cockpit client (cockpitSourceDrawing.js drawCockpitDataCard: its sessions, or
+     * "no data since HH:MM" while the service is gone or the source is stale). A frozen card only records it.
+     *
+     * @returns {void}
+     */
+    _drawSessionsCard() {
+        drawCockpitDataCard({
+            cardId: COCKPIT_SESSIONS_CARD_ID, card: this._sessionsCard, cockpitClient: this._cockpitClient,
+        });
+    }
+
+    /**
+     * A session row of the dropdown's card was clicked: the menu closes first, whatever the activation then does
+     * (Review Focus 3), then the extension's activation path takes the user to the session. It closes as an activated
+     * menu item closes it (itemActivated, ruling D30): with the stock fade, while the menu's state, its
+     * open-state-changed and the release of its grab all happen at once (GNOME Shell 50's popupMenu.js), so the
+     * activation runs with the menu closed and the grab gone. Neither step throws into the row's click handler (ruling
+     * D25): each failure is logged, and a failed close still activates.
+     *
+     * @param {string} sessionId - The clicked session's id.
+     * @returns {void}
+     */
+    _onSessionActivated(sessionId) {
+        this._runCockpitStep('close the menu for a session', () => this.menu.itemActivated());
+        this._runCockpitStep('activate a session', () => this._activateSessionInExtension(sessionId));
     }
 
     /**
@@ -269,8 +482,8 @@ class PulseIndicator extends PanelMenu.Button {
 
     /**
      * Redraws the graphs whose columns changed once the client's histories have changed (a Sample, a state, or no
-     * data), and refreshes the hover label while it is up, from the latest snapshot, so it never shows an older
-     * sample than the graphs do.
+     * data), refreshes the hover label while it is up, from the latest snapshot, so it never shows an older sample
+     * than the graphs do, and last gives the dropdown's sessions card its Sample (_onCockpitSample).
      *
      * @returns {void}
      */
@@ -280,6 +493,24 @@ class PulseIndicator extends PanelMenu.Button {
             this._updateHoverLabelText();
             this._placeHoverLabel();
         }
+        this._onCockpitSample();
+    }
+
+    /**
+     * The dropdown's share of a Sample (this history listener is the dropdown's tick, as the extension's own is the
+     * layer's), while the menu is open: the pacing draws what a Changed or a pull left pending, then pulls the
+     * sessions card's suspect sources (with no layer, or a layout without a sessions card, nothing else pulls them;
+     * the client refuses a second ask about the same source within its interval, so the layer's ask in the same Sample
+     * makes no second GetState). Nothing while the menu is closed or the card was not built; never thrown into the
+     * client's listener loop (ruling D25).
+     *
+     * @returns {void}
+     */
+    _onCockpitSample() {
+        if (this._sessionsPacing === null || !this.menu.isOpen)
+            return;
+        this._runCockpitStep('take its Sample', () =>
+            this._sessionsPacing.onSample({isSubscriptionWanted: IS_COCKPIT_SUBSCRIPTION_WANTED_WHILE_OPEN}));
     }
 
     /**
@@ -429,46 +660,80 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     /**
-     * Finds the first system monitor installed, in RESOURCES_APP_IDS order.
-     *
-     * @returns {Shell.App|undefined} The app, or undefined when none is installed.
-     */
-    _findResourcesApp() {
-        const appSystem = Shell.AppSystem.get_default();
-        return RESOURCES_APP_IDS
-            .map(appId => appSystem.lookup_app(appId))
-            .find(app => app !== null);
-    }
-
-    /**
      * Shows "Open Resources" only while a system monitor is installed.
      *
      * @returns {void}
      */
     _syncOpenResourcesVisibility() {
-        this._openResourcesItem.visible = this._findResourcesApp() !== undefined;
+        this._openResourcesItem.visible = findResourcesApp() !== undefined;
     }
 
     /**
-     * Opens the first system monitor installed and leaves the overview so it is seen. The menu closes itself on
-     * the item's activation. With none installed (the item is hidden then) it does nothing.
+     * Runs one step of the dropdown's cockpit part and logs its failure instead of throwing it (ruling D25: the
+     * cockpit never takes the indicator down, and no menu signal handler, client listener loop or row click handler
+     * is thrown into).
+     *
+     * @param {string} stepName - What the step does, as "could not ..." words it, for example 'take its Sample'.
+     * @param {function(): void} step - The step.
+     * @returns {void}
+     */
+    _runCockpitStep(stepName, step) {
+        try {
+            step();
+        } catch (error) {
+            this._logCockpitFailure(stepName, error);
+        }
+    }
+
+    /**
+     * Logs a failure of the dropdown's cockpit part on the shared error log, rate-limited by its context (the template
+     * key), so one failure repeating with another error text or stack is still written once per interval.
+     *
+     * @param {string} stepName - What failed, as "could not ..." words it.
+     * @param {*} error - What it threw.
+     * @returns {void}
+     */
+    _logCockpitFailure(stepName, error) {
+        const context = `the dropdown's sessions card could not ${stepName}`;
+        const errorText = describeErrorWithStack(error);
+        this._errorLog.log(`${context}: ${errorText}`, context);
+    }
+
+    /**
+     * Removes the dropdown's cockpit part, each step guarded (lib/teardown.js runEveryStep), in an order that never
+     * calls into a destroyed actor: the cockpit client listener first, so no event reaches what follows; the pacing
+     * (its fallback timeout); the card (which hides the tooltip as it goes, and leaves the item); the item (which
+     * leaves the menu); last the tooltip (its label leaves the chrome). The fields are cleared first. What was never
+     * built is skipped, so it also undoes a build that failed half-way.
      *
      * @returns {void}
      */
-    _openResources() {
-        const resourcesApp = this._findResourcesApp();
-        if (resourcesApp === undefined)
-            return;
-        resourcesApp.activate();
-        Main.overview.hide();
+    _destroySessionsItem() {
+        const cockpitListenerId = this._cockpitListenerId;
+        const sessionsPacing = this._sessionsPacing;
+        const sessionsCard = this._sessionsCard;
+        const sessionsItem = this._sessionsItem;
+        const sessionsTooltip = this._sessionsTooltip;
+        this._cockpitListenerId = null;
+        this._sessionsPacing = null;
+        this._sessionsCard = null;
+        this._sessionsItem = null;
+        this._sessionsTooltip = null;
+        runEveryStep([
+            {name: 'remove the cockpit listener', run: () => this._cockpitClient.removeListener(cockpitListenerId)},
+            {name: 'destroy the pacing', run: () => sessionsPacing?.destroy()},
+            {name: 'destroy the card', run: () => sessionsCard?.destroy()},
+            {name: 'destroy the item', run: () => sessionsItem?.destroy()},
+            {name: 'destroy the tooltip', run: () => sessionsTooltip?.destroy()},
+        ], (stepName, error) => this._logCockpitFailure(stepName, error));
     }
 
     /**
      * Removes everything the indicator added outside itself: the display-scale handler, the hover label's pending
-     * placement and pending show, its client listener, the dropdown card (its own listener goes with it) and the
-     * hover label itself (destroying it also takes it out of the chrome, with its own
-     * handlers). Runs on the 'destroy' signal, which PanelMenu.Button connects, so it runs however the indicator
-     * is destroyed.
+     * placement and pending show, its client listener, the dropdown's cockpit part (_destroySessionsItem: its cockpit
+     * client listener, its pacing, its card and its tooltip), the dropdown card (its own listener goes with it) and
+     * the hover label itself (destroying it also takes it out of the chrome, with its own handlers). Runs on the
+     * 'destroy' signal, which PanelMenu.Button connects, so it runs however the indicator is destroyed.
      *
      * @returns {void}
      */
@@ -484,6 +749,7 @@ class PulseIndicator extends PanelMenu.Button {
             this._client.removeHistoryListener(this._historyListenerId);
             this._historyListenerId = null;
         }
+        this._destroySessionsItem();
         this._dropdownCard?.destroy();
         this._dropdownCard = null;
         this._openResourcesItem = null;
@@ -491,6 +757,8 @@ class PulseIndicator extends PanelMenu.Button {
         this._hoverLabel = null;
         this._isHoverLabelShown = false;
         this._client = null;
+        this._cockpitClient = null;
+        this._activateSessionInExtension = null;
         super._onDestroy();
     }
 });

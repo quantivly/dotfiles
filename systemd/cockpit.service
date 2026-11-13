@@ -71,6 +71,11 @@ ConditionPathExists=%E/resource-pulse/cockpit.json
 Type=dbus
 BusName=io.github.quantivly.dotfiles.Cockpit1
 ExecStart=/usr/bin/gjs -m %h/.dotfiles/gnome-shell/extensions/resource-pulse@dotfiles/service/cockpit.js
+# The nested test harness's fixture mode is chosen by this variable alone, so
+# it is removed from the service's environment: a user manager whose own
+# environment carries it (a `systemctl --user import-environment` from a test
+# shell) can never make this unit serve a fixture instead of the sources.
+UnsetEnvironment=RESOURCE_PULSE_COCKPIT_FIXTURE
 # A crash restarts it; a clean exit (a stop, SIGTERM) stays stopped.
 Restart=on-failure
 RestartSec=5

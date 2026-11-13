@@ -58,3 +58,15 @@ test('jsonFields: enumOrNull keeps a listed string only', () => {
     assertEqual(jsonFields.enumOrNull('Working', ['idle', 'working']), null);
     assertEqual(jsonFields.enumOrNull(1, ['1']), null);
 });
+test('jsonFields: isSameAsJson says two parsed values are the same when their JSON texts are: a new object with the ' +
+    'same fields in the same order is, another value, another order or null against an object is not', () =>
+    assertEqual({
+        newObjectSameFields: jsonFields.isSameAsJson({a: 1, b: [2, 3]}, {a: 1, b: [2, 3]}),
+        anotherValue: jsonFields.isSameAsJson({a: 1, b: [2, 3]}, {a: 1, b: [3, 2]}),
+        anotherOrder: jsonFields.isSameAsJson({a: 1, b: 2}, {b: 2, a: 1}),
+        nullAgainstNull: jsonFields.isSameAsJson(null, null),
+        objectAgainstNull: jsonFields.isSameAsJson({a: 1}, null),
+    }, {
+        newObjectSameFields: true, anotherValue: false, anotherOrder: false, nullAgainstNull: true,
+        objectAgainstNull: false,
+    }));

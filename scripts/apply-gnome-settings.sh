@@ -236,6 +236,48 @@ genable_extension() {
 }
 
 #######################################
+# Opt an extension out, the counterpart of genable_extension: idempotently append
+# its uuid to disabled-extensions (which wins over enabled-extensions in
+# GNOME 50) and drop it from enabled-extensions, keeping every other entry in
+# order. Nothing in the portable core calls this: only ~/.gnome-settings.local
+# does, e.g. to turn ding's desktop window off so the cockpit's cards can take
+# hover and click.
+# Arguments:
+#   $1 - extension uuid (e.g. ding@rastersoft.com)
+#######################################
+gdisable_extension() {
+    local uuid="$1" schema="org.gnome.shell"
+
+    if ! grep -qx "$schema" <<<"$SCHEMAS"; then
+        log WARNING "Schema '$schema' not found — skipping disabled-extensions for $uuid"
+        return 0
+    fi
+
+    local enabled_value disabled_value entry
+    local -a enabled_entries=() disabled_entries=() kept_enabled_entries=()
+    enabled_value="$(gsettings get "$schema" enabled-extensions 2>/dev/null || true)"
+    disabled_value="$(gsettings get "$schema" disabled-extensions 2>/dev/null || true)"
+    mapfile -t enabled_entries < <(list_array_entries "$enabled_value")
+    mapfile -t disabled_entries < <(list_array_entries "$disabled_value")
+
+    # A here-string, not a pipe: under pipefail, grep -q exiting at its first match can
+    # SIGPIPE the printf and make a present uuid read as absent.
+    if grep -qxF "$uuid" <<<"$(printf '%s\n' "${disabled_entries[@]}")"; then
+        log INFO "$uuid is already in disabled-extensions"
+    else
+        disabled_entries+=("$uuid")
+        gset "$schema" disabled-extensions "$(format_array_value "${disabled_entries[@]}")"
+    fi
+
+    for entry in "${enabled_entries[@]}"; do
+        [[ "$entry" == "$uuid" ]] || kept_enabled_entries+=("$entry")
+    done
+    if (( ${#kept_enabled_entries[@]} != ${#enabled_entries[@]} )); then
+        gset "$schema" enabled-extensions "$(format_array_value "${kept_enabled_entries[@]}")"
+    fi
+}
+
+#######################################
 # Verify we are on a GNOME desktop with gsettings available.
 # Returns: 0 if GNOME, 1 otherwise
 #######################################

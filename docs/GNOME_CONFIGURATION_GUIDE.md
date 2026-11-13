@@ -39,7 +39,8 @@ Everything is set via `gsettings` (the schema-validated front end to dconf). The
 
 ### Desktop — no icons
 - All `ding` desktop icons hidden (home/trash/volumes/network/link-emblem/drop-place)
-- The lightweight `ding` extension stays enabled, just invisible (fully reversible)
+- The lightweight `ding` extension stays enabled, just invisible (fully reversible), unless your local
+  layer turns it off for the [cockpit](#drawing-the-cockpit)
 
 ### Keybindings — tmux-friendly
 - GNOME workspace switching is moved **off** `Ctrl+Alt+Arrow` onto `Super`-based
@@ -59,11 +60,12 @@ Everything is set via `gsettings` (the schema-validated front end to dconf). The
   locks the screen and never suspends. See [DOCK_LID_SUSPEND.md](DOCK_LID_SUSPEND.md).
 
 ### Extensions — one of our own
-No third-party extension is installed, and none of the stock ones is enabled or disabled: the
-decluttered look comes purely from hiding visible items. All stock Canonical extensions stay exactly
-as Ubuntu ships them (`ding`, `ubuntu-dock`, `tiling-assistant`, `ubuntu-appindicators`, snapd/web
-search providers). The one addition is **Resource Pulse**, an in-repo extension that is linked for
-everyone and **off until you opt in** — see [Resource Pulse](#resource-pulse).
+No third-party extension is installed, and the portable layer enables or disables none of the stock
+ones: the decluttered look comes purely from hiding visible items. All stock Canonical extensions stay
+exactly as Ubuntu ships them (`ding`, `ubuntu-dock`, `tiling-assistant`, `ubuntu-appindicators`,
+snapd/web search providers), unless your local layer turns one off with `gdisable_extension <uuid>`, as
+the cockpit's owner does `ding`. The one addition is **Resource Pulse**, an in-repo extension that is
+linked for everyone and **off until you opt in** — see [Resource Pulse](#resource-pulse).
 
 ## Resource Pulse
 
@@ -73,7 +75,8 @@ to answer "why is this machine slow right now". It lives in
 sampling left the shell: [the service design](superpowers/specs/2026-11-08-resource-pulse-service-design.md).
 The approved design for growing it into a desktop cockpit (a second service, a grid of cards on the 27",
 ding off, tooltips and a focus click): [the cockpit design](superpowers/specs/2026-11-09-desktop-cockpit-design.md).
-Its data side is built ([The cockpit service](#the-cockpit-service)); nothing of it is drawn yet.
+Its data side ([The cockpit service](#the-cockpit-service)) and the drawing of its first four cards
+([Drawing the cockpit](#drawing-the-cockpit)) are built.
 
 ### How it runs
 
@@ -85,7 +88,8 @@ It has two parts:
   synchronous, in its own process, so a slow read delays only its own next sample. It runs in
   `background.slice` at `Nice=10`, capped at `CPUQuota=10%` and `MemoryMax=128M`; systemd restarts it
   5 s after a crash, at most 5 times in 5 minutes.
-- **The extension**, which only draws: the top-bar graphs, the desktop card and the dropdown. It
+- **The extension**, which only draws: the top-bar graphs, the desktop card, the dropdown and, where the
+  cockpit is configured, the cockpit's grid. It
   reads no file and starts no process, and each of its D-Bus calls is asynchronous with a 2 s timeout,
   so the shell never waits on the service.
 
@@ -105,8 +109,9 @@ Each side runs its entry and every module that imports, directly or not, as
 - a **data-side** change (`service/`, or a `lib/` module the service imports, such as
   `lib/cadence.js`) is live within seconds, with no logout. The extension sees the service come back
   and reads its state again; the restart starts both histories over;
-- a **drawing** change (`extension.js`, `card.js`, `indicator.js`, `graph.js`, `pulseClient.js`, or a
-  `lib/` module only the shell imports, such as `lib/visibility.js`) waits for the next login, because
+- a **drawing** change (a `.js` file at the extension's top level, such as `extension.js`, `card.js`,
+  `indicator.js` or `cockpitLayer.js`, or a `lib/` module only the shell imports, such as
+  `lib/visibility.js`) waits for the next login, because
   the shell loads an extension's JS once per login, and never restarts the service. A `lib/` module both
   import (`lib/protocol.js`) is both: the service runs it at once, the shell at the next login.
   `gnome-status` says when the desktop runs an older copy of that code;
@@ -147,31 +152,39 @@ normal or dialog window on the primary monitor's active workspace fully contains
 is fullscreen (ding's desktop window never counts, and partly covered counts as visible). While
 covered it is **dimmed**, repaints only every 30 s (still dimmed, from the latest state) and releases
 its detail watch, so a card wrongly judged covered reads as stale, never as live; on reveal it repaints
-at once, undimmed, and takes the watch again. `Super+D` reveals it without waiting for a sample.
+at once, undimmed, and takes the watch again. `Super+D` reveals it without waiting for a sample. With the
+cockpit drawn, the card sits in the grid's system cell and is judged on the cockpit monitor, as each card
+of the grid is ([Drawing the cockpit](#drawing-the-cockpit)).
 
 **Nothing on a timer.** While samples flow the shell side wakes for nothing else: the sample is the tick.
 The top bar's graphs are redrawn only when a column changes by a whole device pixel, and only while the
 top bar is shown. The card is drawn through an offscreen texture, so a window drawing over it does not
 repaint it. Whether the card is covered is checked again on window changes, on the covering window's own
 moves, and on a sample: every one while the card is visible, every fifteenth while it is covered. Only
-while the service is silent and the card covered does a
-10-second check run. The budgets, and the request that checks them: [What it costs](#what-it-costs).
+while the service is silent and the card covered (with the cockpit, every card of the grid) does a
+10-second check run. The cockpit adds no repeating timer; "Freshness" in
+[Drawing the cockpit](#drawing-the-cockpit) says when a change is drawn. The budgets, and the request that
+checks them: [What it costs](#what-it-costs).
 
 **The dropdown.** Clicking the top-bar graphs opens a dropdown holding a second card, live while it is
-open, and an **Open Resources** button (Resources, else System Monitor; hidden when neither is
-installed). Resting the pointer on the graphs shows a one-line summary, never while the dropdown is
-open.
+open; under it, once the cockpit service has answered, the cockpit's sessions card
+([Drawing the cockpit](#drawing-the-cockpit)); and an **Open Resources** button (Resources, else System
+Monitor; hidden when neither is installed). Resting the pointer on the graphs shows a one-line summary,
+never while the dropdown is open.
 
 ### The cockpit service
 
 A third part, opt-in: the data side of [the cockpit design](superpowers/specs/2026-11-09-desktop-cockpit-design.md),
-built from [its plan](superpowers/plans/2026-11-09-desktop-cockpit-data-side.md). **Nothing is drawn yet: the
-drawing side is the next plan.** Until it lands, nothing starts the service but you, and nothing reads it but
-`gnome-status`.
+built from [its plan](superpowers/plans/2026-11-09-desktop-cockpit-data-side.md). The extension draws what it
+serves ([Drawing the cockpit](#drawing-the-cockpit)) and starts it: at every enable it asks systemd for the
+unit, as it does for the sampler (`StartUnit`, retried after 5 s, 30 s, then every 5 minutes until the
+service owns its name). A unit systemd skips for want of the config file, or has no file for, ends the asking
+until the next enable.
 
 **What it serves.** `cockpit.service` (`gjs -m service/cockpit.js`) is a second systemd user unit, apart
-from the sampler, so a cockpit deploy never restarts the sampler or resets its histories. It serves JSON on
-the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
+from the sampler, so a cockpit deploy leaves the sampler and its histories alone, unless the change touches
+a module the sampler imports too, such as `lib/constants.js`: `./install` then restarts both. It serves JSON
+on the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
 `/io/github/quantivly/dotfiles/Cockpit1`:
 
 - `GetState`: the layout, the config error (null when there is none), and three sources, each stamped with
@@ -185,13 +198,27 @@ the session bus as `io.github.quantivly.dotfiles.Cockpit1` (protocol 1), at
 - `FocusSession(id)`: focuses that session's herdr workspace, then its pane, and answers whether it did. A
   failure is an answer, never a D-Bus error: `focused: false` and an `error` code, one of `unknown-session`
   (no row has that id), `no-pane` (the row has no herdr pane), `herdr-rejected` (herdr refused, or its
-  reply could not be read), `herdr-unreachable` (no socket, a refused connection, or no reply in 2 s) and
-  `internal` (a fault in the service). herdr's own message goes to the journal, never to the bus:
-  `cockpit: focus: <id>: <message>`.
+  reply could not be read), `herdr-unreachable` (no socket, a refused connection, or no reply to either
+  request in 0.75 s, so the answer comes before the shell's 2 s call gives up) and `internal` (a fault in the
+  service). herdr's own message goes to the journal, never to the bus:
+  `cockpit: focus: <id>: <message>`. Once herdr focused the pane, the answer also names
+  `windowPidCandidates`, for the shell to bring the window showing herdr forward: herdr's API lists no
+  clients, so the service finds them in `/proc` (a `herdr` process with a controlling terminal; the server
+  has none) and names each client's pid and its parents' (pid 1 left out, at most 64). A failure names none,
+  and so does a fault while naming them, which is logged: the pane stays focused.
+
+**Fixture mode.** With `RESOURCE_PULSE_COCKPIT_FIXTURE` naming a JSON file, the service runs no source,
+reads no config and never asks herdr: it serves the file's `state` (re-read on change, as the config is) and
+answers every `FocusSession` with its `focusReply`, and logs `cockpit: serving a fixture (<path>)`. The
+file is read through the cockpit's refusing reader, so a path under a stat-only directory is never opened:
+the service exits 1 instead. It is for the nested harness alone; the unit unsets the variable
+(`UnsetEnvironment=`), so a user manager that carries it cannot make the unit serve a fixture.
 
 **Stale.** The service sends `Changed` only when something changed, so a quiet source is not a dead one.
 A source is stale once its `sampledAtUsec` is older than 3 of its own `intervalSeconds`
-(`COCKPIT_SOURCE_STALE_INTERVALS`); the drawing side will pull `GetState` once before drawing one stale.
+(`COCKPIT_SOURCE_STALE_INTERVALS`). The extension, seeing one that old on a sample while the cockpit can be
+seen, asks `GetState` again, at most once per interval of that source, and draws the source as no data only
+once such a request has come back, answered or failed, without a newer stamp.
 
 It runs in `background.slice` at `Nice=10`, capped at `CPUQuota=10%`, `MemoryHigh=64M` and
 `MemoryMax=96M`; systemd restarts it 5 s after a crash, at most 5 times in 5 minutes. Its budgets are in
@@ -203,16 +230,18 @@ changed after it started, as it does the sampler; a cockpit that is not running 
 set). `./install` links the unit for everyone and enables it for no one: it has no `[Install]` section. Its
 `ConditionPathExists` (on `%E`, which is `$XDG_CONFIG_HOME` or `~/.config`, where the service reads the
 file too) makes systemd skip every start while that file is absent. The unit stays inactive, and that is
-not a failure. To opt in, copy the template and start the service once by hand: nothing starts it yet.
+not a failure. To opt in, copy the template. The extension starts the service at its next enable (the next
+login, unlock or blank); start it by hand to have the grid drawn now, since the extension follows the
+service's bus name whatever systemd answered it before.
 
 ```bash
 mkdir -p ~/.config/resource-pulse
 cp ~/.dotfiles/examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json
-systemctl --user start cockpit.service
+systemctl --user start cockpit.service   # or wait for the next enable
 gnome-status        # cockpit: active, protocol 1, last publish …
 ```
 
-The file names the monitor the cockpit will be drawn on (`monitor`, by `vendor` and `product`) and its card
+The file names the monitor the cockpit is drawn on (`monitor`, by `vendor` and `product`) and its card
 groups (`groups`). Each group has an `id`, a `caption`, 1 or 2 `columns` and its `cards`, from `system`,
 `apps`, `connections`, `sessions`, `health`, `seats`, `sol` and `work`; the groups' columns add up to at
 most 4. `version` must be 1. Keys it does not know, such as the template's `_comment`, are ignored.
@@ -226,7 +255,7 @@ publishes the `configError` `missing`. The sources are served either way.
 
 | Source | Interval | Also sampled at once on |
 |---|---|---|
-| `sessions` | 10 s while a watch is held, 60 s otherwise | nothing |
+| `sessions` | 10 s while a watch is held, 60 s otherwise | the first watch being taken, as a signal is (so at most once in 2 s) |
 | `network` | 10 s | a change to NetworkManager's primary connection, its type, the connectivity or whether Wi-Fi is enabled |
 | `mounts` | 30 s | a mount or an unmount (the mount monitor's `mounts-changed`) |
 
@@ -284,6 +313,136 @@ publishes the `configError` `missing`. The sources are served either way.
   and `inactive (not running)` while the file is absent and `ConditionResult` is not `no`, a unit whose
   last start found the file (stopped since, and the file deleted).
 
+### Drawing the cockpit
+
+With the cockpit service configured, the extension draws its layout as a grid of cards on one monitor's
+desktop, behind every window, and the desktop card moves into the grid. The top bar and its dropdown stay
+where they are.
+
+**Turning it on**, in this order:
+
+1. Fast-forward the checkout: `git -C ~/.dotfiles fetch origin main`; then
+   `git -C ~/.dotfiles diff --name-only HEAD..origin/main`, which must name no file that
+   `git -C ~/.dotfiles status` shows as changed; then `git -C ~/.dotfiles merge --ff-only origin/main`.
+2. `bash ~/.dotfiles/install`. It links the cockpit's unit and restarts each running service whose code
+   changed, the sampler too when a module it imports changed ([The cockpit service](#the-cockpit-service)).
+3. Make the config from the template: `mkdir -p ~/.config/resource-pulse`, then
+   `cp ~/.dotfiles/examples/resource-pulse-cockpit.json.template ~/.config/resource-pulse/cockpit.json`.
+4. Add to `~/.gnome-settings.local` the lines of the "Cockpit" block of
+   `~/.dotfiles/examples/gnome-settings.local.template`, uncommented: `gdisable_extension ding@rastersoft.com`
+   and the four background `gset` lines. A file made from an earlier template lacks the ding line, and
+   `gnome-init` never overwrites one that exists, so copy the lines rather than look for them to uncomment.
+5. `gnome-apply`. ding goes and the background turns solid at this step, not at the login; until the login
+   the desktop card stays top right.
+6. Log out and in.
+7. `gnome-status` says `cockpit: active, protocol 1, …`.
+
+A file made after the login needs no new login: `systemctl --user start cockpit.service` draws the grid
+([Opt-in by file](#the-cockpit-service)). The template's layout names cards of later stages, so four of its
+eight cells are empty by design.
+
+**Where.** The cockpit monitor is the one the config's `monitor` block names, its `vendor` and `product`
+both equal to what Mutter's DisplayConfig reports; else the only monitor; else the largest one that is not
+primary. It is chosen again whenever the monitors change, so an undock moves the grid to the monitor that is
+left. On a screen whose work area is too small for the cards (the grid needs at least 1802×1014; the laptop's
+own panel at its default scaling is 1536×960), the desktop card is drawn top right instead, as with no layout,
+and the journal says so once (`the cockpit grid needs a larger work area than …`); the grid comes back when the
+work area is large enough again, at a dock. At a login's first enable the desktop card sits top right until
+the service's layout arrives (a first answer that fails or does not come in 2 s is asked for again after 5 s,
+then 30 s, then every 300 s), then the grid replaces it; from then on the extension keeps the last layout
+across disables, so an unlock or a blank draws the grid at once. A layout that names no `system` card draws
+no system card. The overview hides the grid as it hides the card. The lock screen draws none of it, since
+GNOME turns the extension off there: it shows the lock screen's own background, the solid colour below once
+applied.
+
+**The grid.** Four columns by three rows, centred on the cockpit monitor's work area. The groups sit left to
+right, each `columns` cells wide under its caption, and fill their cells left to right, then down. At a work
+area of 1920 × 1080 logical pixels the cells are 420 × 300, 24 apart inside a group and between rows, 48
+between groups, under a 28-pixel caption row; every length scales by the smaller of the work area's width
+over 1920 and its height over 1080, kept between half and double, and is rounded down. A card fills its
+cell. This release draws four cards, `system`, `apps`, `connections` and `sessions`. Any other id
+(`health`, `seats`, `sol` and `work` belong to later stages) leaves its cell empty under its caption, as
+does a second cell of the same id, and a group's cards past its `columns` × 3 cells get none.
+
+**The cards.** Every row of the apps, connections and sessions cards shows a tooltip once the pointer has
+rested on it for 300 ms.
+
+- **System** is the desktop card itself, as [How it runs](#how-it-runs) describes it. A click opens
+  Resources (else System Monitor).
+- **Apps** lists up to six of the heaviest by CPU ("kernel" and "short jobs" among them when they rank),
+  each with its share of the whole machine and a faint bar of it, then, under a divider, up to six apps by
+  memory, each with a bar against the largest: the sampler's rankings
+  ([Every number, defined](#every-number-defined)). A row's tooltip names the group it was ranked as, such
+  as `unit:docker.service`.
+- **Connections** lists the uplink, what kind of link it is and whether the internet is reachable over it:
+  `wired` (`wired · wifi off` when docked) or `wifi`; `wired · limited` or `wifi · portal` when
+  NetworkManager reaches the internet only in part; `wired · no internet`, with the offline icon, when not at
+  all; `online` when the primary connection is neither, such as a VPN on a full tunnel or a tethered phone
+  (its tooltip says so), and `offline` when NetworkManager finds no internet over it, as with no link at all;
+  `uplink unknown` without NetworkManager, or while it has not judged a link that is neither. Its tooltip
+  gives NetworkManager's verdict, `internet: <connectivity>`. Then the VPN (`VPN up (tun0)` or `VPN down`,
+  its icon teal while up and grey while down or unknown), the SSH masters (`3 live ssh masters`), then one
+  row per mount: its label and free space, with a bar of the space used, and its mount point, filesystem type
+  and size in the tooltip, a line too long for the tooltip cut at its end. Five mounts at most; the rest are
+  counted on a `+N more` line.
+- **Sessions** has a header (`SESSIONS`, how many, each state's icon with its count, and their memory in
+  all), then up to six sessions, the largest memory first, the rest counted on a `+N more` line. A row shows
+  its state's icon (working: a teal play; blocked, waiting on you: an amber warning; idle: a grey pause;
+  done: a green check; unknown: a grey question mark), the name, the idle age (`*` when only the Claude
+  process's age is known), the memory and a bar against the largest. An idle or done session idle 30
+  minutes or more is dimmed, and a blocked one's name is tinted amber. The tooltip gives the state (a
+  blocked one's as `waiting on you`), the herdr pane, the account and the context used when they are known,
+  and says the memory is the Claude process's alone (MCP servers and tool shells not counted). Without herdr
+  the card says `herdr not running`.
+
+**Take me there.** A click on a session row asks the cockpit service to focus that session's herdr pane,
+then brings forward the window that shows it, as a dock click does: it switches to the window's workspace,
+unminimizes and raises it, which ends `Super+D`. Clicks are taken one at a time: a click while the last
+one's answer is awaited (up to 2 s) does nothing. The window is found by process: one whose process is the
+herdr client or one of the client's parents, preferring one on the active workspace, then the topmost. So
+herdr running inside tmux matches no window (the tmux server, not the terminal, is the client's parent): the
+pane is focused and nothing comes forward. A terminal that runs all its windows in one process can bring
+forward another of its windows. Each reason nothing came forward is one line in the shell's journal, at
+most once in 10 minutes for each reason ([Checking that it runs](#checking-that-it-runs)).
+
+**Freshness.** Each card is judged covered on its own, as the desktop card is, on the cockpit monitor. A
+covered card is frozen and dimmed, and repainted, still dimmed, at most every 30 seconds; a revealed card
+(`Super+D` reveals them all) draws at once the latest the extension holds. Only while a card of the grid
+can be seen outside the overview, or while the dropdown is open, does the extension hold the cockpit
+service's watch (which samples the sessions at once, then every 10 s rather than 60: the sessions a reveal
+draws at once give way to those sampled at the reveal from the next sample on) and follow its `Changed`. A
+change is drawn on the next sample, about 2 seconds later, or, by a one-shot timeout, after 3 seconds if the
+sampler is silent. A source the service stopped refreshing makes its whole card give way to
+`no data since HH:MM`, the oldest last sample of the card's sources: a stale mounts source hides the uplink,
+VPN and SSH rows too. If the cockpit service goes away the grid stays: the system and apps cards keep drawing
+from the sampler, the others say `no data since HH:MM`, and the extension starts the service again at its next
+enable (systemd restarts one that crashed before then).
+
+**The dropdown** shows the sessions card under its system card once the cockpit service has answered, with
+the same rows and tooltips, live while the menu is open: it opens on the sessions the extension holds, and
+those sampled as it opens follow within a few seconds. A row's click closes the menu, then takes you to the
+session.
+
+**Hover, clicks and ding.** The cards take the pointer only while no desktop-icons window (ding's) shows on
+the cockpit monitor, since that window would take the clicks. With ding on they are display-only: no
+tooltip and no click. Turning ding off, and the wallpaper into a solid `#121a1a` on the desktop and the lock
+screen, are steps 4 and 5 of turning the cockpit on (above). `gdisable_extension` appends the uuid to
+`disabled-extensions` and removes it from `enabled-extensions`. Turning ding off costs the desktop's
+right-click menu.
+
+**Without the file,** a colleague sees the previous release exactly: the card top right of the primary
+monitor, and the dropdown with its system card and **Open Resources**. systemd skips the unit at each
+enable, which ends the extension's asking until the next. Masking the unit
+(`systemctl --user mask cockpit.service`) turns the cockpit off the same way from the next login, the file
+kept: the extension takes the mask as it takes a missing file, with no retry and no warning. `gnome-status`
+does warn, though: with the file there it reports `cannot load (LoadState=masked)` with a ⚠ on every run, so
+removing the file is the quiet way off.
+
+**When the grid cannot be drawn,** because a layout cannot be built, rebuilt or placed, the card stays top
+right, as without a cockpit, and the shell's journal holds one line saying so
+([Checking that it runs](#checking-that-it-runs)). That layout is not tried again until the service sends
+another, nor kept for the next enable.
+
 ### Every number, defined
 
 | Number | Definition | Source |
@@ -298,7 +457,7 @@ publishes the `configError` `missing`. The sources are served either way.
 | App memory | Each leaf cgroup's memory **minus reclaimable page cache**: `memory.current − (active_file + inactive_file)`. This matches the MemAvailable semantics, so cache never counts as used. A leaf at or under 64 MiB (`APP_MEMORY_STAT_MIN_BYTES`) ranks by `memory.current` as it is: too small to top the ranking, so its `memory.stat` is not read. | cgroup v2 `memory.current`, `memory.stat` |
 | "kernel" | A computed CPU-only entry: the root `/sys/fs/cgroup/cpu.stat` Δ minus the Σ of the scanned **parent slices'** Δ, clamped at 0. The parents are listed afresh every scan: every slice directly under `user@<uid>.service` (`app.slice`, `session.slice`, `background.slice`, and any a `systemd-run --user --slice=` job makes) and every top-level slice but `user.slice` (`system.slice`, `machine.slice`, and any other), so a VM, a rootless container or such a job is named, not counted here. That leaves kernel threads, irq, reclaim, zram compression, PID 1, the user managers and login-session scopes. It is ranked only when every parent has a delta and both listings succeeded: with none read, "root minus zero parents" would name the whole machine. It is **not a memory candidate** (the user's decision): the memory half of "heaviest" names real apps only, and unattributed memory still counts in the MEM total. | root and parent cgroups |
 | "short jobs" | A computed CPU-only entry: Σ over the scanned parents of max(0, the parent's Δ minus the Σ of its leaves' Δ). These are units that started and ended between two scans (timers, oneshots); a parent whose leaves exceed its Δ (read skew) adds 0. A leaf whose counter went backwards (a unit recreated at the same path) counts its current value; a leaf absent from the previous scan counts its full usage only when its parent was listed in that scan. | parent cgroups |
-| Heaviest | **One line**, as in the mockup: the top entry by CPU (an app, "kernel" or "short jobs"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. Names ellipsize to fit the card's fixed width; the numbers are never cut. When the top CPU entry is below 1% of the machine the CPU half reads `idle`. The halves collapse into one (`herdr agents 31% · 15.7 GiB`) only when they are the same group, never merely the same name: `docker.service` and `docker-x.scope` stay separate. The service also publishes the first 10 of each ranking (`cpuRanking`, `memoryRanking`, `APP_RANKING_LENGTH`) for the cockpit's apps card, which is not drawn yet. | the two rankings above |
+| Heaviest | **One line**, as in the mockup: the top entry by CPU (an app, "kernel" or "short jobs"), then the top real app by memory, for example `Chromium 31% · herdr agents 15.7 GiB`. Names ellipsize to fit the card's fixed width; the numbers are never cut. When the top CPU entry is below 1% of the machine the CPU half reads `idle`. The halves collapse into one (`herdr agents 31% · 15.7 GiB`) only when they are the same group, never merely the same name: `docker.service` and `docker-x.scope` stay separate. The service also publishes the first 10 of each ranking (`cpuRanking`, `memoryRanking`, `APP_RANKING_LENGTH`) for the cockpit's apps card, which draws the first six of each. | the two rankings above |
 | Names | The launcher prefix is matched before unescaping, so `app-gnome\x2dcalculator-1234.scope` is the app `gnome-calculator`. `org.gnome.SettingsDaemon.Power.service` is `gsd-power`; any other reverse-DNS unit drops its first two segments (`org.freedesktop.IBus.session.GNOME.service` is `IBus.session.GNOME`). A snap is named through `<snap>_<app>.desktop` when that exists, else by its snap name. | cgroup names |
 | Session state | herdr's `agent_status` for the session's Claude agent: `working`, `blocked`, `idle` or `done`; anything else, or none, is `unknown`. A session is one herdr agent whose `agent` is `claude`. The source also counts the sessions in each state. | herdr's `session.snapshot`, over its socket |
 | Session name | The first that is set of: the hspawn registry entry's `slug`, its `branch`, the herdr workspace's label, and the last segment of the session's cwd, through the name guard ([The cockpit service](#the-cockpit-service)). | `~/.local/state/hspawn/*.json` (by `pane_id`), herdr's snapshot |
@@ -311,7 +470,8 @@ publishes the `configError` `missing`. The sources are served either way.
 | SSH masters | The number of entries in `~/.ssh/sockets`, listed and never opened: 0 when the directory is missing, null when it cannot be listed. | the directory's names |
 | Mounts | Network shares (a filesystem type of `cifs`, `smb3`, `nfs`, `nfs4`, `fuse.sshfs`, `fuse.rclone`, `davfs` or `afp`) and removable disks (mounted under `/media/`, `/run/media/` or `/mnt/`); a network type wins. Sorted by mount point. The label is GIO's guess at the mount's name, else the mount point's last segment, through the name guard. Free and total are the filesystem's own, from a query that counts as failed after 2 s, as on a hung share: that row's sizes are then null, and the row stays. One query per mount point runs at a time. | the mount table (`GioUnix`), `filesystem::free` and `filesystem::size` |
 
-The rows from Session state on are the cockpit service's, in `GetState`; nothing draws them yet.
+The rows from Session state on are the cockpit service's, in `GetState`; the cockpit's sessions and
+connections cards draw them ([Drawing the cockpit](#drawing-the-cockpit)).
 
 ### Enabling it
 
@@ -371,7 +531,28 @@ Resource Pulse: linked=yes enabled=yes state=ACTIVE
 
 The service logs to its unit's journal, `journalctl --user -u resource-pulse.service`; the extension
 logs under `resource-pulse:` in the shell's, `journalctl --user -b -g resource-pulse`. Each distinct
-message appears at most once per 10 minutes.
+message appears at most once per 10 minutes. The cockpit service logs to its own unit's journal,
+`journalctl --user -u cockpit.service`, every line prefixed `cockpit:`. Among the cockpit's lines in the
+shell's journal:
+
+- `resource-pulse: could not draw the cockpit layer, so the card is drawn top right: <error>`: the grid
+  could not be built, rebuilt or placed from the service's layout ([Drawing the cockpit](#drawing-the-cockpit)).
+- `resource-pulse: the cockpit grid needs a larger work area than <width>x<height> (at least 1802x1014), so the
+  card is drawn top right`: the cockpit monitor's work area is too small for the cards, written once as that
+  begins.
+- `resource-pulse: could not read the cockpit layout (<error>), so the card is drawn top right`: the service
+  could not read `cockpit.json`, as `gnome-status` says it. Among the errors: `missing` with no file or one
+  that cannot be read, `config: malformed JSON` for text that is not JSON (a half-typed save included),
+  `config: expected a JSON object` for JSON that is not an object, or the first field it found wrong, such as
+  `groups[1].caption: expected a non-empty string`; the grid goes. Once the file reads again the grid comes back
+  the next time the extension reads the cockpit's state, which is when the dropdown opens, when the screen comes
+  back from a lock or a blank, or when `cockpit.service` starts again: it does not come back by itself while only
+  the card top right is on screen.
+- `resource-pulse: cockpit: focus: <reason>`: a session row's click brought no window forward. The reason is
+  one of `FocusSession`'s five error codes ([The cockpit service](#the-cockpit-service); `internal` also when
+  the call itself failed or got no answer in 2 s), `not focused`, or `no window for pids [<pids>]` when herdr
+  focused the pane and no window's process is among them. Each reason is logged at most once per 10
+  minutes, and a new one at once.
 
 ### Trying changes in a nested shell
 
@@ -389,6 +570,10 @@ scripts/resource-pulse-nested.sh start --gc-log --replay   # or: collections log
 scripts/resource-pulse-nested.sh eval 'Main.extensionManager.lookup("resource-pulse@dotfiles").state'
 scripts/resource-pulse-nested.sh screenshot card.png 2600 40 470 200   # x y width height, optional
 scripts/resource-pulse-nested.sh scenario idle   # with --replay: idle, light or busy (busy until asked)
+RESOURCE_PULSE_NESTED_LIFETIME_SECONDS=3600 scripts/resource-pulse-nested.sh start --gc-log --replay   # for check cockpit
+nohup scripts/resource-pulse-nested.sh check cockpit >check.txt 2>&1   # with --gc-log --replay and no window yet
+scripts/resource-pulse-nested.sh window herdr-probe   # a small window, the cockpit's one window candidate
+scripts/resource-pulse-nested.sh pointer 1200 400 click   # the nested pointer to x y (stage pixels), and a click
 scripts/resource-pulse-nested.sh stop         # logs and screenshots stay in the run directory
 ```
 
@@ -402,19 +587,55 @@ for extension updates, and the extension-update apps masked. The run's own copie
 service and then the cockpit service start on the private session bus before the shell, with the same
 allowlist, and the run refuses to go on when either does not own its name within 15 s (their logs are
 `log/service.log` and `log/cockpit.log`, their pids `service=` and `cockpit=` in `state/run.values`).
-The cockpit reads the config template, copied into the run's config home as
-`resource-pulse/cockpit.json`; it finds no herdr there, and no NetworkManager or UPower on the fake
-system bus. The extension's `StartUnit` finds no systemd there; that is expected, since it draws from
-the service's samples whatever `StartUnit` answers. Unsafe mode (which
+The cockpit runs in fixture mode ([The cockpit service](#the-cockpit-service)): it serves the run's
+`state/cockpit-fixture.json`, written at the start from `gnome-shell/tests/fixtures/cockpit/nested-state.json`
+with every source stamped then and none going stale within the run, and answers every `FocusSession` with
+the fixture's reply, which names no window until `window` names one; it asks no herdr. The fixture's layout
+is the template's groups with no monitor named, so the grid is drawn on the nested shell's one monitor.
+The extension's `StartUnit` finds no systemd there; that is expected, since it follows both services on the
+bus whatever `StartUnit` answers. Unsafe mode (which
 `eval` and `screenshot` need) comes from a throwaway helper extension that exists only in that
-directory and refuses to act anywhere else, and `eval` and `screenshot` refuse a run whose
-supervisor and recorded gnome-shell are not both running in its own session. A run lives at most 20
-minutes (`setsid timeout`). `stop` ends the shell and both services, and signals only processes in the
+directory and refuses to act anywhere else, and every request (`eval`, `screenshot` and the rest) refuses
+a run whose supervisor and recorded gnome-shell are not both running in its own session. A run lives at
+most 20 minutes (`setsid timeout`; `RESOURCE_PULSE_NESTED_LIFETIME_SECONDS` sets another limit). `stop`
+ends the shell, both services and the windows `window` opened, and signals only processes in the
 run's own session, only while that session is still led by the run's own `timeout`: a run that
 already ended is just cleaned up, since its session id may since belong to something else. Any
 isolation step that fails stops the run with exit 2, and a shell whose unsafe-mode helper did not
 load is reported within 15 s. It needs gnome-shell and a GPU, so CI does not run it; its hermetic
 rows are in the suite below.
+
+**Driving the cockpit.** Three requests act on the drawn cockpit, each only in a live run:
+
+- `window <title>` opens a small Gtk 4 window titled with a plain name, a client of the nested shell only,
+  names its pid as the fixture's one window candidate, and prints the pid once the shell shows it. `stop`
+  closes it.
+- `pointer <x> <y> [click]` moves the nested shell's own virtual pointer to a point in stage pixels and,
+  when asked, clicks the primary button there. A pointer that never arrives is exit 2.
+- `check cockpit` judges the cockpit, in a run started with `--gc-log --replay` whose session has no window
+  yet, one line a step: `ok`, `bad` or `could not judge`, never `ok` for a step it could not judge. The
+  steps: the extension active and its log free of errors; the layer and the grid; the apps card's rows
+  against the rankings the replay sends; hover; the clicks, with two windows of its own (from another
+  window's focus, from every window minimized, a reply naming no window, one not focused, two quick
+  clicks); cover and reveal; a source made stale and put back; the layout taken away (an unreadable
+  `cockpit.json`, so the card goes back top right) and given back (the grid at its cells again once the
+  dropdown has opened, which reads it, and closed); the dropdown; the lock path (disable, then enable); a
+  screenshot, `shots/cockpit-<pass>.png`, once window effects are over; the log; and the count budgets
+  through `perf`, about nine minutes more. Exit 1 when a
+  step is bad, else 2 when one could not be judged. It rewrites only the run's copy of the fixture. It may
+  run again in the same run:
+  each pass judges the log from where the last one stopped reading, and cannot judge the clicks whose one
+  journal line the extension's 10-minute limit still holds from an earlier pass, and says how long is left.
+  A pass takes about 9 minutes, its `perf` pass included (9 min 6 s and 9 min 9 s in the nested shell on
+  2026-11-12), and a run lives 20 minutes by default, so start a run meant for it with
+  `RESOURCE_PULSE_NESTED_LIFETIME_SECONDS` raised, as above: an hour holds a pass, a fix and a second pass.
+
+**Stopping a `check cockpit` or a `perf`.** A stopped one first puts the run back: its windows closed, the
+extension enabled, the top bar shown, the fixture restored. That takes about a minute, and up to a few
+minutes when the nested shell does not answer; it says so on stderr. Leave it to finish: it ignores
+`TERM` and `INT` until then, but a `HUP` or a `QUIT` (a closed terminal) still ends it, and a `KILL`
+leaves the run changed. So start either one under `nohup`, with its output sent to a file, as above,
+never through a pipe such as `| tee`: a pipe whose reader has gone can cut the put-back short.
 
 ### What it costs
 
@@ -426,6 +647,7 @@ adds over the same shell with it disabled, in % of one core.
 | card covered, top bar on, idle machine | 0.08 |
 | card covered, top bar on, busy machine | 0.20 |
 | card visible | 0.25 |
+| cockpit visible: its four cards and the top bar | 0.5 |
 | card covered, under a window redrawing 60 times a second | 0.3 |
 | the main thread's median per 2 s tick, card covered: idle, busy | 1 ms, 3 ms |
 
@@ -440,13 +662,16 @@ not. In a 60 s window:
 | frames with the card covered and idle input | at most the disabled state's frames plus 3 |
 | top-bar paints while the top bar is hidden | none |
 | the card's offscreen redirect | always |
+| the offscreen redirect of each of the cockpit's apps, connections and sessions cards | always |
+| an offscreen redirect of the cockpit's layer, or of the system cell's wrapper around the card | none |
+| a one-shot fallback timeout (the cover check's, the layer's or the dropdown's) found armed at `perf`'s reading, with Samples flowing | none |
 
 `scripts/resource-pulse-nested.sh perf` measures both, in the isolated nested shell and never on the live
 desktop:
 
 ```bash
 scripts/resource-pulse-nested.sh start --gc-log --replay
-scripts/resource-pulse-nested.sh perf   # about 9 minutes; exit 1 names every count budget it found broken
+nohup scripts/resource-pulse-nested.sh perf >perf.txt 2>&1   # about 9 minutes; exit 1 names every count budget it found broken
 scripts/resource-pulse-nested.sh stop
 ```
 
@@ -455,6 +680,10 @@ scripts/resource-pulse-nested.sh stop
   input; covered with busy input; top bar hidden and covered; visible with busy input. It prints one line a
   state (CPU, the median per tick, collections, frames, Samples, top-bar paints, the card's redirect) and
   then a verdict. It needs `gnome-calculator` and `jq`; a count it could not take is exit 2, never a pass.
+  Every nested run draws the cockpit's grid from its fixture, so in the covered states every card of the
+  grid is covered and in the visible state every card is visible; after each enabled state's counts `perf`
+  reads the grid (a line a state), and a second verdict line names each broken cockpit budget, the last
+  three rows above. A state not set up as it is named stops it with exit 2.
 - **How to read it.** Run it three times. The counts must pass each time. The percentages are reported, not
   gated: take the median, and on a busy machine read them against the shipped extension measured at the same
   moment, not against the table. A collections budget broken by one, in one state of one run, can be
@@ -477,6 +706,21 @@ scripts/resource-pulse-nested.sh stop
 - **Not budgeted yet: nothing visible.** With the top bar hidden and the card covered the extension still
   receives Samples, since a card judged covered may still be seen through a translucent window and is kept
   fresh. That state is `perf`'s fourth line; taking it to zero is stage two's.
+- **The cockpit's budgets are the nested shell's.** They come from the "Budgets" section of
+  `docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md`: 0.5 % of one core with the
+  cockpit visible, its four cards and the top bar, as in the first table; and, as for the card, no forced
+  collection the extension causes, no repeating timer in the shell, and one frame a Sample at most. The live
+  desktop reads above the nested figures, as the bullet on it says, and has no percentage to pass.
+- **Measured in the nested shell on 2026-11-12**, three `perf` runs with the fixture's grid drawn in every
+  enabled state, in % of one core over the disabled state (lowest to highest, then the median): covered with
+  idle input 0.074 to 0.113 (0.109), the median above the 0.08 the first table gives a covered card, in two
+  runs of three; covered and busy 0.181 to 0.217 (0.185), the median under the 0.20 it gives a covered card
+  on a busy machine, one run of three over it; top bar hidden and covered 0.093 to 0.110 (0.110); the
+  cockpit visible and busy 0.288 to 0.320 (0.289), within its 0.5. The `perf` pass that ends each of the
+  three `check cockpit` passes read covered with idle input at 0.208, 0.286 and 0.113, all three over the
+  0.08, and covered and busy at 0.189, 0.285 and 0.347, two of them over the 0.20. The main
+  thread's median per tick, the median of the three: 0.81 ms covered and idle, 2.93 ms covered and busy,
+  4.86 ms visible. Every count and cockpit budget held in each run.
 
 **The services and memory,** at idle:
 
@@ -523,21 +767,36 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (798 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1213 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
-version-skew rows) and of the cockpit's herdr socket client (against a fake herdr speaking herdr's
-framing on a socket in a temp dir). On a private bus of its own (`dbus-run-session`, never the live session bus) it
-runs the service's D-Bus face, the client against it, the real `service/main.js`, the cockpit's D-Bus
-face, and the real `service/cockpit.js` (under a temp home, with no system bus, and a fake herdr for
-`FocusSession`). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
-covers `genable_extension`, `gnome-status`, the unit and its install step, the cost script and the
-nested harness against stubs. It never touches the live session, but it is **not fully hermetic**: the
+version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
+cockpit's herdr socket client (against a fake herdr speaking herdr's
+framing on a socket in a temp dir). Those rows run only in a process started with no reachable bus, a config
+home that cannot exist and one fixed time zone (`gnome-shell/tests/liveSessionBarrier.js`: `run.js` started any
+other way runs itself again behind them), so a fake a row leaves out reaches no bus and no herdr socket, never
+the live session or system bus or the live herdr, and a row that reads a local time reads it in the same zone
+on every machine. So run them through `gjs -m gnome-shell/tests/run.js` or the table. On a private bus of its own
+(`dbus-run-session`, never the live session bus) it runs the service's D-Bus face, the client against it, the real `service/main.js`, the cockpit's D-Bus
+face, the cockpit client against it and against a fake systemd that answers its StartUnit and unit read, and the real
+`service/cockpit.js` (under a temp home, with no system bus, and a fake herdr and a
+fake herdr client, a process named `herdr` in a terminal of its own, for `FocusSession`; then with a fault
+injected into its `/proc` scan; then with a fake herdr that never answers a focus request, which `FocusSession`
+answers within the client's call timeout; then in fixture mode). It parses the Shell glue, enforces the no-blocking and `metadata.json` rules, and
+covers `genable_extension` and `gdisable_extension`, `gnome-status`, the unit and its install step, the
+cost script and the nested harness, `check cockpit` included, against stubs. It never touches the live
+session, but it is **not fully hermetic**: the
 `service/main.js` rows sample this machine's real `/proc` and `/sys`, and the `service/cockpit.js` rows
-its real mount and route tables. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
-(package `dbus-daemon`) and `gdbus` (`libglib2.0-bin`): without any of them it stops with exit 2. The
-card-width row also needs Pango's typelibs (`gir1.2-pango-1.0`) and the card's font, Ubuntu Sans
-(`fonts-ubuntu`), and the row on the nested `perf` request's probe answers needs `jq`: without them
+its real mount and route tables and its processes' `/proc/<pid>/stat` lines. It needs `gjs`, `zsh`, `find`, `timeout`, `dbus-run-session`
+(package `dbus-daemon`), `gdbus` (`libglib2.0-bin`) and util-linux's `script` (`bsdutils`): without any of them it
+stops with exit 2. The card-width row also needs Pango's typelibs (`gir1.2-pango-1.0`) and the card's font,
+Ubuntu Sans (`fonts-ubuntu`), and the row on the nested `perf` request's probe answers needs `jq`: without them
 those rows fail. None is ever a pass.
+
+**Run on a desktop**, the table starts bash scripts named `gnome-shell` and `gjs` as stand-ins, and ends
+them itself. A table that was stopped leaves none past a minute; one killed outright can leave a stand-in for
+up to an hour. A leftover is a process whose `readlink /proc/<pid>/exe` is bash and whose
+`readlink /proc/<pid>/fd/255` is a script under a temporary directory. End it by its pid, never by name: the
+live session runs real processes of both names.
 
 ## Keyboard-driven workflow (no extensions needed)
 
@@ -641,3 +900,5 @@ two ticks while silently undoing a setting it had just applied.
 - **Tmux integration:** the script moves GNOME workspace switching off `Ctrl+Alt+Arrow` onto `Super`-based shortcuts so tmux pane-resize works (the previously-manual fix is now baked in).
 - **XDG user-dir guard:** `scripts/repair-xdg-user-dirs.sh` (alias `xdg-repair`) keeps `~/Desktop`, `~/Documents`, … as real directories so `snapd-desktop-integration` can't turn them into broken self-referential symlinks. Idempotent; `./install` runs it on graphical workstations (gated on `$XDG_CURRENT_DESKTOP` + `xdg-user-dirs-update`, skipped on servers). See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 - **Wayland gotcha:** changes apply live; dock relayout is guaranteed after one log out / log in. `Alt+F2 r` / `Meta.restart` are X11-only — never use them.
+- **Why Resource Pulse's plain-gjs rows run behind a barrier ([Tests](#tests)):** on 2026-11-11 a mutation run removed a row's fake connection, and the row reached the live session bus. Setting the variables inside the runner comes too late: gjs connects to both the session and the system bus before its first line of JavaScript, which is why `run.js` restarts itself with them set.
+- **Why the table's stand-ins are ended by pid ([Tests](#tests)):** on 2026-11-12, during the cockpit's build, stopped and failing table runs left stand-ins (bash scripts named `gnome-shell` or `gjs`) beside the live shell three times. Each was identified by `readlink` of its `exe` and its `fd/255` and ended by its pid, and the stand-ins were then given bounded lifetimes of their own.

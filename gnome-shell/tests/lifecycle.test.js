@@ -5,6 +5,8 @@
 import {test, assertEqual} from './harness.js';
 import {runEveryStep} from '../extensions/resource-pulse@dotfiles/lib/teardown.js';
 import {RateLimitedLogger} from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
+// Read through the namespace too, so a missing export fails its row rather than the whole run.
+import * as errorLogModule from '../extensions/resource-pulse@dotfiles/lib/errorLog.js';
 import {ERROR_LOG_REPEAT_INTERVAL_USEC, LOG_PREFIX} from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 
 const ONE_SECOND_USEC = 1_000_000;
@@ -88,4 +90,38 @@ test('RateLimitedLogger: messages sharing a template key are written once per 10
         `${LOG_PREFIX} cannot read 3 cgroups, first: a.scope: Permission denied`,
         `${LOG_PREFIX} cannot read 7 cgroups, first: c.scope: Permission denied`,
     ]);
+});
+
+test('runLoggingFailure: a card whose draw throws is logged under its context once per 10 minutes, whatever its ' +
+    'error, the cards after it are still drawn, and nothing is thrown', () => {
+    const clock = {nowUsec: 0};
+    const written = [];
+    const errorLog = new RateLimitedLogger({nowUsec: () => clock.nowUsec, write: line => written.push(line)});
+    const drawnCardIds = [];
+    const drawEveryCard = attempt => ['system', 'apps', 'sessions'].map(cardId => errorLogModule.runLoggingFailure({
+        run: () => {
+            if (cardId === 'apps')
+                throw new Error(`apps exploded (${attempt})`);
+            drawnCardIds.push(cardId);
+        },
+        errorLog,
+        context: 'cockpit layer could not draw a card',
+    }));
+    let firstResults = null;
+    let thrownMessage = null;
+    try {
+        firstResults = drawEveryCard(1);
+        clock.nowUsec += ONE_SECOND_USEC;
+        drawEveryCard(2);
+    } catch (error) {
+        thrownMessage = error.message;
+    }
+    assertEqual({
+        thrownMessage, firstResults, drawnCardIds, firstLines: written.map(line => line.split('\n')[0]),
+    }, {
+        thrownMessage: null,
+        firstResults: [true, false, true],
+        drawnCardIds: ['system', 'sessions', 'system', 'sessions'],
+        firstLines: [`${LOG_PREFIX} cockpit layer could not draw a card: apps exploded (1)`],
+    });
 });

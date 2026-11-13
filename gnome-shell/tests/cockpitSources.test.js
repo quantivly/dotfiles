@@ -13,6 +13,7 @@ import * as mountsSource from '../extensions/resource-pulse@dotfiles/service/sou
 import * as sourceIo from '../extensions/resource-pulse@dotfiles/service/sources/sourceIo.js';
 import * as constants from '../extensions/resource-pulse@dotfiles/lib/constants.js';
 import * as cockpitProtocol from '../extensions/resource-pulse@dotfiles/lib/cockpitProtocol.js';
+import * as cockpitStaleness from '../extensions/resource-pulse@dotfiles/lib/cockpitStaleness.js';
 
 const MICROSECONDS_PER_SECOND = 1e6;
 /** The fake wall clock's start: a plausible epoch time, in microseconds. */
@@ -487,22 +488,93 @@ test('cockpitSources: a removed listener is not called; one that throws is logge
     sources.destroy();
 });
 
-test('cockpitSources: setWatched reschedules sessions at once with the new interval, without an extra sample',
-    async () => {
+test('cockpitSources: becoming watched samples sessions at once, stamped with the watched interval, and reschedules ' +
+    'it 10 s from the watch; the other sources keep their cadence', async () => {
     const {sources, clock, calls} = fakeSetup({watched: false});
     sources.start();
     await clock.advanceSeconds(30);
-    assertEqual(calls.sessions, 1);
+    assertEqual(calls, {sessions: 1, network: 4, mounts: 2});
     sources.setWatched(true);
     await settle();
-    assertEqual(calls.sessions, 1, 'watching does not sample');
-    await clock.advanceSeconds(10);
-    assertEqual(calls.sessions, 2, 'the next sample is 10 s after the watch, not 60 s after start');
-    sources.setWatched(false);
-    await clock.advanceSeconds(59);
-    assertEqual(calls.sessions, 2);
+    assertEqual(calls, {sessions: 2, network: 4, mounts: 2}, 'becoming watched samples sessions alone, at once');
+    assertEqual([sources.sourcesByName.sessions.sampledAtUsec, sources.sourcesByName.sessions.intervalSeconds],
+        [clock.nowUsec, 10], 'the watched sample is stamped now, under the watched interval');
+    await clock.advanceSeconds(9);
+    assertEqual(calls.sessions, 2, 'nothing more before the watched interval');
     await clock.advanceSeconds(1);
+    assertEqual(calls.sessions, 3, 'the next sample is 10 s after the watch, not 60 s after start');
+    sources.destroy();
+});
+
+test('cockpitSources: watched again inside the signal cooldown, sessions sample nothing at once: one sample per ' +
+    'cooldown, the one owed coming as the cooldown ends', async () => {
+    const {sources, clock, calls} = fakeSetup({watched: false});
+    sources.start();
+    await clock.advanceSeconds(30);
+    sources.setWatched(true);
+    await settle();
+    assertEqual(calls.sessions, 2, 'the first watch samples at once');
+    await clock.advanceSeconds(0.5);
+    sources.setWatched(false);
+    await clock.advanceSeconds(0.5);
+    sources.setWatched(true);
+    await settle();
+    assertEqual(calls.sessions, 2, 'a watch inside the cooldown samples nothing at once');
+    await clock.advanceSeconds(0.9);
+    assertEqual(calls.sessions, 2, 'nor before the cooldown ends');
+    // The 1 s left of the cooldown is GLib's whole second already: the sample it owes comes 2 s after the first.
+    await clock.advanceSeconds(0.1);
+    assertEqual(calls.sessions, 3, 'the cooldown\'s end gives the one sample it owes');
+    sources.destroy();
+});
+
+test('cockpitSources: becoming unwatched (a longer interval) samples nothing, and reschedules sessions 60 s from then',
+    async () => {
+    const {sources, clock, calls} = fakeSetup({watched: true});
+    sources.start();
+    await clock.advanceSeconds(25);
     assertEqual(calls.sessions, 3);
+    sources.setWatched(false);
+    await settle();
+    assertEqual(calls.sessions, 3, 'unwatching samples nothing');
+    await clock.advanceSeconds(59);
+    assertEqual(calls.sessions, 3);
+    await clock.advanceSeconds(1);
+    assertEqual(calls.sessions, 4);
+    sources.destroy();
+});
+
+test('cockpitSources: the review\'s sequence: watched for one sample, covered 40 s, then revealed, samples at the ' +
+    'reveal, so the next Sample\'s pull finds a fresh stamp under the watched interval, never "no data since"',
+    async () => {
+    const {sources, clock} = fakeSetup({watched: false});
+    sources.start();
+    await clock.advanceSeconds(300);
+    sources.setWatched(true);
+    await clock.advanceSeconds(4);
+    sources.setWatched(false);
+    await clock.advanceSeconds(36);
+    sources.setWatched(true);
+    await clock.advanceSeconds(15);
+    sources.setWatched(false);
+    await clock.advanceSeconds(40);
+    const revealedAtUsec = clock.nowUsec;
+    sources.setWatched(true);
+    await settle();
+    const sessionsAtReveal = sources.sourcesByName.sessions;
+    await clock.advanceSeconds(2);
+    const nextSampleFreshness = cockpitStaleness.sourceFreshness({
+        sampledAtUsec: sources.sourcesByName.sessions.sampledAtUsec,
+        intervalSeconds: sources.sourcesByName.sessions.intervalSeconds, nowRealUsec: clock.nowUsec,
+        lastPullRequestedAtUsec: null, lastPullCompletedAtUsec: null,
+    });
+    assertEqual({
+        stampSecondsBeforeReveal: (revealedAtUsec - sessionsAtReveal.sampledAtUsec) / MICROSECONDS_PER_SECOND,
+        intervalSeconds: sessionsAtReveal.intervalSeconds, nextSampleFreshness,
+    }, {
+        stampSecondsBeforeReveal: 0, intervalSeconds: 10,
+        nextSampleFreshness: {isStale: false, shouldPull: false, ageSeconds: 2},
+    });
     sources.destroy();
 });
 
@@ -1203,7 +1275,7 @@ function removeTree(path) {
     file.delete(null);
 }
 
-test('readFileRefusingSecrets: every stat-only path is refused before it is opened; an ordinary file is read', () => {
+test('readFileRefusingSecrets: every stat-only path is refused, as a StatOnlyPathRefusedError, before it is opened; an ordinary file is read', () => {
     const fakeHome = makeTempHome();
     try {
         const secretPaths = [
@@ -1211,14 +1283,16 @@ test('readFileRefusingSecrets: every stat-only path is refused before it is open
             ...LOCAL_FILE_STEMS.map(stem => `${fakeHome}/${stem}${LOCAL_FILE_SUFFIX}`),
         ];
         secretPaths.forEach(path => plantFile(path, PLANTED_SECRET_TEXT));
+        // Typed, so that service/cockpit.js can tell a refusal from a fault (its fixture read catches this alone).
         const outcomes = secretPaths.map(path => {
             try {
                 return `read: ${sourceIo.readFileRefusingSecrets(path)}`;
             } catch (error) {
-                return error.message;
+                const refusalType = error instanceof sourceIo.StatOnlyPathRefusedError ? 'refusal' : 'other';
+                return `${refusalType}: ${error.message}`;
             }
         });
-        assertEqual(outcomes, secretPaths.map(path => `cockpit: refused to open ${path}`));
+        assertEqual(outcomes, secretPaths.map(path => `refusal: cockpit: refused to open ${path}`));
         const ordinaryPath = `${fakeHome}/dev/notes.json`;
         plantFile(ordinaryPath, '{"ok": true}');
         assertEqual(sourceIo.readFileRefusingSecrets(ordinaryPath), '{"ok": true}');

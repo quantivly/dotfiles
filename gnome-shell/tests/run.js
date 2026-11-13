@@ -1,9 +1,16 @@
 // Entry point: gjs -m gnome-shell/tests/run.js
-// Every test file is imported by a STATIC list, so a missing file is an import
-// error and never a silently smaller run.
+// Its first import is the live-session barrier (liveSessionBarrier.js): the rows
+// run only in a process started with no reachable session or system bus and a
+// config home that cannot exist (so no herdr socket), so a fake a row leaves out
+// can never reach the live session, and in one fixed time zone (ruling D31); a
+// runner started otherwise runs itself again so. Every test file is imported by
+// a STATIC list, so a missing file is an import error and never a silently
+// smaller run.
+import './liveSessionBarrier.js';
 import GLib from 'gi://GLib';
 import {runAll} from './harness.js';
 import './harness.test.js';
+import './liveSessionBarrier.test.js';
 import './jsonFields.test.js';
 import './parsers.test.js';
 import './math.test.js';
@@ -15,6 +22,13 @@ import './visibility.test.js';
 import './protocol.test.js';
 import './cockpitProtocol.test.js';
 import './cockpitConfig.test.js';
+import './cockpitGrid.test.js';
+import './cockpitMonitor.test.js';
+import './cockpitStaleness.test.js';
+import './cockpitFormat.test.js';
+import './cockpitInteraction.test.js';
+import './cockpitWiring.test.js';
+import './processTree.test.js';
 import './nameGuard.test.js';
 import './sessions.test.js';
 import './network.test.js';
@@ -23,11 +37,16 @@ import './herdrSocket.test.js';
 import './cockpitSources.test.js';
 import './service-sampler.test.js';
 import './client.test.js';
+import './cockpitClient.test.js';
+import './displayConfig.test.js';
+import './cockpitSourceDrawing.test.js';
+import './cockpitGlue.test.js';
 import './graph.test.js';
 import './topbarColumns.test.js';
 import './lifecycle.test.js';
 import './nestedHarness.test.js';
 import './perfProbe.test.js';
+import './cockpitCheck.test.js';
 import './imports.test.js';
 
 const EXIT_CODE_TEST_FAILURE = 1;

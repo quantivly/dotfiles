@@ -154,11 +154,18 @@ const COVER_SIGNAL_RECEIVERS = new Set([
     'global.display', 'global.window_manager', 'global.workspace_manager', 'metaWindow',
 ]);
 // The client's two kinds of listener, counted apart: a history listener added must be removed as one, since
-// removeListener on its id is a silent no-op on the other kind's map.
+// removeListener on its id is a silent no-op on the other kind's map. A snapshot listener is the pulse client's
+// (extension.js's this._client, or client in teardown); the cockpit client's listeners (this._cockpitClient, or
+// cockpitClient in teardown) are its one kind, counted apart too. Both are also counted on any receiver, so a listener
+// added through another name (an alias, a new client) cannot go unseen.
 const ADD_HISTORY_LISTENER_PATTERN = /\.addHistoryListener\(/g;
+const ADD_ANY_LISTENER_PATTERN = /\.addListener\(/g;
+const REMOVE_ANY_LISTENER_PATTERN = /\.removeListener\(/g;
 const REMOVE_HISTORY_LISTENER_PATTERN = /\.removeHistoryListener\(/g;
-const ADD_SNAPSHOT_LISTENER_PATTERN = /\.addListener\(/g;
-const REMOVE_SNAPSHOT_LISTENER_PATTERN = /\.removeListener\(/g;
+const ADD_SNAPSHOT_LISTENER_PATTERN = /(?<![\w.])(?:this\._)?client\??\.addListener\(/g;
+const REMOVE_SNAPSHOT_LISTENER_PATTERN = /(?<![\w.])(?:this\._)?client\??\.removeListener\(/g;
+const ADD_COCKPIT_LISTENER_PATTERN = /(?<![\w.])(?:this\._)?cockpitClient\??\.addListener\(/g;
+const REMOVE_COCKPIT_LISTENER_PATTERN = /(?<![\w.])(?:this\._)?cockpitClient\??\.removeListener\(/g;
 /** How far extension.js indents a class method's own statements; one level more is inside an if. */
 const METHOD_STATEMENT_INDENT = ' '.repeat(8);
 
@@ -461,12 +468,58 @@ test('visibility: rectangles overlap only when they share area: touching along a
     });
 });
 
-test('visibility: a fullscreen primary monitor covers the card even with no window over it; otherwise the windows ' +
+test('visibility: a fullscreen monitor covers the card on it even with no window over it; otherwise the windows ' +
     'decide', () => {
-    const isCovered = (isPrimaryMonitorInFullscreen, windowRects) =>
-        visibilityModule.isCardCovered({isPrimaryMonitorInFullscreen, cardRect: CARD_RECT, windowRects});
+    const isCovered = (isMonitorInFullscreen, windowRects) =>
+        visibilityModule.isCardCovered({isMonitorInFullscreen, cardRect: CARD_RECT, windowRects});
     assertEqual([isCovered(true, []), isCovered(false, []), isCovered(false, [MAXIMIZED_WINDOW_RECT])],
         [true, false, true]);
+});
+
+test('visibility: every drawn card is checked on its own (cardsCover): a card one window contains is covered, one ' +
+    'only partly under a window is visible; the windows followed are those containing any card, once each, in ' +
+    'order; a fullscreen monitor covers every card', () => {
+    const neighbourCardRect = {...CARD_RECT, y: CARD_RECT.y + CARD_RECT.height + NEIGHBOUR_WINDOW_SIZE_PX};
+    const overFirstCardRect = {...CARD_RECT};
+    const overBothCardsRect = {x: CARD_RECT.x, y: CARD_RECT.y, width: CARD_RECT.width,
+        height: neighbourCardRect.y + neighbourCardRect.height - CARD_RECT.y};
+    const partlyOverNeighbourRect = {...neighbourCardRect, width: neighbourCardRect.width - ONE_PIXEL};
+    const cards = [{cardId: 'system', rect: CARD_RECT}, {cardId: 'apps', rect: neighbourCardRect}];
+    const cover = (isMonitorInFullscreen, windowRects) =>
+        visibilityModule.cardsCover({cards, isMonitorInFullscreen, windowRects});
+    assertEqual({
+        firstCovered: cover(false, [partlyOverNeighbourRect, overFirstCardRect]),
+        bothUnderOneWindow: cover(false, [overBothCardsRect, overFirstCardRect]),
+        noWindows: cover(false, []),
+        fullscreen: cover(true, [overFirstCardRect]),
+    }, {
+        firstCovered: {isEveryCardCovered: false, coveredCardIds: ['system'], visibleCardIds: ['apps'],
+            coveringWindowIndexes: [1]},
+        bothUnderOneWindow: {isEveryCardCovered: true, coveredCardIds: ['system', 'apps'], visibleCardIds: [],
+            coveringWindowIndexes: [0, 1]},
+        noWindows: {isEveryCardCovered: false, coveredCardIds: [], visibleCardIds: ['system', 'apps'],
+            coveringWindowIndexes: []},
+        fullscreen: {isEveryCardCovered: true, coveredCardIds: ['system', 'apps'], visibleCardIds: [],
+            coveringWindowIndexes: [0]},
+    });
+});
+
+test('visibility: with no card drawn (a layout naming none this release knows) every card counts as covered, so ' +
+    'nothing is checked on every tick and no watch is held for it', () =>
+    assertEqual(visibilityModule.cardsCover({cards: [], isMonitorInFullscreen: false, windowRects: []}), {
+        isEveryCardCovered: true, coveredCardIds: [], visibleCardIds: [], coveringWindowIndexes: [],
+    }));
+
+test('visibility: a card newly covered is stamped as painted now (its freeze), one still covered keeps its stamp, ' +
+    'and a revealed card loses its stamp (frozenPaintStamps)', () => {
+    const systemPaintedAtUsec = 7 * USEC_PER_SECOND;
+    const appsPaintedAtUsec = 9 * USEC_PER_SECOND;
+    const nowUsec = 40 * USEC_PER_SECOND;
+    assertEqual(visibilityModule.frozenPaintStamps({
+        stampsByCardId: {system: systemPaintedAtUsec, apps: appsPaintedAtUsec},
+        coveredCardIds: ['system', 'sessions'],
+        nowUsec,
+    }), {system: systemPaintedAtUsec, sessions: nowUsec});
 });
 
 test('card repaint: an unfrozen card renders every snapshot, and its first render repaints the memory bar and all ' +
@@ -821,43 +874,56 @@ test('stylesheet.css dims the frozen card in a rule of its own (.resource-pulse-
     `frozen card rule: ${JSON.stringify(frozenCardStyle)}`);
 });
 
-test('extension.js: while the card is frozen every tick, whether or not the backstop checked the cover, and the ' +
-    'fallback timeout repaint it, dimmed, once isFrozenRepaintDue says so, timing from the freeze and then from each ' +
-    'repaint; a revealed card is left to the reveal', () => {
+test('extension.js: while a card is frozen every tick, whether or not the backstop checked the cover, and the ' +
+    'fallback timeout repaint it, dimmed, once frozenCardsDueRepaint says so, timing from its freeze and then from ' +
+    'each repaint (only frozen cards hold a stamp: a revealed card is left to the reveal); the v2 card top right ' +
+    'repaints from the client\'s latest, the cockpit\'s cards through the layer', () => {
     const extensionSource = readExtensionFile('extension.js');
     const tickLines = declarationBody(extensionSource, '_onCardCoverTick() {').split('\n');
     const timeoutLines = trimmedLines(declarationBody(extensionSource, '_onCoverFallbackTimeout() {'));
-    const repaintBody = declarationBody(extensionSource, '_repaintFrozenCardIfDue() {');
+    const repaintBody = declarationBody(extensionSource, '_repaintFrozenCardsIfDue() {');
+    const repaintOneLines = trimmedLines(declarationBody(extensionSource, '_repaintFrozenCard(cardId) {'));
     const syncLines = trimmedLines(declarationBody(extensionSource, '_syncCardCover() {'));
     const lineAfter = (lines, line) => (lines.includes(line) ? lines[lines.indexOf(line) + 1] : null);
-    const freezeCondition = 'if (isCovered && this._isCardVisible)';
-    const freezeConditionIndex = syncLines.indexOf(freezeCondition);
+    const stampStatement = 'this._frozenCardPaintedAtUsecByCardId = frozenPaintStamps({';
+    const stampIndex = syncLines.indexOf(stampStatement);
     assertEqual({
         everyTickAsksOutsideTheBackstop: tickLines
-            .filter(line => line === `${METHOD_STATEMENT_INDENT}this._repaintFrozenCardIfDue();`).length,
+            .filter(line => line === `${METHOD_STATEMENT_INDENT}this._repaintFrozenCardsIfDue();`).length,
         afterTheFallbackCheck: lineAfter(timeoutLines, 'this._syncCardCover();'),
-        leavesARevealedCardAlone: statementCount(repaintBody, 'if (this._card === null || this._isCardVisible)'),
-        decides: repaintBody.includes(
-            'isFrozenRepaintDue({lastFrozenPaintAtUsec: this._frozenCardPaintedAtUsec, nowUsec})'),
-        recordsEachRepaint: statementCount(repaintBody, 'this._frozenCardPaintedAtUsec = nowUsec;'),
-        repaints: statementCount(repaintBody, 'this._card.repaintFrozen();'),
-        timesFromTheFreeze: lineAfter(syncLines, freezeCondition),
-        stampsBeforeRecordingTheCover: freezeConditionIndex >= 0 &&
-            freezeConditionIndex < syncLines.indexOf('this._isCardVisible = !isCovered;'),
+        decides: repaintBody.includes('const dueCardIds = frozenCardsDueRepaint({'),
+        // Only the due cards: iterating every stamp would repaint every frozen card on every tick.
+        iteratesTheDueCards: statementCount(repaintBody, 'for (const cardId of dueCardIds) {'),
+        readsTheFrozenStamps: statementCount(repaintBody,
+            'frozenPaintedAtUsecByCardId: this._frozenCardPaintedAtUsecByCardId,'),
+        recordsEachRepaint: statementCount(repaintBody, 'this._frozenCardPaintedAtUsecByCardId[cardId] = nowUsec;'),
+        repaintsEachDueCard: statementCount(repaintBody, 'this._repaintFrozenCard(cardId);'),
+        repaintsOne: repaintOneLines.slice(1, -1),
+        timesFromTheFreeze: lineAfter(syncLines, stampStatement),
+        stampsBeforeRecordingTheCover: stampIndex >= 0 &&
+            stampIndex < syncLines.indexOf('this._isCardVisible = !isCovered;'),
     }, {
         everyTickAsksOutsideTheBackstop: 1,
-        afterTheFallbackCheck: 'this._repaintFrozenCardIfDue();',
-        leavesARevealedCardAlone: 1,
+        afterTheFallbackCheck: 'this._repaintFrozenCardsIfDue();',
         decides: true,
+        iteratesTheDueCards: 1,
+        readsTheFrozenStamps: 1,
         recordsEachRepaint: 1,
-        repaints: 1,
-        timesFromTheFreeze: 'this._frozenCardPaintedAtUsec = GLib.get_monotonic_time();',
+        repaintsEachDueCard: 1,
+        repaintsOne: [
+            'if (this._layer !== null) {', 'this._layer.repaintFrozenCard(cardId);', 'return;', '}',
+            'const client = this._client;', 'this._card.update(client.latestSnapshot, client.lastGoodClockLabel);',
+            'this._card.repaintFrozen();',
+        ],
+        timesFromTheFreeze: 'stampsByCardId: this._frozenCardPaintedAtUsecByCardId, coveredCardIds, ' +
+            'nowUsec: GLib.get_monotonic_time(),',
         stampsBeforeRecordingTheCover: true,
     });
 });
 
-test('extension.js checks the cover on a restack, a fullscreen change, a minimize, an unminimize, a size change, ' +
-    'the end of a drag, a workspace switch, "show desktop", every client update and a covering window\'s move, ' +
+test('extension.js checks the cover on a restack, a window created or leaving a monitor, a fullscreen change, a ' +
+    'minimize, an unminimize, a size change, the end of a drag, a workspace switch, "show desktop", every client ' +
+    'update and a covering window\'s move, ' +
     'resize, move to another workspace or close, and its teardown disconnects every object it connects to (the ' +
     'covering windows through _disconnectCoveringWindows) and removes that history listener as one', () => {
     const extensionSource = readExtensionFile('extension.js');
@@ -879,8 +945,12 @@ test('extension.js checks the cover on a restack, a fullscreen change, a minimiz
         receiversNeverDisconnected: [...connectedReceivers].filter(receiver => !disconnectedReceivers.has(receiver)),
         historyListenersAdded: countMatches(extensionSource, ADD_HISTORY_LISTENER_PATTERN),
         snapshotListenersAdded: countMatches(extensionSource, ADD_SNAPSHOT_LISTENER_PATTERN),
+        cockpitListenersAdded: countMatches(extensionSource, ADD_COCKPIT_LISTENER_PATTERN),
         historyListenersRemovedOnTeardown: countMatches(tearDownBody, REMOVE_HISTORY_LISTENER_PATTERN),
         snapshotListenersRemovedOnTeardown: countMatches(tearDownBody, REMOVE_SNAPSHOT_LISTENER_PATTERN),
+        cockpitListenersRemovedOnTeardown: countMatches(tearDownBody, REMOVE_COCKPIT_LISTENER_PATTERN),
+        listenersAddedOnAnyReceiver: countMatches(extensionSource, ADD_ANY_LISTENER_PATTERN),
+        listenersRemovedOnTeardownFromAnyReceiver: countMatches(tearDownBody, REMOVE_ANY_LISTENER_PATTERN),
     }, {
         connectedSignals: [
             'Main.layoutManager monitors-changed',
@@ -889,6 +959,8 @@ test('extension.js checks the cover on a restack, a fullscreen change, a minimiz
             'global.display grab-op-end',
             'global.display in-fullscreen-changed',
             'global.display restacked',
+            'global.display window-created',
+            'global.display window-left-monitor',
             'global.display workareas-changed',
             'global.window_manager minimize',
             'global.window_manager size-changed',
@@ -905,8 +977,12 @@ test('extension.js checks the cover on a restack, a fullscreen change, a minimiz
         receiversNeverDisconnected: [],
         historyListenersAdded: 1,
         snapshotListenersAdded: 0,
+        cockpitListenersAdded: 1,
         historyListenersRemovedOnTeardown: 1,
         snapshotListenersRemovedOnTeardown: 0,
+        cockpitListenersRemovedOnTeardown: 1,
+        listenersAddedOnAnyReceiver: 1,
+        listenersRemovedOnTeardownFromAnyReceiver: 1,
     });
 });
 
@@ -921,25 +997,46 @@ test('extension.js: enable() follows the cover right after adding the card, befo
     }, {counts: [1, 1, 1], areConsecutive: true});
 });
 
-test('extension.js: _placeCard() checks the cover right after placing the card', () => {
-    const placeCardBody = trimmedLines(declarationBody(readExtensionFile('extension.js'), '_placeCard() {'));
-    const placeLineIndex = placeCardBody.indexOf('this._card?.placeOnPrimaryMonitor();');
-    assertEqual([placeLineIndex >= 0, placeCardBody[placeLineIndex + 1]], [true, 'this._syncCardCover();']);
-});
+test('extension.js: _placeCard() places the v2 card top right only while no cockpit layer is shown (the system ' +
+    'cell holds it otherwise, so it is never drawn twice: Review Focus 1), else the layer, and checks the cover ' +
+    'right after placing', () =>
+    assertEqual(trimmedLines(declarationBody(readExtensionFile('extension.js'), '_placeCard() {')).slice(1, -1), [
+        'if (this._layer === null)', 'this._card?.placeOnPrimaryMonitor();', 'else', 'this._placeCockpitLayer();',
+        'this._syncCardCover();',
+    ]));
 
-test('extension.js: _syncCardCover() freezes a covered card, records whether it can be seen, restarts the ' +
-    'backstop\'s count, follows the covering windows, and updates the fallback timeout and the detail watch', () => {
+test('extension.js: _syncCardCover() freezes each covered card and unfreezes each visible one, records whether any ' +
+    'can be seen and which, restarts the backstop\'s count, sets the layer\'s interactivity, follows the covering ' +
+    'windows, and updates the fallback timeout, the detail watch and the cockpit\'s watch; each loop freezes the ' +
+    'cards it names as its pair says (the covered frozen, the visible unfrozen)', () => {
     const syncBody = declarationBody(readExtensionFile('extension.js'), '_syncCardCover() {');
+    const syncLines = trimmedLines(syncBody);
+    const lineAfter = (lines, line) => (lines.includes(line) ? lines[lines.indexOf(line) + 1] : null);
     const statements = [
-        'const {isCovered, coveringWindows} = this._readCardCover();',
+        'const {isCovered, coveredCardIds, visibleCardIds, coveringWindows, isCockpitInteractive} =',
+        'this._readCardCover();',
         'this._ticksSinceCoverCheck = 0;',
         'this._followCoveringWindows(coveringWindows);',
-        'this._card.setFrozen(isCovered);',
+        'for (const cardId of coveredCardIds)',
+        'this._setCardFrozen(cardId, true);',
+        'for (const cardId of visibleCardIds)',
+        'this._setCardFrozen(cardId, false);',
         'this._isCardVisible = !isCovered;',
+        'this._visibleCardIds = visibleCardIds;',
+        'this._layer?.setInteractive(isCockpitInteractive);',
         'this._syncCoverFallbackTimer();',
         'this._syncDetailWatch();',
+        'this._syncCockpitWatch();',
     ];
-    assertEqual(statements.map(statement => statementCount(syncBody, statement)), [1, 1, 1, 1, 1, 1, 1]);
+    assertEqual({
+        counts: statements.map(statement => statementCount(syncBody, statement)),
+        coveredLoopFreezes: lineAfter(syncLines, 'for (const cardId of coveredCardIds)'),
+        visibleLoopUnfreezes: lineAfter(syncLines, 'for (const cardId of visibleCardIds)'),
+    }, {
+        counts: statements.map(() => 1),
+        coveredLoopFreezes: 'this._setCardFrozen(cardId, true);',
+        visibleLoopUnfreezes: 'this._setCardFrozen(cardId, false);',
+    });
 });
 
 test('extension.js: the bursty window-manager, display and covering-window triggers queue the one coalesced cover ' +
@@ -972,6 +1069,8 @@ test('extension.js: the bursty window-manager, display and covering-window trigg
     }, {
         coverSignalHandlers: [
             'global.display restacked: queueCardCoverCheck',
+            'global.display window-created: queueCardCoverCheck',
+            'global.display window-left-monitor: queueCardCoverCheck',
             'global.display in-fullscreen-changed: queueCardCoverCheck',
             'global.display grab-op-end: queueCardCoverCheck',
             'global.window_manager minimize: queueCardCoverCheck',
@@ -1001,7 +1100,8 @@ test('extension.js follows exactly the windows covering the card, connecting and
     const readBody = declarationBody(extensionSource, '_readCardCover() {');
     const disconnectLines = trimmedLines(declarationBody(extensionSource, '_disconnectCoveringWindows() {'));
     assertEqual({
-        coveringFromThePureRule: readBody.includes('indexesOfRectsCoveringCard({cardRect, windowRects})'),
+        coveringFromThePureRule: readBody.includes('coveringWindows: coveringWindowIndexes.map(windowIndex => ' +
+            'metaWindows[windowIndex]),') && readBody.includes('= cardsCover({'),
         decidesByDifference: followBody.includes('coveringWindowChanges({'),
         releasesTheOnesToRelease: statementCount(followBody, 'this._stopFollowingCoveringWindow(metaWindow);'),
         followsTheOnesToFollow: statementCount(followBody, 'this._startFollowingCoveringWindow(metaWindow);'),
@@ -1142,13 +1242,15 @@ test('extension.js: when the overview has closed, the cover is checked again', (
 
 // The top-bar dropdown: indicator.js is a PanelMenu.Button whose menu holds a second card and "Open Resources".
 const INDICATOR_SOURCE_FILE = 'indicator.js';
+/** The indicator's constructor: the pulse client, then the cockpit's options (the dropdown's sessions card). */
+const INDICATOR_INIT_DECLARATION = '_init(client, {cockpitClient, errorLog, onSessionActivated}) {';
 
 test('indicator.js is a PanelMenu.Button with a menu of its own, and the click that launched Resources directly is ' +
     'gone', () => {
     const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
     assertEqual({
         extendsPanelMenuButton: indicatorSource.includes('class PulseIndicator extends PanelMenu.Button {'),
-        createsItsMenu: statementCount(declarationBody(indicatorSource, '_init(client) {'),
+        createsItsMenu: statementCount(declarationBody(indicatorSource, INDICATOR_INIT_DECLARATION),
             'super._init(MENU_ALIGNMENT, ACCESSIBLE_NAME);'),
         suppressesItsMenu: indicatorSource.includes('DONT_CREATE_MENU'),
         hasItsOwnClickGesture: indicatorSource.includes('ClickGesture'),
@@ -1160,11 +1262,13 @@ test('indicator.js is a PanelMenu.Button with a menu of its own, and the click t
 });
 
 test('indicator.js: the menu holds a non-reactive item with the second card, and an "Open Resources" item that ' +
-    'launches the first installed id in RESOURCES_APP_IDS and is hidden when none is installed', () => {
+    'launches the first installed id in RESOURCES_APP_IDS (cockpitCards.js finds and opens it) and is hidden when ' +
+    'none is installed', () => {
     const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
+    const cockpitCardsSource = readExtensionFile('cockpitCards.js');
     const buildBody = declarationBody(indicatorSource, '_buildDropdown() {');
-    const findBody = declarationBody(indicatorSource, '_findResourcesApp() {');
-    const openBody = declarationBody(indicatorSource, '_openResources() {');
+    const findBody = declarationBody(cockpitCardsSource, 'export function findResourcesApp() {');
+    const openBody = declarationBody(cockpitCardsSource, 'export function openResourcesApp() {');
     const visibilityBody = declarationBody(indicatorSource, '_syncOpenResourcesVisibility() {');
     assertEqual({
         cardItemIsInert: buildBody.includes('new PopupMenu.PopupBaseMenuItem(CARD_ITEM_PROPERTIES)') &&
@@ -1175,12 +1279,13 @@ test('indicator.js: the menu holds a non-reactive item with the second card, and
         openItemLabel: statementCount(buildBody,
             'this._openResourcesItem = new PopupMenu.PopupMenuItem(OPEN_RESOURCES_LABEL);'),
         labelIsTheSpecifiedOne: indicatorSource.includes('const OPEN_RESOURCES_LABEL = \'Open Resources\';'),
-        activationLaunches: buildBody.includes('this._openResourcesItem.connect(\'activate\', () => this._openResources());'),
+        activationLaunches: buildBody.includes(
+            'this._openResourcesItem.connect(\'activate\', () => openResourcesApp());'),
         lookupUsesTheSharedIds: findBody.includes('RESOURCES_APP_IDS') && findBody.includes('.find(app => app !== null)'),
         launchActivates: statementCount(openBody, 'resourcesApp.activate();'),
         launchLeavesTheOverview: statementCount(openBody, 'Main.overview.hide();'),
         hiddenWhenNoneInstalled: statementCount(visibilityBody,
-            'this._openResourcesItem.visible = this._findResourcesApp() !== undefined;'),
+            'this._openResourcesItem.visible = findResourcesApp() !== undefined;'),
     }, {
         cardItemIsInert: true, secondCardIsBuilt: 1, cardIsInTheItem: 1, cardIsNeverPlaced: false, openItemLabel: 1,
         labelIsTheSpecifiedOne: true, activationLaunches: true, lookupUsesTheSharedIds: true, launchActivates: 1,
@@ -1192,7 +1297,7 @@ test('indicator.js: the dropdown card is never frozen while the menu is open: cl
     'it (a repaint at once), and opening re-checks whether Resources is installed', () => {
     const indicatorSource = readExtensionFile(INDICATOR_SOURCE_FILE);
     const openStateBody = declarationBody(indicatorSource, '_onMenuOpenStateChanged(isOpen) {');
-    const initBody = declarationBody(indicatorSource, '_init(client) {');
+    const initBody = declarationBody(indicatorSource, INDICATOR_INIT_DECLARATION);
     assertEqual({
         freezesExactlyWhileClosed: statementCount(openStateBody, 'this._dropdownCard.setFrozen(!isOpen);'),
         recheckedOnEveryChange: statementCount(openStateBody, 'this._syncOpenResourcesVisibility();'),

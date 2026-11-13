@@ -1,9 +1,10 @@
-// The pure decisions behind the desktop card's covered check (extension.js): which windows can cover the card, whether
-// one does and which ones do, how the windows it follows change, on which Sample a covered card is checked again
-// (the backstop), when the fallback timeout runs (only while the card is covered and the service is silent), and when
-// the frozen card is repainted. The card sits above the wallpaper and below every window, so a window hides it most of
-// the day; while one does, the extension freezes the card (dimmed, repainted only every
-// FROZEN_REPAINT_INTERVAL_SECONDS) and releases the detail watch.
+// The pure decisions behind the desktop cards' covered check (extension.js): which windows can cover a card, whether
+// one does and which ones do, each drawn card on its own (the v2 card top right, or each card of the cockpit's grid),
+// how the windows it follows change, on which Sample covered cards are checked again (the backstop), when the fallback
+// timeout runs (only while every card is covered and the service is silent), and when a frozen card is repainted. The
+// cards sit above the wallpaper and below every window, so windows hide them most of the day; while one does, the
+// extension freezes the card (dimmed, repainted only every FROZEN_REPAINT_INTERVAL_SECONDS) and releases the watches
+// nothing seen needs.
 //
 // Rectangles are {x, y, width, height} in stage (logical) pixels: a window's frame rect and the card's placed position
 // both are, under fractional scaling too, so they are compared directly. Pure: no Shell, St, Clutter or Meta import,
@@ -136,10 +137,10 @@ export function isCoverBackstopDue({isCovered, ticksSinceCoverCheck}) {
 export const CoverFallbackTimerChange = Object.freeze({START: 'start', STOP: 'stop', NONE: 'none'});
 
 /**
- * Says whether a window's state lets it cover the card: an ordinary window or a dialog (so never ding's desktop
+ * Says whether a window's state lets it cover a card: an ordinary window or a dialog (so never ding's desktop
  * window, which spans the whole screen, nor a dock or a popup), not minimized, showing (not hidden by "show desktop"),
  * and on the active workspace or on all of them. Only such a window's frame is read, and it counts when that frame
- * overlaps the primary monitor, which the card is on (doRectsOverlap).
+ * overlaps the monitor the cards are on (doRectsOverlap).
  *
  * @param {object} windowState - What the Shell glue read from the window.
  * @param {boolean} windowState.isNormalOrDialog - Its type is Meta.WindowType.NORMAL or DIALOG.
@@ -190,15 +191,63 @@ export function isFrozenRepaintDue({lastFrozenPaintAtUsec, nowUsec}) {
 }
 
 /**
- * Says whether the card is covered: a fullscreen window fills the primary monitor, or one window contains the whole
- * card (isRectFullyCovered).
+ * Says whether a card is covered: a fullscreen window fills the monitor the card is on, or one window contains the
+ * whole card (isRectFullyCovered).
  *
  * @param {object} surroundings - What the Shell glue read.
- * @param {boolean} surroundings.isPrimaryMonitorInFullscreen - The primary monitor is fullscreen.
+ * @param {boolean} surroundings.isMonitorInFullscreen - The card's monitor (the primary one for the v2 card, the
+ *     cockpit monitor for the cockpit's cards) is fullscreen.
  * @param {Rect} surroundings.cardRect - The card.
  * @param {Rect[]} surroundings.windowRects - The frames of the windows that can cover it.
  * @returns {boolean} True when covered.
  */
-export function isCardCovered({isPrimaryMonitorInFullscreen, cardRect, windowRects}) {
-    return isPrimaryMonitorInFullscreen === true || isRectFullyCovered(cardRect, windowRects);
+export function isCardCovered({isMonitorInFullscreen, cardRect, windowRects}) {
+    return isMonitorInFullscreen === true || isRectFullyCovered(cardRect, windowRects);
+}
+
+/**
+ * Checks every drawn card on its own against the same monitor and windows (isCardCovered), and finds the windows to
+ * follow: those that contain any card (indexesOfRectsCoveringCard), once each. "Covered", for the backstop and the
+ * fallback timeout, means every drawn card is covered, which no card drawn (a layout naming none this release knows)
+ * counts as: nothing is then checked on every tick, and no watch is held for it.
+ *
+ * @param {object} surroundings - What the Shell glue read.
+ * @param {Array<{cardId: string, rect: Rect}>} surroundings.cards - Each drawn card and its rectangle.
+ * @param {boolean} surroundings.isMonitorInFullscreen - The cards' monitor is fullscreen.
+ * @param {Rect[]} surroundings.windowRects - The frames of the windows that can cover a card on that monitor.
+ * @returns {{isEveryCardCovered: boolean, coveredCardIds: string[], visibleCardIds: string[],
+ *     coveringWindowIndexes: number[]}} The cover of each card, in the cards' order, and the indexes in windowRects of
+ *     the windows that contain any card, ascending.
+ */
+export function cardsCover({cards, isMonitorInFullscreen, windowRects}) {
+    const coveredCardIds = [];
+    const visibleCardIds = [];
+    const coveringWindowIndexSet = new Set();
+    for (const {cardId, rect: cardRect} of cards) {
+        const isCovered = isCardCovered({isMonitorInFullscreen, cardRect, windowRects});
+        (isCovered ? coveredCardIds : visibleCardIds).push(cardId);
+        for (const windowIndex of indexesOfRectsCoveringCard({cardRect, windowRects}))
+            coveringWindowIndexSet.add(windowIndex);
+    }
+    return {
+        isEveryCardCovered: visibleCardIds.length === 0,
+        coveredCardIds,
+        visibleCardIds,
+        coveringWindowIndexes: [...coveringWindowIndexSet].sort((firstIndex, secondIndex) => firstIndex - secondIndex),
+    };
+}
+
+/**
+ * When each frozen card was last painted, after a cover check: a card covered now that had no stamp was frozen just
+ * now, which paints it, so it is stamped now; one covered before keeps its stamp (the frozen repaint counts from it);
+ * a card no longer covered has none (its reveal repainted it).
+ *
+ * @param {object} cover - The stamps and the cover.
+ * @param {Object<string, number>} cover.stampsByCardId - Each frozen card's last paint (monotonic µs) before it.
+ * @param {string[]} cover.coveredCardIds - The cards covered now.
+ * @param {number} cover.nowUsec - Now, monotonic µs.
+ * @returns {Object<string, number>} The stamps after the check, one per covered card.
+ */
+export function frozenPaintStamps({stampsByCardId, coveredCardIds, nowUsec}) {
+    return Object.fromEntries(coveredCardIds.map(cardId => [cardId, stampsByCardId[cardId] ?? nowUsec]));
 }

@@ -94,6 +94,13 @@ export const HOVER_LABEL_DELAY_MS = 300;
 /** Milliseconds the hover label takes to fade in, and to fade out: the dash's own label timings (dash.js). */
 export const HOVER_LABEL_FADE_IN_MS = 150;
 export const HOVER_LABEL_FADE_OUT_MS = 100;
+/** Pixels between a cockpit row's edge and the cockpit tooltip's nearest edge. */
+export const COCKPIT_TOOLTIP_GAP_PX = 6;
+/**
+ * The actor opacity, of 255, of a long-idle session row: the design's 0.55. St reads no CSS `opacity`, so the
+ * sessions card sets it on the row actor.
+ */
+export const COCKPIT_LONG_IDLE_ROW_OPACITY = 140;
 /** Width of one top-bar graph's slot for a sample, in logical pixels: whole pixels keep the slots crisp. */
 export const TOPBAR_GRAPH_SLOT_WIDTH_PX = 1;
 /** Width of each top-bar graph, in logical pixels: one slot per sample of its history. */
@@ -160,6 +167,47 @@ export const APP_RANKING_LENGTH = 10;
  * "no data since HH:MM" rather than its numbers as live.
  */
 export const COCKPIT_SOURCE_STALE_INTERVALS = 3;
+/** The interval a cockpit source is judged against when it publishes none (null or 0): one sample a minute. */
+export const COCKPIT_FALLBACK_INTERVAL_SECONDS = 60;
+/**
+ * What the extension's cockpit client (cockpitClient.js) knows of cockpit.service:
+ * - STARTING: asked systemd to start it, and no state from it yet;
+ * - SKIPPED: the cockpit is not configured: systemd skipped the start job for its condition (no layout file), or has
+ *   no such unit (NoSuchUnit: never linked, or unloaded after a skipped job); nothing is retried until the next
+ *   start();
+ * - LIVE: its GetState answered, and its changes are followed;
+ * - VANISHED: it left the bus after it was there; the client starts nothing (a stop stays a stop).
+ */
+export const CockpitClientState = Object.freeze({
+    STARTING: 'starting',
+    SKIPPED: 'skipped',
+    LIVE: 'live',
+    VANISHED: 'vanished',
+});
+/**
+ * The `type` of each event the cockpit client tells its listeners:
+ * - STATE: its CockpitClientState changed (`{type, state}`);
+ * - LAYOUT: the layout or the config error changed (`{type, layout, configError}`);
+ * - SOURCES: these sources changed, or a pull settled their freshness (`{type, names, cause}`, cause a
+ *   CockpitSourcesCause).
+ */
+export const CockpitClientEventType = Object.freeze({
+    STATE: 'state',
+    LAYOUT: 'layout',
+    SOURCES: 'sources',
+});
+/**
+ * What brought a cockpit client's SOURCES event (its `cause`), so the extension can pace what it draws (ruling D20):
+ * - READ: a GetState the client asked for of itself: an owner's appearance, the subscription becoming wanted (a
+ *   reveal), or a Changed that came before any state; pulls that joined it are told with it;
+ * - CHANGED: a Changed signal;
+ * - PULL: a pull's GetState (pullIfSuspicious), answered or failed, or completed at once (no owner, or the owner left).
+ */
+export const CockpitSourcesCause = Object.freeze({
+    READ: 'read',
+    CHANGED: 'changed',
+    PULL: 'pull',
+});
 /**
  * Longest name, in characters, a cockpit source publishes (a session slug or branch, a workspace label, an account, a
  * mount label); a longer one is published as COCKPIT_REDACTED_NAME.
@@ -175,6 +223,12 @@ export const COCKPIT_REDACTED_NAME = '—';
  * reads as null, so another program's runaway string cannot ride an id onto the bus.
  */
 export const COCKPIT_ID_MAX_CHARS = 128;
+/**
+ * Longest session row id, in characters, a cockpit reader passes: the id is "<workspace>:<pane>" at its longest (the
+ * pane id alone, or a Claude session id, when herdr gives less), so two COCKPIT_ID_MAX_CHARS ids and the colon. A row
+ * with a longer id is dropped, and the client's focusSession refuses one.
+ */
+export const COCKPIT_SESSION_ID_MAX_CHARS = 2 * COCKPIT_ID_MAX_CHARS + 1;
 /** Longest path, in characters, a cockpit reader passes (a mount row's mount point); a longer one drops its row. */
 export const COCKPIT_PATH_MAX_CHARS = 1024;
 /** Prefix of every journal line the cockpit service writes. */
@@ -201,8 +255,39 @@ export const ROUTE_FLAG_GATEWAY = 0x0002;
  * instead of stalling the service.
  */
 export const HERDR_REQUEST_TIMEOUT_MS = 2000;
+/**
+ * Milliseconds the cockpit service waits for herdr to answer each of FocusSession's two focus requests (workspace, then
+ * pane): shorter than HERDR_REQUEST_TIMEOUT_MS, so that twice it, with FOCUS_SESSION_REPLY_MARGIN_MS, fits under the
+ * client's DBUS_CALL_TIMEOUT_MS and a slow herdr is answered herdr-unreachable before the client gives up.
+ */
+export const HERDR_FOCUS_REQUEST_TIMEOUT_MS = 750;
+/**
+ * Milliseconds FocusSession leaves, after its two focus requests and under the client's DBUS_CALL_TIMEOUT_MS, for its
+ * /proc scan for the window candidates and the bus's round trips.
+ */
+export const FOCUS_SESSION_REPLY_MARGIN_MS = 400;
 /** herdr's API socket's path under the user's config home (XDG_CONFIG_HOME). */
 export const HERDR_SOCKET_RELATIVE_PATH = 'herdr/herdr.sock';
+/** Where the kernel lists its processes: one directory per pid, named by the pid. */
+export const PROC_ROOT_PATH = '/proc';
+/** A process's stat file, under its directory in PROC_ROOT_PATH: one line, its pid, comm, state, ppid and on. */
+export const PROC_PID_STAT_FILE_NAME = 'stat';
+/**
+ * Most entries of one process's chain of parents that lib/processTree.js follows, the process itself included: a
+ * deeper chain is cut there. A herdr client's terminal is its second or third parent.
+ */
+export const PROCESS_ANCESTOR_MAX_DEPTH = 16;
+/**
+ * Most window candidates a FocusSession reply carries (the herdr clients and their parents, ruling out pid 1); a
+ * reader drops any past it.
+ */
+export const FOCUS_WINDOW_PID_CANDIDATES_MAX = 64;
+/**
+ * The environment variable that puts the cockpit service in fixture mode: when it names a JSON file, the service
+ * serves that file's state and focus reply instead of its sources and the config. Only the nested test harness sets
+ * it; cockpit.service never does.
+ */
+export const COCKPIT_FIXTURE_ENVIRONMENT_VARIABLE = 'RESOURCE_PULSE_COCKPIT_FIXTURE';
 /**
  * Most characters of herdr's own error text (its code and message) a rejection's message carries; the rest is cut. An
  * unknown method's message lists every method herdr has, about 2,000 characters.
@@ -241,3 +326,86 @@ export const STAT_ONLY_PATH_FRAGMENTS = [
  * share cannot stall the mounts source.
  */
 export const FILESYSTEM_QUERY_TIMEOUT_MS = 2000;
+/**
+ * The cockpit grid at its reference size, in logical pixels (the spec's numbers at 1920 x 1080): every length scales
+ * with the cockpit monitor's work area. `columns` and `rows` are the most cells a group's block holds across and down.
+ */
+export const COCKPIT_GRID_REFERENCE = Object.freeze({
+    widthPx: 1920, heightPx: 1080, cellWidthPx: 420, cellHeightPx: 300,
+    innerGutterPx: 24, groupGapPx: 48, rowGutterPx: 24, captionHeightPx: 28, columns: 4, rows: 3,
+});
+/** The smallest factor the cockpit grid shrinks to, however small the monitor. */
+export const COCKPIT_GRID_MIN_SCALE = 0.5;
+/** The largest factor the cockpit grid grows to, however large the monitor. */
+export const COCKPIT_GRID_MAX_SCALE = 2;
+/**
+ * The widest a cockpit card's content draws, in logical pixels, its cell's padding and border included. The grid's
+ * cells scale with the work area and the cards' content does not: the v2 card's rows, which the system cell adopts,
+ * need about 25.8em in its font, 374 to 378 px (the CPU graph alone is 150 px; stylesheet.css .rp-card-fixed), so 412
+ * to 416 px with the cell's 18 px side padding and 1 px border; the larger is taken. Where a scaled cell and its inner
+ * gutter are narrower, a card runs into the next one, so the grid is not drawn (lib/cockpitGrid.js
+ * isCockpitGridDrawable, ruling D36).
+ */
+export const COCKPIT_CARD_CONTENT_WIDTH_PX = 416;
+/** The card ids the cockpit draws; any other id in the layout still gets a cell, which stays empty. */
+export const COCKPIT_DRAWN_CARD_IDS = ['system', 'apps', 'connections', 'sessions'];
+/** The system card's id: the v2 card's cell. With no cockpit layout the v2 card, top right, is checked under it. */
+export const COCKPIT_SYSTEM_CARD_ID = 'system';
+/** The apps card's id: the card the pulse client's snapshots feed, besides the system card. */
+export const COCKPIT_APPS_CARD_ID = 'apps';
+/** The sessions card's id: the one cockpit card the top-bar dropdown draws too, under its system card. */
+export const COCKPIT_SESSIONS_CARD_ID = 'sessions';
+/** The cards that draw the sampler's snapshot (the system card, the apps card), which the detail watch feeds. */
+export const COCKPIT_SNAPSHOT_CARD_IDS = Object.freeze([COCKPIT_SYSTEM_CARD_ID, COCKPIT_APPS_CARD_ID]);
+/** The cockpit service's sources each card draws (lib/cockpitProtocol.js COCKPIT_SOURCE_NAMES): none for those two. */
+export const COCKPIT_SOURCE_NAMES_BY_CARD_ID = Object.freeze({
+    system: Object.freeze([]),
+    apps: Object.freeze([]),
+    connections: Object.freeze(['network', 'mounts']),
+    sessions: Object.freeze(['sessions']),
+});
+/**
+ * Seconds the cockpit waits for a Sample before it draws a Changed (or a pull's answer) by itself: a Changed waits for
+ * the next Sample (one frame a tick), and this one-shot timeout draws it when the sampler is silent.
+ */
+export const COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS = 3;
+/** How a cockpit card writes the time of a source's last stamp in "no data since HH:MM" (GLib.DateTime.format). */
+export const COCKPIT_CLOCK_LABEL_FORMAT = '%H:%M';
+/** The most session rows the sessions card draws; the rest collapse into a '+N more' line. */
+export const SESSIONS_CARD_ROW_LIMIT = 6;
+/** The most rows each ranking (CPU, memory) of the apps card draws. */
+export const APPS_CARD_ROW_LIMIT = 6;
+/**
+ * The most rows the connections card draws: the uplink, the VPN and the ssh masters, then up to five mounts; the
+ * mounts past it collapse into a '+N more' line. Its rows are built with the card, so no update makes an actor.
+ */
+export const CONNECTIONS_CARD_ROW_LIMIT = 8;
+/** Size of a cockpit row's icon and of the sessions header's state icons, in logical pixels: a panel status icon's. */
+export const COCKPIT_ROW_ICON_SIZE_PX = 16;
+/**
+ * Width of a cockpit row's bar track, as a share of its cell's width: a fixed slot at the row's end, so a bar's change
+ * never moves the name beside it, and the bars of a card line up.
+ */
+export const COCKPIT_ROW_BAR_TRACK_SHARE_OF_CELL_WIDTH = 0.15;
+/** Pixels between a state's icon and its count in the sessions header, closer than the header's other parts. */
+export const COCKPIT_STATE_COUNT_SPACING_PX = 2;
+/** Seconds in the units an idle time is written in; a session idle for less than the next unit up shows this one. */
+export const SECONDS_PER_MINUTE = 60;
+export const SECONDS_PER_HOUR = 3600;
+export const SECONDS_PER_DAY = 86400;
+/** Icon names (symbolic, from the stock theme) the cockpit cards draw, by session state and by connection kind. */
+export const COCKPIT_ICON_NAMES = Object.freeze({
+    working: 'media-playback-start-symbolic',
+    blocked: 'dialog-warning-symbolic',
+    idle: 'media-playback-pause-symbolic',
+    done: 'object-select-symbolic',
+    unknown: 'dialog-question-symbolic',
+    wired: 'network-wired-symbolic',
+    wifi: 'network-wireless-symbolic',
+    offline: 'network-offline-symbolic',
+    online: 'network-transmit-receive-symbolic',
+    vpn: 'network-vpn-symbolic',
+    ssh: 'utilities-terminal-symbolic',
+    mountRemovable: 'drive-removable-media-symbolic',
+    mountNetwork: 'folder-remote-symbolic',
+});

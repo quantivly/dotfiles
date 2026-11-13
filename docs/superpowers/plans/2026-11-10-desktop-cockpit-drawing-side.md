@@ -27,6 +27,41 @@ in the build ledger copied to `~/Projects/handoffs/cockpit-data-side-build-recor
 declaring stale), R17 (a never-started unit reads `ConditionResult=no`), R18 (`FocusSession.error` is a code), R20
 (cap the composite row `id`).
 
+## Amendment (2026-11-11, approved by the owner)
+
+The Resource Pulse performance design (`docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md`,
+#377) was approved while this plan was being built. It decided that its stage one lands **before** the drawing
+side, and that this plan is amended for what it measured. Where this section and a task's text below differ, this
+section wins.
+
+**What it measured:** a `Gio.DBusProxy` owned only by JavaScript, with handlers, makes GJS force a full garbage
+collection 10 s after every D-Bus signal it receives; a periodic 2 s timer in the shell costs about as much as
+handling a Sample; an actor in the background group is painted on every frame a window draws over it.
+
+**Order of work:**
+
+1. Tasks 1–7 and 11 are built on this branch before the performance stage one (Tasks 1–6 before this amendment
+   existed; Tasks 7 and 11 because they do not depend on the order).
+2. The branch then parks: no pull request and no merge.
+3. Once the performance stage one is on `main`: rebase, then Task 5b, then Tasks 8, 9, 10, 12 and 13, the
+   whole-branch review and the pull request.
+
+**Per task:**
+
+- **Task 5 (built):** every decision stays (the skipped-unit rule, pull-on-suspicion, the pull stamps). Its
+  transport, a `Gio.DBusProxy` made by `createProxy`, is replaced by Task 5b.
+- **Task 5b (new, below):** the client follows the service through a name watch and a subscription, and holds no
+  subscription while nothing of the cockpit is visible.
+- **Task 7 (built):** freeze and dim stay. Every card sets `Clutter.OffscreenRedirect.ALWAYS` at construction;
+  no `vfunc_paint` or `vfunc_paint_node`; no actor is made or destroyed on an update. At the rebase the system
+  cell keeps one texture, not two (the wrapper's and the `PulseCard`'s own, which the performance work adds).
+- **Task 8:** no timer. Its "Cover", "Suspicion" and "Watch" bullets are replaced by the amended ones in the
+  task.
+- **Tasks 9 and 10:** unchanged in content, built on the post-performance `indicator.js` and `extension.js`.
+- **Task 12:** `check cockpit` also asserts the count budgets with the cockpit visible, using the performance
+  harness's requests: no forced collection the extension causes, no periodic timer, one frame a tick at most.
+- **Task 13:** the guide's cost section quotes the per-state budgets.
+
 ## Global Constraints
 
 - The four deal-breakers are binding: desktop instability; wrong or laggy numbers; cost (CPU, memory, battery);
@@ -58,8 +93,22 @@ declaring stale), R17 (a never-started unit reads `ConditionResult=no`), R18 (`F
   again on the next `enable()`); any other answer keeps v2's retry chain. A service that ran and then vanished is
   never restarted by the client (v2's rule). The last layout received is kept on the extension object across
   `enable`/`disable` (as `_lastGoodClockLabel` is) so a re-enable after a blank rebuilds the grid at once.
-- **Budgets:** gnome-shell under 0.1 % of one core at idle, added by the whole extension; no repaint except on
-  hover, on `Changed` and on the 30 s frozen repaint; gnome-shell RSS flat over 24 h.
+- **Budgets (amended):** the per-state budgets of the performance design's "Budgets" section replace the single
+  0.1 % line: with the cockpit visible (four cards and the top bar) 0.5 % of one core, added by the whole
+  extension; the other states as that table gives them. The count budgets are the ones a check asserts: no forced
+  collection the extension causes, no periodic timer in the shell, one frame a tick at most and none when no pixel
+  changed. No repaint except on hover, on an applied `Changed` and on the 30 s frozen repaint; gnome-shell RSS
+  flat over 24 h.
+- **Client rules (amended):** no `Gio.DBusProxy` in shell-side code; signals come through
+  `connection.signal_subscribe`, the owner through `Gio.bus_watch_name_on_connection`, calls through
+  `connection.call`. The cockpit client subscribes only while the cockpit layer or the dropdown is visible; on
+  reveal it subscribes and calls `GetState`.
+- **One tick, one frame (amended):** a `Changed` is applied on the next Sample, at most 2 s later; if no Sample
+  comes within `COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS = 3` it is applied by itself, by a one-shot timeout.
+  Nothing in the cockpit repeats on a timer.
+- **Drawing (amended):** every card is drawn through its own offscreen texture
+  (`Clutter.OffscreenRedirect.ALWAYS`); there is no JavaScript in the paint path (no `vfunc_paint`, no
+  `vfunc_paint_node`, no `St.DrawingArea` in the cockpit's cards); no actor is made or destroyed on an update.
 - **Repo rules:** a new glue file goes into `GLUE_FILE_NAMES` (`gnome-shell/tests/imports.test.js`) and the table's
   glue-parse loop; a new pure top-level file into `PURE_TOP_LEVEL_FILE_NAMES` and `PURE_MODULE_PATHS`;
   `EXPECTED_SHELL_CLOSURE` is an exact string and changes with every module the shell newly imports; the pinned
@@ -420,6 +469,39 @@ test('cockpitInteraction: the outcome activates on focused + picked, logs otherw
 
 ---
 
+### Task 5b: The client follows the service without a proxy (amendment; built after the performance stage one)
+
+**Files:**
+- Modify: `cockpitClient.js`, `gnome-shell/tests/cockpitClient.test.js`, `gnome-shell/tests/cockpit-client-dbus.test.js`,
+  `scripts/test-resource-pulse.sh` (`EXPECTED_SHELL_CLOSURE` if a module is added)
+- Create, only if the performance work's `serviceLink.js` does not fit a second service: `cockpitLink.js` of the
+  same shape, registered as that file is
+
+**Interfaces:**
+- Consumes: the performance work's `serviceLink.js` as built (a name watch, a signal subscription, `call`,
+  `setSampleSubscribed`, `destroy`). Read it first; the names below follow its plan and give way to what was built.
+- Produces, on `CockpitClient`:
+  - the constructor option `createLink(connection, callbacks) → link` in place of `createProxy`; every other
+    public member as Task 5 built it (`state`, `layout`, `configError`, `sourcesByName`, `sourceFreshness`,
+    `start`, `destroy`, `setWatchWanted`, `addListener`, `removeListener`, `pullIfSuspicious`, `focusSession`);
+  - `setSubscriptionWanted(isWanted: boolean)`: starts false. While not wanted the client holds no `Changed`
+    subscription and publishes nothing; when it becomes wanted and the service has an owner it subscribes, then
+    calls `GetState`; a service that restarted while unsubscribed is read afresh on return.
+- Decisions that must not change: the skipped-unit rule and D4 (`NoSuchUnit` is SKIPPED), D5 (a refreshed source
+  clears its pull stamps, with the cycle guard), D6 (a failed pull completes), R14.
+
+- [ ] **Step 1: Port the fixtures** from `FakeProxy` to a fake link, without changing what any existing row
+  asserts; delete only rows that test the proxy itself, and name each in the commit message.
+- [ ] **Step 2: Write the failing rows:** with the subscription not wanted, no subscription is held and no
+  listener is told; wanting it subscribes and reads `GetState`; an owner that changed while unsubscribed is read
+  afresh; on the private bus against the real service, the owner appears, `GetState` answers, a `Changed`
+  arrives, and after `destroy()` no callback is called. The table's "no shell-side file names `Gio.DBusProxy`"
+  row (the performance work adds it) must pass with `cockpitClient.js` in scope.
+- [ ] **Step 3: Implement.** **Step 4: Run the rows and the table.**
+- [ ] **Step 5: Commit** (`Follow the cockpit service through a name watch and a subscription, not a proxy`).
+
+---
+
 ### Task 6: The tooltip actor, the icon names and the stylesheet classes (glue)
 
 **Files:**
@@ -547,9 +629,18 @@ test('cockpitInteraction: the outcome activates on focused + picked, logs otherw
     `layer.setInteractive`.
   - Watch: `_syncCockpitWatch()` → `cockpitClient.setWatchWanted(isCockpitWatchWanted({...}))`, called where
     `_syncDetailWatch` is.
-  - Suspicion: the cover re-check timer (already every `SAMPLE_INTERVAL_SECONDS` while covered) and the frozen
-    repaint call `cockpitClient.pullIfSuspicious(name)` for every drawn source once per tick; a visible card's
-    update path calls it on each `Changed` for the sources it did not receive.
+  - Suspicion (amended; replaces the timer this bullet used to name): while a cockpit card is visible, each
+    Sample calls `cockpitClient.pullIfSuspicious(name)` for every drawn source; while none is visible nothing
+    runs, since the client holds no subscription then and a reveal's `GetState` is itself the fresh read.
+  - Cover (amended, added to the bullet above): the cockpit cards join the performance work's cover check as
+    built (window signals, each Sample while visible, every fifteenth Sample while covered); no timer is added.
+    The extension's `notify::width` placement must not move the `PulseCard` while the system cell holds it.
+  - Subscription (amended): `cockpitClient.setSubscriptionWanted` is given the same answer as the watch
+    (`isCockpitWatchWanted`), wherever `_syncCockpitWatch()` runs. The apps card reads the sampler's snapshot, so
+    the detail watch counts a visible cockpit as it counts the v2 card.
+  - Applying a `Changed` (amended): a `Changed` only marks its sources as pending; the next Sample applies every
+    pending source to the cards, and a one-shot timeout of `COCKPIT_CHANGED_APPLY_FALLBACK_SECONDS` applies them
+    if no Sample comes. The decision (apply now, wait, arm the fallback) is a pure function in `lib/` with rows.
   - Teardown: the new steps join `runEveryStep` in `_tearDown` (layer before cards' clients; `UnwatchCockpit` by the
     client's `destroy`); the destroy-order row is updated to `layer card indicator cockpitClient client` or the
     order the builder settles, pinned.
@@ -657,6 +748,9 @@ test('cockpitInteraction: the outcome activates on focused + picked, logs otherw
   ms; `window herdr-probe` then click the row → `global.display.focus_window.get_pid()` equals the probe's pid;
   show-desktop (every window minimized through `eval`) then click → the probe unminimized and focused; `screenshot
   cockpit.png`; the shell log holds no `resource-pulse:` or `cockpit:` error.
+- Count budgets (amended): with the cockpit visible, `check cockpit` also runs the performance harness's
+  count check as built (its `perf` request) and prints `bad` on a repeating timer, on more than one frame a tick,
+  or on more forced collections than the disabled shell showed in the same run.
 - Hermetic rows: usage of the three subcommands; `window` refuses without a run and records the pid file; the
   fixture path exported to the cockpit start; `check cockpit` with a stubbed `eval` answering the expected values
   passes and with one wrong answer fails naming the step.
@@ -702,7 +796,8 @@ test('cockpitInteraction: the outcome activates on focused + picked, logs otherw
    shows tooltips; a row click focuses the pane and brings the terminal forward; covering a card freezes and dims
    it; 20 lock/unlock cycles, a dock and undock, overview in and out; `gnome-extensions info resource-pulse@dotfiles`
    says ACTIVE; the journal holds no `resource-pulse:` or `cockpit:` errors.
-4. Cost: the in-shell reading (`scripts/resource-pulse-cost.sh --cpu-percent 600` for gnome-shell) under 0.1 %;
-   the cockpit's watched reading with the cockpit revealed; gnome-shell RSS now and in 24 h through `rabota schedule
-   add`.
+4. Cost (amended): the in-shell readings against the per-state budgets of the performance design (with the
+   cockpit revealed, 0.5 % of one core in the nested shell; the live shell reads about 1.7 times the nested
+   figures and has no percentage to pass); the count budgets hold; the cockpit service's watched reading with the
+   cockpit revealed; gnome-shell RSS now and in 24 h through `rabota schedule add`.
 5. Then stage two (Sol) gets its own design pass and mockup.

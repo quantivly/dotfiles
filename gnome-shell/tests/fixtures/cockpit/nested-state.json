@@ -1,0 +1,51 @@
+{
+  "state": {
+    "layout": {
+      "monitor": {"vendor": null, "product": null},
+      "groups": [
+        {"id": "machine", "caption": "MACHINE", "columns": 2, "cards": ["system", "apps", "connections", "health"]},
+        {"id": "agents", "caption": "AGENTS", "columns": 1, "cards": ["sessions", "seats"]},
+        {"id": "work", "caption": "WORK", "columns": 1, "cards": ["sol", "work"]}
+      ]
+    },
+    "configError": null,
+    "sources": {
+      "sessions": {
+        "sampledAtUsec": 1794000001000000,
+        "intervalSeconds": 10,
+        "herdrRunning": true,
+        "totalMemoryBytes": 1000000000,
+        "counts": {"working": 1, "blocked": 0, "idle": 1, "done": 0, "unknown": 0},
+        "rows": [
+          {
+            "id": "w1:p1", "name": "alpha-sync", "state": "working", "idleSeconds": 5, "idleFromProcessAge": false,
+            "memoryBytes": 600000000, "workspaceId": "w1", "paneId": "p1", "account": "work", "contextPercent": 21
+          },
+          {
+            "id": "w1:p2", "name": "beta-docs", "state": "idle", "idleSeconds": 2400, "idleFromProcessAge": false,
+            "memoryBytes": 400000000, "workspaceId": "w1", "paneId": "p2", "account": "personal",
+            "contextPercent": 64
+          }
+        ]
+      },
+      "network": {
+        "sampledAtUsec": 1794000001000000,
+        "intervalSeconds": 10,
+        "uplink": {"kind": "wired", "connectivity": "full", "wifiEnabled": false},
+        "vpn": {"isUp": false, "interfaceName": null},
+        "sshMasterCount": 2
+      },
+      "mounts": {
+        "sampledAtUsec": 1794000001000000,
+        "intervalSeconds": 30,
+        "rows": [
+          {
+            "mountPoint": "/media/user/SCRATCH", "label": "SCRATCH", "kind": "removable", "filesystemType": "exfat",
+            "freeBytes": 100000000000, "totalBytes": 250000000000
+          }
+        ]
+      }
+    }
+  },
+  "focusReply": {"focused": true, "windowPid": null, "error": null, "windowPidCandidates": [4242]}
+}

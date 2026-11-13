@@ -126,12 +126,12 @@ function recordCalls(connection) {
 /**
  * Calls a method through a link and waits for its answer.
  *
- * @param {object} link - serviceLink.js's ResourcePulseLink.
+ * @param {object} link - serviceLink.js's link, as createResourcePulseLink makes it.
  * @param {string} methodName - The method.
  * @returns {Promise<{error: Error|null, reply: GLib.Variant|null}>} What the link answered.
  */
 function callThroughLink(link, methodName) {
-    return new Promise(resolve => link.call(methodName, null, (error, reply) => resolve({error, reply})));
+    return new Promise(resolve => link.call(methodName, null, null, (error, reply) => resolve({error, reply})));
 }
 
 /**
@@ -228,7 +228,7 @@ test('link: the owner appears, GetState answers, a Sample arrives, and after des
     withServedResourcePulse(async ({sampler, isNameOwned, serviceName, releaseName, clientConnection}) => {
         const recordedCalls = recordCalls(clientConnection);
         const recording = makeRecordingLink(clientConnection);
-        const isSubscribedFromCreation = recording.link.isSampleSubscribed;
+        const isSubscribedFromCreation = recording.link.isSubscribed;
         // A second link on the same connection stays live: that it sees the Sample and the owner leaving after the
         // first is destroyed proves both reached this connection, and that one link's destroy() spares the other.
         const control = makeRecordingLink(clientConnection);
@@ -250,7 +250,7 @@ test('link: the owner appears, GetState answers, a Sample arrives, and after des
             // The call's shape carries what the client's rows cannot see: every call has DBUS_CALL_TIMEOUT_MS.
             assertEqual({
                 isNameOwned, isOwnerSeen, isSampleSeen, hasControlSeenBoth, isSubscribedFromCreation,
-                isSubscribedAfterDestroy: recording.link.isSampleSubscribed,
+                isSubscribedAfterDestroy: recording.link.isSubscribed,
                 owners: recording.owners, sampleCount: recording.samples.length,
                 calls: recordedCalls, stateError: stateAnswer.error,
                 stateSignature: stateAnswer.reply?.get_type_string() ?? null,
@@ -316,7 +316,7 @@ test('link: a call goes to the unique name of the owner the watch reported, and 
             releaseName();
             const isVanishSeen = await waitUntil(() => recording.owners.at(-1) === null, BUS_ROUND_TRIP_TIMEOUT_MS);
             let unownedAnswer = null;
-            recording.link.call(GET_STATE_METHOD_NAME, null, (error, reply) => {
+            recording.link.call(GET_STATE_METHOD_NAME, null, null, (error, reply) => {
                 unownedAnswer = {error, reply};
             });
             const isUnownedAnsweredAtOnce = unownedAnswer !== null;

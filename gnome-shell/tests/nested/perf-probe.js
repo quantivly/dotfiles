@@ -23,12 +23,23 @@
 // handler is connected once and stays for the life of the nested shell, which is test-only. Its per-frame handler is
 // itself a cost, which `perf`'s percentages include and say so.
 //
-// Requests: 'attach-disabled', 'attach-enabled' (each zeroes the counts), 'read'.
+// The cockpit's grid (cockpitLayer.js) is drawn in every nested run, so a read-cockpit after an enabled read answers,
+// as they are at the end of the window, what `perf` needs to tell the grid's states apart and to hold its budgets: the
+// card ids that can be seen (the extension's _visibleCardIds), the card ids the layer draws (null with no layer), each
+// part's offscreen redirect (the layer's own, and each drawn card's; ruling D12 wants ALWAYS on the data cards and none
+// on the layer or the system cell's wrapper, whose adopted v2 card keeps its own), and the one-shot fallback timeouts
+// armed now (the cover check's, the layer's pacing's, the dropdown's pacing's), which no state with Samples flowing may
+// hold. Counting nothing, it attaches nothing; it refuses like a read, and also when a field it reads is not there.
+//
+// Requests: 'attach-disabled', 'attach-enabled' (each zeroes the counts), 'read', 'read-cockpit'.
 // Answers: {refused: string, missing?: string[]} on a refusal; otherwise
 //   attach-disabled  {attached: 'disabled', counts: 'frames only: ...'}
 //   attach-enabled   {attached: 'enabled', reattached: boolean}
 //   read             {mode: 'disabled', frames} or
 //                    {mode: 'enabled', frames, samples, topbarPaints, cardRedirect, isCardVisible, isIndicatorMapped}
+//   read-cockpit     {mode: 'enabled', visibleCardIds, layerCardIds, cockpitRedirects, armedCockpitTimers}: the ids
+//                    sorted; layerCardIds and cockpitRedirects ({layer, <card id>...}: 'ALWAYS', 'NONE' or the
+//                    number) null with no layer; armedCockpitTimers the names of the armed ones, in a fixed order
 
 /**
  * Attaches the counters, zeroes them, or reads them, as one request asks.
@@ -57,6 +68,27 @@ function resourcePulsePerfProbe(request) {
     const ATTACHED_PART_NAMES = ['indicator', 'cpuGraphArea', 'memoryGraphArea', 'card', 'client'];
     /** The parts a read takes its two facts from: the card's visibility from one, the mapping from the other. */
     const FACT_PART_NAMES = ['extension', 'indicator'];
+    /** What read-cockpit names a redirect of none (Clutter's 0), which the layer and the system cell's wrapper want. */
+    const NO_REDIRECT_NAME = 'NONE';
+    /** The key read-cockpit answers the layer's own redirect under, beside each drawn card's id. */
+    const LAYER_REDIRECT_KEY = 'layer';
+    /**
+     * The fields read-cockpit reads, by the object that holds them, and how a refusal names each. A field that is not
+     * there at all (undefined) is a refusal: the extension changed shape, and reading on would answer nothing.
+     */
+    const COCKPIT_FIELD_DESCRIPTIONS = {
+        extensionLayer: "the extension's cockpit layer field (_layer: the layer, or null with none)",
+        extensionVisibleCardIds: "the extension's visible card ids (_visibleCardIds, an array)",
+        extensionCoverFallback: "the extension's cover fallback timeout (_coverFallbackSourceId)",
+        layerCards: "the layer's drawn card ids and cards (drawnCardIds, _cardsById)",
+        layerRedirect: "the layer's offscreen redirect (get_offscreen_redirect)",
+        layerPacing: "the layer's pacing and its fallback timeout (_pacing._fallbackSourceId)",
+        dropdownPacing: "the dropdown's pacing (_indicator._sessionsPacing: the pacing, or null with no sessions item)",
+    };
+    /** The one-shot fallback timeouts read-cockpit names when armed, in the order it names them. */
+    const COVER_FALLBACK_TIMER_NAME = 'cover-fallback';
+    const LAYER_PACING_TIMER_NAME = 'layer-pacing-fallback';
+    const DROPDOWN_PACING_TIMER_NAME = 'dropdown-pacing-fallback';
 
     globalThis[PROBE_STATE_KEY] ??= {
         counters: {frames: 0, samples: 0, topbarPaints: 0},
@@ -248,6 +280,114 @@ function resourcePulsePerfProbe(request) {
         };
     }
 
+    /**
+     * The name read-cockpit gives an offscreen redirect.
+     *
+     * @param {number} redirect - What get_offscreen_redirect() answered.
+     * @returns {string} 'ALWAYS', NO_REDIRECT_NAME for 0, or the number as text.
+     */
+    function redirectName(redirect) {
+        if (redirect === imports.gi.Clutter.OffscreenRedirect.ALWAYS)
+            return ALWAYS_REDIRECT_NAME;
+        return redirect === 0 ? NO_REDIRECT_NAME : String(redirect);
+    }
+
+    /**
+     * The cockpit fields read-cockpit cannot read, each by its COCKPIT_FIELD_DESCRIPTIONS key: the extension's, then,
+     * with a layer, the layer's, then the dropdown's pacing field.
+     *
+     * @param {object} extension - The extension's object.
+     * @param {object} indicator - The top bar indicator.
+     * @returns {string[]} The keys of the fields that are not there; empty when every one can be read.
+     */
+    function missingCockpitFields(extension, indicator) {
+        const layer = extension._layer;
+        const missing = [];
+        if (layer === undefined)
+            missing.push('extensionLayer');
+        if (!Array.isArray(extension._visibleCardIds))
+            missing.push('extensionVisibleCardIds');
+        if (extension._coverFallbackSourceId === undefined)
+            missing.push('extensionCoverFallback');
+        if (layer !== undefined && layer !== null) {
+            if (!Array.isArray(layer.drawnCardIds) || typeof layer._cardsById?.get !== 'function')
+                missing.push('layerCards');
+            if (typeof layer.get_offscreen_redirect !== 'function')
+                missing.push('layerRedirect');
+            if (layer._pacing?._fallbackSourceId === undefined)
+                missing.push('layerPacing');
+        }
+        const dropdownPacing = indicator._sessionsPacing;
+        if (dropdownPacing === undefined || (dropdownPacing !== null && dropdownPacing._fallbackSourceId === undefined))
+            missing.push('dropdownPacing');
+        return missing;
+    }
+
+    /**
+     * Each part of the grid's offscreen redirect: the layer's own under LAYER_REDIRECT_KEY, then each drawn card's under
+     * its id, in the layer's order.
+     *
+     * @param {object} layer - The cockpit layer, every field it needs readable.
+     * @returns {Object<string, string>} The redirects' names, by part.
+     */
+    function cockpitRedirects(layer) {
+        const redirectsByPart = {[LAYER_REDIRECT_KEY]: redirectName(layer.get_offscreen_redirect())};
+        for (const cardId of layer.drawnCardIds)
+            redirectsByPart[cardId] = redirectName(layer._cardsById.get(cardId).get_offscreen_redirect());
+        return redirectsByPart;
+    }
+
+    /**
+     * The fallback timeouts armed now, by name, in a fixed order.
+     *
+     * @param {object} extension - The extension's object.
+     * @param {object|null} layer - The cockpit layer, or null.
+     * @param {object|null} dropdownPacing - The dropdown's pacing, or null.
+     * @returns {string[]} The names of the armed ones.
+     */
+    function armedCockpitTimers(extension, layer, dropdownPacing) {
+        const armedTimerNames = [];
+        if (extension._coverFallbackSourceId !== null)
+            armedTimerNames.push(COVER_FALLBACK_TIMER_NAME);
+        if (layer !== null && layer._pacing._fallbackSourceId !== null)
+            armedTimerNames.push(LAYER_PACING_TIMER_NAME);
+        if (dropdownPacing !== null && dropdownPacing._fallbackSourceId !== null)
+            armedTimerNames.push(DROPDOWN_PACING_TIMER_NAME);
+        return armedTimerNames;
+    }
+
+    /**
+     * read-cockpit: the grid's facts as they are now, refused like a read (nothing attached in the enabled mode, or the
+     * parts changed since the attach) and when a field it reads is not there.
+     *
+     * @returns {object} The answer.
+     */
+    function readCockpit() {
+        if (probe.mode !== ENABLED_MODE)
+            return {refused: 'read-cockpit needs the enabled mode: attach-enabled comes before it'};
+        const parts = findParts();
+        if (!areAttachedParts(parts)) {
+            return {
+                refused: "the extension's parts changed during the window (disabled or enabled again): " +
+                    'its facts are void',
+            };
+        }
+        const missing = missingCockpitFields(parts.extension, parts.indicator);
+        if (missing.length > 0) {
+            const missingDescriptions = missing.map(fieldKey => COCKPIT_FIELD_DESCRIPTIONS[fieldKey]).join('; ');
+            return {refused: `cannot read the cockpit's facts from ${missingDescriptions}`, missing};
+        }
+        const layer = parts.extension._layer;
+        const dropdownPacing = parts.indicator._sessionsPacing;
+        return {
+            mode: ENABLED_MODE,
+            visibleCardIds: [...parts.extension._visibleCardIds].sort(),
+            layerCardIds: layer === null ? null : [...layer.drawnCardIds].sort(),
+            cockpitRedirects: layer === null ? null : cockpitRedirects(layer),
+            armedCockpitTimers: armedCockpitTimers(parts.extension, layer, dropdownPacing),
+        };
+    }
+
     switch (request) {
     case 'attach-disabled':
         return attachDisabled();
@@ -255,7 +395,9 @@ function resourcePulsePerfProbe(request) {
         return attachEnabled();
     case 'read':
         return read();
+    case 'read-cockpit':
+        return readCockpit();
     default:
-        return {refused: `unknown request '${request}': attach-disabled, attach-enabled or read`};
+        return {refused: `unknown request '${request}': attach-disabled, attach-enabled, read or read-cockpit`};
     }
 }

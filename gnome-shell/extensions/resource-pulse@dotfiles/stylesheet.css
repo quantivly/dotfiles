@@ -113,3 +113,103 @@
   color: rgba(255, 255, 255, 0.45);
   -rp-graph-opacity: 0.4;
 }
+
+/* Added in the cockpit drawing release. Every class above stays as it was: GNOME re-reads this file on every enable
+   but the code only at login, so the previous release's code may meet this stylesheet until the next login. The
+   cockpit layer sets each cell's size, so none of these fixes a width or height except the row bar's. */
+
+/* The layer holding every cockpit card: transparent, so only the cards show on the desktop. */
+.rp-cockpit-layer {
+  background-color: transparent;
+}
+
+/* A group caption above its cards. St reads no text-transform, so the layer upper-cases the text itself. */
+.rp-cockpit-caption {
+  color: rgba(255, 255, 255, 0.6);
+  letter-spacing: 1px;
+  font-size: 0.8em;
+  font-weight: bold;
+}
+
+/* One card's cell: the desktop card's surface, filling the cell the grid gave it. */
+.rp-cockpit-cell {
+  background-color: rgba(30, 30, 30, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 14px 18px;
+  spacing: 12px;
+  color: white;
+  font-family: "Ubuntu Sans", sans-serif;
+  font-feature-settings: "tnum";
+}
+
+/* A row of a cell, and its faint bar: a line in a slot of fixed width at the row's end, as long as its share of
+   that slot (the row sets the bar's width). */
+.rp-cockpit-row {
+  spacing: 8px;
+}
+
+.rp-cockpit-row:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.rp-cockpit-row-bar {
+  background-color: rgba(255, 255, 255, 0.08);
+  height: 2px;
+}
+
+/* A session's state: the colour of its icon and text (an icon follows the text colour). */
+.rp-cockpit-state-working {
+  color: #2190a4;
+}
+
+.rp-cockpit-state-blocked {
+  color: #e5a50a;
+}
+
+.rp-cockpit-state-idle {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.rp-cockpit-state-done {
+  color: #26a269;
+}
+
+.rp-cockpit-state-unknown {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* The name of a session waiting on someone: the amber tint of the blocked state. */
+.rp-cockpit-name-waiting {
+  color: #e5a50a;
+}
+
+/* The class hook of a session idle for a long time. St reads no CSS opacity, so the dim itself is the row actor's
+   opacity, which the sessions card sets (COCKPIT_LONG_IDLE_ROW_OPACITY); nothing here dims it. */
+.rp-cockpit-row-long-idle {
+}
+
+/* The tooltip every cockpit card shares: the top bar's hover label, left-aligned for several lines. Its width is
+   bounded, so the label's ellipsize cuts a long line (a mount point, an app's group key) at its end. */
+.rp-cockpit-tooltip {
+  background-color: rgba(0, 0, 0, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: white;
+  border-radius: 12px;
+  padding: 6px 12px;
+  text-align: left;
+  font-feature-settings: "tnum";
+  max-width: 40em;
+}
+
+/* A card with nothing to show: a muted line. */
+.rp-cockpit-no-data {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* The dropdown's sessions item, under its card item, shown once the cockpit has answered: the card inside has its own
+   surface, so the item only pads it, as the card item does. The menu's hover and focus colours stay off the item
+   (reactive: false, can_focus: false in indicator.js); the card's rows take the pointer themselves. */
+.rp-cockpit-menu-sessions-item {
+  padding: 4px 6px;
+}
