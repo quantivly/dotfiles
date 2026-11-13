@@ -55,6 +55,10 @@ PRIVATE_BUS_RUNNER="$DOTFILES/gnome-shell/tests/run-sampler-program.js"
 # The bus rows take about 15 s; the cap ends a hang, and KILL follows TERM for whatever outlives it.
 PRIVATE_BUS_TIMEOUT_SECONDS=300
 PRIVATE_BUS_KILL_AFTER_SECONDS=10
+# The exit code libtest gives when a test failed (a cargo test run with a failing test exits 101).
+LIBTEST_FAILED_EXIT_CODE=101
+# How many constant names the program prints and the gjs comparison tallies.
+EXPECTED_CONSTANT_NAME_COUNT=26
 TALLY_PATTERN='^JS-TALLY pass=([0-9]+) fail=([0-9]+)$'
 
 PASS=0; FAIL=0
@@ -187,8 +191,8 @@ while IFS= read -r comparison_line; do
     "CONSTANT-ROW fail "*) bad "constant ${comparison_line#CONSTANT-ROW fail }" ;;
   esac
 done <<<"$COMPARISON_OUTPUT"
-check "the comparison printed its tally of 26 names and exited 0" \
-  "$(printf '%s\n' "$COMPARISON_OUTPUT" | rg -c -x 'CONSTANT-TALLY names=26'):$COMPARISON_EXIT" "1:0"
+check "the comparison printed its tally of $EXPECTED_CONSTANT_NAME_COUNT names and exited 0" \
+  "$(printf '%s\n' "$COMPARISON_OUTPUT" | rg -c -x "CONSTANT-TALLY names=$EXPECTED_CONSTANT_NAME_COUNT"):$COMPARISON_EXIT" "1:0"
 
 # A stand-in program that prints the real program's constants after an `sed` edit, to prove the comparison can fail.
 make_edited_program() {
@@ -337,7 +341,7 @@ BUS_LINK_GUARD_EXIT=$?
 BUS_LINK_GUARD_RESULT_PATTERN="^test result: FAILED\\. 0 passed; $BUS_LINK_TEST_COUNT failed;"
 check "off the private bus every bus_link test refuses: a failing exit, one refusal each, none passed" \
   "$BUS_LINK_GUARD_EXIT/$(rg -c '^refusing to run: ' <<<"$BUS_LINK_GUARD_OUTPUT")/$(rg -c "$BUS_LINK_GUARD_RESULT_PATTERN" <<<"$BUS_LINK_GUARD_OUTPUT")" \
-  "101/$BUS_LINK_TEST_COUNT/1"
+  "$LIBTEST_FAILED_EXIT_CODE/$BUS_LINK_TEST_COUNT/1"
 # On the private bus each test runs in a process and on a bus of its own: a link's connection lives as long as its
 # receiving thread, so in one process a link one test leaves behind could make another fail for its reason and not
 # its own.
@@ -367,8 +371,8 @@ fi
 
 # 2 cargo unit tests + 1 build + 1 zbus feature row + 6 program flag rows + 26 constants + 1 comparison tally
 # + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks + 8 carried-check fixtures + 2 runner guards
-# + 1 bus_link guard + 8 bus_link tests + 8 rows of the program on a private bus.
-EXPECTED_ROWS=251
+# + 1 bus_link guard + 8 bus_link tests + 11 rows of the program on a private bus.
+EXPECTED_ROWS=254
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

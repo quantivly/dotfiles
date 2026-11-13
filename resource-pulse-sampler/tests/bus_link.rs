@@ -23,7 +23,7 @@
 use std::env;
 use std::fs;
 use std::future::poll_fn;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -61,6 +61,8 @@ const NAME_RELEASED_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a started program may take to own the name, and to exit once its bus is gone.
 const NAME_OWNED_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRAM_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// What the program logs when its bus goes away.
+const SHUTTING_DOWN_LOG_TEXT: &str = "shutting down: the bus connection closed";
 /// How often a condition with a time-out is looked at.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// The methods the tests' own calls name; the link hands any call over, known or not.
@@ -264,7 +266,7 @@ fn describe(event: Option<BusEvent>) -> String {
     match event {
         Some(BusEvent::Call(call)) => format!("Call({})", call.member),
         Some(BusEvent::NameVanished(name)) => format!("NameVanished({name})"),
-        Some(BusEvent::Disconnected) => "Disconnected".to_owned(),
+        Some(BusEvent::Disconnected(_)) => "Disconnected".to_owned(),
         None => "nothing".to_owned(),
     }
 }
@@ -569,6 +571,7 @@ fn program_exits_0_when_its_bus_goes_away() {
     let mut program = ChildGuard(
         Command::new(SAMPLER_PROGRAM_PATH)
             .env(SESSION_BUS_ADDRESS_VARIABLE, &second_bus.address)
+            .stderr(Stdio::piped())
             .spawn()
             .expect("the program starts"),
     );
@@ -600,4 +603,17 @@ fn program_exits_0_when_its_bus_goes_away() {
         thread::sleep(POLL_INTERVAL);
     };
     assert_eq!(ending, "exit status: 0");
+    // The program has exited, so its stderr pipe is at its end and reading it cannot block.
+    let mut logged_text = String::new();
+    program
+        .0
+        .stderr
+        .take()
+        .expect("a stderr pipe")
+        .read_to_string(&mut logged_text)
+        .expect("the program's stderr can be read");
+    assert!(
+        logged_text.contains(SHUTTING_DOWN_LOG_TEXT),
+        "the program did not log {SHUTTING_DOWN_LOG_TEXT:?}; stderr was {logged_text:?}"
+    );
 }

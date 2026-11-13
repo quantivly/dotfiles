@@ -67,8 +67,9 @@ pub enum BusEvent {
     Call(IncomingCall),
     /// A unique name the program followed has left the bus. It is followed no more.
     NameVanished(String),
-    /// The connection to the bus is gone, and nothing more will arrive.
-    Disconnected,
+    /// The connection to the bus is gone, and nothing more will arrive. Carries `zbus`'s error as
+    /// text when the stream ended on a read error, and nothing when it simply ended.
+    Disconnected(Option<String>),
 }
 
 /// A method call received from the bus.
@@ -146,8 +147,9 @@ enum IncomingMessage {
     Call(IncomingCall),
     /// The bus daemon says this name has no owner any more.
     NameLeftBus(String),
-    /// The stream of incoming messages has ended: the connection is gone.
-    StreamEnded,
+    /// The stream of incoming messages has ended: the connection is gone. Carries `zbus`'s error
+    /// as text when the stream ended on a read error, and nothing when it simply ended.
+    StreamEnded(Option<String>),
 }
 
 /// The connection, the channel the receiving thread fills, and the names being followed.
@@ -222,11 +224,15 @@ impl BusLink {
                 Ok(incoming_message) => incoming_message,
                 Err(RecvTimeoutError::Timeout) => return Ok(None),
                 // The receiving thread ends only once the stream has: the connection is gone.
-                Err(RecvTimeoutError::Disconnected) => return Ok(Some(BusEvent::Disconnected)),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Ok(Some(BusEvent::Disconnected(None)))
+                }
             };
             match incoming_message {
                 IncomingMessage::Call(call) => return Ok(Some(BusEvent::Call(call))),
-                IncomingMessage::StreamEnded => return Ok(Some(BusEvent::Disconnected)),
+                IncomingMessage::StreamEnded(reason) => {
+                    return Ok(Some(BusEvent::Disconnected(reason)))
+                }
                 IncomingMessage::NameLeftBus(name) => {
                     if self.followed_names.get_mut().contains(&name) {
                         self.stop_following_departed(&name)?;
@@ -364,9 +370,10 @@ fn forward_incoming_messages(
                     None => continue,
                 },
                 // `zbus` ends the stream after its first read error, so an error is its end too.
-                Some(Err(_)) | None => IncomingMessage::StreamEnded,
+                Some(Err(error)) => IncomingMessage::StreamEnded(Some(error.to_string())),
+                None => IncomingMessage::StreamEnded(None),
             };
-            let is_stream_end = matches!(incoming_message, IncomingMessage::StreamEnded);
+            let is_stream_end = matches!(incoming_message, IncomingMessage::StreamEnded(_));
             // A send fails only once the BusLink is gone, and then nobody is left to tell.
             if message_sender.send(incoming_message).is_err() || is_stream_end {
                 return;

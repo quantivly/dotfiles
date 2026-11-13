@@ -38,6 +38,9 @@ const NAME_NOT_OWNED_EXIT_CODE: u8 = 1;
 /// The interval between ticks without the flag: the sampler's own.
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(SAMPLE_INTERVAL_SECONDS);
 
+/// What the program logs, after its prefix, when the bus connection closes.
+const SHUTTING_DOWN_TEXT: &str = "shutting down: the bus connection closed";
+
 /// What the flags ask for.
 enum ProgramMode {
     PrintConstants,
@@ -162,10 +165,19 @@ fn run_service_loop(bus_link: &mut BusLink, tick_interval: Duration) {
             Ok(Some(BusEvent::NameVanished(_))) => {
                 service.vanished_caller_count = service.vanished_caller_count.saturating_add(1);
             }
-            Ok(Some(BusEvent::Disconnected)) => return,
+            Ok(Some(BusEvent::Disconnected(reason))) => {
+                eprintln!("{}", shutting_down_line(reason.as_deref()));
+                return;
+            }
             Err(error) => eprintln!("{LOG_PREFIX} bus: {error}"),
         }
     }
+}
+
+/// The line logged when the bus goes away: the fixed words, then `: <reason>` when `zbus` gave one.
+fn shutting_down_line(reason: Option<&str>) -> String {
+    let reason_suffix = reason.map(|text| format!(": {text}")).unwrap_or_default();
+    format!("{LOG_PREFIX} {SHUTTING_DOWN_TEXT}{reason_suffix}")
 }
 
 /// The first tick time after `now` on the grid of `previous_tick_at` plus whole intervals, so

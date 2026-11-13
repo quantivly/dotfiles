@@ -49,12 +49,12 @@ done
 LIST_FILE="${LIST_FILE:-$CRATE_DIR/tests/carried-rows.txt}"
 EXEMPT_FILE="${EXEMPT_FILE:-$CRATE_DIR/tests/carried-rows-exempt.txt}"
 
+command -v rg >/dev/null || fatal "rg is required"
+command -v awk >/dev/null || fatal "awk is required"
 [[ -r "$LIST_FILE" ]] || fatal "cannot read the list $LIST_FILE"
 [[ -r "$EXEMPT_FILE" ]] || fatal "cannot read the exempt file $EXEMPT_FILE"
 rg -q -v -e '^#' -e '^$' "$LIST_FILE" || fatal "the list $LIST_FILE holds no titles"
 [[ -d "$CRATE_DIR" ]] || fatal "no crate directory at $CRATE_DIR"
-command -v rg >/dev/null || fatal "rg is required"
-command -v awk >/dev/null || fatal "awk is required"
 
 PORTED_LINES_FILE="$(mktemp)" || fatal "mktemp failed"
 trap 'rm -f "$PORTED_LINES_FILE"' EXIT

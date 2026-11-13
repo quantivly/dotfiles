@@ -47,6 +47,10 @@ const REQUEST_NAME_DO_NOT_QUEUE_FLAG = 0x4;
 const REQUEST_NAME_REPLY_EXISTS = 3;
 const INTROSPECTABLE_INTERFACE_NAME = 'org.freedesktop.DBus.Introspectable';
 const INTROSPECT_METHOD = 'Introspect';
+const PEER_INTERFACE_NAME = 'org.freedesktop.DBus.Peer';
+const PING_METHOD = 'Ping';
+/** An object path the program does not serve. */
+const OFF_PROGRAM_OBJECT_PATH = '/';
 const UNKNOWN_METHOD_ERROR_NAME = 'org.freedesktop.DBus.Error.UnknownMethod';
 /** A method the interface does not have. */
 const MISSING_METHOD_NAME = 'NoSuchMethod';
@@ -229,6 +233,59 @@ function callMethod(connection, {destination, objectPath, interfaceName, methodN
                 resolve(reply);
             });
     });
+}
+
+/**
+ * Calls the program's GetState with no interface in the message. `Gio.DBusConnection.call` refuses a null
+ * interface name in gjs, so the message is built and sent by hand.
+ *
+ * @param {Gio.DBusConnection} connection - The caller.
+ * @param {(reply: GLib.Variant) => void} onReply - Runs with the reply's body.
+ * @returns {Promise<GLib.Variant>} The reply's body.
+ */
+function callGetStateWithoutInterface(connection, onReply) {
+    const message = Gio.DBusMessage.new_method_call(
+        RESOURCE_PULSE_BUS_NAME, RESOURCE_PULSE_OBJECT_PATH, null, GET_STATE_METHOD_NAME);
+    return new Promise((resolve, reject) => {
+        connection.send_message_with_reply(message, Gio.DBusSendMessageFlags.NONE, CALL_TIMEOUT_MS, null,
+            (sendingConnection, result) => {
+                let replyMessage;
+                try {
+                    replyMessage = sendingConnection.send_message_with_reply_finish(result);
+                } catch (error) {
+                    reject(error);
+                    return;
+                }
+                try {
+                    // gjs throws the GError when the reply is an error reply.
+                    replyMessage.to_gerror();
+                } catch (error) {
+                    reject(error);
+                    return;
+                }
+                const body = replyMessage.get_body();
+                onReply(body);
+                resolve(body);
+            });
+    });
+}
+
+/**
+ * Says how a call ended, telling an error reply from a time-out.
+ *
+ * @param {Promise<GLib.Variant>} pendingCall - A call made through callMethod.
+ * @returns {Promise<string>} 'answered', 'error reply: <name>' for a reply from the program, or
+ *     'no answer: <message>' for a call that ended locally, as a time-out after CALL_TIMEOUT_MS does.
+ */
+async function describeCallOutcome(pendingCall) {
+    try {
+        await pendingCall;
+        return 'answered';
+    } catch (error) {
+        // A JS error (a call that could not even be made) is not a GLib.Error and has no remote name.
+        const remoteErrorName = error instanceof GLib.Error ? Gio.DBusError.get_remote_error(error) : null;
+        return remoteErrorName === null ? `no answer: ${error.message}` : `error reply: ${remoteErrorName}`;
+    }
 }
 
 /**
@@ -483,6 +540,40 @@ test('program: an unknown method is answered with org.freedesktop.DBus.Error.Unk
             remoteErrorName = Gio.DBusError.get_remote_error(error) ?? `not a remote error: ${error.message}`;
         }
         assertEqual(remoteErrorName, UNKNOWN_METHOD_ERROR_NAME);
+    }));
+
+// Task 12 will make the program answer what GDBus answers on every object, and rows 1 and 2 then
+// change to assert those answers; what they pin for good is that the call is answered at all.
+test('program: Introspect on the root path is answered, not left to time out', () =>
+    withServingProgram([], async ({openClient}) => {
+        const outcome = await describeCallOutcome(callMethod(openClient(), {
+            destination: RESOURCE_PULSE_BUS_NAME,
+            objectPath: OFF_PROGRAM_OBJECT_PATH,
+            interfaceName: INTROSPECTABLE_INTERFACE_NAME,
+            methodName: INTROSPECT_METHOD,
+        }));
+        assertEqual(outcome, `error reply: ${UNKNOWN_METHOD_ERROR_NAME}`);
+    }));
+
+test('program: Peer.Ping on the program\'s own path is answered, not left to time out', () =>
+    withServingProgram([], async ({openClient}) => {
+        const outcome = await describeCallOutcome(callMethod(openClient(), {
+            destination: RESOURCE_PULSE_BUS_NAME,
+            objectPath: RESOURCE_PULSE_OBJECT_PATH,
+            interfaceName: PEER_INTERFACE_NAME,
+            methodName: PING_METHOD,
+        }));
+        assertEqual(outcome, `error reply: ${UNKNOWN_METHOD_ERROR_NAME}`);
+    }));
+
+test('program: GetState with no interface returns the state', () =>
+    withServingProgram([], async ({openClient}) => {
+        let state = null;
+        const outcome = await describeCallOutcome(callGetStateWithoutInterface(openClient(), reply => {
+            state = parseStringReply(reply);
+        }));
+        assertEqual({outcome, hasSequence: Number.isInteger(state?.sequence)},
+            {outcome: 'answered', hasSequence: true});
     }));
 
 test('program: Introspect returns the interface with its three methods and its signal', () =>
