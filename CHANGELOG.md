@@ -21,9 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     With no flag the program serves a counter in place of the sampler (`--tick-interval-ms` sets its tick).
     The table runs it on a private bus of its own (`gnome-shell/tests/run-sampler-program.js`), with rows for
     the reply order, the start-up order, a second copy, an unknown method, `Introspect`, the name flags and a
-    caller that leaves, and two Rust tests on a private bus pin the start-up order deterministically
-    (`tests/bus_link.rs`). The private-bus guard moved to `gnome-shell/tests/privateBus.js`, which registers no
-    rows; `service-dbus.test.js` re-exports it.
+    caller that leaves. Rust tests on a private bus (`tests/bus_link.rs`) pin deterministically the start-up
+    order, the name flags (no replacing an owner, no queueing), no reply to a call that wants none, following a
+    caller that already left and unfollowing one, and exit 0 when the bus goes away; a row fails if `zbus` is
+    built with its object server (`service`). The private-bus guard moved to `gnome-shell/tests/privateBus.js`,
+    which registers no rows; `service-dbus.test.js` re-exports it.
 - **Resource Pulse draws the desktop cockpit: a grid of four cards on the cockpit monitor, the sessions
   card in the dropdown, and a click that takes you to a Claude Code session.** Built from
   `docs/superpowers/plans/2026-11-10-desktop-cockpit-drawing-side.md` (design:

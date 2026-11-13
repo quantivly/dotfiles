@@ -517,8 +517,11 @@ test('program: Introspect returns the interface with its three methods and its s
         });
     }));
 
-test('program: the name was asked for with DO_NOT_QUEUE only', () =>
-    withServingProgram([], async ({ownerName, openClient}) => {
+// The end-to-end twin of the two flag tests in resource-pulse-sampler/tests/bus_link.rs. Those pin that the program
+// neither takes the name from an owner that allows replacement nor queues behind an owner; this row pins that it does
+// not allow replacement itself. Together they hold "do not queue only".
+test('program: it does not allow replacement: a request with REPLACE_EXISTING gets "exists" and the name stays its own',
+    () => withServingProgram([], async ({ownerName, openClient}) => {
         const helperConnection = openClient();
         // With REPLACE_EXISTING the helper takes the name from any owner that asked with ALLOW_REPLACEMENT.
         const reply = await callMethod(helperConnection, {

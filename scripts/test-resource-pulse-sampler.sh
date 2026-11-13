@@ -17,9 +17,11 @@
 #     `dbus-run-session`), holding the reply order, the start-up order, the name
 #     flags and the answer to every call, and rows proving that runner refuses any
 #     other bus;
-#   - the bus link's start-up order, deterministically: the #[ignore]d tests of
-#     resource-pulse-sampler/tests/bus_link.rs, run with --ignored on the private
-#     bus (one row per test, as cargo's others), and a row proving they refuse off it.
+#   - the bus link's rules, deterministically: the #[ignore]d tests of
+#     resource-pulse-sampler/tests/bus_link.rs, each run with --ignored in a process
+#     and on a private bus of its own (one row per test, as cargo's others), and a
+#     row proving they refuse off it;
+#   - a row that fails if zbus is built with its object server (`service`).
 # Nothing here touches the live session bus. Every run of the program outside
 # `dbus-run-session` gets BUS_BARRIER (a session bus address nobody listens on,
 # in this run's directory, and a runtime directory of its own), so a program that
@@ -124,7 +126,8 @@ count_cargo_test_rows() {
 }
 
 printf 'cargo test: one row per test\n'
-CARGO_TEST_OUTPUT="$(cargo test --locked --manifest-path "$MANIFEST_PATH" 2>&1)"
+# Behind the barrier: a test that reached for a bus here, outside the #[ignore]d private-bus tests below, finds none.
+CARGO_TEST_OUTPUT="$(off_bus cargo test --locked --manifest-path "$MANIFEST_PATH" 2>&1)"
 count_cargo_test_rows "cargo test" "$CARGO_TEST_OUTPUT" "$?"
 
 printf '\nthe program\n'
@@ -134,6 +137,20 @@ else
   tail -15 "$WORK_DIR/build.log"
   bad "cargo build --locked failed"
 fi
+# zbus's object server answers calls on a task of its own, which would break the rule that one thread sends every
+# message; it exists only with zbus's `service` feature, and with that off `#[interface]` and `serve_at` do not even
+# compile. The features are read from cargo's own resolution of the graph, not from Cargo.toml's text, and the
+# resolution must name `default-rt` (which the crate asks for), so a tree that could not be read is a failure.
+ZBUS_FEATURE_TREE="$(off_bus cargo tree --locked --manifest-path "$MANIFEST_PATH" -e features -i zbus 2>&1)"
+ZBUS_FEATURE_TREE_EXIT=$?
+ZBUS_ENABLED_FEATURES=" $(printf '%s\n' "$ZBUS_FEATURE_TREE" | rg -o 'zbus feature "[^"]+"' | sed 's/^zbus feature "//; s/"$//' \
+  | sort -u | tr '\n' ' ')"
+zbus_resolution_verdict=unresolved
+[[ "$ZBUS_ENABLED_FEATURES" == *" default-rt "* ]] && zbus_resolution_verdict=resolved
+zbus_service_verdict=no-service
+[[ "$ZBUS_ENABLED_FEATURES" == *" service "* ]] && zbus_service_verdict=service
+check "zbus is built without its object server: cargo tree resolves its features, and \"service\" is not one" \
+  "$ZBUS_FEATURE_TREE_EXIT/$zbus_resolution_verdict/$zbus_service_verdict" "0/resolved/no-service"
 PROGRAM_PATH="$CARGO_TARGET_DIR/debug/resource-pulse-sampler"
 [[ -x "$PROGRAM_PATH" ]] || fatal "no program at $PROGRAM_PATH"
 off_bus "$PROGRAM_PATH" --print-constants >/dev/null
@@ -155,10 +172,11 @@ off_bus "$PROGRAM_PATH" >/dev/null 2>"$WORK_DIR/no-bus.err"
 check "no flag and no bus to reach: exit 1, with one line on stderr" \
   "$?:$(wc -l <"$WORK_DIR/no-bus.err" | tr -d ' ')" "1:1"
 
-# print_constant_rows <program> runs the gjs comparison against <program> and turns each CONSTANT-ROW line into a row.
-# It sets COMPARISON_EXIT and COMPARISON_OUTPUT; a run that printed no tally is a failed row.
+# run_constants_comparison <program> runs the gjs comparison against <program>, which it runs with --print-constants,
+# and sets COMPARISON_EXIT and COMPARISON_OUTPUT; a run that printed no tally is a failed row. Behind the barrier: a
+# program whose --print-constants fell through to serving would find no bus, and exit 1 at once.
 run_constants_comparison() {
-  COMPARISON_OUTPUT="$(gjs -m "$CONSTANTS_COMPARISON" "$1" 2>&1)"
+  COMPARISON_OUTPUT="$(off_bus gjs -m "$CONSTANTS_COMPARISON" "$1" 2>&1)"
   COMPARISON_EXIT=$?
 }
 printf '\nthe constants, one row per name, against lib/constants.js and lib/protocol.js\n'
@@ -278,6 +296,12 @@ cat >"$PRIVATE_BUS_CONFIG" <<BUS_CONFIG || fatal "cannot write $PRIVATE_BUS_CONF
     <allow send_destination="*"/>
     <allow receive_sender="*"/>
     <allow own="*"/>
+    <!-- A stock bus drops a reply nobody asked for (dbus-daemon(1), requested_reply), so a reply to a call flagged
+         "no reply expected" could not be seen there; this one passes it, for bus_link.rs's no-reply test. -->
+    <allow send_type="method_return" send_requested_reply="false"/>
+    <allow send_type="error" send_requested_reply="false"/>
+    <allow receive_type="method_return" receive_requested_reply="false"/>
+    <allow receive_type="error" receive_requested_reply="false"/>
   </policy>
 </busconfig>
 BUS_CONFIG
@@ -299,21 +323,24 @@ RUNNER_GUARD_OUTPUT="$(on_private_bus gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
 check "the runner refuses to start with no program to run: exit 2, no row run" \
   "$?/$(rg -c -F 'no executable sampler program' <<<"$RUNNER_GUARD_OUTPUT")/$(rg -c '^JS-TALLY' <<<"$RUNNER_GUARD_OUTPUT")" \
   "2/1/"
-# The bus link's start-up order, deterministically (resource-pulse-sampler/tests/bus_link.rs). Its tests are
-# #[ignore]d, so the cargo test step above lists them as ignored and runs nothing on any bus; here they run with
-# --ignored. Off the private bus each must refuse before it connects: under BUS_BARRIER, whose address is outside the
-# private bus directory, both fail with the guard's own message.
+# The bus link's rules, deterministically (resource-pulse-sampler/tests/bus_link.rs). Its tests are #[ignore]d, so the
+# cargo test step above lists them as ignored and runs nothing on any bus; here they run with --ignored. They are taken
+# from the binary's own list, so a test added to the file cannot be left out.
 BUS_LINK_TEST_COMMAND=(cargo test --locked --manifest-path "$MANIFEST_PATH" --test bus_link -- --ignored)
+mapfile -t BUS_LINK_TEST_NAMES < <(off_bus "${BUS_LINK_TEST_COMMAND[@]}" --list 2>/dev/null | sed -n 's/: test$//p')
+BUS_LINK_TEST_COUNT=${#BUS_LINK_TEST_NAMES[@]}
+(( BUS_LINK_TEST_COUNT > 0 )) || bad "cargo test --test bus_link listed no tests: they did not run"
+# Off the private bus every one must refuse before it connects: under BUS_BARRIER, whose address is outside the
+# private bus directory, each fails with the guard's own message, and none passes.
 BUS_LINK_GUARD_OUTPUT="$(off_bus RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" "${BUS_LINK_TEST_COMMAND[@]}" 2>&1)"
 BUS_LINK_GUARD_EXIT=$?
-check "off the private bus both bus_link tests refuse: a failing exit, two refusals, none passed" \
-  "$BUS_LINK_GUARD_EXIT/$(rg -c '^refusing to run: ' <<<"$BUS_LINK_GUARD_OUTPUT")/$(rg -c '^test result: FAILED\. 0 passed; 2 failed;' <<<"$BUS_LINK_GUARD_OUTPUT")" \
-  "101/2/1"
+BUS_LINK_GUARD_RESULT_PATTERN="^test result: FAILED\\. 0 passed; $BUS_LINK_TEST_COUNT failed;"
+check "off the private bus every bus_link test refuses: a failing exit, one refusal each, none passed" \
+  "$BUS_LINK_GUARD_EXIT/$(rg -c '^refusing to run: ' <<<"$BUS_LINK_GUARD_OUTPUT")/$(rg -c "$BUS_LINK_GUARD_RESULT_PATTERN" <<<"$BUS_LINK_GUARD_OUTPUT")" \
+  "101/$BUS_LINK_TEST_COUNT/1"
 # On the private bus each test runs in a process and on a bus of its own: a link's connection lives as long as its
 # receiving thread, so in one process a link one test leaves behind could make another fail for its reason and not
-# its own. The tests are taken from the binary's own list, so a test added to the file cannot be left out.
-mapfile -t BUS_LINK_TEST_NAMES < <(off_bus "${BUS_LINK_TEST_COMMAND[@]}" --list 2>/dev/null | sed -n 's/: test$//p')
-(( ${#BUS_LINK_TEST_NAMES[@]} > 0 )) || bad "cargo test --test bus_link listed no tests: they did not run"
+# its own.
 for bus_link_test_name in "${BUS_LINK_TEST_NAMES[@]}"; do
   BUS_LINK_OUTPUT="$(on_private_bus "${BUS_LINK_TEST_COMMAND[@]}" --exact "$bus_link_test_name" 2>&1)"
   count_cargo_test_rows "cargo test --test bus_link $bus_link_test_name" "$BUS_LINK_OUTPUT" "$?"
@@ -338,7 +365,10 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
   bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
 fi
 
-EXPECTED_ROWS=244
+# 2 cargo unit tests + 1 build + 1 zbus feature row + 6 program flag rows + 26 constants + 1 comparison tally
+# + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks + 8 carried-check fixtures + 2 runner guards
+# + 1 bus_link guard + 8 bus_link tests + 8 rows of the program on a private bus.
+EXPECTED_ROWS=251
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

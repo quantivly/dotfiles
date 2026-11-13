@@ -1,7 +1,7 @@
 //! The program's link to the session bus, on `zbus`'s message-level API.
 //!
 //! Four rules shape it; each has a row in `gnome-shell/tests/sampler-program-dbus.test.js`, and
-//! the first has two deterministic tests besides, in `tests/bus_link.rs`.
+//! `tests/bus_link.rs` pins the first, the second and the fourth's exception deterministically.
 //!
 //! - **It listens before it is named.** `zbus` discards a message that arrives while no stream is
 //!   listening, and a client calls `GetState` the instant the name has an owner. So
