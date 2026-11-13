@@ -693,14 +693,20 @@ function processInfoWithClaude(pid, {argv, name}, cwd) {
 }
 
 /**
- * @param {number} pid - A pid.
+ * @param {number} pid - A pid; also its process group, as a job's leader has. Its session is its shell's, pid - 1
+ *     (processInfoWithClaude's shell_pid), so the two fields differ as they do live.
  * @param {number} startTicks - Its start time, in clock ticks after boot.
+ * @param {object} [terminal] - Its terminal.
+ * @param {number} [terminal.foregroundGroupId] - The terminal's foreground process group (tpgid); the process's own
+ *     group (it is in the foreground) unless given.
  * @returns {string} A /proc/<pid>/stat line whose command holds spaces and a parenthesis, as a renamed process can.
  */
-function procPidStatText(pid, startTicks) {
-    // Fields 3 to 21, then starttime (field 22), then the rest.
-    const fieldsBeforeStartTime = ['S', '1', String(pid), String(pid), '0', '-1', '4194560', '100', '0', '0', '0',
-        '50', '10', '0', '0', '20', '0', '12', '0'];
+function procPidStatText(pid, startTicks, {foregroundGroupId = pid} = {}) {
+    const shellSessionId = pid - 1;
+    // Fields 3 to 21 (state, ppid, pgrp, session, tty_nr, tpgid, ...), then starttime (field 22), then the rest.
+    const fieldsBeforeStartTime = ['S', String(shellSessionId), String(pid), String(shellSessionId), '34816',
+        String(foregroundGroupId),
+        '4194560', '100', '0', '0', '0', '50', '10', '0', '0', '20', '0', '12', '0'];
     return `${pid} (claude (x) y) ${fieldsBeforeStartTime.join(' ')} ${startTicks} 1000000 2000 18446744073709551615\n`;
 }
 
@@ -825,7 +831,9 @@ function sessionsSourceOver({herdrClient, fileSystem, nowUsec}, extra = {}) {
     return new sessionsSource.SessionsSource({
         herdrClient, configHome: FAKE_CONFIG_HOME, stateHome: FAKE_STATE_HOME, homeDirectory: FAKE_HOME,
         readFile: path => fileSystem.readFile(path), statFile: path => fileSystem.statFile(path),
-        listDirectory: path => fileSystem.listDirectory(path), nowUsec: () => nowUsec, ...extra,
+        listDirectory: path => fileSystem.listDirectory(path), nowUsec: () => nowUsec,
+        // No real full collection in the rows; the collection rows pass their own.
+        collectGarbage: () => {}, ...extra,
     });
 }
 
@@ -988,6 +996,220 @@ test('SessionsSource: a malformed registry file is skipped with one log line, an
     assertEqual(loggedLines.length, 1, loggedLines.join(' | '));
     assertEqual(loggedLines[0].startsWith(`cockpit: sessions: skipped registry file ${REGISTRY_DIRECTORY}/broken.json`),
         true, loggedLines[0]);
+});
+
+/** Start ticks of the processes the remembered-process rows plant: any value; only whether it changes matters. */
+const FIRST_START_TICKS = 4000;
+const LATER_START_TICKS = 9000;
+
+/**
+ * The remembered-process rows' fixture: one claude agent per pane id, each pane's claude process with a live
+ * /proc/<pid>/stat and status. The file table and the process_info table are returned so a row can change them
+ * between samples, as a process exiting or starting would.
+ *
+ * @param {string[]} paneIds - The panes, each with a claude agent; pane i's claude pid is 1001 + i.
+ * @returns {object} `{herdrClient, fileSystem, files, processInfoByPaneId, snapshot, clock}`; clock.nowUsec is read
+ *     by the source at each sample.
+ */
+function rememberedProcessFixture(paneIds) {
+    const snapshot = {
+        agents: paneIds.map(paneId => claudeAgent({paneId, workspaceId: 'w1', sessionId: `sess-${paneId}`,
+            status: 'working', cwd: `/srv/${paneId}`})),
+        workspaces: [],
+    };
+    const processInfoByPaneId = {};
+    const files = {[PROC_STAT_PATH]: `btime ${FAKE_BOOT_TIME_SECONDS}\n`};
+    paneIds.forEach((paneId, index) => {
+        const pid = 1001 + index;
+        processInfoByPaneId[paneId] = processInfoWithClaude(pid, {argv: ['claude'], name: 'claude'}, `/srv/${paneId}`);
+        files[`/proc/${pid}/stat`] = procPidStatText(pid, FIRST_START_TICKS);
+        files[`/proc/${pid}/status`] = procPidStatusText(1024, 0);
+    });
+    const herdrClient = fakeHerdrClient({snapshot, processInfoByPaneId});
+    const fileSystem = fakeFileSystem({files});
+    const clock = {nowUsec: FAKE_START_USEC};
+    return {herdrClient, fileSystem, files, processInfoByPaneId, snapshot, clock};
+}
+
+/**
+ * @param {object} fixture - rememberedProcessFixture's result.
+ * @returns {object} A SessionsSource over it, reading the fixture's clock at each call.
+ */
+function rememberingSourceOver(fixture) {
+    return sessionsSourceOver(fixture, {nowUsec: () => fixture.clock.nowUsec});
+}
+
+/**
+ * @param {object} herdrClient - A fakeHerdrClient.
+ * @param {number} fromIndex - The first request to name.
+ * @returns {string[]} The panes whose process_info was asked from that request on, in order.
+ */
+function panesAskedSince(herdrClient, fromIndex) {
+    return herdrClient.requests.slice(fromIndex)
+        .filter(request => request.method === PROCESS_INFO_METHOD)
+        .map(request => request.params.pane_id);
+}
+
+test('SessionsSource: a pane\'s claude process is asked of herdr once and remembered while that process lives',
+    async () => {
+    const fixture = rememberedProcessFixture(['p1', 'p2']);
+    const source = rememberingSourceOver(fixture);
+    await source.sample();
+    const requestsAfterFirstSample = fixture.herdrClient.requests.length;
+    fixture.files['/proc/1002/status'] = procPidStatusText(2048, 0);
+    const sessions = await source.sample();
+    assertEqual(fixture.herdrClient.requests.slice(requestsAfterFirstSample).map(request => request.method),
+        [SNAPSHOT_METHOD], 'the second sample asks herdr for the snapshot only');
+    const memoryBytesOfPane = paneId => sessions.rows.find(row => row.paneId === paneId)?.memoryBytes;
+    assertEqual([memoryBytesOfPane('p1'), memoryBytesOfPane('p2')], [1024 * 1024, 2048 * 1024],
+        'the remembered pid still names each row\'s memory, read anew');
+    // No transcript exists, so the idle age is the process's: now (1_800_000_000 s) less boot (1_799_990_000 s) and
+    // the start time (FIRST_START_TICKS = 4000 ticks = 40 s).
+    assertEqual(sessions.rows.map(row => [row.idleSeconds, row.idleFromProcessAge]), [[9960, true], [9960, true]],
+        'the remembered start time still gives the idle age');
+});
+
+test('SessionsSource: herdr is asked again for a pane whose remembered process left its terminal\'s foreground',
+    async () => {
+    const fixture = rememberedProcessFixture(['p1', 'p2']);
+    const source = rememberingSourceOver(fixture);
+    await source.sample();
+    const requestsAfterFirstSample = fixture.herdrClient.requests.length;
+    // p1's claude was suspended to its shell (pid 999's group holds the terminal); it lives, with its start time.
+    fixture.files['/proc/1001/stat'] = procPidStatText(1001, FIRST_START_TICKS, {foregroundGroupId: 999});
+    await source.sample();
+    assertEqual(panesAskedSince(fixture.herdrClient, requestsAfterFirstSample), ['p1']);
+});
+
+test('SessionsSource: herdr is asked again for a pane whose remembered process exited or whose pid now names another',
+    async () => {
+    const fixture = rememberedProcessFixture(['p1', 'p2', 'p3']);
+    const source = rememberingSourceOver(fixture);
+    await source.sample();
+    const requestsAfterFirstSample = fixture.herdrClient.requests.length;
+    // p1's claude exited and a new one runs as pid 2001; p2's pid was reused by a later process; p3 is unchanged.
+    delete fixture.files['/proc/1001/stat'];
+    delete fixture.files['/proc/1001/status'];
+    fixture.processInfoByPaneId.p1 = processInfoWithClaude(2001, {argv: ['claude'], name: 'claude'}, '/srv/p1');
+    fixture.files['/proc/2001/stat'] = procPidStatText(2001, LATER_START_TICKS);
+    fixture.files['/proc/2001/status'] = procPidStatusText(4096, 0);
+    fixture.files['/proc/1002/stat'] = procPidStatText(1002, LATER_START_TICKS);
+    const sessions = await source.sample();
+    assertEqual(panesAskedSince(fixture.herdrClient, requestsAfterFirstSample), ['p1', 'p2']);
+    assertEqual(sessions.rows.find(row => row.paneId === 'p1').memoryBytes, 4096 * 1024,
+        'the new answer\'s pid names the row');
+});
+
+test('SessionsSource: a process whose start time cannot be read is not remembered, so herdr is asked again',
+    async () => {
+    const fixture = rememberedProcessFixture(['p1']);
+    // The claude process exited between herdr's answer and the read of its stat line.
+    delete fixture.files['/proc/1001/stat'];
+    const source = rememberingSourceOver(fixture);
+    await source.sample();
+    const requestsAfterFirstSample = fixture.herdrClient.requests.length;
+    await source.sample();
+    assertEqual(panesAskedSince(fixture.herdrClient, requestsAfterFirstSample), ['p1']);
+});
+
+test('SessionsSource: a pane with only its shell in the foreground is asked again at each sample, which still resolves',
+    async () => {
+    const fixture = rememberedProcessFixture(['p1', 'p2']);
+    // p1's claude exited; its shell holds the terminal.
+    fixture.processInfoByPaneId.p1 = {pane_id: 'p1', shell_pid: 900, foreground_process_group_id: 900,
+        foreground_processes: [{pid: 900, name: 'zsh', argv: ['-zsh'], cmdline: '-zsh', cwd: '/srv/p1'}]};
+    const source = rememberingSourceOver(fixture);
+    await source.sample();
+    const requestsAfterFirstSample = fixture.herdrClient.requests.length;
+    const sessions = await source.sample();
+    assertEqual(panesAskedSince(fixture.herdrClient, requestsAfterFirstSample), ['p1']);
+    assertEqual(sessions.rows.find(row => row.paneId === 'p1')?.memoryBytes, null);
+});
+
+test('SessionsSource: a remembered answer is asked again once it is PROCESS_INFO_MAX_AGE_SECONDS old', async () => {
+    const fixture = rememberedProcessFixture(['p1']);
+    const source = rememberingSourceOver(fixture);
+    const maxAgeUsec = sessionsSource.PROCESS_INFO_MAX_AGE_SECONDS * MICROSECONDS_PER_SECOND;
+    await source.sample();
+    const askedAtUsec = fixture.clock.nowUsec;
+    fixture.clock.nowUsec = askedAtUsec + maxAgeUsec - MICROSECONDS_PER_SECOND;
+    const requestsBeforeYoungSample = fixture.herdrClient.requests.length;
+    await source.sample();
+    assertEqual(panesAskedSince(fixture.herdrClient, requestsBeforeYoungSample), [], 'a second short of the age');
+    fixture.clock.nowUsec = askedAtUsec + maxAgeUsec;
+    const requestsBeforeOldSample = fixture.herdrClient.requests.length;
+    await source.sample();
+    assertEqual(panesAskedSince(fixture.herdrClient, requestsBeforeOldSample), ['p1'], 'at the age');
+});
+
+test('SessionsSource: a remembered answer is asked again when the wall clock went back', async () => {
+    const fixture = rememberedProcessFixture(['p1']);
+    const source = rememberingSourceOver(fixture);
+    await source.sample();
+    fixture.clock.nowUsec -= MICROSECONDS_PER_SECOND;
+    const requestsBeforeSample = fixture.herdrClient.requests.length;
+    await source.sample();
+    assertEqual(panesAskedSince(fixture.herdrClient, requestsBeforeSample), ['p1']);
+});
+
+test('SessionsSource: a pane gone from the snapshot is forgotten, so its return is asked of herdr again', async () => {
+    const fixture = rememberedProcessFixture(['p1', 'p2']);
+    const source = rememberingSourceOver(fixture);
+    const bothAgents = fixture.snapshot.agents;
+    await source.sample();
+    fixture.snapshot.agents = bothAgents.filter(agent => agent.pane_id !== 'p1');
+    await source.sample();
+    fixture.snapshot.agents = bothAgents;
+    const requestsBeforeReturn = fixture.herdrClient.requests.length;
+    await source.sample();
+    assertEqual(panesAskedSince(fixture.herdrClient, requestsBeforeReturn), ['p1']);
+});
+
+test('SessionsSource: garbage is collected after a sample\'s herdr requests, at most once per ' +
+    'GARBAGE_COLLECTION_INTERVAL_SECONDS', async () => {
+    const fixture = rememberedProcessFixture(['p1', 'p2']);
+    const monotonic = {usec: 5 * MICROSECONDS_PER_SECOND};
+    const intervalUsec = sessionsSource.GARBAGE_COLLECTION_INTERVAL_SECONDS * MICROSECONDS_PER_SECOND;
+    const requestCountAtEachCollection = [];
+    const source = sessionsSourceOver(fixture, {
+        nowUsec: () => fixture.clock.nowUsec, monotonicUsec: () => monotonic.usec,
+        collectGarbage: () => requestCountAtEachCollection.push(fixture.herdrClient.requests.length),
+    });
+    // The first sample asks the snapshot and both panes (3 requests), each later one the snapshot only.
+    await source.sample();
+    monotonic.usec += intervalUsec - MICROSECONDS_PER_SECOND;
+    await source.sample();
+    monotonic.usec += MICROSECONDS_PER_SECOND;
+    await source.sample();
+    assertEqual(requestCountAtEachCollection, [3, 5],
+        'after the first sample, not a second short of the interval, then at the interval');
+});
+
+test('SessionsSource: a collection that throws is logged, and the sample still resolves with its rows', async () => {
+    const fixture = rememberedProcessFixture(['p1']);
+    const loggedLines = [];
+    const source = sessionsSourceOver(fixture, {
+        nowUsec: () => fixture.clock.nowUsec, monotonicUsec: () => 0, logWriter: line => loggedLines.push(line),
+        collectGarbage: () => {
+            throw new Error('collector broke');
+        },
+    });
+    const sessions = await source.sample();
+    assertEqual(sessions.rows.map(row => row.paneId), ['p1']);
+    assertEqual(loggedLines.length, 1, loggedLines.join(' | '));
+    assertEqual(loggedLines[0].startsWith('cockpit: sessions: garbage collection failed: '), true, loggedLines[0]);
+});
+
+test('SessionsSource: a sample that rejects still collects the garbage when a collection is due', async () => {
+    const collections = [];
+    const herdrClient = fakeHerdrClient({snapshotError: herdrError('timeout', HERDR_TIMEOUT_MESSAGE)});
+    const source = sessionsSourceOver({herdrClient, fileSystem: fakeFileSystem({}), nowUsec: FAKE_START_USEC},
+        {monotonicUsec: () => 0, collectGarbage: () => collections.push('collected')});
+    let rejection = null;
+    await source.sample().catch(error => {
+        rejection = error;
+    });
+    assertEqual([rejection?.code, collections], ['timeout', ['collected']]);
 });
 
 /** A fake NetworkManager proxy: a name owner, cached properties, and the g-properties-changed signal. */

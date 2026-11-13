@@ -271,6 +271,18 @@ publishes the `configError` `missing`. The sources are served either way.
 - A source that fails keeps its last object, stamp included, and logs one line; the others go on.
 - Each request to herdr gives up after 2 s. With no herdr socket (`~/.config/herdr/herdr.sock`), or one that
   refuses connections, `sessions` has no rows and `herdrRunning` is false; that is not an error.
+- `sessions` asks herdr for a pane's Claude process (`pane.process_info`) once and remembers it while that
+  process lives, for at most 10 minutes. It asks again at once in four cases, each read from the process's
+  `/proc/<pid>/stat`:
+  - a new pane;
+  - a process that exited;
+  - a pid that now names another process (its start time differs);
+  - a process that left its terminal's foreground group (its `pgrp` is no longer the terminal's `tpgid`).
+
+  Each sample still asks for the snapshot and reads every session's memory anew.
+- After a `sessions` sample the service runs a full garbage collection, at most once in 50 s: after every
+  sample at the 60 s pace, and every fifth at the 10 s pace. herdr's replies are native memory the engine
+  does not count, so without it they pile up between collections.
 
 **The secrets rule.** The service hands the drawing side only fields it chose:
 
@@ -767,7 +779,7 @@ leader; never a shorter history. Before the service existed the sampling ran ins
 
 ### Tests
 
-`scripts/test-resource-pulse.sh` (1215 checks) runs the `gjs -m` unit tests of `lib/`, of the
+`scripts/test-resource-pulse.sh` (1226 checks) runs the `gjs -m` unit tests of `lib/`, of the
 service's sampler (synchronous reads against fixtures), of `PulseClient` (its JSON handling and
 version-skew rows), of `CockpitClient` (the skipped-unit rule and pull-on-suspicion, on fakes) and of the
 cockpit's herdr socket client (against a fake herdr speaking herdr's

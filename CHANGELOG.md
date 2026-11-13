@@ -686,6 +686,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The cockpit service meets its CPU budget and stops piling up memory
+  (`service/sources/sessions.js`).** Measured on the live desktop on 2026-11-13 with 25 herdr sessions,
+  it read 0.086 % of one core unwatched, against a budget of 0.05. Its anonymous memory grew from 45 to
+  65 MB in five hours, until the unit's `MemoryHigh=64M` pushed the rest to swap. Read-only probes of the
+  real modules against the live herdr put the cost in the sessions source:
+  - **CPU:** one `pane.process_info` request per Claude pane, every sample (about 2.2 ms of CPU each,
+    85 % of a 70–78 ms sample).
+  - **Memory:** herdr's replies arrive as `GLib.Bytes`, native memory that SpiderMonkey does not count
+    towards a collection.
+
+  The source now:
+  - **Remembers each pane's Claude process.** It asks herdr again only in these cases, each checked against
+    the process's `/proc/<pid>/stat`:
+    - a new pane;
+    - a process that exited;
+    - a pid that now names a later process (its start time differs);
+    - a process that left its terminal's foreground group;
+    - an answer 10 minutes old.
+  - **Runs a full garbage collection after a sample**, at most once in 50 s, as the sampler does after each
+    app scan. A failed collection is logged, never thrown.
+
+  The same probe of the new code against the live herdr, with its clock advanced by the pace between
+  samples:
+  - **Watched (10 s pace):** 7.4 ms of CPU per sample, 0.074 % of one core (budget 0.1); anonymous memory
+    15–16 MB, flat over 600 samples.
+  - **Unwatched (60 s pace):** 14.3 ms per sample, 0.024 % (budget 0.05); memory 11–14 MB over 300 samples.
+
+  In 300 back-to-back samples, all inside the 10-minute bound, it sent no `process_info` request after the
+  first, for any of the 29 live sessions. Nothing the cards show changes. The new constants stay in the
+  source, not in `lib/constants.js`, so a deploy restarts only the cockpit service, not the sampler.
+  `scripts/test-resource-pulse.sh` goes from 1215 to 1226 rows.
+
 - **The credential reconciler treats the same grant in two writers' shapes as one login
   (`scripts/claude-account-dirs.sh`).** The equal-expiry tie-break compared the whole
   `claudeAiOauth` block, so `subscriptionTypeSource`, which Claude Code writes and `clauth login`
