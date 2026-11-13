@@ -1,6 +1,7 @@
 //! The program's link to the session bus, on `zbus`'s message-level API.
 //!
-//! Four rules shape it; each has a row in `gnome-shell/tests/sampler-program-dbus.test.js`.
+//! Four rules shape it; each has a row in `gnome-shell/tests/sampler-program-dbus.test.js`, and
+//! the first has two deterministic tests besides, in `tests/bus_link.rs`.
 //!
 //! - **It listens before it is named.** `zbus` discards a message that arrives while no stream is
 //!   listening, and a client calls `GetState` the instant the name has an owner. So
@@ -177,6 +178,16 @@ impl BusLink {
             followed_names: RefCell::default(),
             pending_events: RefCell::default(),
         })
+    }
+
+    /// The link's unique name on the bus, which a call can be addressed to before the program
+    /// owns any other. The bus assigns it in its reply to `Hello`, inside `build()`, so a bus
+    /// connection always has one; the empty string would mean a peer-to-peer connection, which a
+    /// `BusLink` never makes.
+    pub fn unique_name(&self) -> &str {
+        self.connection
+            .unique_name()
+            .map_or("", |unique_name| unique_name.as_str())
     }
 
     /// Asks for the name with DO_NOT_QUEUE only.

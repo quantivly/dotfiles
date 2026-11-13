@@ -16,7 +16,10 @@
 #     on a PRIVATE bus of this run (gnome-shell/tests/run-sampler-program.js under
 #     `dbus-run-session`), holding the reply order, the start-up order, the name
 #     flags and the answer to every call, and rows proving that runner refuses any
-#     other bus.
+#     other bus;
+#   - the bus link's start-up order, deterministically: the #[ignore]d tests of
+#     resource-pulse-sampler/tests/bus_link.rs, run with --ignored on the private
+#     bus (one row per test, as cargo's others), and a row proving they refuse off it.
 # Nothing here touches the live session bus. Every run of the program outside
 # `dbus-run-session` gets BUS_BARRIER (a session bus address nobody listens on,
 # in this run's directory, and a runtime directory of its own), so a program that
@@ -89,32 +92,40 @@ BUS_BARRIER=(GSETTINGS_BACKEND=memory "DBUS_SESSION_BUS_ADDRESS=$BARRIER_BUS_ADD
 # off_bus <command...> runs a command behind BUS_BARRIER.
 off_bus() { env "${BUS_BARRIER[@]}" "$@"; }
 
+# count_cargo_test_rows <label> <output> <exit status>: one row per test a cargo test run passed and one failed row
+# per test it failed (the sums of its `test result: ... N passed; M failed;` lines: unit, integration and doc test
+# binaries each print one), a failed row when it printed no such line (it did not run, which is a failure and not
+# zero rows), and one when it exited non-zero with no failed test counted.
+count_cargo_test_rows() {
+  local test_label="$1" test_output="$2" test_exit="$3" passed_count failed_count result_line_count row
+  read -r passed_count failed_count result_line_count < <(
+    printf '%s\n' "$test_output" | awk '
+      /^test result: / {
+        lines++
+        for (i = 1; i <= NF; i++) {
+          if ($i == "passed;") passed += $(i - 1)
+          if ($i == "failed;") failed += $(i - 1)
+        }
+      }
+      END { printf "%d %d %d\n", passed, failed, lines }')
+  if (( result_line_count == 0 )); then
+    printf '%s\n' "$test_output" | tail -15
+    bad "$test_label printed no \`test result:\` line (exit $test_exit): it did not run, which is a failure and not zero rows"
+    return
+  fi
+  for ((row = 0; row < passed_count; row++)); do ok "$test_label $((row + 1)) of $passed_count passed"; done
+  for ((row = 0; row < failed_count; row++)); do bad "$test_label failed ($((row + 1)) of $failed_count)"; done
+  if (( test_exit != 0 && failed_count == 0 )); then
+    printf '%s\n' "$test_output" | tail -15
+    bad "$test_label exited $test_exit with no failed test counted"
+  fi
+  # Each failing test's name, and each panic with the three lines after it (an assert_eq! message takes three).
+  (( failed_count == 0 )) || printf '%s\n' "$test_output" | rg --no-context-separator -A 3 "^(test .* FAILED|thread '[^']*'.* panicked at )"
+}
+
 printf 'cargo test: one row per test\n'
 CARGO_TEST_OUTPUT="$(cargo test --locked --manifest-path "$MANIFEST_PATH" 2>&1)"
-CARGO_TEST_EXIT=$?
-# Sum every `test result: ... N passed; M failed;` line (unit, integration and doc test binaries each print one).
-read -r CARGO_PASSED CARGO_FAILED CARGO_RESULT_LINES < <(
-  printf '%s\n' "$CARGO_TEST_OUTPUT" | awk '
-    /^test result: / {
-      lines++
-      for (i = 1; i <= NF; i++) {
-        if ($i == "passed;") passed += $(i - 1)
-        if ($i == "failed;") failed += $(i - 1)
-      }
-    }
-    END { printf "%d %d %d\n", passed, failed, lines }')
-if (( CARGO_RESULT_LINES == 0 )); then
-  printf '%s\n' "$CARGO_TEST_OUTPUT" | tail -15
-  bad "cargo test printed no \`test result:\` line (exit $CARGO_TEST_EXIT): it did not run, which is a failure and not zero rows"
-else
-  for ((row = 0; row < CARGO_PASSED; row++)); do ok "cargo test $((row + 1)) of $CARGO_PASSED passed"; done
-  for ((row = 0; row < CARGO_FAILED; row++)); do bad "cargo test failed ($((row + 1)) of $CARGO_FAILED)"; done
-  if (( CARGO_TEST_EXIT != 0 && CARGO_FAILED == 0 )); then
-    printf '%s\n' "$CARGO_TEST_OUTPUT" | tail -15
-    bad "cargo test exited $CARGO_TEST_EXIT with no failed test counted"
-  fi
-  (( CARGO_FAILED == 0 )) || printf '%s\n' "$CARGO_TEST_OUTPUT" | rg '^(test .* FAILED|failures:)'
-fi
+count_cargo_test_rows "cargo test" "$CARGO_TEST_OUTPUT" "$?"
 
 printf '\nthe program\n'
 if cargo build --locked --manifest-path "$MANIFEST_PATH" >"$WORK_DIR/build.log" 2>&1; then
@@ -288,6 +299,26 @@ RUNNER_GUARD_OUTPUT="$(on_private_bus gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
 check "the runner refuses to start with no program to run: exit 2, no row run" \
   "$?/$(rg -c -F 'no executable sampler program' <<<"$RUNNER_GUARD_OUTPUT")/$(rg -c '^JS-TALLY' <<<"$RUNNER_GUARD_OUTPUT")" \
   "2/1/"
+# The bus link's start-up order, deterministically (resource-pulse-sampler/tests/bus_link.rs). Its tests are
+# #[ignore]d, so the cargo test step above lists them as ignored and runs nothing on any bus; here they run with
+# --ignored. Off the private bus each must refuse before it connects: under BUS_BARRIER, whose address is outside the
+# private bus directory, both fail with the guard's own message.
+BUS_LINK_TEST_COMMAND=(cargo test --locked --manifest-path "$MANIFEST_PATH" --test bus_link -- --ignored)
+BUS_LINK_GUARD_OUTPUT="$(off_bus RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" "${BUS_LINK_TEST_COMMAND[@]}" 2>&1)"
+BUS_LINK_GUARD_EXIT=$?
+check "off the private bus both bus_link tests refuse: a failing exit, two refusals, none passed" \
+  "$BUS_LINK_GUARD_EXIT/$(rg -c '^refusing to run: ' <<<"$BUS_LINK_GUARD_OUTPUT")/$(rg -c '^test result: FAILED\. 0 passed; 2 failed;' <<<"$BUS_LINK_GUARD_OUTPUT")" \
+  "101/2/1"
+# On the private bus each test runs in a process and on a bus of its own: a link's connection lives as long as its
+# receiving thread, so in one process a link one test leaves behind could make another fail for its reason and not
+# its own. The tests are taken from the binary's own list, so a test added to the file cannot be left out.
+mapfile -t BUS_LINK_TEST_NAMES < <(off_bus "${BUS_LINK_TEST_COMMAND[@]}" --list 2>/dev/null | sed -n 's/: test$//p')
+(( ${#BUS_LINK_TEST_NAMES[@]} > 0 )) || bad "cargo test --test bus_link listed no tests: they did not run"
+for bus_link_test_name in "${BUS_LINK_TEST_NAMES[@]}"; do
+  BUS_LINK_OUTPUT="$(on_private_bus "${BUS_LINK_TEST_COMMAND[@]}" --exact "$bus_link_test_name" 2>&1)"
+  count_cargo_test_rows "cargo test --test bus_link $bus_link_test_name" "$BUS_LINK_OUTPUT" "$?"
+done
+
 PROGRAM_BUS_OUTPUT="$(on_private_bus gjs -m "$PRIVATE_BUS_RUNNER" "$PROGRAM_PATH" 2>&1)"
 PROGRAM_BUS_EXIT=$?
 printf '%s\n' "$PROGRAM_BUS_OUTPUT"
@@ -307,7 +338,7 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
   bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
 fi
 
-EXPECTED_ROWS=241
+EXPECTED_ROWS=244
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then
