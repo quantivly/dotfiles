@@ -1225,8 +1225,9 @@ export class ServiceSampler {
      * @param {string} cgroupRootPath - Absolute path of the cgroup v2 root.
      * @param {string} directoryRelativePath - The cgroup to list, relative to the cgroup root.
      * @param {CgroupReadFailures} failures - Collects the failure.
-     * @returns {string[]|null} Child paths relative to the cgroup root (none for a vanished cgroup); null when the
-     *     listing failed.
+     * @returns {string[]|null} Child paths relative to the cgroup root in JavaScript's default string order (none for
+     *     a vanished cgroup), so a group takes the name of the same first leaf in every scan; null when the listing
+     *     failed.
      */
     _listChildPaths(cgroupRootPath, directoryRelativePath, failures) {
         let childNames;
@@ -1238,7 +1239,10 @@ export class ServiceSampler {
             failures.note(directoryRelativePath, error);
             return null;
         }
-        return childNames.map(childName => joinPath(directoryRelativePath, childName));
+        // Sorted (JavaScript's default string order) because a directory lists in no defined order, and a group takes
+        // the name of its first leaf: unsorted, a group whose leaves resolve to different names could change name
+        // between scans. The compiled sampler lists in this same order.
+        return [...childNames].sort().map(childName => joinPath(directoryRelativePath, childName));
     }
 
     /**

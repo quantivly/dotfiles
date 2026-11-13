@@ -506,6 +506,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Resource Pulse sampler takes each cgroup directory's children in name order,** so a group whose
+  leaves resolve to different names always gets the same one: a group takes the name of its first leaf, and
+  a directory lists in no defined order. Such a group's name can change once, at the deploy. The port of the
+  sampler to Rust lists in this same order. The deploy restarts the sampler once, so its histories start
+  again.
+
 - **Resource Pulse costs gnome-shell a quarter to two thirds of what it did, and no longer forces a full
   garbage collection every 10 seconds.** Stage one of
   `docs/superpowers/specs/2026-11-10-resource-pulse-performance-design.md`, built from
