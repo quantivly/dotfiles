@@ -21,6 +21,7 @@ pub mod cadence;
 pub mod constants;
 pub mod cpu;
 pub mod history;
+pub mod insertion_ordered_map;
 pub mod js_string;
 pub mod memory;
 pub mod parsers;

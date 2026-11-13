@@ -379,7 +379,7 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
 fi
 
 # 171 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
-# string order, 68 of app naming and ranking, 37 of the scan cadence) + 1 build + 1 zbus feature row + 6 program flag rows
+# string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence) + 1 build + 1 zbus feature row + 6 program flag rows
 # + 26 constants + 1 comparison tally + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks
 # + 11 carried-check fixtures + 2 runner guards + 1 bus_link guard + 8 bus_link tests
 # + 11 rows of the program on a private bus.
