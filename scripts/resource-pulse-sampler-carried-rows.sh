@@ -35,8 +35,9 @@ EXEMPT_FILE=""
 # The marker a Rust test carries to say which gjs row it ports: a doc comment at the start of a line.
 # One pattern, read by rg to find the files and by awk to cut off the title.
 PORTED_ROW_MARKER_PATTERN='^[ \t]*/// row: '
-# What the first line after a marker's doc comment must be: the test attribute.
-TEST_ATTRIBUTE_PATTERN='^[ \t]*#\[test\]'
+# What the first line after a marker's doc comment must be: the test attribute. Each bracket is a
+# one-character class, not a backslash escape: what awk makes of `\[` in a -v value differs by awk.
+TEST_ATTRIBUTE_PATTERN='^[ \t]*#[[]test[]]'
 # A line of a doc comment, which a marker's doc comment may continue with.
 DOC_COMMENT_LINE_PATTERN='^[ \t]*///'
 

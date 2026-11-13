@@ -1249,8 +1249,8 @@ fn counters_near_the_top_of_a_u64_round_as_doubles_do() {
 }
 
 /// A root delta above 2^53 reads as a double: kernel's share is the double the gjs computes.
-/// Expected values: `rankApps` run under gjs, whose literal 9007199254740993 is 2^53 (written as 2^53 here, since clippy refuses a literal
-/// that rounds).
+/// Expected values: `rankApps` run under gjs, whose literal 9007199254740993 is 2^53 (written as
+/// 2^53 here, since clippy refuses a literal that rounds).
 #[test]
 fn a_root_delta_above_two_to_the_53_is_a_double() {
     let scan = with_parents(
