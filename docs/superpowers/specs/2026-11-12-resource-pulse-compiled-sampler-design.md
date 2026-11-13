@@ -147,7 +147,7 @@ load of 3.5 to 6.8.
 | `zbus` 6.2.1, with its object server | 0.055, 0.087 | 3.3 MiB | 1.3 MiB | 2 | 1.18 MB | 27 | 2026-11-01 |
 | `rustbus` 0.19.3 | 0.050, 0.082 | 2.5 MiB | 0.6 MiB | 1 | 0.49 MB | 15 | 2023-08-29 |
 | The live gjs sampler, same windows | 0.207, 0.122 | 30.5 MiB | 15.5 MiB | 12 | — | — | — |
-| `zbus` 6.3.0 as this design uses it, measured in the build: the bus layer alone, no reads (its Sample is about 20 bytes, not the spike's 2.2 kB, so do not compare its figure with the spike's rows) | 0.008, 0.007 | 3.3 MiB | 1.3 MiB | 3 | 1.28 MB | 27 | 2026-11-13 |
+| `zbus` 6.3.0 as this design uses it, measured in the build: the bus layer alone, no reads, and a Sample of about 20 bytes where the spike's is 2.2 kB | 0.008, 0.007 | 3.3 MiB | 1.3 MiB | 3 | 1.28 MB | 27 | 2026-11-13 |
 
 - **D-Bus costs nothing that can be measured in CPU.** Both libraries read the same as the floor; the two runs
   differ from each other by more than the libraries do.
@@ -156,10 +156,11 @@ load of 3.5 to 6.8.
   sampling thread, with no object server ("The program"). The table's last row is that configuration,
   measured in the build on 2026-11-13.
 - **The library is final: `zbus`.** Both orders held three runs in a row. The reply order was checked over
-  about 8,000 state replies and 500 Samples a run at 20 ms ticks, and each row or test was seen failing under a
-  change that breaks its rule. Used this way the program has three threads, not two (one of its own only
-  receives), holds 3.3 MiB, and its bus layer is 301 lines of code. The build locked version 6.3.0,
-  released after the spike; the two versions do not differ in anything the four rules rest on. Record:
+  about 8,000 state replies and 500 Samples a run at 20 ms ticks, and each row or test was seen failing
+  under a change that breaks its rule. Used this way the program has three threads, not two (one of its own
+  only receives), holds 3.3 MiB, and its bus layer was 301 lines of code when measured (306 as merged). The
+  build locked version 6.3.0, released after the spike; the two versions do not differ in anything the four
+  rules rest on. Record:
   `~/Projects/handoffs/resource-pulse-perf-tools/2026-11-12-stage-two/library-decision/result.md`.
 - **The live sampler's memory:** 30.5 MiB resident counts shared library pages. Its unit is charged 16.6 MiB.
   Its two CPU figures differ because its watch state differed; it was not read.
@@ -266,16 +267,17 @@ error for a call it does not know. So the choice is narrower than the first draf
 - **The bus name is never taken from a running copy, and never given up.** The gjs service asks for the name
   with "do not queue" only. `zbus`'s default adds "replace the existing owner" and "allow replacement", so
   with the default a second copy takes the name and the first runs on without it: one mistyped command would
-  put the desktop on a program systemd does not manage. The program asks with "do not queue" only. The deterministic tests in
-  `resource-pulse-sampler/tests/bus_link.rs` pin the rule, and the row checks that the program as a whole holds
-  it: a second copy exits 1, and the first still owns the name afterwards.
+  put the desktop on a program systemd does not manage. The program asks with "do not queue" only. The
+  deterministic tests in `resource-pulse-sampler/tests/bus_link.rs` pin the rule, and the row checks that
+  the program as a whole holds it: a second copy exits 1, and the first still owns the name afterwards.
 - **It listens before it is named.** The client calls `GetState` the instant the name has an owner, and
   systemd counts the unit started at the same instant. `zbus` drops a message that arrives while nothing is
   listening, and its builder asks for the name before the program can listen. So the connection is made
   without a name, the stream of incoming messages is opened, and only then is the name requested. The gjs
-  service states the same rule in its header. The deterministic tests in `resource-pulse-sampler/tests/bus_link.rs`
-  pin the rule, and the row checks that the program as a whole holds it: the program started many times, each time
-  called from a handler of the name's appearance, with no call ever timing out.
+  service states the same rule in its header. The deterministic tests in
+  `resource-pulse-sampler/tests/bus_link.rs` pin the rule, and the row checks that the program as a whole
+  holds it: the program started many times, each time called from a handler of the name's appearance,
+  with no call ever timing out.
 - **One thread produces every message, replies included.** A state reply that carries sequence N leaves
   after Sample N and before Sample N+1. The gjs service gives that order by having one thread, and the
   client leans on it: while it waits for a state it drops Samples, because "the state includes this Sample",

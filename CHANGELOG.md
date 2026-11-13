@@ -10,23 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **The Resource Pulse sampler's Rust crate, its state table and its CI job (stage two, pull request B).**
-  `resource-pulse-sampler/` holds the crate (the constants, which `--print-constants` prints one by one, and the bus link),
-  `scripts/test-resource-pulse-sampler.sh` its state table (cargo's tests, one row per constant compared with
-  `lib/constants.js` and `lib/protocol.js`, one row per gjs test title the crate must carry over), and the
-  `resource-pulse-sampler-test` job runs it. `zsh/zshrc.buildlimits` caps `RUST_TEST_THREADS` beside
-  `CARGO_BUILD_JOBS`; `build-limits` lists it. Nothing on the machine runs the program yet.
+  `resource-pulse-sampler/` holds the crate (the constants, which `--print-constants` prints one by one, and
+  the bus link), `scripts/test-resource-pulse-sampler.sh` its state table (cargo's tests, one row per
+  constant compared with `lib/constants.js` and `lib/protocol.js`, one row per gjs test title the crate must
+  carry over), and the `resource-pulse-sampler-test` job runs it. `zsh/zshrc.buildlimits` caps
+  `RUST_TEST_THREADS` beside `CARGO_BUILD_JOBS`; `build-limits` lists it, and `scripts/test-buildlimits.sh`
+  has its row. Nothing on the machine runs the program yet.
   - **The bus link, and the proof that decides the D-Bus library.** `src/bus.rs` is the link to the bus, on
-    `zbus`'s message-level API, and `main.rs` serves a counter over it: connected with no name and listening before it asks for the name, the name
+    `zbus`'s message-level API: connected with no name and listening before it asks for the name, the name
     asked for with "do not queue" only, every reply and signal sent from one thread, and every call answered.
-    With no flag the program serves a counter in place of the sampler (`--tick-interval-ms` sets its tick).
-    The table runs it on a private bus of its own (`gnome-shell/tests/run-sampler-program.js`), with rows for
-    the reply order, the start-up order, a second copy, an unknown method, calls off the program's path and
-    interface (`Introspect` on another object, `Ping`, `GetState` with no interface), `Introspect`, the name
-    flags and a caller that leaves. Rust tests on a private bus (`tests/bus_link.rs`) pin deterministically the start-up
-    order, the name flags (no replacing an owner, no queueing), no reply to a call that wants none, following a
-    caller that already left and unfollowing one, and exit 0 when the bus goes away, logging once that the connection closed; a row fails if `zbus` is
-    built with its object server (`service`). The private-bus guard moved to `gnome-shell/tests/privateBus.js`,
-    which registers no rows; `service-dbus.test.js` re-exports it.
+    With no flag `main.rs` serves a counter over it in place of the sampler (`--tick-interval-ms` sets its
+    tick). The table runs it on a private bus of its own (`gnome-shell/tests/run-sampler-program.js`), with
+    rows for the reply order, the start-up order, a second copy, an unknown method, `Introspect`, the name
+    flags, a caller that leaves, and three calls that must still be answered: `Introspect` on another object
+    path, `Peer.Ping`, and `GetState` with no interface. Rust tests on a private bus (`tests/bus_link.rs`)
+    pin deterministically the start-up order, the name flags (no replacing an owner, no queueing), no reply
+    to a call that wants none, following a caller that already left and unfollowing one, and exit 0 when the
+    bus goes away, with one logged line saying the connection closed; a row fails if `zbus` is built with
+    its object server (`service`). The private-bus guard moved to `gnome-shell/tests/privateBus.js`, which
+    registers no rows; `service-dbus.test.js` re-exports it.
 
 - **The fingerprint reader, without ever putting a fingerprint wait in front of a password:
   `fingerprint-setup` (`--check`, `--remove`).**
