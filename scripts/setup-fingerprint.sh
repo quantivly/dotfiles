@@ -23,6 +23,15 @@
 # `pam-auth-update --enable fprintd` would do in front of every password on the
 # machine. Why each piece is shaped as it is: docs/FINGERPRINT.md.
 #
+# BEFORE THE FIRST WRITE, the sudo stack the install would leave is loaded
+# through the REAL libpam (scripts/pam-stack-probe.py, pam_start_confdir) with a
+# correct password standing in, and the install refuses unless it authenticates:
+# one misspelled keyword in a stanza makes libpam refuse every sudo, correct
+# password or not (measured: PAM_PERM_DENIED). --check loads the installed stack
+# the same way. It also refuses a common-auth with any auth module outside a
+# known set: the stanza's pam_unix runs BEFORE common-auth, so a correct password
+# returns before a lockout check (pam_faillock) or a second factor there runs.
+#
 # Copied root-owned, never symlinked: root's PAM reads them. Every write is a
 # root-owned temporary file RENAMED into place, so a concurrent sudo never reads
 # half a stack. The ORDER is load-bearing, because libpam aborts the whole stack
@@ -37,8 +46,9 @@
 #
 # Usage: setup-fingerprint.sh [--check | --remove]
 #   --check   read-only, needs no sudo: is every piece installed as this checkout
-#             says, has gdm compiled the greeter change, and does no PAM stack
-#             put pam_fprintd in front of a password? Exit 1 if not.
+#             says, does the installed sudo stack load through libpam and accept
+#             a correct password, has gdm compiled the greeter change, and does no
+#             PAM stack put pam_fprintd in front of a password? Exit 1 if not.
 #   --remove  take every piece out again. The edited files return
 #             byte-identical to what they were before the install.
 #
@@ -103,6 +113,18 @@ FPRINTD_MODULE_RE='(^|[[:space:]/])pam_fprintd(\.so)?([[:space:]]|$)'
 # it after a password has already failed.
 FPRINTD_ALLOWED_SERVICES=(gdm-fingerprint "$STANZA_NAME")
 REQUIRED_PAM_MODULES=(pam_fprintd.so pam_exec.so)
+COMMON_AUTH="${PAM_ETC_DIR}/common-auth"
+# The auth modules common-auth may run. The stanza's pam_unix runs before all of
+# them, so each must be one a correct password may skip: the password checks
+# themselves, the stack's own deny/permit, and pam_cap (capability.conf is
+# `none *` here). pam_sss is known because the gate skips non-local accounts.
+# pam_fprintd is the other guard's to report, not this one's.
+KNOWN_COMMON_AUTH_MODULES=(pam_unix.so pam_sss.so pam_deny.so pam_permit.so pam_cap.so pam_fprintd.so)
+AUTH_LINE_RE='^[[:space:]]*-?auth[[:space:]]+(\[[^]]*\]|[^[:space:]]+)[[:space:]]+([^[:space:]]+)'
+ANY_INCLUDE_RE='^[[:space:]]*@include'
+BLANK_RE='^[[:space:]]*$'
+PROBE="${DOTFILES}/scripts/pam-stack-probe.py"
+PAM_SUCCESS=0
 
 # Owner and mode of an installed copy. Under the test seam nothing can be
 # chowned to root, so the copies belong to whoever runs the suite.
@@ -253,6 +275,94 @@ is_greeter_compiled_stale() {
   [[ ! -e "$GREETER_COMPILED" || "$GREETER_COMPILED" -ot "$GREETER_CONFIG" ]]
 }
 
+# does_end_in_newline <file> — every edit rewrites whole lines, so a file whose
+# last line is unterminated could not be restored byte for byte.
+does_end_in_newline() {
+  [[ -z "$(tail -c1 "$1")" ]]
+}
+
+# is_known_common_auth_module <name.so>
+is_known_common_auth_module() {
+  local known
+  for known in "${KNOWN_COMMON_AUTH_MODULES[@]}"; do
+    if [[ "$1" == "$known" ]]; then return 0; fi
+  done
+  return 1
+}
+
+# modules_the_stanza_would_skip — every auth module in common-auth outside the
+# known set, one line each. An include is unknown too: what it runs cannot be
+# read from here.
+modules_the_stanza_would_skip() {
+  local line module
+  if [[ ! -r "$COMMON_AUTH" ]]; then
+    printf '%s cannot be read, so what it runs cannot be known\n' "$COMMON_AUTH"
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ $COMMENT_RE || "$line" =~ $BLANK_RE ]]; then continue; fi
+    if [[ "$line" =~ $ANY_INCLUDE_RE ]]; then
+      printf '%s includes another file, whose modules a correct password at the stanza would skip: %s\n' "$COMMON_AUTH" "$line"
+      continue
+    fi
+    if [[ ! "$line" =~ $AUTH_LINE_RE ]]; then continue; fi
+    module="${BASH_REMATCH[2]##*/}"
+    if is_known_common_auth_module "$module"; then continue; fi
+    printf '%s has %s, which a correct password at the stanza would skip: %s\n' "$COMMON_AUTH" "$module" "$line"
+  done <"$COMMON_AUTH"
+  return 0
+}
+
+# build_probe_confdir <target|installed> — prints a directory holding this
+# machine's PAM configuration as libpam reads it (vendor files, then /etc/pam.d
+# over them), with sudo, sudo-i and the stanza as the install WOULD leave them
+# (target) or as they ARE (installed), and the stanza's modules swapped for
+# stand-ins: pam_permit for pam_unix (a correct password) and for the gate,
+# pam_deny for pam_fprintd (no reader is touched).
+build_probe_confdir() {
+  local mode="$1" confdir="$WORK/pamconf" file service
+  rm -rf "$confdir"
+  mkdir -p "$confdir"
+  for file in "$PAM_VENDOR_DIR"/* "$PAM_ETC_DIR"/*; do
+    if [[ -f "$file" && -r "$file" ]]; then cp "$file" "$confdir/"; fi
+  done
+  if [[ "$mode" == target ]]; then
+    cp "$STANZA_SRC" "$confdir/$STANZA_NAME"
+    for service in "${SUDO_SERVICES[@]}"; do
+      render_sudo_service "$service" with >"$confdir/${service##*/}"
+    done
+  fi
+  if [[ -f "$confdir/$STANZA_NAME" ]]; then
+    sed -i -e 's/pam_unix\.so/pam_permit.so/g' -e 's/pam_exec\.so/pam_permit.so/g' \
+           -e 's/pam_fprintd\.so/pam_deny.so/g' "$confdir/$STANZA_NAME"
+  fi
+  printf '%s\n' "$confdir"
+}
+
+# sudo_stack_problems <target|installed> — sudo and sudo-i, loaded through the
+# REAL libpam from build_probe_confdir with a correct password standing in: one
+# line per service that does not authenticate. In installed mode a service that
+# does not include the stanza is not this setup's to judge, and is passed over.
+sudo_stack_problems() {
+  local mode="$1" confdir service name outcome
+  confdir="$(build_probe_confdir "$mode")"
+  for service in "${SUDO_SERVICES[@]}"; do
+    name="${service##*/}"
+    if [[ "$mode" == installed ]] && [[ ! -r "$service" ]]; then continue; fi
+    if [[ "$mode" == installed ]] && (( $(count_matching_lines "$service" "$INCLUDE_RE") == 0 )); then
+      continue
+    fi
+    if ! outcome="$(python3 -I "$PROBE" --confdir "$confdir" --service "$name" 2>&1)"; then
+      printf '%s could not be loaded through libpam: %s\n' "$name" "$outcome"
+      continue
+    fi
+    if [[ "${outcome%% *}" != "$PAM_SUCCESS" ]]; then
+      printf '%s: libpam refuses a CORRECT password through this stack (result %s)\n' "$name" "$outcome"
+    fi
+  done
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # --check: the INSTALLED STATE, not the install's exit status.
 # ---------------------------------------------------------------------------
@@ -339,6 +449,28 @@ check_no_fprintd_in_front() {
   log SUCCESS "no PAM stack puts pam_fprintd in front of a password (gdm-fingerprint runs beside one)"
 }
 
+check_sudo_stack_loads() {
+  local problems line
+  problems="$(sudo_stack_problems installed)"
+  if [[ -n "$problems" ]]; then
+    while IFS= read -r line; do log ERROR "$line"; done <<<"$problems"
+    return 1
+  fi
+  log SUCCESS "the installed sudo stack loads through the real libpam and accepts a correct password"
+}
+
+check_common_auth_known() {
+  local problems line
+  problems="$(modules_the_stanza_would_skip)"
+  if [[ -n "$problems" ]]; then
+    while IFS= read -r line; do log ERROR "$line"; done <<<"$problems"
+    log ERROR "  the stanza checks the password BEFORE common-auth; known modules: ${KNOWN_COMMON_AUTH_MODULES[*]}"
+    log ERROR "  remove fingerprint-setup (--remove) or that module; docs/FINGERPRINT.md says why"
+    return 1
+  fi
+  log SUCCESS "common-auth runs nothing a password checked first would skip"
+}
+
 check_pam_modules() {
   local module bad=0
   for module in "${REQUIRED_PAM_MODULES[@]}"; do
@@ -361,10 +493,17 @@ check_installed() {
     (( rc == 0 )) || bad=1
     (( rc == 2 )) && is_sudo_broken=1
   done
+  # A stack libpam refuses is as broken as a missing stanza: either way sudo
+  # refuses everyone, and the repair goes through the untouched polkit, ONCE.
+  if ! check_sudo_stack_loads; then
+    bad=1
+    is_sudo_broken=1
+  fi
   if (( is_sudo_broken )); then
-    log ERROR "  repair it from a GNOME dialog (polkit is untouched, so pkexec still works):"
+    log ERROR "  sudo refuses everyone until this is fixed; repair it from a GNOME dialog (polkit is untouched):"
     log ERROR "    pkexec sed -i '/^@include ${STANZA_NAME}\$/d' ${SUDO_SERVICES[*]}"
   fi
+  check_common_auth_known || bad=1
   check_greeter || bad=1
   check_no_fprintd_in_front || bad=1
   check_pam_modules || bad=1
@@ -466,9 +605,17 @@ for module in "${REQUIRED_PAM_MODULES[@]}"; do
     exit 2
   fi
 done
+if ! command -v python3 >/dev/null || [[ ! -r "$PROBE" ]]; then
+  log ERROR "python3 and $PROBE are needed to load the stack through libpam before installing it — nothing installed"
+  exit 2
+fi
 for service in "${SUDO_SERVICES[@]}"; do
   if [[ ! -r "$service" ]]; then
     log ERROR "$service is missing or unreadable — nothing installed"
+    exit 2
+  fi
+  if ! does_end_in_newline "$service"; then
+    log ERROR "$service does not end in a newline, so --remove could not restore it byte for byte — nothing installed"
     exit 2
   fi
   if (( $(count_matching_lines "$service" "$COMMON_AUTH_RE") != 1 )); then
@@ -478,6 +625,10 @@ for service in "${SUDO_SERVICES[@]}"; do
 done
 if [[ ! -r "$GREETER_CONFIG" ]]; then
   log ERROR "$GREETER_CONFIG is missing or unreadable (is gdm3 installed?) — nothing installed"
+  exit 2
+fi
+if ! does_end_in_newline "$GREETER_CONFIG"; then
+  log ERROR "$GREETER_CONFIG does not end in a newline, so --remove could not restore it byte for byte — nothing installed"
   exit 2
 fi
 if (( $(count_matching_lines "$GREETER_CONFIG" "^\\[org/gnome/login-screen\\]$") != 1 )); then
@@ -496,6 +647,19 @@ if [[ -n "$violations" ]]; then
   log ERROR "  that already delays a password; the stock profile is removed with:"
   log ERROR "    sudo pam-auth-update --disable fprintd"
   log ERROR "  — nothing installed"
+  exit 1
+fi
+skipped_modules="$(modules_the_stanza_would_skip)"
+if [[ -n "$skipped_modules" ]]; then
+  while IFS= read -r line; do log ERROR "$line"; done <<<"$skipped_modules"
+  log ERROR "  the stanza checks the password BEFORE common-auth; known modules: ${KNOWN_COMMON_AUTH_MODULES[*]}"
+  log ERROR "  — nothing installed"
+  exit 1
+fi
+stack_problems="$(sudo_stack_problems target)"
+if [[ -n "$stack_problems" ]]; then
+  while IFS= read -r line; do log ERROR "$line"; done <<<"$stack_problems"
+  log ERROR "  that is the stack this install would leave; installing it would refuse every sudo — nothing installed"
   exit 1
 fi
 

@@ -37,9 +37,14 @@ boot.
 
 - **sudo asks for the password first, and it works at once.** To use the reader instead, press
   Enter on the empty prompt (a wrong password does the same). sudo then says "Place your finger
-  on the fingerprint reader". **Ctrl+C** at that point goes back to a fresh password prompt.
-- **Docked, nothing changes:** with the lid closed, Enter on the empty prompt just asks for the
-  password again.
+  on the fingerprint reader".
+- **Ctrl+C at the finger prompt:** sudo asks for the password again.
+- **Each detour costs one of sudo's three tries.** Ctrl+C, a finger that fails twice, and an
+  Enter while docked each end that try, and sudo's next try asks for the password again.
+  Nothing re-asks inside a single try: `common-auth` re-checks the same password, as
+  "The stanza, through the real libpam" below shows.
+- **Docked, the reader is never offered:** with the lid closed, Enter on the empty prompt just
+  uses up that try, and sudo asks again.
 - **The lock screen takes either one, whichever comes first.**
 - **Each decision is logged** with the reason: `journalctl -t fingerprint-gate`. Expect lines
   such as `offer: lid open, terminal attached`, `skip: lid closed` and `skip: no terminal`.
@@ -58,6 +63,14 @@ fingerprint-setup --remove   # takes it all out; the edited files return byte-id
 - The gate and the stanza are root-owned regular files, byte-identical to this checkout.
 - `sudo` and `sudo-i` include the stanza exactly once, immediately before
   `@include common-auth`.
+- **The installed sudo stack loads through the real libpam and accepts a correct password.**
+  This catches a stanza that matches its checkout but cannot be parsed: one misspelled keyword
+  makes libpam refuse every sudo. The install runs the same test on the stack it *would* leave,
+  and refuses to write anything that fails it.
+- **`common-auth` runs only modules a password checked first may skip.** The stanza checks the
+  password *before* `common-auth`, so a lockout (`pam_faillock`) or a second factor added there
+  later would be passed over. The install refuses, and `--check` fails, on anything outside the
+  known set.
 - The greeter key is set by this setup's line alone, and gdm has recompiled it.
 - **No effective PAM service except `gdm-fingerprint` and this stanza runs `pam_fprintd`.** This
   last check is the requirement, as a check. The stock `pam-auth-update --enable fprintd` puts
@@ -68,9 +81,9 @@ conffiles, so an upgrade that ships a new one asks whether to keep yours. Taking
 version only drops the include, and sudo simply goes back to password-only. Re-run
 `fingerprint-setup` to put it back.
 
-**If `--check` says "sudo is BROKEN"**, the stanza is gone while `sudo` still includes it, and
-libpam then aborts every sudo before it asks for anything. polkit is untouched, so repair it from
-a GNOME dialog:
+**If `--check` says sudo "refuses everyone"**, either the stanza is gone while `sudo` still
+includes it, or libpam cannot load the stack. Either way every sudo fails before it asks for
+anything. polkit is untouched, so repair it from a GNOME dialog:
 
 ```bash
 pkexec sed -i '/^@include sudo-fingerprint$/d' /etc/pam.d/sudo /etc/pam.d/sudo-i
@@ -138,9 +151,13 @@ maintainers name GDM and GNOME's polkit dialog as the frontends that do ensure a
 treat sudo as a policy decision for distributions and administrators. Here, many agents run
 unattended under this user.
 
-`fingerprint-should-skip` therefore offers the reader only when all three of these hold:
+`fingerprint-should-skip` therefore offers the reader only when all four of these hold:
 
 - **The service is `sudo` or `sudo-i`.**
+- **`PAM_USER` is a local account** (a line of `/etc/passwd`). The stanza's first check is
+  `pam_unix`, which knows only local accounts. For a domain (SSSD) account, a *correct*
+  password fails it, and only `common-auth`'s `pam_sss` would accept that password, after the
+  reader. That is a fingerprint wait in front of a correct password, which this skip prevents.
 - **`PAM_TTY` is a real terminal.** A tty-less sudo cannot read a password, and without this
   gate that failure falls straight through to a fingerprint wait. That is the CVE's shape,
   exactly.
@@ -203,15 +220,43 @@ and the installed gate still deciding. The results:
 |---|---|
 | right password first | success; the gate never runs |
 | wrong password, terminal, lid open, finger right | success (`offer:` logged) |
-| finger wrong too, second password right | success |
-| lid closed, finger *would* match, second password wrong | refused: the finger was never asked |
-| lid closed, second password right | success: the gate's success jump poisons nothing |
+| finger wrong, a later `common-auth` module accepts | success: a failed finger decides nothing |
+| lid closed, finger *would* match, `common-auth` refuses | refused: the finger was never asked |
+| lid closed, a later `common-auth` module accepts | success: the gate's success jump poisons nothing |
 | no terminal, finger *would* match | refused (`skip: no terminal`) |
 | stanza missing while sudo includes it | `pam_start` fails with `PAM_ABORT` (26) before any prompt |
 | gate missing | pam_exec's failure reads as **offer**, lid closed or not |
+| **real** `pam_unix` in both places, finger wrong | refused after **one** prompt |
+| the same, with two `pam_authenticate` calls on one handle | refused after **two** prompts |
 
-The last two rows set the install order: the gate, then the stanza, then the includes. Removal
-runs the other way.
+"A later `common-auth` module accepts" is a stand-in for `pam_sss` accepting a domain account.
+It is **not** a second chance at a typed password. The last two rows, with the real
+`pam_unix`, show why: `pam_unix` reads the password through `pam_get_authtok()`, which returns
+the one already typed, so `common-auth` re-checks that same typo or empty Enter and fails it.
+The new prompt after Ctrl+C, a failed finger, or a docked Enter is **sudo-rs retrying the whole
+`pam_authenticate`**, and libpam clears the cached password between attempts. Each detour
+therefore costs one of sudo's tries, and with `passwd_tries=1` a failed finger would end sudo.
+An independent review of this branch found that; the first version of these docs claimed a
+fresh prompt from `common-auth`.
+
+The stanza-missing and gate-missing rows set the install order: the gate, then the stanza, then
+the includes. Removal runs the other way.
+
+**The install loads the stack through libpam before writing anything.**
+`scripts/pam-stack-probe.py` runs the sudo stack the install *would* leave: this machine's PAM
+files, the stanza from the checkout, and `sudo` with the include. `pam_permit` stands in for
+`pam_unix` (a correct password) and for the gate, and `pam_deny` for `pam_fprintd`. The install
+refuses unless that authenticates. One misspelled control keyword in the stanza (`sufficent`) makes
+libpam refuse the whole stack with `PAM_PERM_DENIED`, correct password or not (measured). Copying
+it would lock everyone out of sudo while `--check`'s byte comparison against the same checkout
+stayed green. `--check` runs the same load test against the installed files.
+
+**`common-auth` must hold only modules a password checked first may skip.** The stanza's
+`pam_unix` returns success *before* `common-auth` runs. A correct password therefore never
+reaches a `pam_faillock preauth` lockout, a second factor, or anything else `pam-auth-update`
+later adds there. The known set is `pam_unix`, `pam_sss` (the gate skips non-local accounts),
+`pam_deny`, `pam_permit` and `pam_cap` (`capability.conf` is `none *`). The install refuses
+anything else, an `@include` too, and `--check` fails on it.
 
 `quiet_log` is on the pam_exec line because "offer" is an exit 1. Without it, pam_exec would log
 every offer as a failed command.
@@ -241,7 +286,8 @@ gate a terminal by setting the variable.
   falls back to the password, as classic sudo's does, by masking SIGINT around PAM.
 - **Not documented anywhere, so measured:** sudo-rs 0.2.13 passes an *empty* password through
   to PAM. An empty Enter therefore reaches the reader (step 3 below). Ubuntu's 0.2.13 also
-  carries PR #1322: Ctrl+C at the finger prompt gives a fresh password prompt (step 4).
+  carries PR #1322: Ctrl+C at the finger prompt ends that try instead of sudo itself, and the
+  next try asks for the password (step 5).
 - **sudo-rs prints nothing between the two password checks.** A typo therefore looks like a
   password that was accepted and then asked for a finger. The first live run did exactly that,
   and `pam_unix`'s "authentication failure" line in the journal is how to tell.
@@ -263,8 +309,9 @@ open unless stated.
 4. **An empty Enter reaches the reader:** "Place your finger on the fingerprint reader", then
    the right index finger, succeeds. sudo accepts **any** enrolled finger, not just the first
    one `fprintd-verify` would check. The run took 6.4 s, almost all of it the human's.
-5. **A typo, then Ctrl+C:** typing `x` and Enter brings up the finger prompt, and Ctrl+C gives a
-   fresh password prompt that the real password then passes.
+5. **A typo, then Ctrl+C:** typing `x` and Enter brings up the finger prompt, and Ctrl+C brings
+   back a password prompt that the real password then passes. That prompt is sudo-rs's next
+   try (see the stanza section above).
 6. **No terminal:** from Claude Code's Bash tool, `sudo true` fails in 0 s with "A terminal is
    required to authenticate". The journal says `skip: no terminal (service=sudo tty=none)`.
 7. **`PAM_TTY` is sudo-rs's own:** every terminal run logs `tty=/dev/pts/22`.
@@ -273,9 +320,10 @@ open unless stated.
 9. **polkit is untouched:** `pkexec true` shows GNOME's dialog with the password field ready at
    once, and no fingerprint text.
 10. **The lock screen** (Super+L) unlocks with a touch. It needed nothing beyond enrolment.
-11. **Pending:** docked with the lid closed, an empty Enter should bring the password prompt
-    back at once and log `skip: lid closed`. At the next natural reboot, the greeter should be
-    password-only and the keyring unlocked.
+11. **Pending:** docked with the lid closed, an empty Enter should use up that try with no
+    finger prompt, then sudo asks for the password again, and the journal logs
+    `skip: lid closed`. At the next natural reboot, the greeter should be password-only and the
+    keyring unlocked.
 
 ### Designs not taken
 
@@ -290,10 +338,11 @@ open unless stated.
 
 ### Tests
 
-State table: `scripts/test-fingerprint.sh` (112 checks, hermetic, CI `fingerprint-test`). It
+State table: `scripts/test-fingerprint.sh` (129 checks, hermetic, CI `fingerprint-test`). It
 covers the following:
 
-- **The gate**, run as pam_exec runs it: `env -i` plus the PAM items, with no PATH.
+- **The gate**, run as pam_exec runs it: `env -i` plus the PAM items, with no PATH. Local
+  accounts come from a passwd fixture.
 - **The stanza**, exactly as shipped.
 - **The installer**, under a prefix. A `sudo` stub runs `install`, `mv` and `rm` for real but
   confined to the prefix, and models `systemctl reload gdm.service` as gdm's `generate-config`.
@@ -301,9 +350,14 @@ covers the following:
   `sudo`, `sudo-i`, `common-auth`, `polkit-1` and `greeter.dconf-defaults` text, including the
   trailing spaces in Ubuntu's greeter file.
 - **The worktree guard.**
-- **The installed stack through the real libpam** (the table above).
+- **The installed stack through the real libpam** (the table above), using the same probe
+  the install uses.
+- **The install refusing a stanza libpam cannot load, and `--check` catching one already
+  installed,** even when it matches its checkout.
+- **`common-auth` gaining `pam_faillock` or an `@include`:** refused at install, and a failure
+  in `--check`.
 
-**The mutation sweep (2026-11-13, at `d99a10e`) killed all 43 mutants.**
+**The first mutation sweep (2026-11-13, at `d99a10e`) killed all 43 mutants.**
 
 - **Coverage:** 14 mutants in the gate, 5 in the stanza and 24 in the installer.
 - **Applicability:** none was not applicable. Each replaced exactly one text, and its diff

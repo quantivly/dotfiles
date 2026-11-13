@@ -4,9 +4,13 @@
 # Included by /etc/pam.d/sudo and /etc/pam.d/sudo-i, immediately before
 # `@include common-auth`. The PASSWORD comes first and works at once, exactly as
 # common-auth checks it. An empty Enter (or a wrong password) falls through to
-# the fingerprint, which fingerprint-should-skip offers only for sudo, with a
-# real terminal and the lid open. When the finger fails, or is skipped,
-# common-auth follows with a fresh password prompt and its own pam_deny.
+# the fingerprint, which fingerprint-should-skip offers only for sudo, a local
+# account, a real terminal and the lid open. When the finger fails, or is
+# skipped, common-auth follows: its pam_unix re-checks the SAME password (it
+# reuses the cached one, measured), fails it, and its pam_deny ends this attempt.
+# The new prompt comes from sudo trying again, so each detour costs one of
+# sudo's tries. setup-fingerprint.sh refuses a common-auth with anything this
+# early password check would skip past (pam_faillock, say).
 #
 # The gate's SUCCESS (exit 0, "skip") jumps over pam_fprintd; its failure
 # ("offer") is ignored, so it never decides the outcome. quiet_log, because every

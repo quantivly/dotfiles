@@ -22,11 +22,14 @@
 # file and its environment is not the caller's to choose.
 #
 # THE STANZA'S CONTROL FLOW runs through the REAL libpam: pam_start_confdir()
-# reads a service from any directory, unprivileged. The files a real install
-# wrote under the prefix are copied there with pam_permit/pam_deny standing in
-# for "this password / this finger is right / wrong", and the installed gate
-# still deciding. So `[success=1 default=ignore]`, `sufficient` and @include are
-# libpam's semantics, not this suite's belief about them.
+# reads a service from any directory, unprivileged (scripts/pam-stack-probe.py,
+# which the installer uses too). The files a real install wrote under the prefix
+# are copied there with pam_permit/pam_deny standing in for "this password / this
+# finger is right / wrong", and the installed gate still deciding. So
+# `[success=1 default=ignore]`, `sufficient` and @include are libpam's semantics,
+# not this suite's belief about them. Two rows keep the REAL pam_unix, for an
+# account that does not exist, to count prompts: one per attempt, because
+# pam_unix reuses the cached password, so a second prompt is the caller's retry.
 #
 # The fixture /etc is Ubuntu 26.04's own text (sudo-common, polkitd, gdm3),
 # trailing spaces included, so every edit is tested against what it will meet.
@@ -45,6 +48,7 @@ DOTFILES="$(cd "$HERE/.." && pwd -P)"
 SETUP="$HERE/setup-fingerprint.sh"
 STANZA_SRC="$DOTFILES/pam/sudo-fingerprint"
 GATE_SRC="$DOTFILES/pam/fingerprint-should-skip"
+PROBE="$HERE/pam-stack-probe.py"
 # Where the stanza says the gate lives, and so where the install must put it.
 GATE_INSTALLED_PATH="/usr/local/libexec/fingerprint-should-skip"
 STANZA_INSTALLED_PATH="/etc/pam.d/sudo-fingerprint"
@@ -61,7 +65,7 @@ bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for f in "$SETUP" "$STANZA_SRC" "$GATE_SRC"; do
+for f in "$SETUP" "$STANZA_SRC" "$GATE_SRC" "$PROBE"; do
   [[ -r "$f" ]] || fatal "cannot read $f"
 done
 for t in git cmp stat env touch sh sha256sum python3; do
@@ -159,11 +163,18 @@ chmod +x "$STUBBIN"/* || fatal setup
 # A checkout laid out like the repo, holding only what the installer reads.
 mkroot() {
   mkdir -p "$1/scripts" "$1/pam" || fatal "mkroot $1"
-  if ! { cp "$SETUP" "$1/scripts/" && cp -p "$STANZA_SRC" "$GATE_SRC" "$1/pam/"; }; then
+  if ! { cp "$SETUP" "$PROBE" "$1/scripts/" && cp -p "$STANZA_SRC" "$GATE_SRC" "$1/pam/"; }; then
     fatal "mkroot $1"
   fi
 }
 ROOT="$T/root"; mkroot "$ROOT"
+# A checkout whose stanza has ONE misspelled control keyword: libpam refuses the
+# whole stack for it, correct password or not.
+ROOT_BAD="$T/root-bad"; mkroot "$ROOT_BAD"
+sed -i 's/^\(auth  \)sufficient\( *pam_unix\)/\1sufficent\2/' "$ROOT_BAD/pam/sudo-fingerprint"
+[[ "$(grep -c '^auth  sufficent' "$ROOT_BAD/pam/sudo-fingerprint")" == 1 ]] || fatal "the misspelled-stanza fixture did not apply"
+# A checkout without the libpam probe.
+ROOT_NO_PROBE="$T/root-no-probe"; mkroot "$ROOT_NO_PROBE"; rm -f "$ROOT_NO_PROBE/scripts/pam-stack-probe.py"
 
 # write_ubuntu_etc <dir> — Ubuntu 26.04's own files, as the install meets them.
 write_ubuntu_etc() {
@@ -229,6 +240,12 @@ EOF
 session       required   pam_env.so readenv=1 user_readenv=0
 @include common-session-noninteractive
 EOF
+  # What sudo and sudo-i also include. Never run by pam_authenticate, but libpam
+  # aborts a whole stack whose include target is missing, so they must exist.
+  printf 'account required pam_permit.so\n' >"$p/etc/pam.d/common-account" || fatal "fixture $p"
+  printf 'password required pam_permit.so\n' >"$p/etc/pam.d/common-password" || fatal "fixture $p"
+  printf 'session required pam_permit.so\n' >"$p/etc/pam.d/common-session" || fatal "fixture $p"
+  printf 'session required pam_permit.so\n' >"$p/etc/pam.d/common-session-noninteractive" || fatal "fixture $p"
   # printf, not a heredoc: four of these lines END IN A SPACE in Ubuntu's file,
   # and a whitespace hook would strip them silently out of a heredoc here.
   printf '%s\n' \
@@ -302,16 +319,24 @@ mklid() { { mkdir -p "$1/$2" && printf '%s\n' "$3" >"$1/$2/state"; } || fatal "m
 LID_OPEN="$T/lid-open";     mklid "$LID_OPEN" LID 'state:      open'
 LID_CLOSED="$T/lid-closed"; mklid "$LID_CLOSED" LID 'state:      closed'
 GATE_LOG="$T/gate.log"
+# The gate's local accounts. fingerprint-test-nobody is local HERE and unknown to
+# the real system, so the real pam_unix rows reach the gate's offer.
+PASSWD_FIXTURE="$T/passwd"
+printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' 'someone:x:1000:1000::/home/someone:/bin/sh' \
+  'fingerprint-test-nobody:x:1001:1001::/nonexistent:/bin/sh' >"$PASSWD_FIXTURE" || fatal "passwd fixture"
 
 # run_gate <service|UNSET> <tty|UNSET> <lid-dir> [extra args] — pam_exec's view of
 # it: no environment but the PAM items. Prints the exit status (1 offer, 0 skip).
+# The user is GATE_USER (UNSET for none), "someone" by default, a local account.
 run_gate() {
-  local service="$1" tty="$2" lid="$3"; shift 3
-  local items=(PAM_TYPE=auth PAM_USER=someone)
+  local service="$1" tty="$2" lid="$3" user="${GATE_USER:-someone}"; shift 3
+  local items=(PAM_TYPE=auth)
+  [[ "$user" != UNSET ]] && items+=("PAM_USER=$user")
   [[ "$service" != UNSET ]] && items+=("PAM_SERVICE=$service")
   [[ "$tty" != UNSET ]] && items+=("PAM_TTY=$tty")
   : >"$GATE_LOG"
-  env -i "${items[@]}" "$GATE_SRC" --lid-dir "$lid" --log-file "$GATE_LOG" "$@" >/dev/null 2>&1
+  env -i "${items[@]}" "$GATE_SRC" --lid-dir "$lid" --passwd-file "$PASSWD_FIXTURE" \
+    --log-file "$GATE_LOG" "$@" >/dev/null 2>&1
   echo $?
 }
 gate_said() { grep -c -F -- "$1" "$GATE_LOG"; }
@@ -355,6 +380,16 @@ check "polkit-1 is never offered, even with a tty and the lid open" \
 check "login is never offered" "$(run_gate login /dev/tty3 "$LID_OPEN")" 0
 check "a service whose name merely starts with sudo is never offered" "$(run_gate sudoedit /dev/pts/3 "$LID_OPEN")" 0
 check "no PAM_SERVICE at all: skipped" "$(run_gate UNSET /dev/pts/3 "$LID_OPEN")" 0
+
+printf '\nthe gate: local accounts only (pam_unix, first in the stanza, knows no other)\n'
+check "a user not in the passwd file (a domain account a correct password would pass later): skipped, and logged" \
+  "$(GATE_USER=stranger run_gate sudo /dev/pts/3 "$LID_OPEN"):$(gate_said 'skip: not a local account')" "0:1"
+check "no PAM_USER at all: skipped" "$(GATE_USER=UNSET run_gate sudo /dev/pts/3 "$LID_OPEN")" 0
+check "a user whose name is only a prefix of a local one: skipped" "$(GATE_USER=some run_gate sudo /dev/pts/3 "$LID_OPEN")" 0
+check "the local account on the passwd file's last line: offered" \
+  "$(GATE_USER=fingerprint-test-nobody run_gate sudo /dev/pts/3 "$LID_OPEN")" 1
+check "a passwd file that does not exist: skipped" \
+  "$(run_gate sudo /dev/pts/3 "$LID_OPEN" --passwd-file "$T/no/such/passwd")" 0
 
 printf '\nthe gate: reading the lid (anything it cannot read is a skip; the password always works)\n'
 L="$T/lid-none"; mkdir -p "$L" || fatal "lid fixture"
@@ -449,6 +484,10 @@ check "--check after the install: exit 0" "$rc" 0
 check "--check needs no sudo" "$(logged_re '^sudo ')" 0
 check "--check says gdm-fingerprint's own pam_fprintd is fine (GDM runs it beside the password)" \
   "$(out_has 'no PAM stack puts pam_fprintd in front of a password')" 1
+check "--check loads the installed sudo stack through the real libpam" \
+  "$(out_has 'loads through the real libpam and accepts a correct password')" 1
+check "--check finds nothing in common-auth that the early password check would skip" \
+  "$(out_has 'common-auth runs nothing a password checked first would skip')" 1
 before="$(tree_hash "$P")"
 rc="$(run_setup "$ROOT" "$P")"
 check "a second install changes no byte: no second include, no second marker" "$rc:$(tree_hash "$P")" "0:$before"
@@ -530,6 +569,19 @@ check "a COMMENTED pam_fprintd line runs nothing: exit 0" "$rc" 0
 P="$(installed_prefix)"; rm -f "$P/usr/lib/x86_64-linux-gnu/security/pam_fprintd.so"
 rc="$(run_setup "$ROOT" "$P" --check)"
 check "pam_fprintd.so not installed" "$rc:$(out_has 'pam_fprintd.so is not installed')" "1:1"
+P="$(installed_prefix)"; sed -i '0,/pam_unix/s/^auth.*pam_unix.*/auth requisite pam_faillock.so preauth\n&/' "$P/etc/pam.d/common-auth"
+rc="$(run_setup "$ROOT" "$P" --check)"
+check "common-auth gains pam_faillock (a correct password at the stanza would skip its lockout)" \
+  "$rc:$(out_has 'pam_faillock.so, which a correct password at the stanza would skip')" "1:1"
+P="$(installed_prefix)"; printf '@include common-auth-extra\n' >>"$P/etc/pam.d/common-auth"
+rc="$(run_setup "$ROOT" "$P" --check)"
+check "common-auth includes another file (what it runs cannot be read from here)" \
+  "$rc:$(out_has 'common-auth includes another file')" "1:1"
+P="$(installed_prefix)"; cp "$ROOT_BAD/pam/sudo-fingerprint" "$P$STANZA_INSTALLED_PATH"
+rc="$(run_setup "$ROOT_BAD" "$P" --check)"
+check "an installed stanza libpam cannot load, though it matches its checkout: says sudo refuses everyone" \
+  "$rc:$(out_has 'libpam refuses a CORRECT password'):$(out_has 'pkexec sed -i'):$(out_has 'sudo-fingerprint matches this checkout')" \
+  "1:2:1:1"
 
 # ---------------------------------------------------------------------------
 printf '\ninstall refuses, and writes nothing\n'
@@ -563,6 +615,26 @@ check "libpam-fprintd not installed: exit 2" "$rc:$(tree_hash "$P"):$(out_has 'a
 P="$(newprefix)"; rm -f "$P/etc/pam.d/sudo-i"; before="$(tree_hash "$P")"
 rc="$(run_setup "$ROOT" "$P")"
 check "no /etc/pam.d/sudo-i: exit 2" "$rc:$(tree_hash "$P")" "2:$before"
+P="$(newprefix)"; before="$(tree_hash "$P")"
+rc="$(run_setup "$ROOT_BAD" "$P")"
+check "a stanza libpam cannot load (one misspelled keyword would refuse EVERY sudo): exit 1, nothing written" \
+  "$rc:$(tree_hash "$P"):$(logged_re '^sudo '):$(out_has 'libpam refuses a CORRECT password')" "1:$before:0:2"
+P="$(newprefix)"; sed -i '0,/pam_unix/s/^auth.*pam_unix.*/auth requisite pam_faillock.so preauth\n&/' "$P/etc/pam.d/common-auth"
+before="$(tree_hash "$P")"
+rc="$(run_setup "$ROOT" "$P")"
+check "common-auth with pam_faillock: exit 1, nothing written" \
+  "$rc:$(tree_hash "$P"):$(out_has 'pam_faillock.so, which a correct password at the stanza would skip')" "1:$before:1"
+P="$(newprefix)"; truncate -s -1 "$P/etc/pam.d/sudo"; before="$(tree_hash "$P")"
+rc="$(run_setup "$ROOT" "$P")"
+check "a sudo file with no final newline (--remove could not restore it byte for byte): exit 2" \
+  "$rc:$(tree_hash "$P"):$(out_has 'does not end in a newline')" "2:$before:1"
+P="$(newprefix)"; truncate -s -1 "$P/etc/gdm3/greeter.dconf-defaults"; before="$(tree_hash "$P")"
+rc="$(run_setup "$ROOT" "$P")"
+check "a greeter file with no final newline: exit 2" "$rc:$(tree_hash "$P")" "2:$before"
+P="$(newprefix)"; before="$(tree_hash "$P")"
+rc="$(run_setup "$ROOT_NO_PROBE" "$P")"
+check "a checkout without the libpam probe (nothing to validate the stack with): exit 2, nothing written" \
+  "$rc:$(tree_hash "$P"):$(out_has 'are needed to load the stack')" "2:$before:1"
 
 P="$(newprefix)"
 rc="$(STUB_GDM_RELOAD_FAIL=1 run_setup "$ROOT" "$P")"
@@ -619,65 +691,6 @@ check "--check runs from a worktree (it writes nothing), and is not refused" \
 # The installed files, run through the REAL libpam. pam_start_confdir() reads
 # the service from a directory of our choosing, so no root and no /etc.
 printf '\nthe installed stack, through the real libpam (permit/deny stand in for right/wrong)\n'
-cat >"$T/pam_run.py" <<'PY'
-"""pam_authenticate SERVICE from CONFDIR via the real libpam; print the return code.
-
-Every prompt is answered with an empty string: the stand-in modules ignore it.
-A failing pam_start prints "start:<code>", which is how a missing include shows.
-"""
-import ctypes
-import ctypes.util
-import sys
-
-PAM_TTY_ITEM = 3
-libpam = ctypes.CDLL(ctypes.util.find_library("pam"))
-libc = ctypes.CDLL(ctypes.util.find_library("c"))
-libc.strdup.restype = ctypes.c_void_p
-libc.calloc.restype = ctypes.c_void_p
-if not hasattr(libpam, "pam_start_confdir"):
-    print("no-confdir")
-    sys.exit(0)
-
-
-class PamMessage(ctypes.Structure):
-    _fields_ = [("msg_style", ctypes.c_int), ("msg", ctypes.c_char_p)]
-
-
-class PamResponse(ctypes.Structure):
-    _fields_ = [("resp", ctypes.c_void_p), ("resp_retcode", ctypes.c_int)]
-
-
-CONVERSATION = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int,
-                                ctypes.POINTER(ctypes.POINTER(PamMessage)),
-                                ctypes.POINTER(ctypes.POINTER(PamResponse)), ctypes.c_void_p)
-
-
-class PamConv(ctypes.Structure):
-    _fields_ = [("conv", CONVERSATION), ("appdata_ptr", ctypes.c_void_p)]
-
-
-def answer_empty(count, _messages, responses, _appdata):
-    """Answer every message with an empty string, in memory libpam frees."""
-    block = ctypes.cast(libc.calloc(count, ctypes.sizeof(PamResponse)), ctypes.POINTER(PamResponse))
-    for i in range(count):
-        block[i].resp = libc.strdup(b"")
-    responses[0] = block
-    return 0
-
-
-service, confdir, tty = sys.argv[1], sys.argv[2], sys.argv[3]
-handle = ctypes.c_void_p()
-conversation = PamConv(CONVERSATION(answer_empty), None)
-started = libpam.pam_start_confdir(service.encode(), b"someone", ctypes.byref(conversation),
-                                   confdir.encode(), ctypes.byref(handle))
-if started != 0:
-    print(f"start:{started}")
-    sys.exit(0)
-if tty:
-    libpam.pam_set_item(handle, PAM_TTY_ITEM, tty.encode())
-print(libpam.pam_authenticate(handle, 0))
-libpam.pam_end(handle, 0)
-PY
 P="$(installed_prefix)"
 CONF="$T/pamconf"
 # stack <first password> <finger> <second password> <lid dir> — the installed
@@ -689,31 +702,36 @@ stack() {
   printf 'account required pam_permit.so\n' >"$CONF/common-account"
   printf 'session required pam_permit.so\n' >"$CONF/common-session-noninteractive"
   sed -i -e "s|pam_unix\.so nullok|pam_$1.so|" -e "s|pam_fprintd\.so max-tries=2 timeout=10|pam_$2.so|" \
-         -e "s|$GATE_INSTALLED_PATH|$P$GATE_INSTALLED_PATH --lid-dir $4 --log-file $GATE_LOG|" \
+         -e "s|$GATE_INSTALLED_PATH|$P$GATE_INSTALLED_PATH --lid-dir $4 --passwd-file $PASSWD_FIXTURE --log-file $GATE_LOG|" \
          "$CONF/sudo-fingerprint" || fatal "pamconf"
   sed -i -e "s|pam_unix\.so nullok|pam_$3.so|" -e 's|pam_sss\.so use_first_pass|pam_deny.so|' \
          -e 's|pam_cap\.so|pam_permit.so|' "$CONF/common-auth" || fatal "pamconf"
   : >"$GATE_LOG"
 }
-authenticate() { python3 -I "$T/pam_run.py" sudo "$CONF" "$1" 2>&1; }
+# probe [args] — the shared probe on $CONF's sudo: "<result> <prompts>".
+probe() { python3 -I "$PROBE" --confdir "$CONF" --service sudo "$@" 2>&1; }
+# authenticate <tty> — the result alone, as the local account "someone".
+authenticate() { local outcome; outcome="$(probe --user someone --tty "$1")"; printf '%s' "${outcome%% *}"; }
 
 stack permit deny deny "$LID_OPEN"
+python3 -I "$PROBE" --confdir "$CONF" --service sudo >/dev/null 2>&1
+[[ $? == 2 ]] && fatal "the probe cannot run here: no libpam with pam_start_confdir (Linux-PAM < 1.4)"
 check "the stand-ins replaced every real module and the gate path (else this section tests nothing)" \
   "$(cat "$CONF"/* | grep -v '^[[:space:]]*#' | grep -c -E "pam_unix|pam_fprintd|pam_sss|pam_cap| $GATE_INSTALLED_PATH")" 0
 result="$(authenticate /dev/pts/3)"
-[[ "$result" == no-confdir ]] && fatal "this libpam has no pam_start_confdir (Linux-PAM < 1.4)"
 check "the right password first: authenticated, and the gate never even runs" \
   "$result:$(wc -l <"$GATE_LOG" | tr -d ' ')" "$PAM_SUCCESS:0"
 stack deny permit deny "$LID_OPEN"
 check "a wrong (or empty) password, a terminal, the lid open: the finger authenticates" \
   "$(authenticate /dev/pts/3):$(gate_said 'offer:')" "$PAM_SUCCESS:1"
 stack deny deny permit "$LID_OPEN"
-check "the finger fails too: common-auth's fresh password prompt still authenticates" "$(authenticate /dev/pts/3)" "$PAM_SUCCESS"
+check "the finger fails, and common-auth's own check accepts: authenticated (a failed finger decides nothing)" \
+  "$(authenticate /dev/pts/3)" "$PAM_SUCCESS"
 stack deny permit deny "$LID_CLOSED"
 check "lid closed: the finger is never asked, though it would have matched" \
   "$(authenticate /dev/pts/3):$(gate_said 'skip: lid closed')" "$PAM_AUTH_ERR:1"
 stack deny deny permit "$LID_CLOSED"
-check "lid closed, the second password right: authenticated (the skip's jump poisons nothing)" \
+check "lid closed, and common-auth's own check accepts: authenticated (the skip's jump poisons nothing)" \
   "$(authenticate /dev/pts/3)" "$PAM_SUCCESS"
 stack deny permit deny "$LID_OPEN"
 check "no terminal: the finger is never asked, though it would have matched" \
@@ -728,7 +746,15 @@ sed -i "s|$P$GATE_INSTALLED_PATH|$T/no/such/gate|" "$CONF/sudo-fingerprint"
 check "the gate missing: pam_exec's failure reads as OFFER, lid closed or not (why the gate goes in first)" \
   "$(authenticate '')" "$PAM_SUCCESS"
 
-EXPECTED_ROWS=112
+printf '\nthe re-prompt is the caller retrying, not common-auth (the REAL pam_unix, an account it does not know)\n'
+stack unix deny unix "$LID_OPEN"
+check "one attempt asks ONCE: common-auth's pam_unix re-checks the cached password, and the attempt fails" \
+  "$(probe --user fingerprint-test-nobody --tty /dev/pts/3):$(gate_said 'offer:')" "$PAM_AUTH_ERR 1:1"
+stack unix deny unix "$LID_OPEN"
+check "a second attempt on the same handle (sudo's retry) is what asks again" \
+  "$(probe --user fingerprint-test-nobody --tty /dev/pts/3 --attempts 2)" "$PAM_AUTH_ERR 2"
+
+EXPECTED_ROWS=129
 
 # --- the count this suite is documented as running ---------------------------
 # Same needle as the other suites: docs/REPO_CHECKS.md, "Where a check count lives".

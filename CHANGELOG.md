@@ -11,8 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The fingerprint reader, without ever putting a fingerprint wait in front of a password:
   `fingerprint-setup` (`--check`, `--remove`).**
-  - **sudo** asks for the password first, as before. An empty Enter switches to the reader, offered
-    only with a real terminal and the lid open, so agents and docked use never wait on it.
+  - **sudo** asks for the password first, as before. An empty Enter switches to the reader. It is
+    offered only to a local account, with a real terminal and the lid open, so agents, domain
+    accounts and docked use never wait on it. Leaving the reader ends that try, and sudo asks
+    again on its next one.
+  - **Nothing is written until the stack it would leave loads through the real libpam** and
+    accepts a correct password: one misspelled keyword would refuse every sudo. The install also
+    refuses a `common-auth` holding anything the early password check would skip
+    (`pam_faillock`, a second factor).
   - **The lock screen** takes either one at the same moment (GDM's own `gdm-fingerprint`).
   - **The greeter** stays password-only, so the keyring unlocks at login.
   - **polkit, su, login and `common-auth` are untouched.** `--check` fails if any PAM stack ever
