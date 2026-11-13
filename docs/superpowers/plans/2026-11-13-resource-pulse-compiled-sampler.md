@@ -53,6 +53,11 @@ passed, because each depends on something measured here.
 - **Names:** every constant with a role is named, with its unit in the name. The crate is
   `resource-pulse-sampler/`, the program `resource-pulse-sampler`, installed at
   `~/.local/lib/resource-pulse/resource-pulse-sampler`.
+- **Arithmetic** (amended 2026-11-14, during the build): every integer read from a file becomes `f64`
+  before the first arithmetic on it, and the arithmetic is written in the order the JavaScript writes it,
+  because the gjs sampler's numbers are doubles throughout. A counter delta is never a `u64` or `i64`
+  subtraction: it goes through `counter_delta_usec`, which converts first. A field too large for its
+  integer type reads as no data.
 - **Each pull request** runs `pre-commit run --all-files`, `./scripts/check-claude-md.sh` and
   `scripts/test-resource-pulse.sh`, and from pull request B on `scripts/test-resource-pulse-sampler.sh`,
   each at its asserted total.
@@ -328,6 +333,9 @@ and expected values, marked `/// row: <title>`, and its line leaves `carried-row
 - [ ] **Step 2: Run, see them fail. Step 3: Implement. Step 4: Run, see them pass,** with clippy clean.
 - [ ] **Step 5: Remove the 16 titles from the exempt list, run the state table, commit.**
 
+**As built (2026-11-14):** the signatures above. A field too large for its integer type reads as no data,
+where the gjs parser returns an inexact double; no kernel writes such a field.
+
 ### Task 6: CPU, memory, pressure and the ring buffer
 
 **Files:**
@@ -353,8 +361,15 @@ and expected values, marked `/// row: <title>`, and its line leaves `carried-row
   `'cpu: a CPU that appears or vanishes between two samples gives a number or no data, never a panic'`: two
   per-CPU maps whose key sets differ in each direction, and one empty. (Review Focus 4.)
 - [ ] **Step 2 to 4: Run, implement, run.** The arithmetic is in `f64`, in the order the JavaScript writes it;
-  an integer becomes `f64` where the JavaScript first divides or multiplies by a non-integer.
+  an integer becomes `f64` before the first arithmetic on it. (Amended 2026-11-14: this step first said
+  "where the JavaScript first divides or multiplies by a non-integer", which does sums and differences in
+  integers and so differs from gjs when a counter goes backwards or passes 2^53.)
 - [ ] **Step 5: Remove the 22 titles from the exempt list, run the state table, commit.**
+
+**As built (2026-11-14):** `parse_cpu_list` returns `Result<Vec<u32>, CpuListError>` (the gjs throws and its
+caller logs) and refuses a CPU above 65,535; `cpu_busy_fraction` takes `Option<&CpuTimes>` twice; the
+fields of `MemoryUsage` and `SwapSummary` are `f64`; `RingBuffer::new` takes a `NonZeroUsize` and cannot
+fail.
 
 ### Task 7: JavaScript's strings, and the naming and ranking of apps
 
@@ -390,6 +405,11 @@ and expected values, marked `/// row: <title>`, and its line leaves `carried-row
 - [ ] **Step 2 to 4: Run, implement, run.**
 - [ ] **Step 5: Remove the 41 titles from the exempt list, run the state table, commit.**
 
+**As built (2026-11-14):** `CgroupDescription`'s `kind` is an enum that carries the app ids. In
+`RankingScan` the root and parent CPU deltas are `f64` (from `counter_delta_usec`), the elapsed time is
+`i64`, and usage and memory are `u64`. The insertion-ordered map is
+`src/insertion_ordered_map.rs`.
+
 ### Task 8: The scan cadence
 
 **Files:**
@@ -409,6 +429,10 @@ and expected values, marked `/// row: <title>`, and its line leaves `carried-row
 
 - [ ] **Step 1: Write the 36 carried rows, failing. Steps 2 to 4: Run, implement, run.**
 - [ ] **Step 5: Remove the 36 titles from the exempt list, run the state table, commit, open pull request C.**
+
+**As built (2026-11-14):** `arms_warm_up` and `is_triggered_scan` take `Option<ScanReason>`.
+`CadenceState` holds its counters and CPU values as `Option<f64>` and its two band lists as
+`Vec<Option<f64>>`, since the gjs rows pass `null`, `NaN` and a band of -1.
 
 ---
 

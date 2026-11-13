@@ -255,21 +255,30 @@ run_carried_fixture() {
   FIXTURE_OUTPUT="$("$CARRIED_ROWS_CHECK" --crate-dir "$1" --list "${2:-$1/tests/carried-rows.txt}" --exempt "$1/tests/carried-rows-exempt.txt" 2>&1)"
   FIXTURE_EXIT=$?
 }
-BASELINE_FIXTURE="$(write_carried_fixture baseline $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n')"
+BASELINE_FIXTURE="$(write_carried_fixture baseline $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n#[test]\nfn alpha() {}\n')"
 run_carried_fixture "$BASELINE_FIXTURE"
 check "one ported, two exempt: exit 0, three passing lines" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c '^CARRIED-ROW pass ')" "0:3"
-MISSING_FIXTURE="$(write_carried_fixture missing $'Beta row\tnot yet ported\n' $'/// row: Alpha row\n')"
+MISSING_FIXTURE="$(write_carried_fixture missing $'Beta row\tnot yet ported\n' $'/// row: Alpha row\n#[test]\nfn alpha() {}\n')"
 run_carried_fixture "$MISSING_FIXTURE"
 check "a title found nowhere: exit 1, named as missing" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW fail missing: Gamma row')" "1:1"
-DUPLICATED_FIXTURE="$(write_carried_fixture duplicated $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n/// row: Alpha row\n')"
+DUPLICATED_FIXTURE="$(write_carried_fixture duplicated $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n#[test]\nfn alpha() {}\n/// row: Alpha row\n#[test]\nfn alpha_again() {}\n')"
 run_carried_fixture "$DUPLICATED_FIXTURE"
 check "a title ported twice: exit 1, named as duplicated" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW fail duplicated: Alpha row')" "1:1"
-BOTH_FIXTURE="$(write_carried_fixture both $'Alpha row\tnot yet ported\nBeta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n')"
+BOTH_FIXTURE="$(write_carried_fixture both $'Alpha row\tnot yet ported\nBeta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n#[test]\nfn alpha() {}\n')"
 run_carried_fixture "$BOTH_FIXTURE"
 check "a title both ported and exempt: exit 1, named as such" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW fail ported-and-exempt: Alpha row')" "1:1"
-UNKNOWN_FIXTURE="$(write_carried_fixture unknown $'Beta row\tnot yet ported\nGamma row\tnot yet ported\nDelta row\tnot a gjs row\n' $'/// row: Alpha row\n')"
+UNKNOWN_FIXTURE="$(write_carried_fixture unknown $'Beta row\tnot yet ported\nGamma row\tnot yet ported\nDelta row\tnot a gjs row\n' $'/// row: Alpha row\n#[test]\nfn alpha() {}\n')"
 run_carried_fixture "$UNKNOWN_FIXTURE"
 check "an exempt title the list lacks: exit 1, named as unknown" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW fail unknown-exempt: Delta row')" "1:1"
+UNKNOWN_PORTED_FIXTURE="$(write_carried_fixture unknown-ported $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n#[test]\nfn alpha() {}\n/// row: Delta row\n#[test]\nfn delta() {}\n')"
+run_carried_fixture "$UNKNOWN_PORTED_FIXTURE"
+check "a port under a title the list lacks: exit 1, named as unknown" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW fail unknown-ported: Delta row')" "1:1"
+NOT_A_DOC_COMMENT_FIXTURE="$(write_carried_fixture not-a-doc-comment $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n#[test]\nfn alpha() {}\nlet note = 1; /// row: Beta row\n')"
+run_carried_fixture "$NOT_A_DOC_COMMENT_FIXTURE"
+check "a marker inside a line is not a port: exit 0, Beta still exempt only" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW pass exempt: Beta row')" "0:1"
+NOT_ON_A_TEST_FIXTURE="$(write_carried_fixture not-on-a-test $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\nfn alpha() {}\n')"
+run_carried_fixture "$NOT_ON_A_TEST_FIXTURE"
+check "a marker on a function that is not a test: exit 1, named as such" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg -c -x 'CARRIED-ROW fail marker-not-on-test: Alpha row')" "1:1"
 run_carried_fixture "$BASELINE_FIXTURE" "$WORK_DIR/no-such-list.txt"
 check "a list that cannot be read: exit 2, no pass line" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg '^CARRIED-ROW ' | wc -l | tr -d ' ')" "2:0"
 
@@ -369,10 +378,12 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
   bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
 fi
 
-# 2 cargo unit tests + 1 build + 1 zbus feature row + 6 program flag rows + 26 constants + 1 comparison tally
-# + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks + 8 carried-check fixtures + 2 runner guards
-# + 1 bus_link guard + 8 bus_link tests + 11 rows of the program on a private bus.
-EXPECTED_ROWS=254
+# 171 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
+# string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence) + 1 build + 1 zbus feature row + 6 program flag rows
+# + 26 constants + 1 comparison tally + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks
+# + 11 carried-check fixtures + 2 runner guards + 1 bus_link guard + 8 bus_link tests
+# + 11 rows of the program on a private bus.
+EXPECTED_ROWS=426
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then
