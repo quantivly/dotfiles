@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `lib/constants.js` and `lib/protocol.js`, one row per gjs test title the crate must carry over), and the
   `resource-pulse-sampler-test` job runs it. `zsh/zshrc.buildlimits` caps `RUST_TEST_THREADS` beside
   `CARGO_BUILD_JOBS`; `build-limits` lists it. Nothing on the machine runs the program yet.
+  - **The bus link, and the proof that decides the D-Bus library.** `src/bus.rs` serves `ResourcePulse1` on
+    `zbus`'s message-level API: connected with no name and listening before it asks for the name, the name
+    asked for with "do not queue" only, every reply and signal sent from one thread, and every call answered.
+    With no flag the program serves a counter in place of the sampler (`--tick-interval-ms` sets its tick).
+    The table runs it on a private bus of its own (`gnome-shell/tests/run-sampler-program.js`), with rows for
+    the reply order, the start-up order, a second copy, an unknown method, `Introspect`, the name flags and a
+    caller that leaves. The private-bus guard moved to `gnome-shell/tests/privateBus.js`, which registers no
+    rows; `service-dbus.test.js` re-exports it.
 - **Resource Pulse draws the desktop cockpit: a grid of four cards on the cockpit monitor, the sessions
   card in the dropdown, and a click that takes you to a Claude Code session.** Built from
   `docs/superpowers/plans/2026-11-10-desktop-cockpit-drawing-side.md` (design:

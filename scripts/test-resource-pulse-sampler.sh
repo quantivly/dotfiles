@@ -11,16 +11,25 @@
 #     and rows proving that comparison fails when a value changes on one side;
 #   - one row per gjs test title the crate must carry over (scripts/resource-pulse-sampler-carried-rows.sh),
 #     and rows proving that check fails for a missing, a duplicated and a
-#     double-counted title, an unknown exempt title, and an unreadable list.
-# The program is not run by anything on the machine; nothing here starts a
-# service, touches the session bus or reads a process's command line.
+#     double-counted title, an unknown exempt title, and an unreadable list;
+#   - the program's flags and exit statuses, and its bus rows: the program served
+#     on a PRIVATE bus of this run (gnome-shell/tests/run-sampler-program.js under
+#     `dbus-run-session`), holding the reply order, the start-up order, the name
+#     flags and the answer to every call, and rows proving that runner refuses any
+#     other bus.
+# Nothing here touches the live session bus. Every run of the program outside
+# `dbus-run-session` gets BUS_BARRIER (a session bus address nobody listens on,
+# in this run's directory, and a runtime directory of its own), so a program that
+# tried to connect there could reach no bus at all; on the private bus it gets
+# that bus's address, checked by the runner. Nothing reads a process's command line.
 #
 # "Could not run" is exit 2, never a pass: a missing cargo, gjs, dbus-run-session,
-# rg, python3 or script, or a cargo run that prints no `test result:` line, is
-# fatal or a failed row. The suite asserts its own row total.
+# rg, python3, setsid, timeout or script, a cargo run that prints no `test result:`
+# line, or a bus runner that prints no tally, is fatal or a failed row. The suite
+# asserts its own row total.
 #
-# Requires: bash, cargo, gjs, dbus-run-session (Ubuntu: dbus-daemon; later tasks
-# run the program on a private bus), rg, python3. Needs the network the first time
+# Requires: bash, cargo, gjs, dbus-run-session (Ubuntu: dbus-daemon), setsid and
+# timeout (util-linux, coreutils), rg, python3. Needs the network the first time
 # (crates.io); no root.
 #
 # Usage: scripts/test-resource-pulse-sampler.sh
@@ -37,6 +46,11 @@ CONSTANTS_COMPARISON="$DOTFILES/gnome-shell/tests/sampler-constants.js"
 CARRIED_ROWS_CHECK="$HERE/resource-pulse-sampler-carried-rows.sh"
 CARRIED_ROWS_GENERATOR="$HERE/resource-pulse-sampler-carried-rows-generate.py"
 CARRIED_ROWS_LIST_FILE="$CRATE_DIR/tests/carried-rows.txt"
+PRIVATE_BUS_RUNNER="$DOTFILES/gnome-shell/tests/run-sampler-program.js"
+# The bus rows take about 15 s; the cap ends a hang, and KILL follows TERM for whatever outlives it.
+PRIVATE_BUS_TIMEOUT_SECONDS=300
+PRIVATE_BUS_KILL_AFTER_SECONDS=10
+TALLY_PATTERN='^JS-TALLY pass=([0-9]+) fail=([0-9]+)$'
 
 PASS=0; FAIL=0
 ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
@@ -44,13 +58,14 @@ bad()   { printf '  \033[1;31m✗\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — expected '$3', got '$2'"; fi; }
 fatal() { printf '\033[1;31mFATAL\033[0m: %s\n' "$*" >&2; exit 2; }
 
-for required_tool in cargo gjs dbus-run-session rg python3 awk; do
+for required_tool in cargo gjs dbus-run-session setsid timeout rg python3 awk; do
   command -v "$required_tool" >/dev/null || fatal "$required_tool is required"
 done
 [[ -r "$MANIFEST_PATH" ]] || fatal "cannot read $MANIFEST_PATH"
 [[ -r "$CONSTANTS_COMPARISON" ]] || fatal "cannot read $CONSTANTS_COMPARISON"
 [[ -x "$CARRIED_ROWS_CHECK" ]] || fatal "cannot run $CARRIED_ROWS_CHECK"
 [[ -r "$CARRIED_ROWS_GENERATOR" ]] || fatal "cannot read $CARRIED_ROWS_GENERATOR"
+[[ -r "$PRIVATE_BUS_RUNNER" ]] || fatal "cannot read $PRIVATE_BUS_RUNNER"
 
 # Workers for cargo's build and its tests when the caller's environment sets neither. The interactive cap comes from
 # zsh/zshrc.buildlimits (which exports both variables); this is only the fallback for a non-interactive run.
@@ -61,6 +76,18 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/res
 
 WORK_DIR="$(mktemp -d)" || fatal "mktemp -d failed"
 trap 'rm -rf "$WORK_DIR"' EXIT
+
+# BUS_BARRIER: the environment of every program run outside the private bus. Its session bus address is a socket
+# nobody listens on, and its runtime directory is this run's own, so neither the address nor the fallback under
+# XDG_RUNTIME_DIR can lead to the live session bus.
+BARRIER_RUNTIME_DIR="$WORK_DIR/barrier-runtime"
+BARRIER_BUS_ADDRESS="unix:path=$WORK_DIR/barrier-no-session-bus"
+if ! mkdir -p "$BARRIER_RUNTIME_DIR" || ! chmod 700 "$BARRIER_RUNTIME_DIR"; then
+  fatal "cannot create the barrier's runtime directory $BARRIER_RUNTIME_DIR"
+fi
+BUS_BARRIER=(GSETTINGS_BACKEND=memory "DBUS_SESSION_BUS_ADDRESS=$BARRIER_BUS_ADDRESS" "XDG_RUNTIME_DIR=$BARRIER_RUNTIME_DIR")
+# off_bus <command...> runs a command behind BUS_BARRIER.
+off_bus() { env "${BUS_BARRIER[@]}" "$@"; }
 
 printf 'cargo test: one row per test\n'
 CARGO_TEST_OUTPUT="$(cargo test --locked --manifest-path "$MANIFEST_PATH" 2>&1)"
@@ -98,13 +125,24 @@ else
 fi
 PROGRAM_PATH="$CARGO_TARGET_DIR/debug/resource-pulse-sampler"
 [[ -x "$PROGRAM_PATH" ]] || fatal "no program at $PROGRAM_PATH"
-"$PROGRAM_PATH" --print-constants >/dev/null
+off_bus "$PROGRAM_PATH" --print-constants >/dev/null
 check "--print-constants exits 0" "$?" 0
-"$PROGRAM_PATH" >/dev/null 2>"$WORK_DIR/usage.err"
-check "no argument: exit 2" "$?" 2
-check "no argument: a one-line usage on stderr" "$(wc -l <"$WORK_DIR/usage.err" | tr -d ' ')" 1
-"$PROGRAM_PATH" --nonsense >/dev/null 2>&1
+off_bus "$PROGRAM_PATH" --tick-interval-ms >/dev/null 2>"$WORK_DIR/usage.err"
+check "--tick-interval-ms without a number: exit 2" "$?" 2
+check "--tick-interval-ms without a number: one line on stderr, and it is the usage" \
+  "$(wc -l <"$WORK_DIR/usage.err" | tr -d ' '):$(rg -c '^usage: resource-pulse-sampler ' "$WORK_DIR/usage.err")" "1:1"
+tick_interval_refusals=""
+for refused_interval in 0 twenty -5 18446744073709551616; do
+  off_bus "$PROGRAM_PATH" --tick-interval-ms "$refused_interval" >/dev/null 2>&1
+  tick_interval_refusals+="$refused_interval=$? "
+done
+check "--tick-interval-ms refuses zero, a word, a negative and an overflow: exit 2 each" \
+  "$tick_interval_refusals" "0=2 twenty=2 -5=2 18446744073709551616=2 "
+off_bus "$PROGRAM_PATH" --nonsense >/dev/null 2>&1
 check "an unknown argument: exit 2" "$?" 2
+off_bus "$PROGRAM_PATH" >/dev/null 2>"$WORK_DIR/no-bus.err"
+check "no flag and no bus to reach: exit 1, with one line on stderr" \
+  "$?:$(wc -l <"$WORK_DIR/no-bus.err" | tr -d ' ')" "1:1"
 
 # print_constant_rows <program> runs the gjs comparison against <program> and turns each CONSTANT-ROW line into a row.
 # It sets COMPARISON_EXIT and COMPARISON_OUTPUT; a run that printed no tally is a failed row.
@@ -209,7 +247,67 @@ check "a list with no titles: exit 2, no pass line" "$FIXTURE_EXIT:$(printf '%s\
 "$CARRIED_ROWS_CHECK" --no-such-flag >/dev/null 2>&1
 check "an unknown flag: exit 2" "$?" 2
 
-EXPECTED_ROWS=229
+printf '\nthe program on a private bus (gnome-shell/tests/run-sampler-program.js)\n'
+# The bus is this run's own: a path socket in a 0700 directory, and no service directory, so nothing on it can be
+# activated. The runner refuses to start unless DBUS_SESSION_BUS_ADDRESS is that socket, and it all runs behind
+# BUS_BARRIER, so even a program that ignored the address would find no live bus to fall back to.
+PRIVATE_BUS_DIR="$WORK_DIR/private-bus"
+PRIVATE_BUS_CONFIG="$WORK_DIR/private-bus.conf"
+if ! mkdir -p "$PRIVATE_BUS_DIR" || ! chmod 700 "$PRIVATE_BUS_DIR"; then
+  fatal "cannot create the private bus directory $PRIVATE_BUS_DIR"
+fi
+cat >"$PRIVATE_BUS_CONFIG" <<BUS_CONFIG || fatal "cannot write $PRIVATE_BUS_CONFIG"
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:dir=$PRIVATE_BUS_DIR</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+BUS_CONFIG
+# on_private_bus <command...> runs a command on its own private bus, behind the barrier. GIO_USE_VFS=local keeps GIO
+# from asking that bus for gvfs. It runs in a session of its own (setsid), and timeout signals its whole process
+# group, so a time-out ends the private dbus-daemon and every copy of the program with it.
+on_private_bus() {
+  env "${BUS_BARRIER[@]}" RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" GIO_USE_VFS=local \
+    setsid --wait timeout --kill-after="$PRIVATE_BUS_KILL_AFTER_SECONDS" "$PRIVATE_BUS_TIMEOUT_SECONDS" \
+    dbus-run-session --config-file="$PRIVATE_BUS_CONFIG" -- "$@"
+}
+# The runner's own guards first. Outside its private bus (the barrier's dead socket, outside the bus directory) it
+# must refuse before a row runs; on the bus but with no program, it must refuse too.
+RUNNER_GUARD_OUTPUT="$(off_bus RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" \
+  timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" gjs -m "$PRIVATE_BUS_RUNNER" "$PROGRAM_PATH" 2>&1)"
+check "the runner refuses a bus outside its private directory: exit 2, no row run" \
+  "$?/$(rg -c -F 'refusing to run' <<<"$RUNNER_GUARD_OUTPUT")/$(rg -c '^JS-TALLY' <<<"$RUNNER_GUARD_OUTPUT")" "2/1/"
+RUNNER_GUARD_OUTPUT="$(on_private_bus gjs -m "$PRIVATE_BUS_RUNNER" 2>&1)"
+check "the runner refuses to start with no program to run: exit 2, no row run" \
+  "$?/$(rg -c -F 'no executable sampler program' <<<"$RUNNER_GUARD_OUTPUT")/$(rg -c '^JS-TALLY' <<<"$RUNNER_GUARD_OUTPUT")" \
+  "2/1/"
+PROGRAM_BUS_OUTPUT="$(on_private_bus gjs -m "$PRIVATE_BUS_RUNNER" "$PROGRAM_PATH" 2>&1)"
+PROGRAM_BUS_EXIT=$?
+printf '%s\n' "$PROGRAM_BUS_OUTPUT"
+PROGRAM_BUS_TALLY_LINE=""
+while IFS= read -r program_bus_line; do
+  if [[ "$program_bus_line" =~ $TALLY_PATTERN ]]; then
+    PROGRAM_BUS_TALLY_LINE="$program_bus_line"
+    PROGRAM_BUS_PASS="${BASH_REMATCH[1]}"
+    PROGRAM_BUS_FAIL="${BASH_REMATCH[2]}"
+  fi
+done <<<"$PROGRAM_BUS_OUTPUT"
+[[ -n "$PROGRAM_BUS_TALLY_LINE" ]] \
+  || fatal "no JS-TALLY line from the program's bus rows (exit $PROGRAM_BUS_EXIT): they did not run"
+PASS=$((PASS + PROGRAM_BUS_PASS))
+FAIL=$((FAIL + PROGRAM_BUS_FAIL))
+if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
+  bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
+fi
+
+EXPECTED_ROWS=241
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

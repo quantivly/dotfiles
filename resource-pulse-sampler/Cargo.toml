@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 zbus = { version = "6.2", default-features = false, features = ["default-rt"] }
+# The `Stream` trait the receiving thread polls `zbus`'s message stream through; already in the
+# tree as a dependency of `zbus`, with the same features.
+futures-core = "0.3"
 libc = "0.2"
 
 [dev-dependencies]
