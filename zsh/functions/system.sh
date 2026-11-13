@@ -4598,6 +4598,14 @@ vpn-sweeps() {
 #   - dock-lid-setup:         install or resync both guards (needs sudo)
 #   - dock-lid-setup --check: read-only drift + live-logind check
 # See docs/DOCK_LID_SUSPEND.md.
+#
+# The fingerprint reader, in the same root-owned-copy pattern:
+#   - fingerprint-setup:          password first in sudo, then a gated finger;
+#                                 greeter password-only (needs sudo)
+#   - fingerprint-setup --check:  read-only; also fails if any PAM stack puts
+#                                 pam_fprintd in front of a password
+#   - fingerprint-setup --remove: take it all out again
+# See docs/FINGERPRINT.md.
 # =============================================================================
 # Dev link: ssh to dev over an AWS SSM ProxyCommand
 #
@@ -4894,4 +4902,17 @@ dock-wifi-setup() {
     root="$here"
   fi
   bash "${root}/scripts/setup-dock-wifi.sh" "$@"
+}
+
+# The fingerprint reader (docs/FINGERPRINT.md): sudo takes a finger AFTER the
+# password, the lock screen beside it, the greeter never. Same resolution rule
+# as dock-lid-setup.
+fingerprint-setup() {
+  local root="${HOME}/.dotfiles" here
+  here="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"
+  if [[ -n "$here" && -x "${here}/scripts/setup-fingerprint.sh" ]] \
+     && [[ "$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" -ef "${HOME}/.dotfiles/.git" ]]; then
+    root="$here"
+  fi
+  bash "${root}/scripts/setup-fingerprint.sh" "$@"
 }
