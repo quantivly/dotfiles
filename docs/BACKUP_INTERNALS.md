@@ -61,7 +61,7 @@ commands are all `backup-*`.
   - **A failure resticprofile did see is reported twice.** The ping is idempotent and the alert is
     deduplicated on state change, so the second call is silent.
   - **`scripts/test-backup-units.sh` (29 checks, root-free) pins this**, in the CI job
-    `backup-external-test`. Ten mutants, each killed by at least one row; the list is in its header.
+    `backup-external-test`. Eleven mutants, each killed by at least one row; the list is in its header.
 - **The verification's own blind spot: it verified `latest`, whatever its age.** On 2026-11-02 and
   2026-11-09 `restic-verify` restored the manifest from the 2026-09-20 snapshot (the same 108,764
   bytes both times) and reported success, and pinged its healthcheck green.
