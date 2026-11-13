@@ -15,6 +15,7 @@
     )
 )]
 
+pub mod apps;
 pub mod bus;
 pub mod constants;
 pub mod cpu;
