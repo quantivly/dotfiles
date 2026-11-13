@@ -704,6 +704,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Run `backup-setup` once after deploying**: these are root-owned copies in `/etc`.
   - State table: `scripts/test-backup-units.sh` (hermetic, CI `backup-external-test`).
 
+- **`backup-verify.sh` no longer passes on a snapshot of any age.** Both canaries read `latest`,
+  so through the 54 days above the weekly verification restored the same September snapshot and
+  printed "verification passed". It now states the age of the snapshot it verified, and fails when
+  that is past the limit on a machine that has been up long enough to have backed up.
+  - **Limit:** 48 hours for b2 (`BACKUP_VERIFY_MAX_AGE_HOURS`; `0` turns the judgement off). The
+    external target is not judged by default: a disk undocked for weeks is normal.
+  - **A laptop that was off is not a failure.** A machine up for less than 24 hours
+    (`BACKUP_VERIFY_MIN_UPTIME_HOURS`) is told the age and not judged on it. An uptime that cannot
+    be read excuses nothing.
+  - **An age that cannot be read is a FAIL**, never a tick.
+  - State table: `scripts/test-backup-verify.sh` (hermetic, CI `backup-external-test`).
+
 - **The credential reconciler treats the same grant in two writers' shapes as one login
   (`scripts/claude-account-dirs.sh`).** The equal-expiry tie-break compared the whole
   `claudeAiOauth` block, so `subscriptionTypeSource`, which Claude Code writes and `clauth login`

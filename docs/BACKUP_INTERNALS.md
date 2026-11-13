@@ -62,6 +62,19 @@ commands are all `backup-*`.
     deduplicated on state change, so the second call is silent.
   - **`scripts/test-backup-units.sh` (29 checks, root-free) pins this**, in the CI job
     `backup-external-test`. Ten mutants, each killed by at least one row; the list is in its header.
+- **The verification's own blind spot: it verified `latest`, whatever its age.** On 2026-11-02 and
+  2026-11-09 `restic-verify` restored the manifest from the 2026-09-20 snapshot (the same 108,764
+  bytes both times) and reported success, and pinged its healthcheck green.
+  - **Why the limit is gated on uptime.** The check runs weekly at 05:00 with `Persistent=true`, so
+    after a weekend off it fires at boot, before the day's first backup. An age limit alone would
+    fail every Monday. A machine that has been up for a full day has been through a whole backup
+    schedule, so an old snapshot there is a broken backup and not an absent laptop.
+  - **Why 48 hours and not a week.** With the uptime gate the limit only has to exceed one day of
+    missed runs. A limit near the weekly cadence would have let this incident run seven more days.
+  - **What it cannot see.** A laptop rebooted every day never reaches the uptime gate. The failed
+    unit's own report (above) is the first line; this is the check that stops "verification passed"
+    being printed over a snapshot nothing has added to.
+  - **`scripts/test-backup-verify.sh` (24 checks) pins it.** Nine mutants, each killed.
 
 Commands: `backup-init`, `backup-setup`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-snapshots`, `backup-check`, `backup-restore`, `backup-restore-system`, `backup-mount`, `backup-unlock`, `backup-prune`, `backup-luks-header`, `backup-kit`.
 
