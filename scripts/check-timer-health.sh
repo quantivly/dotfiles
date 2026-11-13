@@ -94,6 +94,16 @@
 # permanently-red checker this repo's records warn about three times. The restic
 # units are SYSTEM-manager units and belong to backup-doctor.
 #
+# Everything the ownership list cannot see
+# ----------------------------------------
+# The list above is the USER units this checkout links. On 2026-11-13 both b2
+# backup units had been in `systemctl --failed` for 54 days and this script, and
+# the prompt it feeds, had nothing to say: they are SYSTEM units. So after its own
+# check it runs scripts/check-failed-units.sh — any failed system unit, any failed
+# user unit this script did not itself judge, and a backup that has stopped
+# succeeding — and counts that script's ✗ lines in the same verdict. One alarm,
+# not two. The units judged here are passed to it so none is reported twice.
+#
 # Usage
 # -----
 #   check-timer-health.sh            report; exit 1 if a managed unit is unhealthy
@@ -153,6 +163,10 @@
 #   TIMER_HEALTH_MAX_HORIZON_DAYS   default 14
 #   TIMER_HEALTH_RESTART_LIMIT  default 3 — see check_standalone_service()
 #   TIMER_HEALTH_NOW            epoch seconds to use as "now"
+#   TIMER_HEALTH_FAILED_UNITS_CHECKER
+#                               the script run for everything the ownership list
+#                               cannot see; default check-failed-units.sh beside
+#                               this one. The state table points it at a stub.
 
 set -uo pipefail
 
@@ -203,6 +217,40 @@ esac
 
 fail=0
 note_fail() { fail=1; }
+
+# The user units main() actually JUDGED — not merely the ones it owns. A unit it
+# skipped (linked but not enabled) or never reached (it returned early) is not
+# here, so check-failed-units.sh still reports it if it has failed.
+JUDGED_USER_UNITS=()
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FAILED_UNITS_CHECKER="${TIMER_HEALTH_FAILED_UNITS_CHECKER:-$SCRIPT_DIR/check-failed-units.sh}"
+# check-failed-units.sh exits with this when something is failed or stale. Any
+# other non-zero status means it could not run.
+readonly FAILED_UNITS_FAULT_STATUS=1
+
+# Run the checker for everything the ownership list cannot see, in THIS shell so
+# that note_fail reaches the exit status. Its ✗ lines are counted by write_state
+# like any other. A checker that is missing, or that could not run, is a fault
+# with its own ✗ line: "unchecked" must never read as "clean".
+check_everything_else() {
+    local judged_units checker_status
+    if [[ ! -x "$FAILED_UNITS_CHECKER" ]]; then
+        note_fail
+        printf '  ✗ %s missing — failed units and backup freshness UNCHECKED.\n' "$FAILED_UNITS_CHECKER"
+        printf '      That is not a pass. Fix: ./install\n'
+        return
+    fi
+    judged_units="$(printf '%s\n' "${JUDGED_USER_UNITS[@]+"${JUDGED_USER_UNITS[@]}"}")"
+    FAILED_UNITS_JUDGED_ELSEWHERE="$judged_units" "$FAILED_UNITS_CHECKER"
+    checker_status=$?
+    (( checker_status == 0 )) && return
+    note_fail
+    if (( checker_status != FAILED_UNITS_FAULT_STATUS )); then
+        printf '  ✗ %s could not run (exit %s) — failed units and backup freshness UNCHECKED.\n' \
+            "$FAILED_UNITS_CHECKER" "$checker_status"
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Which checkout owns the units systemd actually holds
@@ -669,6 +717,8 @@ main() {
         fi
         [[ -n "${tsvc[$unit]}" ]] && activated["${tsvc[$unit]}"]=1
         check_timer "$unit" "${tnext[$unit]}" "${tlast[$unit]}" "${tsvc[$unit]}"
+        JUDGED_USER_UNITS+=("$unit")
+        [[ -n "${tsvc[$unit]}" ]] && JUDGED_USER_UNITS+=("${tsvc[$unit]}")
     done
 
     for unit in "${managed_services[@]}"; do
@@ -678,6 +728,7 @@ main() {
             continue
         fi
         check_standalone_service "$unit"
+        JUDGED_USER_UNITS+=("$unit")
     done
     return 0
 }
@@ -734,6 +785,8 @@ if (( WRITE_STATE )); then
     out_tmp="$(mktemp -p "$ws_dir" .out.XXXXXX)" || exit 1
     main >"$out_tmp" 2>&1
     rc=$?
+    # Appended to the same file, and for the same reason not captured with $(...).
+    check_everything_else >>"$out_tmp" 2>&1
     write_state "$out_tmp" "$rc"; wrote=$?
     rm -f "$out_tmp"
     # Exit status reports only whether the verdict was recorded -- see the header.
@@ -742,5 +795,6 @@ fi
 
 main
 rc=$?
+check_everything_else
 (( rc == 2 )) && exit 2
 exit "$fail"

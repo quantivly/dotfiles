@@ -61,6 +61,18 @@ for t in jq zsh; do command -v "$t" >/dev/null || fatal "missing required tool: 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# verify-tools.sh runs check-timer-health.sh, which delegates to
+# scripts/check-failed-units.sh for failed units and backup freshness. That
+# script reads the REAL /var/lib/restic-notify and the real system manager, so
+# left in place every exit-status row here would depend on whether the machine
+# running this suite has a stale backup (cilantro did, and 14 rows failed). This
+# suite is about the herdr wiring; a quiet stand-in keeps it about that. The
+# delegation is pinned in test-timer-health.sh, the checker in its own table.
+QUIET_FAILED_UNITS_CHECKER="$WORK/quiet-failed-units-checker"
+printf '#!/bin/sh\nexit 0\n' > "$QUIET_FAILED_UNITS_CHECKER" || fatal "setup"
+chmod +x "$QUIET_FAILED_UNITS_CHECKER" || fatal "setup"
+export TIMER_HEALTH_FAILED_UNITS_CHECKER="$QUIET_FAILED_UNITS_CHECKER"
+
 # A herdr stub that records its argv and answers the two subcommands these
 # scripts use. `--skill` output is marked so a regenerated file is
 # distinguishable from a stale one.

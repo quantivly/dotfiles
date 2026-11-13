@@ -686,6 +686,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The first-prompt alarm now sees failed system units, failed user units it does not own, and a
+  backup that has stopped succeeding.** It read only the user units this checkout links. On
+  2026-11-13 both b2 backup units had been in `systemctl --failed` for 54 days, the offsite backup
+  with them, and the one alarm that speaks unasked had said nothing. The seven nanoclaw units were
+  outside it too: one failed 212 times in three days that week.
+  - **`scripts/check-failed-units.sh`** (root-free) reports any failed system unit, any failed
+    user unit `check-timer-health.sh` did not itself judge, and each backup state in
+    `/var/lib/restic-notify` that is failing or past its limit: 48 hours for the b2 backup, 14 days
+    for the external copy, 15 for the weekly verification (`BACKUP_STALE_HOURS_<NAME>`; `0` turns
+    one off). An age is judged only on a machine up for a day, so a laptop that was off is not a
+    fault.
+  - **`check-timer-health.sh` runs it and counts its ✗ lines in the same verdict**, so there is one
+    alarm and not two. The prompt line now reads `unit health`, since it is no longer only timers.
+  - **Only a state a success rewrites is judged.** `b2-check.state` has read `fail` since
+    2026-08-30: the check profile has a failure hook and no success hook, so nothing ever clears
+    it. It is stated, not counted.
+  - State tables: `scripts/test-check-failed-units.sh` (hermetic, CI `timer-health-test`), and 14
+    new rows for the delegation in `scripts/test-timer-health.sh`.
+
 - **The credential reconciler treats the same grant in two writers' shapes as one login
   (`scripts/claude-account-dirs.sh`).** The equal-expiry tie-break compared the whole
   `claudeAiOauth` block, so `subscriptionTypeSource`, which Claude Code writes and `clauth login`
