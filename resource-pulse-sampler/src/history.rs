@@ -1,28 +1,30 @@
 //! The fixed-capacity sample history, ported from `lib/history.js`.
 
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 
 /// Fixed-capacity history of samples; `None` marks a gap (no data).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RingBuffer {
-    capacity: usize,
+    capacity: NonZeroUsize,
     samples: VecDeque<Option<f64>>,
 }
 
 impl RingBuffer {
-    /// An empty buffer keeping at most `capacity` samples; `None` for a capacity of zero (the
-    /// gjs constructor throws for anything that is not a positive integer).
-    pub fn new(capacity: usize) -> Option<Self> {
-        (capacity > 0).then(|| Self {
+    /// An empty buffer keeping at most `capacity` samples. A capacity of zero is impossible by
+    /// type, which is how the gjs constructor's throw (for anything that is not a positive
+    /// integer) is carried: a `NonZeroUsize` cannot be 0, negative, fractional or `NaN`.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
             capacity,
             samples: VecDeque::new(),
-        })
+        }
     }
 
     /// Appends a sample, dropping the oldest when full.
     pub fn push(&mut self, value: Option<f64>) {
         self.samples.push_back(value);
-        if self.samples.len() > self.capacity {
+        if self.samples.len() > self.capacity.get() {
             self.samples.pop_front();
         }
     }
@@ -49,9 +51,9 @@ impl RingBuffer {
 mod tests {
     use super::*;
 
-    /// A buffer of `capacity` that must exist.
+    /// A buffer of `capacity`, which must not be zero.
     fn buffer_of(capacity: usize) -> RingBuffer {
-        RingBuffer::new(capacity).unwrap()
+        RingBuffer::new(NonZeroUsize::new(capacity).unwrap())
     }
 
     /// row: ring buffer drops the oldest and keeps null gaps
@@ -75,13 +77,6 @@ mod tests {
         ring.clear();
         assert_eq!(newest_two, vec![Some(2.0), Some(3.0)]);
         assert_eq!(ring.values(), Vec::<Option<f64>>::new());
-    }
-
-    /// A capacity of zero is no buffer. gjs throws for 0, -1, 1.5 and NaN; a `usize` cannot be
-    /// the other three.
-    #[test]
-    fn a_capacity_of_zero_is_no_buffer() {
-        assert_eq!(RingBuffer::new(0), None);
     }
 
     /// `lastValues(0)` is empty, a count above the length is everything, a capacity of one keeps

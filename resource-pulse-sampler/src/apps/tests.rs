@@ -1190,6 +1190,36 @@ fn equal_values_and_names_rank_by_group_key() {
     assert_eq!(group_keys, ["a", "b"]);
 }
 
+/// Equal values and one name go to the group key, in JavaScript's string order: by UTF-16 code
+/// unit, U+1F600 (D83D DE00) before U+E000, in either insertion order, where Rust's `str::cmp`
+/// puts U+E000 first. Expected order: `rankApps` run under gjs, which gives `\u{1F600}x` first.
+#[test]
+fn equal_values_and_one_name_rank_group_keys_by_utf16_code_unit() {
+    let emoji_key = "\u{1F600}x";
+    let private_use_key = "\u{E000}x";
+    for leaves in [["emoji", "private"], ["private", "emoji"]] {
+        let scan = scan_of(&[
+            (leaves[0], Some(0), 1_000_000, None),
+            (leaves[1], Some(0), 1_000_000, None),
+        ]);
+        let ranking = rank_apps(&scan, &mut |path| AppGroup {
+            group_key: if path == "emoji" {
+                emoji_key
+            } else {
+                private_use_key
+            }
+            .to_string(),
+            name: "x".to_string(),
+        });
+        let group_keys: Vec<&str> = ranking
+            .cpu_ranking
+            .iter()
+            .map(|entry| entry.group_key.as_str())
+            .collect();
+        assert_eq!(group_keys, [emoji_key, private_use_key]);
+    }
+}
+
 /// Counters near the top of a `u64` are doubles in the gjs; sums, differences and shares of them
 /// round as doubles do. Expected values: `rankApps` run under gjs (a counter of 2^63 + 1 reads as
 /// 2^63, so one that fell from 2^63 + 1 to 2^63 has not gone backwards and its delta is 0).

@@ -129,8 +129,10 @@ pub fn parse_proc_stat(text: &str) -> ProcStat {
     parsed
 }
 
-/// `/^\s*$/`-or-`kB` tail of a meminfo line: whether the line has the `kB` unit, or `None` when
-/// the tail is neither blank nor whitespace, `kB`, whitespace.
+/// The part of `MEMINFO_LINE_PATTERN` after the value, `(?:\s+(kB))?\s*$`: an optional unit (some
+/// whitespace, then `kB`) and then only whitespace to the end of the line. `Some(true)` when the
+/// tail has the `kB` unit, `Some(false)` when it is empty or only whitespace, and `None` when the
+/// pattern cannot match it: anything else, or a `kB` not set apart from the value by whitespace.
 fn parse_meminfo_unit_tail(tail: &str) -> Option<bool> {
     match skip_whitespace_run(tail) {
         None => tail.is_empty().then_some(false),

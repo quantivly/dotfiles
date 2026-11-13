@@ -11,11 +11,14 @@
 //! - `^` and `$` under the `m` flag are bounded by [`is_js_line_terminator`], which is four
 //!   characters, not the `\n` and `\r\n` of [`str::lines`].
 //!
-//! One deliberate difference from the gjs parsers: an all-digit field too large for the integer
-//! a parser returns is treated exactly as that parser treats a field that is not a number, and so
-//! is a sum or a kB-to-bytes product that would overflow. It is never wrapped and never
-//! saturated. The gjs parsers return an inexact double there; the kernel's counters are 64-bit,
-//! so such a text cannot come from the kernel.
+//! One deliberate difference from the gjs parsers: a field too large for the integer a parser
+//! returns reads as no data, exactly as that parser treats a field that is not a number, and so
+//! does a sum or a kB-to-bytes product that would overflow. It is never wrapped and never
+//! saturated. The gjs parsers return a double there. For a `u32` field (a UID, a CPU index)
+//! between 2^32 and 2^53 the gjs holds the number exactly, so that is a difference too; neither can
+//! exist on Linux. Above 2^53 the gjs's `memory.stat` sum rounds twice where Rust's rounds once
+//! (8 PiB of page cache, unreachable). The kernel's counters are 64-bit, so no text from the
+//! kernel can reach any of these.
 
 pub mod cgroup;
 pub mod proc;
@@ -107,4 +110,9 @@ pub(crate) fn parse_all_digits(field: &str) -> Option<u64> {
         return None;
     }
     run.value
+}
+
+/// Whether `text` is a non-empty run of ASCII digits and nothing else (`/^\d+$/`).
+pub(crate) fn is_ascii_digit_run(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|character| character.is_ascii_digit())
 }

@@ -112,6 +112,14 @@ fn pressure_reads_the_some_line_and_ignores_the_full_line() {
     assert_eq!(parse_pressure_some_avg10(text), Some(4.7));
 }
 
+/// `\b` in `PSI_SOME_AVG10_PATTERN` is ASCII-only: `é` is not a word character, so `avg10` after it
+/// is at a word boundary and matches. Expected value: `parsePressureSomeAvg10("some \u00e9avg10=2\n")`
+/// run under gjs, which gives 2.
+#[test]
+fn pressure_word_boundary_is_ascii_only() {
+    assert_eq!(parse_pressure_some_avg10("some \u{e9}avg10=2\n"), Some(2.0));
+}
+
 /// row: PSI: the real capture parses to a number
 #[test]
 fn pressure_real_capture_parses() {

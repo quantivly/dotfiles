@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::parsers::is_ascii_digit_run;
 use crate::parsers::proc::{SwapArea, ZramMmStat};
 
 /// What a zram swap area's file name starts with.
@@ -76,8 +77,7 @@ pub fn zram_swap_device_names(swap_areas: &[SwapArea]) -> Vec<String> {
 fn zram_device_name(filename: &str) -> Option<&str> {
     let device_name = filename.strip_prefix(ZRAM_SWAP_AREA_PREFIX)?;
     let digits = device_name.strip_prefix(ZRAM_DEVICE_NAME_PREFIX)?;
-    let has_only_ascii_digits = !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());
-    has_only_ascii_digits.then_some(device_name)
+    is_ascii_digit_run(digits).then_some(device_name)
 }
 
 /// Memory in use, as the kernel's own estimate: `MemTotal - MemAvailable`.

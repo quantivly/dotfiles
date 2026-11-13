@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::constants::PERFORMANCE_CAPACITY_RATIO;
+use crate::parsers::is_ascii_digit_run;
 use crate::parsers::is_js_whitespace;
 use crate::parsers::parse_all_digits;
 use crate::parsers::proc::CpuTimes;
@@ -139,9 +140,9 @@ pub fn cluster_busy_fraction(
 }
 
 /// Reads one CPU number of a CPU list: ASCII digits only, no sign, within the kernel's range.
+/// `whole_part` is the part as it stood in the list, untrimmed, which is the text an error names.
 fn parse_cpu_number(digits: &str, whole_part: &str) -> Result<u32, CpuListError> {
-    let is_digits = !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());
-    if !is_digits {
+    if !is_ascii_digit_run(digits) {
         return Err(CpuListError::UnparseablePart(whole_part.to_string()));
     }
     // All digits, so a failure to read them as a u64 means a number beyond any kernel's.
@@ -167,11 +168,12 @@ pub fn parse_cpu_list(text: &str) -> Result<Vec<u32>, CpuListError> {
         return Ok(Vec::new());
     }
     let mut cpus = Vec::new();
-    for part in trimmed.split(',') {
-        let part = part.trim_matches(is_js_whitespace);
+    for untrimmed_part in trimmed.split(',') {
+        // Trimmed only to match; an error names the part untrimmed, as the gjs message does.
+        let part = untrimmed_part.trim_matches(is_js_whitespace);
         let (first_digits, last_digits) = part.split_once('-').unwrap_or((part, part));
-        let first = parse_cpu_number(first_digits, part)?;
-        let last = parse_cpu_number(last_digits, part)?;
+        let first = parse_cpu_number(first_digits, untrimmed_part)?;
+        let last = parse_cpu_number(last_digits, untrimmed_part)?;
         cpus.extend(first..=last);
     }
     Ok(cpus)
@@ -447,6 +449,32 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    /// The gjs `parseCpuList` names the part untrimmed in its error: for `"0, x"` the message is
+    /// `unparseable CPU list part " x"` (`parseCpuList` run under gjs). A part too large to be a
+    /// CPU names itself untrimmed too; the gjs has no error there, so that message is Rust's own.
+    #[test]
+    fn parse_cpu_list_errors_name_the_part_untrimmed() {
+        let unparseable = parse_cpu_list("0, x").unwrap_err();
+        assert_eq!(unparseable, CpuListError::UnparseablePart(" x".to_string()));
+        assert_eq!(unparseable.to_string(), "unparseable CPU list part \" x\"");
+        assert_eq!(
+            parse_cpu_list("0, 65536 "),
+            Err(CpuListError::CpuNumberTooLarge(" 65536".to_string()))
+        );
+    }
+
+    /// `parseCpuList` trims JavaScript's whitespace, not Rust's (`parseCpuList` run under gjs):
+    /// U+FEFF is trimmed, so `"\u{feff}0"` is `[0]`; U+0085 is not, so `"0\u{85}"` throws
+    /// `unparseable CPU list part "0\u{85}"`.
+    #[test]
+    fn parse_cpu_list_trims_javascript_whitespace_not_rusts() {
+        assert_eq!(parse_cpu_list("\u{feff}0"), Ok(vec![0]));
+        assert_eq!(
+            parse_cpu_list("0\u{85}"),
+            Err(CpuListError::UnparseablePart("0\u{85}".to_string()))
+        );
     }
 
     /// Where Rust refuses what gjs would try: a CPU number above any kernel's. The gjs function
