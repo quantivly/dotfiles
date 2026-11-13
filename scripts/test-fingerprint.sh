@@ -365,8 +365,9 @@ L="$T/lid-garbage"; mklid "$L" LID 'state:      ajar'
 check "a state it does not know: skipped" "$(run_gate sudo /dev/pts/3 "$L")" 0
 L="$T/lid-empty"; { mkdir -p "$L/LID" && : >"$L/LID/state"; } || fatal "lid fixture"
 check "an empty state file: skipped" "$(run_gate sudo /dev/pts/3 "$L")" 0
-L="$T/lid-two-one-closed"; mklid "$L" LID0 'state:      open'; mklid "$L" LID1 'state:      closed'
-check "two lids, one closed: skipped" "$(run_gate sudo /dev/pts/3 "$L")" 0
+# The closed one sorts FIRST, so a later "open" overwriting it would be caught.
+L="$T/lid-two-one-closed"; mklid "$L" LID0 'state:      closed'; mklid "$L" LID1 'state:      open'
+check "two lids, the first closed and the second open: skipped" "$(run_gate sudo /dev/pts/3 "$L")" 0
 L="$T/lid-two-open"; mklid "$L" LID0 'state:      open'; mklid "$L" LID1 'state:      open'
 check "two lids, both open: offered" "$(run_gate sudo /dev/pts/3 "$L")" 1
 L="$T/lid-no-newline"; { mkdir -p "$L/LID" && printf 'state:      open' >"$L/LID/state"; } || fatal "lid fixture"
