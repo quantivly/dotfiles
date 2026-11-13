@@ -444,12 +444,17 @@ fi
 git_dir="$(git -C "$DOTFILES" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
 common_dir="$(git -C "$DOTFILES" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
 if [[ -n "$git_dir" && -n "$common_dir" && "$git_dir" != "$common_dir" ]]; then
-  log ERROR "refusing to install from a WORKTREE: $DOTFILES"
-  log ERROR "  Run this from the live checkout:"
-  log ERROR "    cd ~/.dotfiles && fingerprint-setup"
-  log ERROR "  (set FINGERPRINT_SETUP_ALLOW_WORKTREE=1 to override, e.g. to test a branch.)"
-  [[ "${FINGERPRINT_SETUP_ALLOW_WORKTREE:-0}" == "1" ]] || exit 1
-  log WARNING "FINGERPRINT_SETUP_ALLOW_WORKTREE=1 — continuing from a worktree anyway."
+  # With the override set, the refusal is not printed: a wall of red ✗ lines
+  # above a successful install reads as a failure (measured on the first live run).
+  if [[ "${FINGERPRINT_SETUP_ALLOW_WORKTREE:-0}" == "1" ]]; then
+    log WARNING "installing from a WORKTREE ($DOTFILES), as FINGERPRINT_SETUP_ALLOW_WORKTREE=1 asks"
+  else
+    log ERROR "refusing to install from a WORKTREE: $DOTFILES"
+    log ERROR "  Run this from the live checkout:"
+    log ERROR "    cd ~/.dotfiles && fingerprint-setup"
+    log ERROR "  (set FINGERPRINT_SETUP_ALLOW_WORKTREE=1 to override, e.g. to test a branch.)"
+    exit 1
+  fi
 fi
 
 # EVERY PRECONDITION BEFORE THE FIRST WRITE. A refusal leaves the machine as it

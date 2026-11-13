@@ -604,8 +604,9 @@ check "from a worktree: exit 1, nothing written, and the refusal names the remed
   "$rc:$(tree_hash "$P"):$(out_has 'cd ~/.dotfiles && fingerprint-setup')" "1:$before:1"
 P="$(newprefix)"
 rc="$(FINGERPRINT_SETUP_ALLOW_WORKTREE=1 run_setup "$T/wt" "$P")"
-check "FINGERPRINT_SETUP_ALLOW_WORKTREE=1 overrides it (to test a branch live)" \
-  "$rc:$([[ -f $P$STANZA_INSTALLED_PATH ]] && echo installed)" "0:installed"
+check "FINGERPRINT_SETUP_ALLOW_WORKTREE=1 overrides it, with a warning and no red refusal" \
+  "$rc:$([[ -f $P$STANZA_INSTALLED_PATH ]] && echo installed):$(out_has 'refusing to install'):$(out_has 'as FINGERPRINT_SETUP_ALLOW_WORKTREE=1 asks')" \
+  "0:installed:0:1"
 P="$(newprefix)"
 rc="$(run_setup "$T/repo" "$P")"
 check "the primary checkout of the same repo is not a worktree: installs" "$rc" 0

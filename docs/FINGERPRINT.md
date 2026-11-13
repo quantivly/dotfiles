@@ -23,8 +23,10 @@ own: `sudo` cannot run from a Claude Code session.
    `fingerprint-setup --check`. From a worktree, it refuses unless you set
    `FINGERPRINT_SETUP_ALLOW_WORKTREE=1`.
 3. Enrol two fingers. Use **Settings → System → Users → Fingerprint Login**, or run
-   `fprintd-enroll -f right-index-finger`, then `fprintd-enroll -f left-index-finger`. Confirm
-   with `fprintd-verify`.
+   `fprintd-enroll -f right-index-finger`, then `fprintd-enroll -f left-index-finger`. Lift
+   fully between touches and shift a little each time. Confirm each finger with
+   `fprintd-verify -f <finger>`: with no `-f`, it checks only the first finger enrolled. sudo
+   accepts any of them.
 4. Try it with `sudo -k; sudo true`. Press Enter at the password prompt, and touch the reader
    when it asks.
 
@@ -228,39 +230,52 @@ saw only `PAM_USER`, `PAM_TYPE`, `PAM_SERVICE` and the `PWD` that dash sets. The
 `PATH` and `IFS` itself, and its test seams (`--lid-dir`, `--log-file`) are arguments, which in
 PAM a root-owned file fixes.
 
-**What sudo-rs puts on the PAM environment list before authenticating** is the one input not
-yet measured. That is verification step 8 below.
+**Through sudo-rs 0.2.13 too:** run with no terminal and `PAM_TTY=/dev/pts/9` set in its
+environment, the gate logged `tty=none` (verification step 8 below). A caller cannot hand the
+gate a terminal by setting the variable.
 
 ### sudo-rs specifics
 
 - **sudo-rs #1307:** `sudo -n` used to print the fingerprint prompt. Fixed in 0.2.9.
 - **sudo-rs #1308, fixed by PR #1322 (merged 2025-11-07):** Ctrl+C at the fingerprint prompt now
   falls back to the password, as classic sudo's does, by masking SIGINT around PAM.
-- **Not documented anywhere:** whether sudo-rs passes an *empty* password through to PAM.
-  Verification step 3 measures it. If it refuses one, any wrong character followed by Enter
-  switches to the reader just the same.
+- **Not documented anywhere, so measured:** sudo-rs 0.2.13 passes an *empty* password through
+  to PAM. An empty Enter therefore reaches the reader (step 3 below). Ubuntu's 0.2.13 also
+  carries PR #1322: Ctrl+C at the finger prompt gives a fresh password prompt (step 4).
+- **sudo-rs prints nothing between the two password checks.** A typo therefore looks like a
+  password that was accepted and then asked for a finger. The first live run did exactly that,
+  and `pam_unix`'s "authentication failure" line in the journal is how to tell.
+- **No terminal, no PAM at all for the password:** with no tty, sudo-rs says "A terminal is
+  required to authenticate" and exits at once (step 6).
 
 ### Live verification
 
-Run in a real terminal after the install. **Not yet run: the results are recorded here when it
-is.**
+Run on 2026-11-13, installed from this branch, on this machine with sudo-rs 0.2.13 and the lid
+open unless stated.
 
-1. `fingerprint-setup --check` exits 0.
-2. Lid open, `sudo -k; sudo true`: the typed password works at once, with no finger prompt
-   first.
-3. Empty Enter → "Place your finger" → touch → success, with no fail delay (time it). This also
-   shows whether sudo-rs accepts an empty password.
-4. A typo → finger prompt → Ctrl+C → a fresh password prompt.
-5. Lid closed while docked: empty Enter → the password prompt again, at once; the journal says
-   `skip: lid closed`.
-6. Tty-less, from Claude Code's `!`: `sudo -k; sudo true` fails as before, with no finger wait;
-   the journal says `skip: no terminal`.
-7. Case 3's journal line shows a `/dev/pts/N` tty. If it never does, sudo-rs is not setting
-   `PAM_TTY`, and the gate must not be loosened to compensate.
-8. From `!`: `PAM_TTY=/dev/pts/9 sudo -k true` still logs `skip: no terminal`.
-9. `pkexec true` shows the password field at once, with no finger text.
-10. The lock screen takes a touch, and typing works at the same moment.
-11. At the next natural reboot, the greeter is password-only and the keyring is unlocked.
+1. **Install:** `fingerprint-setup --check` exits 0 at the end of the install.
+2. **Enrolment:** both index fingers enrol (`enroll-completed`). About half the touches came
+   back `enroll-retry-scan`, which is normal for this sensor. `fprintd-verify` with no `-f`
+   checks only the first enrolled finger, so it reads a correct touch of the other finger as
+   `verify-no-match`. Name the finger with `-f`.
+3. **The typed password comes first:** `sudo -k; sudo true` with the password typed succeeds
+   at once. The gate never runs, and nothing is logged.
+4. **An empty Enter reaches the reader:** "Place your finger on the fingerprint reader", then
+   the right index finger, succeeds. sudo accepts **any** enrolled finger, not just the first
+   one `fprintd-verify` would check. The run took 6.4 s, almost all of it the human's.
+5. **A typo, then Ctrl+C:** typing `x` and Enter brings up the finger prompt, and Ctrl+C gives a
+   fresh password prompt that the real password then passes.
+6. **No terminal:** from Claude Code's Bash tool, `sudo true` fails in 0 s with "A terminal is
+   required to authenticate". The journal says `skip: no terminal (service=sudo tty=none)`.
+7. **`PAM_TTY` is sudo-rs's own:** every terminal run logs `tty=/dev/pts/22`.
+8. **A forged `PAM_TTY=/dev/pts/9` with no terminal** fails the same way, and still logs
+   `tty=none`.
+9. **polkit is untouched:** `pkexec true` shows GNOME's dialog with the password field ready at
+   once, and no fingerprint text.
+10. **The lock screen** (Super+L) unlocks with a touch. It needed nothing beyond enrolment.
+11. **Pending:** docked with the lid closed, an empty Enter should bring the password prompt
+    back at once and log `skip: lid closed`. At the next natural reboot, the greeter should be
+    password-only and the keyring unlocked.
 
 ### Designs not taken
 
