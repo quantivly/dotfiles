@@ -34,11 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     hand to the gjs regular expressions, with no regex crate), CPU, memory, pressure and the history buffer
     (`cpu.rs`, `memory.rs`, `pressure.rs`, `history.rs`), JavaScript's string order and the naming and
     ranking of apps (`js_string.rs`, `apps.rs`), and the scan cadence (`cadence.rs`). 115 of the 179 gjs
-    titles are now ported; the other 64 wait for the sampler core. An expected value that is not a gjs
-    row's own was taken by running the gjs function. Two deliberate differences from gjs, each pinned by a
-    test and neither reachable from a real kernel: a number too large for its integer type reads as no
-    data, and a CPU list naming a CPU above 65,535 is refused. The carried-rows check now matches its
-    marker only as a doc comment, and refuses a marker whose title is not in the list.
+    titles are now ported; of the other 64, 55 wait for the sampler core and 9 for the bus face. An
+    expected value that is not a gjs row's own was taken by running the gjs function, except where a test
+    pins one of the two deliberate differences. Two deliberate differences from gjs, each pinned by a test
+    and neither reachable from a real kernel: a number too large for its integer type reads as no data, and
+    a CPU list naming a CPU above 65,535 is refused. The CPU deltas of the root and parent cgroups are
+    computed in doubles from the counters, as gjs computes them. The carried-rows check now matches its
+    marker only as a doc comment, refuses a marker whose title is not in the list, and refuses a marker
+    that is not on a test.
 
 - **The fingerprint reader, without ever putting a fingerprint wait in front of a password:
   `fingerprint-setup` (`--check`, `--remove`).**
