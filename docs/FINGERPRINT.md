@@ -368,6 +368,16 @@ covers the following:
   in place, and no gate directory. Each breaks the install, the install rows fail, and the
   baseline install then ends the suite with "could not run".
 
+**A second sweep over the review fixes (16 mutants) killed 14 at first.** Its two survivors were
+real gaps in the suite, and rows now pin both:
+
+- With nothing installed, `--check` could load plain `sudo` through libpam and wrongly report
+  that libpam refuses a correct password.
+- The probe could count an info message, such as "Place your finger", as a prompt. A `pam_echo`
+  fixture now sends one.
+
+Re-run, both are killed.
+
 ### Sources
 
 - [pam_fprintd(8)](https://www.mankier.com/8/pam_fprintd), LIMITATIONS
