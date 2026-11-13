@@ -590,7 +590,7 @@ fn scan_of(leaves: &[LeafSpec]) -> RankingScan {
 fn with_parents(
     scan: RankingScan,
     parent_of: &[(&str, &str)],
-    parent_deltas: &[(&str, i64)],
+    parent_deltas: &[(&str, f64)],
     listed_previously: &[&str],
 ) -> RankingScan {
     let mut parent_cpu_delta_usec = InsertionOrderedMap::new();
@@ -612,7 +612,7 @@ fn with_parents(
 }
 
 /// `scan` with a root CPU delta.
-fn with_root_delta(scan: RankingScan, root_cpu_delta_usec: i64) -> RankingScan {
+fn with_root_delta(scan: RankingScan, root_cpu_delta_usec: f64) -> RankingScan {
     RankingScan {
         root_cpu_delta_usec: Some(root_cpu_delta_usec),
         ..scan
@@ -722,10 +722,10 @@ fn kernel_is_the_root_delta_minus_the_parents_delta() {
     let scan = with_parents(
         scan_of(&[("app", Some(0), 40_000, Some(1))]),
         &[("app", "p")],
-        &[("p", 40_000)],
+        &[("p", 40_000.0)],
         &[],
     );
-    let ranking = rank(&with_root_delta(scan, 90_000));
+    let ranking = rank(&with_root_delta(scan, 90_000.0));
     let expected_percent = 50_000.0 / MACHINE_CAPACITY_USEC * 100.0;
     assert_eq!(
         ranking.top_cpu,
@@ -743,10 +743,10 @@ fn kernel_tops_cpu_when_the_parents_are_small() {
     let scan = with_parents(
         scan_of(&[("app", Some(0), 1_000_000, Some(1))]),
         &[("app", "p")],
-        &[("p", 1_000_000)],
+        &[("p", 1_000_000.0)],
         &[],
     );
-    let ranking = rank(&with_root_delta(scan, 12_000_000));
+    let ranking = rank(&with_root_delta(scan, 12_000_000.0));
     assert_eq!(
         ranking.top_cpu,
         Some(pseudo_cpu_entry("pseudo:kernel", "kernel", 68.75))
@@ -760,10 +760,10 @@ fn kernel_is_root_minus_parents_not_minus_leaves() {
     let scan = with_parents(
         scan_of(&[("app", Some(0), 1_000_000, Some(1))]),
         &[("app", "p")],
-        &[("p", 11_000_000)],
+        &[("p", 11_000_000.0)],
         &[],
     );
-    let ranking = rank(&with_root_delta(scan, 12_000_000));
+    let ranking = rank(&with_root_delta(scan, 12_000_000.0));
     assert_eq!(
         ranking.top_cpu,
         Some(pseudo_cpu_entry("pseudo:short-jobs", "short jobs", 62.5))
@@ -779,10 +779,10 @@ fn a_parent_missing_from_the_parent_deltas_ranks_neither_kernel_nor_short_jobs()
             ("b", Some(0), 2_000, Some(1)),
         ]),
         &[("a", "p1"), ("b", "p2")],
-        &[("p1", 9_000_000)],
+        &[("p1", 9_000_000.0)],
         &[],
     );
-    let ranking = rank(&with_root_delta(scan, 12_000_000));
+    let ranking = rank(&with_root_delta(scan, 12_000_000.0));
     assert_eq!(top_cpu_name(&ranking), "b");
 }
 
@@ -790,7 +790,10 @@ fn a_parent_missing_from_the_parent_deltas_ranks_neither_kernel_nor_short_jobs()
 #[test]
 fn empty_parent_maps_rank_neither_kernel_nor_short_jobs_even_with_a_root_delta() {
     // Root minus zero parents would name the whole machine as kernel.
-    let scan = with_root_delta(scan_of(&[("app", Some(0), 1_000_000, Some(1))]), 12_000_000);
+    let scan = with_root_delta(
+        scan_of(&[("app", Some(0), 1_000_000, Some(1))]),
+        12_000_000.0,
+    );
     let ranking = rank(&scan);
     assert_eq!(ranking.top_cpu, Some(cpu_entry("app", 6.25)));
 }
@@ -802,7 +805,7 @@ fn short_jobs_is_a_parents_delta_beyond_its_leaves() {
         with_parents(
             scan_of(leaves),
             &[("a", "p"), ("b", "p")],
-            &[("p", 300_000)],
+            &[("p", 300_000.0)],
             &[],
         )
     };
@@ -837,7 +840,7 @@ fn short_jobs_sums_over_parents_and_read_skew_adds_zero() {
             ("b", Some(0), 300_000, Some(1)),
         ]),
         &[("a", "p1"), ("b", "p2")],
-        &[("p1", 900_000), ("p2", 100_000)],
+        &[("p1", 900_000.0), ("p2", 100_000.0)],
         &[],
     );
     let ranking = rank(&scan);
@@ -864,7 +867,7 @@ fn a_new_leaf_counts_its_full_usage_when_its_parent_was_listed_before() {
             ("old", Some(0), 1_000_000, Some(1)),
         ]),
         &[("fresh", "p"), ("old", "p")],
-        &[("p", 5_000_000)],
+        &[("p", 5_000_000.0)],
         &["p"],
     );
     let ranking = rank(&scan);
@@ -880,7 +883,7 @@ fn a_new_leaf_is_skipped_when_its_parent_was_not_listed_before() {
             ("old", Some(0), 1_000_000, Some(1)),
         ]),
         &[("fresh", "p"), ("old", "p")],
-        &[("p", 5_000_000)],
+        &[("p", 5_000_000.0)],
         &[],
     );
     let ranking = rank(&scan);
@@ -896,10 +899,10 @@ fn the_memory_half_is_never_kernel_or_short_jobs_however_much_is_unattributed() 
     let scan = with_parents(
         scan_of(&[("app", Some(0), 1_000, Some(2 * GIB))]),
         &[("app", "p")],
-        &[("p", 11_000_000)],
+        &[("p", 11_000_000.0)],
         &[],
     );
-    let ranking = rank(&with_root_delta(scan, 12_000_000));
+    let ranking = rank(&with_root_delta(scan, 12_000_000.0));
     assert_eq!(
         ranking.top_memory,
         Some(memory_entry("app", (2 * GIB) as f64))
@@ -913,10 +916,10 @@ fn a_root_cpu_counter_that_went_backwards_gives_kernel_zero_percent() {
     let scan = with_parents(
         scan_of(&[("fresh", None, 1_000_000, Some(1))]),
         &[("fresh", "p")],
-        &[("p", 0)],
+        &[("p", 0.0)],
         &[],
     );
-    let ranking = rank(&with_root_delta(scan, -2_000_000));
+    let ranking = rank(&with_root_delta(scan, -2_000_000.0));
     assert_eq!(
         ranking.top_cpu,
         Some(pseudo_cpu_entry("pseudo:kernel", "kernel", 0.0))
@@ -929,7 +932,7 @@ fn without_a_root_cpu_delta_there_is_no_kernel() {
     let scan = with_parents(
         scan_of(&[("app", Some(0), 0, Some(0))]),
         &[("app", "p")],
-        &[("p", 0)],
+        &[("p", 0.0)],
         &[],
     );
     let ranking = rank(&scan);
@@ -962,10 +965,10 @@ fn a_real_app_tied_with_kernel_wins_or_loses_by_name_not_by_being_first() {
         let scan = with_parents(
             scan_of(&[(name, Some(0), 1_000_000, Some(5))]),
             &[(name, "p")],
-            &[("p", 1_000_000)],
+            &[("p", 1_000_000.0)],
             &[],
         );
-        rank(&with_root_delta(scan, 2_000_000))
+        rank(&with_root_delta(scan, 2_000_000.0))
     };
     assert_eq!(top_cpu_name(&tie("alpha")), "alpha");
     assert_eq!(top_cpu_name(&tie("zeta")), "kernel");
@@ -1058,10 +1061,10 @@ fn the_memory_ranking_never_names_kernel_or_short_jobs() {
     let scan = with_parents(
         scan_of(&[("app", Some(0), 1_000_000, Some(1))]),
         &[("app", "p")],
-        &[("p", 11_000_000)],
+        &[("p", 11_000_000.0)],
         &[],
     );
-    let ranking = rank(&with_root_delta(scan, 12_000_000));
+    let ranking = rank(&with_root_delta(scan, 12_000_000.0));
     assert!(!ranking
         .memory_ranking
         .iter()
@@ -1234,16 +1237,17 @@ fn counters_near_the_top_of_a_u64_round_as_doubles_do() {
 }
 
 /// A root delta above 2^53 reads as a double: kernel's share is the double the gjs computes.
-/// Expected values: `rankApps` run under gjs, whose literal 9007199254740993 is 2^53.
+/// Expected values: `rankApps` run under gjs, whose literal 9007199254740993 is 2^53 (written as 2^53 here, since clippy refuses a literal
+/// that rounds).
 #[test]
 fn a_root_delta_above_two_to_the_53_is_a_double() {
     let scan = with_parents(
         scan_of(&[("a", Some(0), 1_000_000, Some(1))]),
         &[("a", "p")],
-        &[("p", 1)],
+        &[("p", 1.0)],
         &[],
     );
-    let ranking = rank(&with_root_delta(scan, 9_007_199_254_740_993_i64));
+    let ranking = rank(&with_root_delta(scan, 9_007_199_254_740_992.0));
     assert_eq!(
         ranking.cpu_ranking,
         [
@@ -1287,7 +1291,7 @@ fn a_leaf_with_no_recorded_parent_counts_only_with_a_previous_reading() {
     let scan = RankingScan {
         parent_cpu_delta_usec: {
             let mut deltas = InsertionOrderedMap::new();
-            deltas.insert("p", 1_000_000);
+            deltas.insert("p", 1_000_000.0);
             deltas
         },
         ..with_root_delta(
@@ -1295,7 +1299,7 @@ fn a_leaf_with_no_recorded_parent_counts_only_with_a_previous_reading() {
                 ("a", Some(0), 1_000_000, Some(1)),
                 ("b", None, 1_000_000, Some(1)),
             ]),
-            3_000_000,
+            3_000_000.0,
         )
     };
     let ranking = rank(&scan);
@@ -1340,10 +1344,10 @@ fn a_real_group_with_a_pseudo_key_merges_with_kernel() {
     let scan = with_parents(
         scan_of(&[("k", Some(0), 1_000_000, Some(1))]),
         &[("k", "p")],
-        &[("p", 1_000_000)],
+        &[("p", 1_000_000.0)],
         &[],
     );
-    let ranking = rank_apps(&with_root_delta(scan, 3_000_000), &mut |_| AppGroup {
+    let ranking = rank_apps(&with_root_delta(scan, 3_000_000.0), &mut |_| AppGroup {
         group_key: "pseudo:kernel".to_string(),
         name: "impostor".to_string(),
     });
@@ -1362,8 +1366,8 @@ fn a_real_group_with_a_pseudo_key_merges_with_kernel() {
 #[test]
 fn kernel_and_short_jobs_of_equal_value_and_a_negative_parent_delta() {
     let leaf = [("a", Some(0), 1_000_000, Some(1))];
-    let equal = with_parents(scan_of(&leaf), &[("a", "p")], &[("p", 3_000_000)], &[]);
-    let equal_ranking = rank(&with_root_delta(equal, 3_000_000));
+    let equal = with_parents(scan_of(&leaf), &[("a", "p")], &[("p", 3_000_000.0)], &[]);
+    let equal_ranking = rank(&with_root_delta(equal, 3_000_000.0));
     assert_eq!(
         equal_ranking.cpu_ranking,
         [
@@ -1372,8 +1376,8 @@ fn kernel_and_short_jobs_of_equal_value_and_a_negative_parent_delta() {
             pseudo_cpu_entry("pseudo:kernel", "kernel", 0.0),
         ]
     );
-    let negative = with_parents(scan_of(&leaf), &[("a", "p")], &[("p", -1_000_000)], &[]);
-    let negative_ranking = rank(&with_root_delta(negative, 3_000_000));
+    let negative = with_parents(scan_of(&leaf), &[("a", "p")], &[("p", -1_000_000.0)], &[]);
+    let negative_ranking = rank(&with_root_delta(negative, 3_000_000.0));
     assert_eq!(
         negative_ranking.cpu_ranking,
         [
@@ -1382,6 +1386,91 @@ fn kernel_and_short_jobs_of_equal_value_and_a_negative_parent_delta() {
             pseudo_cpu_entry("pseudo:short-jobs", "short jobs", 0.0),
         ]
     );
+}
+
+/// Two `usage_usec` readings above 2^53 differ by the double the gjs subtracts, not by the exact
+/// integers: 9007199254740993 reads as 2^53 and 9007199254741000 as 2^53 + 8. Expected values: gjs
+/// run on the same input: `counterDeltaUsec`'s expression, `current >= previous ? current - previous
+/// : current`, gives 8 (the exact difference is 7), and `rankApps` with a root delta of that 8, one
+/// parent of 1 µs, 2 s on 8 CPUs gives kernel's `cpuPercent` as 0.00004375.
+#[test]
+fn counters_above_two_to_the_53_are_subtracted_as_doubles() {
+    const PREVIOUS_USEC: u64 = 9_007_199_254_740_993;
+    const CURRENT_USEC: u64 = 9_007_199_254_741_000;
+    const GJS_DELTA_USEC: f64 = 8.0;
+    assert_eq!(
+        counter_delta_usec(PREVIOUS_USEC, CURRENT_USEC),
+        GJS_DELTA_USEC
+    );
+    let scan = with_parents(
+        scan_of(&[("a", Some(0), 1_000_000, Some(1))]),
+        &[("a", "p")],
+        &[("p", 1.0)],
+        &[],
+    );
+    let ranking = rank(&with_root_delta(
+        scan,
+        counter_delta_usec(PREVIOUS_USEC, CURRENT_USEC),
+    ));
+    assert_eq!(
+        ranking.cpu_ranking,
+        [
+            cpu_entry("a", 6.25),
+            pseudo_cpu_entry("pseudo:kernel", "kernel", 0.00004375),
+            pseudo_cpu_entry("pseudo:short-jobs", "short jobs", 0.0),
+        ]
+    );
+}
+
+/// A counter that went backwards is a recreated unit: its whole new reading counts, as in
+/// `counterDeltaUsec`.
+#[test]
+fn a_counter_that_went_backwards_counts_in_full() {
+    assert_eq!(counter_delta_usec(9_000_000, 3_000_000), 3_000_000.0);
+    assert_eq!(counter_delta_usec(5, 5), 0.0);
+}
+
+/// A `NaN`, an infinity and a negative infinity reach the sort through the deltas, which counters
+/// cannot produce. The ranking returns, and the ordinary entries keep the order the gjs gives them
+/// (a 3 s, a 2 s and a 1 s leaf: `rankApps` run under gjs on the scan without the odd deltas gives
+/// a 18.75, b 12.5, c 6.25). The comparator is a total order for every double, so no input panics
+/// `sort_by`.
+#[test]
+fn a_nan_and_two_infinities_cannot_panic_the_ranking() {
+    let scan = with_parents(
+        scan_of(&[
+            ("a", Some(0), 3_000_000, Some(1)),
+            ("b", Some(0), 2_000_000, Some(1)),
+            ("c", Some(0), 1_000_000, Some(1)),
+        ]),
+        &[("a", "p"), ("b", "q"), ("c", "r")],
+        &[("p", f64::NEG_INFINITY), ("q", f64::INFINITY), ("r", 0.0)],
+        &[],
+    );
+    let ranking = rank(&with_root_delta(scan, 1_000_000.0));
+    let ordinary_names: Vec<&str> = cpu_ranking_names(&ranking)
+        .into_iter()
+        .filter(|name| ["a", "b", "c"].contains(name))
+        .collect();
+    assert_eq!(ordinary_names, ["a", "b", "c"]);
+    let mut totals: Vec<GroupTotal> = [
+        f64::NAN,
+        1.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        f64::NAN,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, value)| GroupTotal {
+        group_key: index.to_string(),
+        name: index.to_string(),
+        value,
+    })
+    .collect();
+    totals.sort_by(compare_largest_first);
+    assert_eq!(totals.len(), 6);
 }
 
 /// A share too small for its digits is the double the gjs computes. Expected value: `rankApps`

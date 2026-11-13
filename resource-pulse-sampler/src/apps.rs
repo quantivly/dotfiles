@@ -167,9 +167,11 @@ pub struct AppGroup {
 /// The inputs of [`rank_apps`]: the fields of the gjs `scan`, without its `nameOfCgroup`, which is
 /// a parameter. Maps that the gjs iterates are [`InsertionOrderedMap`]s.
 ///
-/// Counters stay the integers they are and become `f64` where the gjs does arithmetic on them. The
-/// deltas and the elapsed time are signed integers: a counter that went backwards gives a negative
-/// one. Because no field can hold a `NaN` or an infinity, no total can be one either (see
+/// Counters stay the integers they are and become `f64` before any arithmetic on them, as the gjs
+/// reads them as the doubles `parseInt` makes. So every delta here is a double computed from two
+/// counters converted first ([`counter_delta_usec`]): no delta is ever a `u64` or `i64`
+/// subtraction, which would differ from the gjs above 2^53. The elapsed time is a signed integer
+/// (monotonic microseconds stay below 2^53 for 285 years). The sort tolerates any `f64` (see
 /// [`compare_largest_first`]).
 #[derive(Debug, Clone, Default)]
 pub struct RankingScan {
@@ -183,14 +185,16 @@ pub struct RankingScan {
     pub elapsed_usec: i64,
     /// CPUs counted as 100%.
     pub cpu_count: u64,
-    /// The root cgroup's `usage_usec` delta, if known.
-    pub root_cpu_delta_usec: Option<i64>,
+    /// The root cgroup's `usage_usec` delta, if known. The gjs has no went-backwards rule for it
+    /// (`sampler.js`'s `rootCpuDeltaUsec`): it is the plain `current as f64 - previous as f64`, so a
+    /// counter that went backwards gives a negative delta. Never a `u64` or `i64` subtraction.
+    pub root_cpu_delta_usec: Option<f64>,
     /// The parent slice path of each scanned leaf.
     pub parent_of_leaf: HashMap<String, String>,
     /// Parents whose leaves were listed in the previous scan.
     pub parents_listed_previously: HashSet<String>,
     /// `usage_usec` delta of each parent read in both scans; the order the parents are summed in.
-    pub parent_cpu_delta_usec: InsertionOrderedMap<i64>,
+    pub parent_cpu_delta_usec: InsertionOrderedMap<f64>,
 }
 
 /// One entry of the CPU ranking.
@@ -266,18 +270,19 @@ fn add_to_group(totals: &mut InsertionOrderedMap<GroupTotal>, group: &AppGroup, 
 /// Orders totals largest value first; equal values go to the name that sorts first (in
 /// JavaScript's string order), then to the group key.
 ///
-/// The gjs comparator returns `second.value - first.value`, which is `NaN`, and so "equal", when a
-/// value is `NaN`; and a comparator that is not a total order has no one answer. No total here can
-/// be `NaN` or infinite: every one is a sum of at most a few thousand terms, each a finite
-/// `u64` or `i64` converted to a double (below 2^64), or a difference of two such. So the values
-/// compare as a total order and `partial_cmp` always answers; the `Equal` fallback is for the
-/// compiler, not reachable, and cannot panic in `sort_by`.
+/// Values that are `==` (which treats `-0` and `+0` as equal, as the gjs subtraction does) fall
+/// through to the name and key steps. Values that are not are ordered by [`f64::total_cmp`], largest
+/// first, so the comparison is a total order for every `f64`, `NaN` and infinities included. Counters
+/// cannot produce a `NaN` or an infinity (every total is a sum of at most a few thousand finite
+/// doubles converted from `u64`), so for every reachable input the order is the gjs comparator's,
+/// `second.value - first.value`. The total order exists so that an unreachable input cannot make
+/// `sort_by` panic, which Rust's sort may do on a comparison that is not one.
 fn compare_largest_first(first: &GroupTotal, second: &GroupTotal) -> Ordering {
     if first.value != second.value {
-        return second
-            .value
-            .partial_cmp(&first.value)
-            .unwrap_or(Ordering::Equal);
+        let by_value = second.value.total_cmp(&first.value);
+        if by_value != Ordering::Equal {
+            return by_value;
+        }
     }
     if first.name != second.name {
         return js_string_order(&first.name, &second.name);
@@ -294,21 +299,29 @@ fn largest_totals(totals: &InsertionOrderedMap<GroupTotal>) -> Vec<&GroupTotal> 
     sorted
 }
 
+/// The `usage_usec` delta between two readings of one counter, in microseconds, as `sampler.js`'s
+/// `counterDeltaUsec` and `lib/apps.js` compute it: both counters are converted to `f64` first (the
+/// doubles `parseInt` makes), and a counter that went backwards is a unit recreated at the same
+/// path, so all of its reading is new. Never a `u64` or `i64` subtraction, which differs from the
+/// gjs above 2^53.
+pub(crate) fn counter_delta_usec(previous_usec: u64, current_usec: u64) -> f64 {
+    let previous_usec = previous_usec as f64;
+    let current_usec = current_usec as f64;
+    if current_usec >= previous_usec {
+        current_usec - previous_usec
+    } else {
+        current_usec
+    }
+}
+
 /// Works out one leaf's CPU delta since the previous scan, in microseconds.
 ///
 /// `None` when the leaf cannot be counted: it is new and its parent was not listed in the previous
-/// scan, so it may be old and merely unlisted. A counter that went backwards is a unit recreated
-/// at the same path: all of its usage is new. Both counters are compared as the doubles they are
-/// in the gjs.
+/// scan, so it may be old and merely unlisted. A counter that went backwards counts in full (see
+/// [`counter_delta_usec`]).
 fn leaf_cpu_delta_usec(scan: &RankingScan, cgroup_path: &str, current_usec: u64) -> Option<f64> {
-    let current_usec = current_usec as f64;
     if let Some(&previous_usec) = scan.previous_usage_usec.get(cgroup_path) {
-        let previous_usec = previous_usec as f64;
-        return Some(if current_usec >= previous_usec {
-            current_usec - previous_usec
-        } else {
-            current_usec
-        });
+        return Some(counter_delta_usec(previous_usec, current_usec));
     }
     // A new leaf ran for less than one interval; it counts in full, but only when its parent's
     // listing proves the leaf did not exist before (otherwise a failed listing would turn every
@@ -317,7 +330,7 @@ fn leaf_cpu_delta_usec(scan: &RankingScan, cgroup_path: &str, current_usec: u64)
         .parent_of_leaf
         .get(cgroup_path)
         .is_some_and(|parent_path| scan.parents_listed_previously.contains(parent_path));
-    is_parent_listed_previously.then_some(current_usec)
+    is_parent_listed_previously.then_some(current_usec as f64)
 }
 
 /// Says whether kernel and short jobs can be computed: every parent of a scanned leaf has a delta,
@@ -344,7 +357,6 @@ fn unattributed_cpu_usec(
     let mut parent_delta_total_usec = 0.0;
     let mut short_jobs_usec = 0.0;
     for (parent_path, &parent_delta_usec) in scan.parent_cpu_delta_usec.iter() {
-        let parent_delta_usec = parent_delta_usec as f64;
         parent_delta_total_usec += parent_delta_usec;
         let leaf_delta_usec = leaf_delta_usec_by_parent
             .get(parent_path)
@@ -355,7 +367,7 @@ fn unattributed_cpu_usec(
     }
     let kernel_usec = scan
         .root_cpu_delta_usec
-        .map(|root_delta_usec| max_with_zero(root_delta_usec as f64 - parent_delta_total_usec));
+        .map(|root_delta_usec| max_with_zero(root_delta_usec - parent_delta_total_usec));
     Some(UnattributedCpu {
         kernel_usec,
         short_jobs_usec,
