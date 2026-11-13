@@ -26,6 +26,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     caller that already left and unfollowing one, and exit 0 when the bus goes away; a row fails if `zbus` is
     built with its object server (`service`). The private-bus guard moved to `gnome-shell/tests/privateBus.js`,
     which registers no rows; `service-dbus.test.js` re-exports it.
+
+- **The fingerprint reader, without ever putting a fingerprint wait in front of a password:
+  `fingerprint-setup` (`--check`, `--remove`).**
+  - **sudo** asks for the password first, as before. An empty Enter switches to the reader. It is
+    offered only to a local account, with a real terminal and the lid open, so agents, domain
+    accounts and docked use never wait on it. Leaving the reader ends that try, and sudo asks
+    again on its next one.
+  - **Nothing is written until the stack it would leave loads through the real libpam** and
+    accepts a correct password: one misspelled keyword would refuse every sudo. The install also
+    refuses a `common-auth` holding anything the early password check would skip
+    (`pam_faillock`, a second factor).
+  - **The lock screen** takes either one at the same moment (GDM's own `gdm-fingerprint`).
+  - **The greeter** stays password-only, so the keyring unlocks at login.
+  - **polkit, su, login and `common-auth` are untouched.** `--check` fails if any PAM stack ever
+    runs `pam_fprintd` in front of a password, as the stock `pam-auth-update --enable fprintd`
+    does.
+  - **Packaging and tests:** the root pieces (`pam/sudo-fingerprint`,
+    `pam/fingerprint-should-skip`) are copied root-owned, never symlinked. State table:
+    `scripts/test-fingerprint.sh` (hermetic, CI `fingerprint-test`); its last section runs the
+    installed stack through the real libpam. Guide and record: `docs/FINGERPRINT.md`.
+
 - **Resource Pulse draws the desktop cockpit: a grid of four cards on the cockpit monitor, the sessions
   card in the dropdown, and a click that takes you to a Claude Code session.** Built from
   `docs/superpowers/plans/2026-11-10-desktop-cockpit-drawing-side.md` (design:

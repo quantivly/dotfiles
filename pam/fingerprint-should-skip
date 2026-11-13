@@ -1,0 +1,164 @@
+#!/bin/sh
+# fingerprint-should-skip — installed to /usr/local/libexec/ by ~/.dotfiles
+# scripts/setup-fingerprint.sh (`fingerprint-setup`). Edit the repo copy and re-run it.
+#
+# pam_exec asks it, from /etc/pam.d/sudo-fingerprint, once a sudo
+# password has FAILED (an empty Enter is the deliberate way to get here):
+# should the fingerprint reader be skipped?
+#
+#   exit 0  skip it   the stanza's [success=1] jumps over pam_fprintd, on to
+#                     common-auth, which re-checks the SAME password (pam_unix
+#                     reuses the cached one), fails it, and sudo asks again on
+#                     its next try
+#   exit 1  offer it  a failure the stanza ignores, so pam_fprintd runs next
+#
+# Offered only when all four hold. Anything it cannot determine is a skip: the
+# password always works, so a skip can never lock anyone out.
+#   - PAM_SERVICE is sudo or sudo-i. The stanza belongs nowhere else, and if it
+#     is ever included elsewhere it must not put a fingerprint wait there.
+#   - PAM_USER is a LOCAL account (in /etc/passwd). The stanza's first password
+#     check is pam_unix, which knows only local accounts: for a domain (SSSD)
+#     account a CORRECT password fails it, and only common-auth's pam_sss would
+#     accept it, after the reader. Skipping keeps the reader out of its way.
+#   - PAM_TTY is a terminal (/dev/pts/N or /dev/ttyN). A tty-less sudo is an
+#     agent or a background job, and a fingerprint offered there collects a touch
+#     the user meant for something else (CVE-2024-37408). A papercut guard, NOT a
+#     boundary: a process that opens a pty itself (script, expect, tmux) has one.
+#     docs/FINGERPRINT.md, "Why sudo is gated", says what bounds that instead.
+#   - every lid reads "open". Closed means docked: the reader cannot be touched,
+#     and pam_fprintd would only wait out its timeout.
+#
+# pam_exec gives this process the PAM environment list plus the PAM items and
+# nothing of the caller's (measured: docs/FINGERPRINT.md, "The gate's inputs").
+# It still sets PATH and IFS itself rather than trust what it is handed.
+# A missing or failing gate reads to pam_exec as "offer", the same as exit 1,
+# which is why fingerprint-setup installs it before anything that calls it.
+#
+# Usage: fingerprint-should-skip [--lid-dir DIR] [--passwd-file FILE] [--log-file FILE]
+#   --lid-dir DIR       read DIR/*/state instead of /proc/acpi/button/lid/*/state
+#   --passwd-file FILE  read local accounts from FILE instead of /etc/passwd
+#   --log-file FILE     append the verdict to FILE instead of the journal
+# All three are TEST SEAMS, and deliberately arguments, never environment
+# variables: in PAM the arguments are fixed by a root-owned file.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+IFS='
+	 '
+
+LID_DIR_DEFAULT=/proc/acpi/button/lid
+PASSWD_FILE_DEFAULT=/etc/passwd
+EXIT_SKIP=0
+EXIT_OFFER=1
+JOURNAL_TAG=fingerprint-gate
+
+lid_dir=$LID_DIR_DEFAULT
+passwd_file=$PASSWD_FILE_DEFAULT
+log_file=
+bad_argument=
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --lid-dir | --passwd-file | --log-file)
+      if [ "$#" -lt 2 ]; then
+        bad_argument=$1
+        break
+      fi
+      case $1 in
+        --lid-dir) lid_dir=$2 ;;
+        --passwd-file) passwd_file=$2 ;;
+        --log-file) log_file=$2 ;;
+      esac
+      shift 2 ;;
+    *)
+      bad_argument=$1
+      break ;;
+  esac
+done
+
+service=${PAM_SERVICE:-}
+user=${PAM_USER:-}
+tty=${PAM_TTY:-}
+
+# is_local_account — is PAM_USER a line of the passwd file? An unreadable file
+# is a no, which is a skip.
+is_local_account() {
+  [ -n "$user" ] && [ -r "$passwd_file" ] || return 1
+  while IFS=: read -r account_name _rest; do
+    if [ "$account_name" = "$user" ]; then
+      return 0
+    fi
+  done 2>/dev/null <"$passwd_file"
+  return 1
+}
+
+# read_lid_state — prints open, closed or unknown. One closed lid is enough to
+# skip; no lid at all, or one it cannot read or parse, is unknown.
+read_lid_state() {
+  is_any_lid_found=0
+  lid_state=open
+  for state_file in "$lid_dir"/*/state; do
+    [ -e "$state_file" ] || continue   # the glob matched nothing
+    is_any_lid_found=1
+    label=
+    value=
+    if [ -r "$state_file" ]; then
+      # A line with no final newline still fills both, and `read` then fails.
+      read -r label value 2>/dev/null <"$state_file" || :
+    fi
+    case "$label $value" in
+      'state: open') ;;
+      'state: closed') lid_state=closed ;;
+      *) [ "$lid_state" = closed ] || lid_state=unknown ;;
+    esac
+  done
+  [ "$is_any_lid_found" -eq 1 ] || lid_state=unknown
+  printf '%s\n' "$lid_state"
+}
+
+# report <verdict> <reason> — one line per decision, to the journal (or the
+# test's log file), so `journalctl -t fingerprint-gate` says why.
+report() {
+  line="$1: $2 (service=${service:-none} user=${user:-none} tty=${tty:-none} lid=$lid)"
+  if [ -n "$log_file" ]; then
+    printf '%s\n' "$line" >>"$log_file"
+  else
+    logger -t "$JOURNAL_TAG" -- "$line" 2>/dev/null || :
+  fi
+}
+
+if [ -n "$bad_argument" ]; then
+  lid=unread
+  report skip "bad argument '$bad_argument'"
+  exit "$EXIT_SKIP"
+fi
+
+lid=$(read_lid_state)
+
+case $service in
+  sudo | sudo-i) ;;
+  *)
+    report skip "service is not sudo"
+    exit "$EXIT_SKIP" ;;
+esac
+if ! is_local_account; then
+  report skip "not a local account"
+  exit "$EXIT_SKIP"
+fi
+case $tty in
+  /dev/pts/[0-9]* | /dev/tty[0-9]*) ;;
+  *)
+    report skip "no terminal"
+    exit "$EXIT_SKIP" ;;
+esac
+case $lid in
+  open) ;;
+  closed)
+    report skip "lid closed"
+    exit "$EXIT_SKIP" ;;
+  *)
+    report skip "lid state unknown"
+    exit "$EXIT_SKIP" ;;
+esac
+
+report offer "lid open, terminal attached"
+exit "$EXIT_OFFER"

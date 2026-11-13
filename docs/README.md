@@ -25,6 +25,7 @@ Two audiences run through the whole tree, and mixing them is what made `CLAUDE.m
 | [SHELL_LAYOUT.md](SHELL_LAYOUT.md) | the zsh layer: the two tool-availability patterns with examples, and the full annotated load order | record |
 | [DOCK_LID_SUSPEND.md](DOCK_LID_SUSPEND.md) | why closing the lid locks the screen and never suspends, so agents keep running: the logind policy and the dock holdoff, installing and checking them, what they do not cover, and the suspends and plug-in timings behind them | guide + record |
 | [DOCK_WIFI.md](DOCK_WIFI.md) | the dock Wi-Fi guard: radio off while a wired link is connected, re-evaluated on every link event, at boot and after resume — **plus** the record of the dual-homed tunnel drops, why a marker design fails closed, and the stateful `nmcli` stub | guide + record |
+| [FINGERPRINT.md](FINGERPRINT.md) | the fingerprint reader: beside the password on the lock screen, after it in sudo (gated on a terminal and an open lid), never at the greeter — setting it up, enrolling, checking and repairing it — **plus** the record of why it cannot be parallel in sudo or polkit, the CVE behind the gate, and the stanza measured through the real libpam | guide + record |
 
 ## Terminal and multiplexer
 

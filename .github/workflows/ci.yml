@@ -576,6 +576,21 @@ jobs:
       - name: Run the dock Wi-Fi guard state table
         run: ./scripts/test-dock-wifi.sh
 
+  fingerprint-test:
+    name: Fingerprint Setup State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # No extra packages. The last section runs the installed PAM stack through
+      # the runner's REAL libpam (pam_start_confdir, Linux-PAM >= 1.4, with
+      # pam_permit/pam_deny/pam_exec from libpam-modules) via python3's ctypes,
+      # unprivileged. sudo is a stub at the front of PATH: this runner has
+      # passwordless sudo and live PAM stacks, which is why it has to come first.
+      - name: Run the fingerprint setup state table
+        run: ./scripts/test-fingerprint.sh
+
   resource-pulse-test:
     name: Resource Pulse State Table
     runs-on: ubuntu-latest
