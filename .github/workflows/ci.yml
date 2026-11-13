@@ -486,6 +486,26 @@ jobs:
       - name: Run the check-links state table
         run: ./scripts/test-check-links.sh
 
+  git-hooks-test:
+    name: Global Git Hooks State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Bash and git only: every row builds its own HOME or its own checkout
+      # under mktemp -d and asserts its own row total. No apt step is needed.
+      - name: Run the git-hooks state table
+        run: ./scripts/test-check-git-hooks.sh
+
+      # The half that fails on the commit that breaks it: gitconfig names a
+      # hooks path, so install.conf.yaml must link a runnable hook there. The
+      # link was deleted once (edabe60) and nothing was red for nine months.
+      - name: This checkout links the hooks path its gitconfig names
+        run: ./scripts/check-git-hooks.sh --tracked
+
   timer-health-test:
     name: Repo-Owned Timer Health State Table
     runs-on: ubuntu-latest
