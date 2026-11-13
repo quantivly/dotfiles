@@ -61,6 +61,11 @@ fingerprint-setup --remove   # takes it all out; the edited files return byte-id
   last check is the requirement, as a check. The stock `pam-auth-update --enable fprintd` puts
   the reader in front of the password in `common-auth`, which means every service.
 
+**After a `sudo-common` or `gdm3` upgrade, run `--check`.** `/etc/pam.d/sudo` and `sudo-i` are
+conffiles, so an upgrade that ships a new one asks whether to keep yours. Taking the maintainer's
+version only drops the include, and sudo simply goes back to password-only. Re-run
+`fingerprint-setup` to put it back.
+
 **If `--check` says "sudo is BROKEN"**, the stanza is gone while `sudo` still includes it, and
 libpam then aborts every sudo before it asks for anything. polkit is untouched, so repair it from
 a GNOME dialog:
@@ -141,6 +146,23 @@ unattended under this user.
   out its timeout.
 
 Anything the gate cannot determine counts as a skip, because the password always works.
+
+**The terminal check is a papercut guard, not a boundary.**
+
+- **It stops the accidental case.** Claude Code's Bash tool and `!`, cron and background jobs
+  have no terminal, and their sudo never reaches the reader.
+- **It does not stop a process that sets out to get a terminal.** `script`, `expect` or a tmux
+  pane each present a real `/dev/pts/N`. From there, an empty password sent down that pty
+  reaches the reader, with the prompt shown where you cannot see it.
+- **Nothing here can tell those terminals apart.** An automated review of this change
+  suggested asking logind, but logind registers no session for an Alacritty pty or a `script`
+  one, so to logind they look the same.
+- **What bounds the risk:** such a process runs as you, so it could already take your sudo by
+  aliasing it in your shell. With the password first, it must also fail a password before the
+  reader is even asked.
+
+If that trade is wrong for you, `fingerprint-setup --remove` restores password-only sudo, and the
+lock screen keeps the fingerprint.
 
 ### Why the greeter is password-only, and the lock screen is not
 

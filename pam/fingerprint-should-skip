@@ -16,7 +16,9 @@
 #     is ever included elsewhere it must not put a fingerprint wait there.
 #   - PAM_TTY is a terminal (/dev/pts/N or /dev/ttyN). A tty-less sudo is an
 #     agent or a background job, and a fingerprint offered there collects a touch
-#     the user meant for something else (CVE-2024-37408).
+#     the user meant for something else (CVE-2024-37408). A papercut guard, NOT a
+#     boundary: a process that opens a pty itself (script, expect, tmux) has one.
+#     docs/FINGERPRINT.md, "Why sudo is gated", says what bounds that instead.
 #   - every lid reads "open". Closed means docked: the reader cannot be touched,
 #     and pam_fprintd would only wait out its timeout.
 #
