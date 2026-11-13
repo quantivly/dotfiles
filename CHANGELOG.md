@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Resource Pulse sampler's Rust crate, its state table and its CI job (stage two, pull request B).**
+  `resource-pulse-sampler/` holds the crate (constants only so far: `--print-constants` prints each one),
+  `scripts/test-resource-pulse-sampler.sh` its state table (cargo's tests, one row per constant compared with
+  `lib/constants.js` and `lib/protocol.js`, one row per gjs test title the crate must carry over), and the
+  `resource-pulse-sampler-test` job runs it. `zsh/zshrc.buildlimits` caps `RUST_TEST_THREADS` beside
+  `CARGO_BUILD_JOBS`; `build-limits` lists it. Nothing on the machine runs the program yet.
 - **Resource Pulse draws the desktop cockpit: a grid of four cards on the cockpit monitor, the sessions
   card in the dropdown, and a click that takes you to a Claude Code session.** Built from
   `docs/superpowers/plans/2026-11-10-desktop-cockpit-drawing-side.md` (design:

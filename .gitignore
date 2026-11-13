@@ -43,3 +43,6 @@ config/pypoetry/auth.toml
 # one such .pyc was committed and reached main in #134 before this rule existed.
 __pycache__/
 *.pyc
+
+# Resource Pulse sampler: cargo run by hand (the scripts use ~/.cache/resource-pulse/cargo-target)
+resource-pulse-sampler/target/

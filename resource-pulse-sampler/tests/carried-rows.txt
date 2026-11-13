@@ -1,0 +1,185 @@
+# service-sampler
+service sampler: root-a then root-b gives CPU 60% with P 80 and E 40, complete
+service sampler: the first tick is no data for CPU, never 0%, while memory is present
+service sampler: memory used is MemTotal − MemAvailable in bytes, and its history is the used fraction
+service sampler: swap comes from /proc/swaps, so zram holding more swap than orig_data_size shows no disk swap
+service sampler: swap on disk is real disk Used, and a zram device that is not swap (zram1) adds no "in RAM"
+service sampler: only the zram devices /proc/swaps lists are read, and /sys/block is never listed
+service sampler: an unreadable /proc/swaps is swap no data (logged), while memory stays
+service sampler: PSI cpu some avg10 is 12.5, memory and io 0
+service sampler: without /proc/pressure every pressure is null, memory stays, the sample is incomplete
+service sampler: a missing /proc/stat nulls CPU and logs once per 10 minutes, prefixed
+service sampler: app scans root-a → root-b rank herdr agents top for CPU (50%) and memory (15 GB)
+service sampler: the app scan skips units that never host an app (.mount, .socket), at both depths
+service sampler: app CPU divides by the real time between scans, not the nominal interval
+service sampler: two Chrome scopes are one app (one group key, one name)
+service sampler: a cgroup that vanished mid-scan is skipped in both rankings and the scan succeeds
+service sampler: a leaf whose file is gone with ENODEV (a scope that exited mid-read) is skipped silently, like ENOENT; any other read error is logged
+service sampler: a leaf inside a sub-slice is found, and at or under 64 MiB it is uncorrected
+service sampler: the app scan reads cpu.stat of the root, of app, session and background slices under user@<uid>.service and of system.slice, and of each leaf
+service sampler: app scan: a group takes the name of its first leaf in name order, whatever order the directory lists them in
+service sampler: app scan: name order is JavaScript default string order
+service sampler: kernel (the root beyond its scanned parents) and short jobs (the parents beyond their leaves) each top CPU when theirs is the biggest share
+service sampler: a new leaf counts its whole usage when its parent was listed in the previous scan
+service sampler: a new leaf whose parent could not be listed in the previous scan is skipped, so its CPU is counted as short jobs, and the failed listing is logged
+service sampler: a scan in which a parent cannot be listed ranks neither kernel nor short jobs
+service sampler: a scanned parent that does not exist (systemd removes an empty slice) counts as listed, so kernel and short jobs still rank
+service sampler: a VM's leaf under machine.slice (a top-level slice, like system.slice) is scanned and ranks under its own name, not as kernel (ruling R22)
+service sampler: a slice that a `systemd-run --user --slice=` job made under user@<uid>.service is scanned like app.slice, so the job ranks under its own name, not as kernel (ruling R22)
+service sampler: user.slice and user-<uid>.slice are never scanned parents: neither cpu.stat is read, and kernel is the root beyond the slices under them, never beyond those twice (ruling R22)
+service sampler: a scan that cannot list where its parents are (the cgroup root, or the user's manager) ranks neither kernel nor short jobs, and logs it: kernel never absorbs a parent it could not find (R1, ruling R22)
+service sampler: a long-lived leaf that could not be read in one scan is not counted at its whole lifetime when it reads again: its CPU goes to short jobs
+service sampler: without a uid (unreadable /proc/self/status) neither kernel nor short jobs is ranked, so kernel never absorbs the user session
+service sampler: unwatched, a fresh sampler scans at tick 0 (first), 1 (warm-up) and 31, and no other
+service sampler: watched from before the first tick, it scans at tick 0 (first), 1 (warm-up), 11 and 21
+service sampler: a watch start scans at once and publishes the latest fast-tick values with the new ranking, appending no history
+service sampler: a watch start inside the reveal cooldown does not scan; the warm-up follows on the next tick; unwatching only changes the cadence
+service sampler: a watch start right after a scan neither scans nor publishes, arms no warm-up, and still switches to the watched cadence
+service sampler: a warm-up due 150 ms after a watch-start scan waits one tick, then runs
+service sampler: a watch start after a tick whose sample threw publishes nothing, and its no-data snapshot keeps apps null; the next tick that samples carries the ranking
+service sampler: collectGarbage runs once after each app scan (after its publish), never after a fast tick alone
+service sampler: a scan that throws is logged, drops the ranking, and never costs the tick its sample
+service sampler: app names are looked up once per desktop id and kept across scans, misses included
+service sampler: a name lookup that throws is logged once, and the scan goes on with the name the unit gives
+service sampler: a throwing sample publishes an all-null, incomplete snapshot and a gap in both histories
+service sampler: a tick whose clock label throws publishes no label, and "no data since" keeps the last good one
+service sampler: each history keeps the newest CARD_HISTORY_SAMPLES fast ticks, a gap included
+service sampler: a fast tick hands listeners the history values it appended
+service sampler: an unparseable PMU list falls back to cpu_capacity and is logged, not thrown
+service sampler: a throwing listener is logged and the next still runs; a removed one is not called
+service sampler: 109 cgroups failing with one error log one line per 10 minutes, naming the count and the first path
+service sampler: start() twice adds one source; stop and destroy remove it; nothing after destroy
+service sampler: start() ticks at once, so memory shows before the first interval and CPU after it; nothing ticks after destroy()
+service sampler: the timer callback never throws: a tick that throws is logged and the source continues
+service sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()
+readFileToEnd reads a /proc file whole although it reports a size of 0
+listSubdirectoryNames names the subdirectories of a directory, and leaves its files out
+# service-dbus
+service D-Bus: before any sample GetState answers protocol 1, sequence 0, the start time and the histories
+service D-Bus: each publish sends one Sample (sequence from 1; a reveal appends nothing), and GetState follows
+service D-Bus: GetState's latestSampledAtUsec is the real time of the latest publish, a reveal's included
+service D-Bus: a caller that closes its connection holding a watch loses it: setDetailWatched(false) in 2 s
+service D-Bus: a caller holding two watches that vanishes drops both: setDetailWatched(false), count 0
+service D-Bus: two watches from one caller need two unwatches
+service D-Bus: UnwatchDetail from a caller holding no watch is a no-op, not an error
+service D-Bus: one caller vanishing leaves another's watch, and the sampler hears only changes
+service D-Bus: destroy() unexports the object and detaches from the sampler
+# parsers
+mm_stat: RAM cost is mem_used_total (field 3), not compr_data_size (field 2)
+mm_stat: the real capture parses
+meminfo: kB values become bytes
+meminfo: the real capture has MemTotal and MemAvailable
+PSI: reads the some line avg10, ignores the full line
+PSI: the real capture parses to a number
+/proc/stat: guest and guest_nice parse into their own fields
+/proc/stat: the real capture yields 8 per-CPU entries
+malformed lines yield null, never NaN
+memory.stat: reclaimable = active_file + inactive_file
+cpu.stat: usage_usec
+status: Uid
+memory.current: a single number parses, "max" is null
+/proc/swaps: each area's Used column, KiB → bytes, from the real tab-and-space-separated capture
+/proc/swaps: a header with no area under it is an empty list (no swap), not no data
+/proc/swaps: a malformed Used, a row short of a column or a header without Used is no data (null)
+# math
+CPU busy excludes guest from the total (counting it gives 64%)
+iowait counts as idle (counting it busy gives 67%)
+first sample is no data, not 0
+no delta is no data, not NaN
+a cluster uses only the CPUs present (offline CPUs have no line)
+a cluster sums deltas rather than averaging fractions
+a cluster with no CPU present is null
+parseCpuList handles ranges and singles
+parseCpuList of an empty file is empty
+cluster map: hybrid PMU wins
+cluster map: capacity fallback keeps 1024 and 1005 together
+cluster map: equal capacities give a single cluster (null)
+cluster map: no PMU and no capacities is null
+memory used = MemTotal - MemAvailable, not MemTotal - MemFree
+memory without MemAvailable is no data
+swap: zram's share is the Used of its /dev/zram* areas, so an idle disk area is no disk swap
+swap on disk is the Used of every area that is not zram, summed
+swap: a zram device that is not a swap area (no /proc/swaps row) adds nothing to "in RAM"
+swap: no zram swap area puts everything on disk; no area at all is nothing used
+PSI bands at the edges
+ring buffer drops the oldest and keeps null gaps
+ring buffer lastValues returns the newest, oldest first, and clear empties it
+# apps
+Chromium scope → app org.chromium.Chromium
+gnome launcher with an escaped id
+snap scope → snap name
+the launcher is matched before unescaping: an escaped hyphen after "gnome" is part of the app id
+a GNOME settings daemon is named gsd-<x> in lowercase
+another reverse-DNS unit drops its first two segments
+a snap asks the resolver for <snap>_<app>.desktop, and falls back to the snap name
+herdr service → "herdr agents"
+templated unit drops its instance
+docker scopes group as one "docker"
+display name falls back to the capitalised last id segment
+every \xNN escape is unescaped, not just the first (and a plain name is untouched)
+a launcherless app id keeps its hyphen; a flatpak launcher is stripped
+the resolver answer for <appId>.desktop wins over the fallback
+a non-app kind ignores the resolver
+app CPU is a share of the whole machine (top-style would be 400%)
+two scopes of one app are summed
+two scopes of one app have their memory summed
+a cgroup new this scan is left out of CPU but counted in memory
+kernel is the root delta minus the parents' delta: root 90 ms, one 40 ms parent, 50 ms of machine time
+kernel tops CPU when the parents are small: root 12 s, parents 1 s
+kernel is root minus parents, not minus leaves: a leaf total below its parent's does not inflate it
+a parent missing from the parent deltas: neither kernel nor short jobs is ranked
+empty parent maps: neither kernel nor short jobs is ranked, even with a root delta
+short jobs is a parent's delta beyond its leaves': 300 ms parent, 200 ms of leaves, 100 ms
+short jobs sums over parents, and a parent whose leaves exceed its delta (read skew) adds 0, never less
+a recreated leaf (counter went backwards: prev 9 s, now 3 s) counts 3 s, not 0
+a new leaf counts its full usage when its parent was listed before
+a new leaf is skipped when its parent was not listed before (a failed listing is not a burst)
+the memory half is never kernel or short jobs, however much is unattributed
+a root CPU counter that went backwards gives kernel 0%, never a negative share
+without a root CPU delta there is no kernel
+equal values break ties by name ascending, in either insertion order
+a real app tied with kernel (always ranked last) wins or loses by name, not by being first
+nothing scanned gives null rankings, not zeros
+no cgroup with a delta gives topCpu null while memory still ranks
+apps: rankApps lists every group by CPU and by memory, largest first, at most APP_RANKING_LENGTH
+apps: equal values rank by name, then group key, so the order never depends on insertion
+apps: the memory ranking never names kernel or short jobs
+apps: rankApps with nothing to rank gives empty lists
+apps: the CPU ranking is empty whenever the CPU cannot be ranked
+# cadence
+cadence: the intervals are derived from the seconds constants
+cadence: a quiet state does not scan
+cadence: with no scan yet, scan with reason first
+cadence: first beats watch-start
+cadence: watched interval scans at 10 ticks
+cadence: watched interval does not scan at 9 ticks
+cadence: unwatched interval scans at 30 ticks
+cadence: unwatched interval does not scan at 29 ticks
+cadence: unwatched does not scan at the watched interval
+cadence: a watch starting scans at once
+cadence: a watch starting with no triggered scan yet scans
+cadence: a watch starting inside the reveal cooldown does not scan
+cadence: a watch starting at the end of the reveal cooldown scans
+cadence: a pending warm-up scans with reason warm-up
+cadence: a pending warm-up scans when unwatched too
+cadence: watch-start beats warm-up
+cadence: a watch starting inside the reveal cooldown with a warm-up pending falls through to warm-up
+cadence: warm-up beats burst
+cadence: burst beats interval
+cadence: CPU 40 to 55 bursts when watched
+cadence: CPU 40 to 54 does not burst
+cadence: unwatched never bursts on CPU
+cadence: a null CPU value now never bursts
+cadence: a null CPU value at the last scan never bursts
+cadence: a pressure band rising 1 to 2 bursts
+cadence: a pressure band falling does not burst
+cadence: a pressure band staying does not burst
+cadence: a null pressure band now never bursts
+cadence: a null pressure band at the last scan never bursts
+cadence: unwatched never bursts on pressure
+cadence: no burst inside the burst cooldown
+cadence: a burst is allowed at the end of the burst cooldown
+cadence: a burst is allowed with no triggered scan yet
+cadence: armsWarmUp is true for first, watch-start and burst only
+cadence: isTriggeredScan is true for watch-start and burst only
+cadence: pressureBandIndex follows the band thresholds and passes no data through
