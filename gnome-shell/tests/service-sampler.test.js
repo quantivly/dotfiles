@@ -718,6 +718,86 @@ test('service sampler: the app scan reads cpu.stat of the root, of app, session 
     assertEqual(cpuStatPathsRead, expectedCpuStatPaths);
 });
 
+/**
+ * Wraps an in-memory tree's lister so one directory lists its children in a given order, as a real directory may.
+ *
+ * @param {object} tree - makeFakeFileTree's tree.
+ * @param {string} directoryRelativePath - The cgroup whose children are listed in the given order.
+ * @param {string[]} childNames - Its children's names, in the order to list them.
+ * @returns {(directoryPath: string) => string[]} The lister, for the sampler's listDirectoryNames option.
+ */
+function listingChildrenInOrder(tree, directoryRelativePath, childNames) {
+    const directoryPath = GLib.build_filenamev([FAKE_ROOT_PATH, CGROUP_ROOT_RELATIVE_PATH, directoryRelativePath]);
+    return path => (path === directoryPath ? [...childNames] : tree.listDirectoryNames(path));
+}
+
+const DEMO_DAEMON_LEAF_NAME = 'snap.demo.daemon.service';
+const DEMO_GUI_LEAF_NAME = 'snap.demo.gui-11111111-2222-3333-4444-555555555555.scope';
+const DEMO_GROUP_KEY = 'snap:demo';
+const DEMO_GUI_DESKTOP_ID = 'demo_gui.desktop';
+const DEMO_APP_NAME = 'Demo';
+const DEMO_UNIT_NAME = 'demo';
+
+/**
+ * Scans an in-memory tree under app.slice twice, two seconds apart, with app.slice listing its children in the given
+ * order, and returns the memory ranking's entry for a group.
+ *
+ * @param {string[]} leafNames - The leaves under app.slice (each holds LEAF_MEMORY_BYTES), in listing order.
+ * @param {string} groupKey - The group whose entry to return.
+ * @param {(desktopId: string) => string|null} resolveAppName - The sampler's app-name lookup.
+ * @returns {{groupKey: string, name: string, memoryBytes: number}|undefined} The group's entry in the second scan.
+ */
+function memoryEntryOfGroupAfterTwoScans(leafNames, groupKey, resolveAppName) {
+    const tree = makeFakeTreeWithSampleFiles();
+    const usageUsecByCgroup = {[ROOT_CGROUP_KEY]: 0, [APP_SLICE]: 0};
+    for (const leafName of leafNames)
+        usageUsecByCgroup[`${APP_SLICE}/${leafName}`] = 0;
+    writeCgroupCounters(tree, usageUsecByCgroup);
+    const {sampler, clock} = makeTreeSampler(tree, {
+        listDirectoryNames: listingChildrenInOrder(tree, APP_SLICE, leafNames),
+        resolveAppName,
+    });
+    sampler.initialize();
+    sampler.runTick(0);
+    clock.nowUsec += SAMPLE_SPACING_USEC;
+    sampler.runTick(1);
+    const memoryEntry = sampler.latestSnapshot.apps.memoryRanking.find(entry => entry.groupKey === groupKey);
+    sampler.destroy();
+    return memoryEntry;
+}
+
+test('service sampler: app scan: a group takes the name of its first leaf in name order, whatever order the ' +
+    'directory lists them in', () => {
+    // The daemon leaf has no desktop id, so it is named 'demo'; the gui scope resolves to 'Demo'. Name order puts the
+    // daemon first, so the group is 'demo' however the directory lists them.
+    const resolveAppName = desktopId => (desktopId === DEMO_GUI_DESKTOP_ID ? DEMO_APP_NAME : null);
+    const leavesInNameOrder = [DEMO_DAEMON_LEAF_NAME, DEMO_GUI_LEAF_NAME];
+    const namesByListingOrder = [leavesInNameOrder, [...leavesInNameOrder].reverse()]
+        .map(leafNames => memoryEntryOfGroupAfterTwoScans(leafNames, DEMO_GROUP_KEY, resolveAppName)?.name);
+    assertEqual(namesByListingOrder, [DEMO_UNIT_NAME, DEMO_UNIT_NAME]);
+});
+
+test('service sampler: app scan: name order is JavaScript default string order', () => {
+    // Default order compares UTF-16 code units: uppercase before '_' before lowercase.
+    const leafNamesInListingOrder = ['a.service', 'B.service', '_c.service'];
+    const tree = makeFakeTreeWithSampleFiles();
+    const usageUsecByCgroup = {[ROOT_CGROUP_KEY]: 0, [APP_SLICE]: 0};
+    for (const leafName of leafNamesInListingOrder)
+        usageUsecByCgroup[`${APP_SLICE}/${leafName}`] = 0;
+    writeCgroupCounters(tree, usageUsecByCgroup);
+    const {sampler} = makeTreeSampler(tree, {
+        listDirectoryNames: listingChildrenInOrder(tree, APP_SLICE, leafNamesInListingOrder),
+    });
+    sampler.initialize();
+    sampler.runTick(0);
+    const appSlicePrefix = `${FAKE_ROOT_PATH}/${CGROUP_ROOT_RELATIVE_PATH}/${APP_SLICE}/`;
+    const leafNamesInReadOrder = tree.readPaths
+        .filter(path => path.startsWith(appSlicePrefix) && path.endsWith('.service/cpu.stat'))
+        .map(path => path.slice(appSlicePrefix.length).split('/')[0]);
+    sampler.destroy();
+    assertEqual(leafNamesInReadOrder, ['B.service', '_c.service', 'a.service']);
+});
+
 test('service sampler: kernel (the root beyond its scanned parents) and short jobs (the parents beyond their ' +
     'leaves) each top CPU when theirs is the biggest share', () => {
     // The parents spend 1,000,000 µs (STEADY_DELTAS_USEC). A root delta of 3,000,000 leaves kernel 2,000,000 (50%);
