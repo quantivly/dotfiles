@@ -1,0 +1,19 @@
+# Reports a backup unit that FAILED. Started by that unit's OnFailure=, with the
+# failed unit's full name as the instance (%i).
+#
+# It exists for the failures profiles.toml's run-after-fail hook cannot see: a
+# unit that dies before resticprofile starts (a removed WorkingDirectory, a
+# missing binary, an unreadable EnvironmentFile) never runs any hook. See
+# scripts/restic-unit-failed.sh.
+#
+# COPIED root-owned to /etc/systemd/system by backup-setup, never symlinked.
+#
+# No OnFailure= here, on purpose: a reporter that fails must not report itself.
+
+[Unit]
+Description=Report a failed backup unit (%i)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/restic-unit-failed %i
+TimeoutStartSec=2min

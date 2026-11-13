@@ -17,6 +17,10 @@ Description=restic backup to external HDD (dock-triggered)
 After=network-online.target
 # Don't fight a backup that's already running to the same repo.
 ConditionPathExists=/media/__BACKUP_USER__/Backup/restic/config
+# A failure before resticprofile starts runs none of its hooks; this reports it
+# anyway. An undocked disk is a SKIP (the condition above), not a failure, so it
+# does not fire. See scripts/restic-unit-failed.sh.
+OnFailure=restic-unit-failed@%n.service
 
 [Service]
 Type=oneshot

@@ -686,6 +686,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A backup unit that cannot start now reports it, and the scheduled units no longer run from a
+  directory that can be removed.** From 2026-09-20 every scheduled B2 backup and check failed at
+  `CHDIR`, 398 times over 54 days, and nothing said so. `resticprofile schedule` writes its
+  current directory into the units it generates; `backup-setup` had been run from a worktree that
+  was removed the same day. The failure hook in `profiles.toml` is run *by* resticprofile, which
+  never started.
+  - **`backup-setup` pins `WorkingDirectory=/`** in a `20-workdir.conf` drop-in for both generated
+    templates, and runs resticprofile from `/`. The drop-in survives a later `schedule`.
+  - **Every backup unit names `restic-unit-failed@%n.service` in `OnFailure=`**: the two generated
+    templates through a `30-on-failure.conf` drop-in, `restic-backup-external.service` and
+    `restic-verify.service` in their unit files. `scripts/restic-unit-failed.sh` maps the failed
+    unit onto `restic-notify`'s keys, so the healthchecks `/fail` ping, the desktop alert and its
+    dedup all apply.
+  - **`backup-doctor` fails** on a missing drop-in, and on a scheduled unit whose working directory
+    does not exist.
+  - **Run `backup-setup` once after deploying**: these are root-owned copies in `/etc`.
+  - State table: `scripts/test-backup-units.sh` (hermetic, CI `backup-external-test`).
+
 - **The credential reconciler treats the same grant in two writers' shapes as one login
   (`scripts/claude-account-dirs.sh`).** The equal-expiry tie-break compared the whole
   `claudeAiOauth` block, so `subscriptionTypeSource`, which Claude Code writes and `clauth login`
