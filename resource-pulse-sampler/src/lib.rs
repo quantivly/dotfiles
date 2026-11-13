@@ -17,4 +17,8 @@
 
 pub mod bus;
 pub mod constants;
+pub mod cpu;
+pub mod history;
+pub mod memory;
 pub mod parsers;
+pub mod pressure;
