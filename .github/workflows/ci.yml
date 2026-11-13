@@ -97,6 +97,13 @@ jobs:
       - name: Run the external-HDD state table
         run: ./scripts/test-backup-external.sh
 
+      # The drop-ins the installer writes for the units resticprofile generates,
+      # and the reporter a failed unit starts. Both exist because a unit that
+      # fails before resticprofile runs reports nothing. Stubs for sudo,
+      # resticprofile, systemctl and the notify hook; needs systemd-analyze.
+      - name: Run the backup-units state table
+        run: ./scripts/test-backup-units.sh
+
   systemd-reconcile-test:
     name: systemd Unit Enablement State Table
     runs-on: ubuntu-latest

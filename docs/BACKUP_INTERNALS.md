@@ -40,6 +40,29 @@ commands are all `backup-*`.
 - **Restore correctness (LVM-on-LUKS):** regenerate — do not restore — `/etc/fstab`, `/etc/crypttab`, `/etc/machine-id`, `ssh_host_*`. Timeshift is file-level rollback only (known LVM-on-LUKS bare-metal restore bug). `backup-restore-system` bakes those four excludes in so the `/etc`-slice restore can't break boot.
 - **Verification (DO-449):** a backup's deadliest failure is silent. `backup-doctor` asserts the whole chain is *correct* (perms, config drift vs. `~/.dotfiles`, the DO-448 env drop-in, snapshot age, B2 repo size vs `BACKUP_B2_SIZE_WARN_GB` + last-run churn vs `BACKUP_B2_CHURN_WARN_MB` + prune staleness vs `BACKUP_B2_PRUNE_REMIND_DAYS` (the B2 repo is append-only — it grows until a manual `backup-prune`, and a hit Backblaze storage cap fails ALL runs at the lock write), that healthcheck URLs are set, kit/LUKS-header freshness, disk space; non-zero exit on FAIL). A weekly `systemd/restic-verify.timer` runs `scripts/backup-verify.sh` — a content canary (critical paths present in the latest snapshot) + restore canary (one file restored) — decoupled from `[b2.check]`, skips cleanly when offline, alerts via `restic-notify` (`BACKUP_HC_URL_VERIFY`). `backup-drill` is the on-demand equivalent. `restic check` proves *intact*; this proves *complete + restorable*. Desktop failure notifications dedup on state change (daily reminder while stuck + one "recovered" popup); healthchecks pings fire every run.
 
+- **A unit that fails before resticprofile starts runs none of its hooks (2026-09-20 to 2026-11-13).**
+  Measured on cilantro on 2026-11-13, by a configuration review and not by any alert:
+  - **What failed.** Both `resticprofile-{backup,check}@profile-b2.service` carried
+    `WorkingDirectory=~/.herdr/worktrees/.dotfiles/zvi-plan-review-dev-offload-bde`. `resticprofile
+    schedule` records its current directory there; `backup-setup` was run from that worktree at
+    14:51 on 2026-09-20, the 16:00 run succeeded, and the worktree was gone by 18:00. Every run
+    after that exited `200/CHDIR`: 398 backup runs, and every Sunday check.
+  - **Why nothing said so.** `run-after-fail = restic-notify fail` is executed by resticprofile, so
+    a unit that never reaches `ExecStart` never runs it. `/var/lib/restic-notify/b2-backup.state`
+    still read `success`. No unit had `OnFailure=`. The first-prompt timer check reads user units
+    only. `restic-verify` kept passing, because it restores from `latest` whatever its age.
+  - **The fix has two halves, because either alone leaves a hole.** The `20-workdir.conf` drop-in
+    removes this cause; `OnFailure=restic-unit-failed@%n.service` reports the whole class, whatever
+    the next pre-exec failure is (`203/EXEC`, an unreadable `EnvironmentFile`). A drop-in, not an
+    edit to the unit: resticprofile rewrites the generated units on every `schedule`.
+  - **`%n`, not `%p` or `%i`.** The reporter needs the failed unit's full name to map it onto
+    `restic-notify`'s `<profile>-<command>` key. systemd accepts a full unit name, with its own `@`
+    and `.service`, as an instance; `scripts/test-backup-units.sh` asks `systemd-analyze verify`.
+  - **A failure resticprofile did see is reported twice.** The ping is idempotent and the alert is
+    deduplicated on state change, so the second call is silent.
+  - **`scripts/test-backup-units.sh` (29 checks, root-free) pins this**, in the CI job
+    `backup-external-test`. Ten mutants, each killed by at least one row; the list is in its header.
+
 Commands: `backup-init`, `backup-setup`, `backup-now`, `backup-status`, `backup-doctor`, `backup-drill`, `backup-snapshots`, `backup-check`, `backup-restore`, `backup-restore-system`, `backup-mount`, `backup-unlock`, `backup-prune`, `backup-luks-header`, `backup-kit`.
 
 See [docs/BACKUP_AND_RESTORE_GUIDE.md](BACKUP_AND_RESTORE_GUIDE.md) for setup, the disaster-recovery runbook, and the verification regimen.

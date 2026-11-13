@@ -3435,7 +3435,30 @@ backup-doctor() {
     sudo test -f "/etc/systemd/system/${t}@.service.d/10-backup-env.conf" \
       && _backup_doctor_ok "${t}@ EnvironmentFile drop-in present" \
       || _backup_doctor_bad "${t}@ drop-in MISSING — scheduled runs would get an empty repo (re-run backup-setup)"
+    # Without these two, resticprofile's generated unit runs from whatever
+    # directory `schedule` was called in, and a unit that cannot even start
+    # reports nothing. Both happened at once from 2026-09-20: 54 days, no alert.
+    sudo test -f "/etc/systemd/system/${t}@.service.d/20-workdir.conf" \
+      && _backup_doctor_ok "${t}@ working-directory drop-in present" \
+      || _backup_doctor_bad "${t}@ 20-workdir.conf MISSING — the unit runs from the directory backup-setup was run in, and fails at CHDIR if that is ever removed (re-run backup-setup)"
+    sudo test -f "/etc/systemd/system/${t}@.service.d/30-on-failure.conf" \
+      && _backup_doctor_ok "${t}@ failure-report drop-in present" \
+      || _backup_doctor_bad "${t}@ 30-on-failure.conf MISSING — a unit that fails before resticprofile starts reports nothing (re-run backup-setup)"
   done
+  # The effect, not the file: what systemd will actually chdir into. A unit
+  # whose directory is gone fails every run before resticprofile starts.
+  # Read through process substitution, not a pipe: the loop must run in THIS
+  # shell, or the failure count _backup_doctor_bad keeps is lost with a subshell.
+  local scheduled_unit unit_working_directory
+  while IFS= read -r scheduled_unit; do
+    [[ -n "$scheduled_unit" ]] || continue
+    unit_working_directory="$(systemctl show "$scheduled_unit" --property=WorkingDirectory --value 2>/dev/null)"
+    if [[ -z "$unit_working_directory" || -d "$unit_working_directory" ]]; then
+      _backup_doctor_ok "$scheduled_unit runs from ${unit_working_directory:-systemd's default directory}"
+    else
+      _backup_doctor_bad "$scheduled_unit has WorkingDirectory=$unit_working_directory, which does not exist — every run fails at CHDIR (re-run backup-setup)"
+    fi
+  done < <(systemctl list-units --all --plain --no-legend 'resticprofile-*@*.service' 2>/dev/null | awk '{print $1}')
 
   echo "Timers:"
   local tmr st

@@ -38,6 +38,25 @@ USER_CONFIG="${HOME}/.backup.local"
 # without root — see scripts/test-backup-external.sh. Never set in normal use.
 FSTAB="${FSTAB:-/etc/fstab}"
 
+# --- the scheduled units ----------------------------------------------------
+# A variable, not a literal, only so scripts/test-backup-units.sh can point the
+# drop-in writer at a temp dir after sourcing this file.
+SYSTEMD_SYSTEM_DIR="/etc/systemd/system"
+# The unit templates resticprofile GENERATES. It rewrites the unit files on
+# every `schedule`, so whatever this installer needs them to hold goes in a
+# drop-in, which survives that.
+SCHEDULED_UNIT_TEMPLATES=(resticprofile-backup resticprofile-check)
+# resticprofile records the directory `schedule` was run from as the units'
+# WorkingDirectory. On 2026-09-20 that was a dotfiles worktree. The worktree was
+# removed the same day and every b2 backup and check then failed at CHDIR,
+# before resticprofile started, for 54 days. This is a directory that cannot
+# go away.
+SCHEDULED_UNIT_WORKING_DIRECTORY="/"
+# What a backup unit starts when it FAILS — including when it fails before
+# resticprofile runs, where profiles.toml's run-after-fail hook cannot help.
+UNIT_FAILURE_ON_FAILURE="OnFailure=restic-unit-failed@%n.service"
+UNIT_FAILURE_REPORTER_BIN="/usr/local/bin/restic-unit-failed"
+
 # --- pretty logging (mirrors scripts/apply-gnome-settings.sh) ---------------
 if [[ -t 1 ]]; then
   GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
@@ -213,7 +232,8 @@ install_configs() {
   sudo install -m 755 "$DOTFILES/scripts/backup-manifest.sh" /usr/local/bin/backup-manifest.sh
   sudo install -m 755 "$DOTFILES/scripts/restic-notify.sh"   /usr/local/bin/restic-notify
   sudo install -m 755 "$DOTFILES/scripts/backup-verify.sh"   /usr/local/bin/backup-verify.sh
-  log SUCCESS "backup-manifest.sh / restic-notify / backup-verify.sh → /usr/local/bin"
+  sudo install -m 755 "$DOTFILES/scripts/restic-unit-failed.sh" "$UNIT_FAILURE_REPORTER_BIN"
+  log SUCCESS "backup-manifest.sh / restic-notify / backup-verify.sh / restic-unit-failed → /usr/local/bin"
 }
 
 # ===========================================================================
@@ -833,8 +853,15 @@ install_external_udev() {
 # Source /etc/restic/backup.local INSIDE the root shell (already written by
 # install_configs) rather than passing creds on the command line, so the B2
 # secret never shows up in `ps`/`/proc`. Mirrors _backup_rp in system.sh.
+#
+# `cd /` first: `resticprofile schedule` writes its CURRENT DIRECTORY into the
+# units it generates, as WorkingDirectory. Run from a directory that is later
+# removed (a worktree, 2026-09-20), every scheduled run fails at CHDIR. The
+# 20-workdir.conf drop-in overrides it either way; this keeps the generated
+# unit itself from naming a directory that can disappear.
 rp() {
   sudo bash -c '
+    cd / || exit 1
     set -a; . /etc/restic/backup.local 2>/dev/null; set +a
     : "${RESTIC_PASSWORD_FILE:=/etc/restic/repo.key}"
     : "${RESTIC_COMPRESSION:=auto}"
@@ -906,6 +933,47 @@ init_repos() {
   init_repo "b2" "${BACKUP_B2_REPO:-}"
 }
 
+# Install one systemd drop-in holding one setting: root-owned, and complete or
+# not at all. Written to a temp file and moved into place by install(1), never
+# through `| sudo tee`, which truncates the destination before anything is known
+# to have worked.
+#   $1 — destination path
+#   $2 — section header, e.g. [Service]
+#   $3 — the setting, e.g. WorkingDirectory=/
+install_drop_in() {
+  local dest="$1" section="$2" setting="$3" tmp
+  tmp="$(mktemp)" || { log WARNING "could not create a temp file for $dest."; return 1; }
+  printf '%s\n%s\n' "$section" "$setting" > "$tmp"
+  if ! sudo install -m 644 -o root -g root "$tmp" "$dest"; then
+    rm -f "$tmp"
+    log WARNING "could not install $dest."
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+# The three drop-ins each resticprofile-generated unit template needs.
+#
+#   10-backup-env.conf   resticprofile's own systemd-drop-in-files does NOT
+#                        reliably inject an EnvironmentFile into its @-template
+#                        units (DO-448). Without it the scheduled services run
+#                        with an empty env and {{ .Env.* }} renders "<no value>"
+#                        ("repository does not exist").
+#   20-workdir.conf      see SCHEDULED_UNIT_WORKING_DIRECTORY.
+#   30-on-failure.conf   see UNIT_FAILURE_ON_FAILURE.
+#
+# Returns non-zero at the first drop-in that could not be installed.
+install_schedule_drop_ins() {
+  local template drop_in_dir
+  for template in "${SCHEDULED_UNIT_TEMPLATES[@]}"; do
+    drop_in_dir="${SYSTEMD_SYSTEM_DIR}/${template}@.service.d"
+    sudo install -d -m 755 "$drop_in_dir" || return 1
+    install_drop_in "$drop_in_dir/10-backup-env.conf" "[Service]" "EnvironmentFile=$ENV_FILE" || return 1
+    install_drop_in "$drop_in_dir/20-workdir.conf" "[Service]" "WorkingDirectory=$SCHEDULED_UNIT_WORKING_DIRECTORY" || return 1
+    install_drop_in "$drop_in_dir/30-on-failure.conf" "[Unit]" "$UNIT_FAILURE_ON_FAILURE" || return 1
+  done
+}
+
 # ===========================================================================
 # 5. Install systemd timers + the dock trigger
 # ===========================================================================
@@ -926,17 +994,17 @@ install_schedules() {
     log WARNING "Scheduling failed — check 'resticprofile -c $RP_CONFIG schedule --all'."
   fi
 
-  # resticprofile's systemd-drop-in-files does NOT reliably inject an EnvironmentFile
-  # into its generated @-template units (DO-448), so wire it in explicitly — otherwise
-  # the scheduled services run with an empty env and {{ .Env.* }} renders "<no value>"
-  # ("repository does not exist").
-  for tmpl in resticprofile-backup resticprofile-check; do
-    sudo install -d -m 755 "/etc/systemd/system/${tmpl}@.service.d"
-    printf '[Service]\nEnvironmentFile=%s\n' "$ENV_FILE" \
-      | sudo tee "/etc/systemd/system/${tmpl}@.service.d/10-backup-env.conf" >/dev/null
-  done
+  # The reporter the drop-ins below (and the two repo-owned units) name in
+  # OnFailure=. Installed before them, so no unit ever points at a missing one.
+  sudo install -m 644 "$DOTFILES/systemd/restic-unit-failed@.service" \
+    "$SYSTEMD_SYSTEM_DIR/restic-unit-failed@.service"
+
+  if install_schedule_drop_ins; then
+    log SUCCESS "Drop-ins wired into scheduled backup/check services: environment, working directory, failure report."
+  else
+    log WARNING "Could not install every drop-in for the scheduled units — scheduled runs may fail or fail silently. Re-run backup-setup."
+  fi
   sudo systemctl daemon-reload
-  log SUCCESS "EnvironmentFile drop-in wired into scheduled backup/check services."
 
   # External backup: a timer drives a ConditionPathExists-gated oneshot, so it
   # backs up only when the drive is docked (loop-free; no .path unit).

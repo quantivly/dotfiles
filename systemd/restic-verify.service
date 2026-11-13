@@ -15,6 +15,10 @@
 Description=restic backup verification (content + restore canary)
 After=network-online.target
 Wants=network-online.target
+# A failure the script itself cannot report (it never started: a missing binary,
+# an unreadable EnvironmentFile) still reaches restic-notify. See
+# scripts/restic-unit-failed.sh.
+OnFailure=restic-unit-failed@%n.service
 
 [Service]
 Type=oneshot
