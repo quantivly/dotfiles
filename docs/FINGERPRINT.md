@@ -338,7 +338,7 @@ open unless stated.
 
 ### Tests
 
-State table: `scripts/test-fingerprint.sh` (129 checks, hermetic, CI `fingerprint-test`). It
+State table: `scripts/test-fingerprint.sh` (132 checks, hermetic, CI `fingerprint-test`). It
 covers the following:
 
 - **The gate**, run as pam_exec runs it: `env -i` plus the PAM items, with no PATH. Local

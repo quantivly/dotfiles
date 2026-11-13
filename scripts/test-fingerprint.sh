@@ -441,7 +441,8 @@ check "a prefix that does not exist is refused, exit 2" "$(run_setup "$ROOT" "$T
 printf '\ninstall\n'
 P="$(newprefix)"
 rc="$(run_setup "$ROOT" "$P" --check)"
-check "--check before any install: exit 1" "$rc" 1
+check "--check before any install: exit 1, and blames nothing on libpam (sudo includes no stanza yet)" \
+  "$rc:$(out_has 'libpam refuses')" "1:0"
 rc="$(run_setup "$ROOT" "$P")"
 check "installs, exit 0" "$rc" 0
 check "$STANZA_INSTALLED_PATH is a byte-identical copy of pam/sudo-fingerprint" \
@@ -746,6 +747,18 @@ sed -i "s|$P$GATE_INSTALLED_PATH|$T/no/such/gate|" "$CONF/sudo-fingerprint"
 check "the gate missing: pam_exec's failure reads as OFFER, lid closed or not (why the gate goes in first)" \
   "$(authenticate '')" "$PAM_SUCCESS"
 
+printf '\nthe probe itself (its prompt count is what the next two rows rest on)\n'
+PROBE_CONF="$T/probeconf"
+mkdir -p "$PROBE_CONF" || fatal "probe fixture"
+printf 'auth optional pam_echo.so an info message, not a prompt\nauth required pam_permit.so\n' \
+  >"$PROBE_CONF/echo-then-permit" || fatal "probe fixture"
+check "an info message (what pam_fprintd's 'Place your finger' is) is not counted as a prompt" \
+  "$(python3 -I "$PROBE" --confdir "$PROBE_CONF" --service echo-then-permit 2>&1)" "$PAM_SUCCESS 0"
+check "a service that does not exist: pam_start's own refusal, never a result" \
+  "$(python3 -I "$PROBE" --confdir "$PROBE_CONF" --service no-such-service 2>&1)" "start:$PAM_ABORT"
+check "bad arguments: exit 2 (could not run), never a result" \
+  "$(python3 -I "$PROBE" --service no-confdir-given >/dev/null 2>&1; echo $?)" 2
+
 printf '\nthe re-prompt is the caller retrying, not common-auth (the REAL pam_unix, an account it does not know)\n'
 stack unix deny unix "$LID_OPEN"
 check "one attempt asks ONCE: common-auth's pam_unix re-checks the cached password, and the attempt fails" \
@@ -754,7 +767,7 @@ stack unix deny unix "$LID_OPEN"
 check "a second attempt on the same handle (sudo's retry) is what asks again" \
   "$(probe --user fingerprint-test-nobody --tty /dev/pts/3 --attempts 2)" "$PAM_AUTH_ERR 2"
 
-EXPECTED_ROWS=129
+EXPECTED_ROWS=132
 
 # --- the count this suite is documented as running ---------------------------
 # Same needle as the other suites: docs/REPO_CHECKS.md, "Where a check count lives".
