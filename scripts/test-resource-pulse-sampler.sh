@@ -25,7 +25,7 @@
 #
 # Usage: scripts/test-resource-pulse-sampler.sh
 #   CARGO_TARGET_DIR   cargo's build directory (default: ${XDG_CACHE_HOME:-$HOME/.cache}/resource-pulse/cargo-target)
-#   CARGO_BUILD_JOBS, RUST_TEST_THREADS   worker caps (default: zsh/zshrc.buildlimits's rule, see default_worker_cap)
+#   CARGO_BUILD_JOBS, RUST_TEST_THREADS   worker caps (default: FALLBACK_WORKER_COUNT; an interactive shell has zshrc.buildlimits's)
 
 set -uo pipefail
 
@@ -37,9 +37,6 @@ CONSTANTS_COMPARISON="$DOTFILES/gnome-shell/tests/sampler-constants.js"
 CARRIED_ROWS_CHECK="$HERE/resource-pulse-sampler-carried-rows.sh"
 CARRIED_ROWS_GENERATOR="$HERE/resource-pulse-sampler-carried-rows-generate.py"
 CARRIED_ROWS_LIST_FILE="$CRATE_DIR/tests/carried-rows.txt"
-# What zsh/zshrc.buildlimits does: a quarter of the cores inside a herdr pane, half otherwise, never under 2.
-MINIMUM_WORKER_CAP=2
-WORKER_FALLBACK_CORES=4
 
 PASS=0; FAIL=0
 ok()    { printf '  \033[0;32m✓\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
@@ -55,32 +52,17 @@ done
 [[ -x "$CARRIED_ROWS_CHECK" ]] || fatal "cannot run $CARRIED_ROWS_CHECK"
 [[ -r "$CARRIED_ROWS_GENERATOR" ]] || fatal "cannot read $CARRIED_ROWS_GENERATOR"
 
-# default_worker_cap <cores> <in-herdr-pane: yes|no> prints the cap zsh/zshrc.buildlimits would pick: a quarter of the
-# cores in an agent pane (siblings share the box), half otherwise, and never under MINIMUM_WORKER_CAP.
-default_worker_cap() {
-  local cores="$1" in_herdr_pane="$2" cap
-  if [[ "$in_herdr_pane" == yes ]]; then cap=$((cores / 4)); else cap=$((cores / 2)); fi
-  (( cap < MINIMUM_WORKER_CAP )) && cap=$MINIMUM_WORKER_CAP
-  printf '%s' "$cap"
-}
-# caller_in_herdr_pane prints yes when HERDR_PANE_ID is set and non-empty, else no.
-caller_in_herdr_pane() { if [[ -n "${HERDR_PANE_ID:-}" ]]; then printf yes; else printf no; fi; }
-
-WORKER_CAP="$(default_worker_cap "$(command nproc 2>/dev/null || echo "$WORKER_FALLBACK_CORES")" "$(caller_in_herdr_pane)")"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$WORKER_CAP}"
-export RUST_TEST_THREADS="${RUST_TEST_THREADS:-$WORKER_CAP}"
+# Workers for cargo's build and its tests when the caller's environment sets neither. The interactive cap comes from
+# zsh/zshrc.buildlimits (which exports both variables); this is only the fallback for a non-interactive run.
+FALLBACK_WORKER_COUNT=4
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$FALLBACK_WORKER_COUNT}"
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-$FALLBACK_WORKER_COUNT}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/resource-pulse/cargo-target}"
 
 WORK_DIR="$(mktemp -d)" || fatal "mktemp -d failed"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-printf 'the worker cap follows zsh/zshrc.buildlimits\n'
-check "8 cores in a herdr pane: 2" "$(default_worker_cap 8 yes)" 2
-check "8 cores in a plain shell: 4" "$(default_worker_cap 8 no)" 4
-check "2 cores in a herdr pane: the floor of $MINIMUM_WORKER_CAP" "$(default_worker_cap 2 yes)" "$MINIMUM_WORKER_CAP"
-check "16 cores in a herdr pane: 4" "$(default_worker_cap 16 yes)" 4
-
-printf '\ncargo test: one row per test\n'
+printf 'cargo test: one row per test\n'
 CARGO_TEST_OUTPUT="$(cargo test --locked --manifest-path "$MANIFEST_PATH" 2>&1)"
 CARGO_TEST_EXIT=$?
 # Sum every `test result: ... N passed; M failed;` line (unit, integration and doc test binaries each print one).
@@ -199,7 +181,7 @@ write_carried_fixture() {
 }
 # run_carried_fixture <dir> runs the check on a fixture crate; sets FIXTURE_OUTPUT and FIXTURE_EXIT.
 run_carried_fixture() {
-  FIXTURE_OUTPUT="$(CARRIED_ROWS_CRATE_DIR="$1" CARRIED_ROWS_LIST="${2:-$1/tests/carried-rows.txt}" "$CARRIED_ROWS_CHECK" 2>&1)"
+  FIXTURE_OUTPUT="$("$CARRIED_ROWS_CHECK" --crate-dir "$1" --list "${2:-$1/tests/carried-rows.txt}" --exempt "$1/tests/carried-rows-exempt.txt" 2>&1)"
   FIXTURE_EXIT=$?
 }
 BASELINE_FIXTURE="$(write_carried_fixture baseline $'Beta row\tnot yet ported\nGamma row\tnot yet ported\n' $'/// row: Alpha row\n')"
@@ -220,7 +202,14 @@ check "an exempt title the list lacks: exit 1, named as unknown" "$FIXTURE_EXIT:
 run_carried_fixture "$BASELINE_FIXTURE" "$WORK_DIR/no-such-list.txt"
 check "a list that cannot be read: exit 2, no pass line" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg '^CARRIED-ROW ' | wc -l | tr -d ' ')" "2:0"
 
-EXPECTED_ROWS=231
+EMPTY_FIXTURE="$(write_carried_fixture empty $'' $'')"
+printf '# only a heading\n' >"$EMPTY_FIXTURE/tests/carried-rows.txt"
+run_carried_fixture "$EMPTY_FIXTURE"
+check "a list with no titles: exit 2, no pass line" "$FIXTURE_EXIT:$(printf '%s\n' "$FIXTURE_OUTPUT" | rg '^CARRIED-ROW ' | wc -l | tr -d ' ')" "2:0"
+"$CARRIED_ROWS_CHECK" --no-such-flag >/dev/null 2>&1
+check "an unknown flag: exit 2" "$?" 2
+
+EXPECTED_ROWS=229
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

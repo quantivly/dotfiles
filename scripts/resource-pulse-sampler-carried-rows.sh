@@ -18,22 +18,40 @@
 # Exit: 0 all carried; 1 a title is missing, duplicated, double-counted or
 # unknown; 2 a file cannot be read (never a pass).
 #
-# Environment (for the state table's fixtures; defaults are the crate's own):
-#   CARRIED_ROWS_CRATE_DIR, CARRIED_ROWS_LIST, CARRIED_ROWS_EXEMPT
+# Flags (for the state table's fixtures; the defaults are the crate's own):
+#   --crate-dir <dir>   --list <file>   --exempt <file>
+# An unknown flag, or a list with no titles, is exit 2.
 
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-CRATE_DIR="${CARRIED_ROWS_CRATE_DIR:-$HERE/../resource-pulse-sampler}"
-LIST_FILE="${CARRIED_ROWS_LIST:-$CRATE_DIR/tests/carried-rows.txt}"
-EXEMPT_FILE="${CARRIED_ROWS_EXEMPT:-$CRATE_DIR/tests/carried-rows-exempt.txt}"
+CRATE_DIR="$HERE/../resource-pulse-sampler"
+LIST_FILE=""
+EXEMPT_FILE=""
 # The marker a Rust test carries to say which gjs row it ports.
 PORTED_ROW_MARKER='/// row: '
 
 fatal() { printf 'CARRIED-ROWS: %s\n' "$*" >&2; exit 2; }
 
+while (( $# > 0 )); do
+  case "$1" in
+    --crate-dir|--list|--exempt)
+      (( $# >= 2 )) || fatal "$1 needs a value"
+      case "$1" in
+        --crate-dir) CRATE_DIR="$2" ;;
+        --list) LIST_FILE="$2" ;;
+        --exempt) EXEMPT_FILE="$2" ;;
+      esac
+      shift 2 ;;
+    *) fatal "unknown argument: $1" ;;
+  esac
+done
+LIST_FILE="${LIST_FILE:-$CRATE_DIR/tests/carried-rows.txt}"
+EXEMPT_FILE="${EXEMPT_FILE:-$CRATE_DIR/tests/carried-rows-exempt.txt}"
+
 [[ -r "$LIST_FILE" ]] || fatal "cannot read the list $LIST_FILE"
 [[ -r "$EXEMPT_FILE" ]] || fatal "cannot read the exempt file $EXEMPT_FILE"
+rg -q -v -e '^#' -e '^$' "$LIST_FILE" || fatal "the list $LIST_FILE holds no titles"
 [[ -d "$CRATE_DIR" ]] || fatal "no crate directory at $CRATE_DIR"
 command -v rg >/dev/null || fatal "rg is required"
 command -v awk >/dev/null || fatal "awk is required"
