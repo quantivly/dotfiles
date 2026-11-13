@@ -368,7 +368,7 @@ Gotchas, in the order they bite:
   `0` disables parallelism outright and the rest land in `MAKEFLAGS` as a malformed flag,
   both worse than the default they were meant to improve. It is not silent: `build-limits`
   gained a `source` line naming the tier, the override, or the override it ignored and why.
-  State table: `scripts/test-buildlimits.sh` (37 checks, in CI as `buildlimits-test`) — the
+  State table: `scripts/test-buildlimits.sh` (38 checks, in CI as `buildlimits-test`) — the
   module's first, since `zsh -n` was all it ever had. Hermetic via an **`nproc` stub on a
   from-scratch PATH**: the whole subject is what the module derives from a core count, and
   the row that matters most ("8 cores is still exactly 2") cannot be written at all without

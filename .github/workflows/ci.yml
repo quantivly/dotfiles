@@ -615,6 +615,32 @@ jobs:
       - name: Run the Resource Pulse state table
         run: ./scripts/test-resource-pulse.sh
 
+  resource-pulse-sampler-test:
+    name: Resource Pulse Sampler State Table
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The state table runs gjs (the constants comparison against lib/constants.js and lib/protocol.js).
+      # dbus-daemon ships /usr/bin/dbus-run-session, which the table's later rows run the program under, on a
+      # private bus of their own, never on a session bus the runner may have; libglib2.0-bin brings gdbus.
+      # cargo, rustfmt and clippy come with ubuntu-latest; the first build downloads the crates from crates.io.
+      # ripgrep: the table and the carried-rows check both search with rg and exit 2 without it.
+      - name: Install gjs, dbus-daemon, gdbus and ripgrep
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gjs dbus-daemon libglib2.0-bin ripgrep
+
+      - name: Check the crate's formatting
+        run: cargo fmt --check --manifest-path resource-pulse-sampler/Cargo.toml
+
+      - name: Lint the crate
+        run: cargo clippy --locked --manifest-path resource-pulse-sampler/Cargo.toml -- -D warnings
+
+      - name: Run the Resource Pulse sampler state table
+        run: ./scripts/test-resource-pulse-sampler.sh
+
   dev-link-test:
     name: Dev Link State Table
     runs-on: ubuntu-latest

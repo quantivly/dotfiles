@@ -1951,7 +1951,7 @@ on_private_bus() {
     dbus-run-session --config-file="$PRIVATE_BUS_CONFIG" -- "$@"
 }
 # is_private_bus_address <address> <bus dir>: the drivers' twin of
-# requirePrivateBusAddress (gnome-shell/tests/service-dbus.test.js): one path
+# requirePrivateBusAddress (gnome-shell/tests/privateBus.js): one path
 # socket inside the bus dir, and nothing that could lead it out of it: an
 # address list (;), a /../ segment, or a percent escape (D-Bus decodes %2e%2e
 # to ..). Exported, so a driver run under on_private_bus checks its bus with

@@ -1,0 +1,31 @@
+[package]
+name = "resource-pulse-sampler"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Resource Pulse's sampler: the compiled replacement for the gjs service"
+publish = false
+
+[dependencies]
+zbus = { version = "6.2", default-features = false, features = ["default-rt"] }
+# The `Stream` trait the receiving thread polls `zbus`'s message stream through; already in the
+# tree as a dependency of `zbus`, with the same features.
+futures-core = "0.3"
+libc = "0.2"
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+panic = "deny"

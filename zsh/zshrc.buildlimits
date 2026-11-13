@@ -85,6 +85,8 @@ export GOFLAGS="${GOFLAGS:--p=$_bl_jobs}"
 
 # --- Rust --------------------------------------------------------------------
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$_bl_jobs}"
+# cargo test runs its tests on one thread per core; this caps them like the build.
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-$_bl_jobs}"
 
 # --- Python ------------------------------------------------------------------
 # Consulted by pytest-xdist when invoked as `-n auto`.
@@ -110,6 +112,7 @@ build-limits() {
         "NPM_CONFIG_JOBS" "$NPM_CONFIG_JOBS" \
         "GOFLAGS" "$GOFLAGS" \
         "CARGO_BUILD_JOBS" "$CARGO_BUILD_JOBS" \
+        "RUST_TEST_THREADS" "$RUST_TEST_THREADS" \
         "PYTEST_XDIST_AUTO_NUM_WORKERS" "$PYTEST_XDIST_AUTO_NUM_WORKERS" \
         "UV_CONCURRENT_BUILDS" "$UV_CONCURRENT_BUILDS" \
         "UV_CONCURRENT_INSTALLS" "$UV_CONCURRENT_INSTALLS" \

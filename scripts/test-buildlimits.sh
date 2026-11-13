@@ -91,7 +91,7 @@ check "2 cores: floored at 2"  "$(limits 2 '' MAKEFLAGS)"  "-j2"
 # One row per exported name, because a typo in any single export is invisible:
 # the tool simply keeps its own default and nothing reports it.
 echo "-- every tool tracks the tier --"
-for v in VITEST_MAX_WORKERS NPM_CONFIG_JOBS CARGO_BUILD_JOBS \
+for v in VITEST_MAX_WORKERS NPM_CONFIG_JOBS CARGO_BUILD_JOBS RUST_TEST_THREADS \
          PYTEST_XDIST_AUTO_NUM_WORKERS UV_CONCURRENT_BUILDS UV_CONCURRENT_INSTALLS; do
     check "$v at 16 cores in a pane" "$(limits 16 w1:p1 "$v")" "4"
 done
@@ -160,7 +160,7 @@ check "says an unusable override was ignored" \
 # like a pass. Whitespace is squashed because the sentence wraps between the
 # script name and the count. Which page owns this count and why, and the measured
 # drift behind the rule: docs/REPO_CHECKS.md, "Where a check count lives".
-EXPECTED_ROWS=37
+EXPECTED_ROWS=38
 
 docs_claim() {
   local f="$ROOT/$1"
