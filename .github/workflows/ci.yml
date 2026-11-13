@@ -104,6 +104,12 @@ jobs:
       - name: Run the backup-units state table
         run: ./scripts/test-backup-units.sh
 
+      # The weekly verification reads `latest`, whatever its age, so it passed
+      # for seven weeks on a snapshot nothing was adding to. Stubs for restic,
+      # the notify hook and the uptime file.
+      - name: Run the backup-verify freshness state table
+        run: ./scripts/test-backup-verify.sh
+
   systemd-reconcile-test:
     name: systemd Unit Enablement State Table
     runs-on: ubuntu-latest
