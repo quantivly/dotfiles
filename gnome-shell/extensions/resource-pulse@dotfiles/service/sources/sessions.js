@@ -3,16 +3,28 @@
 // ones (service/sources/sourceIo.js and service/herdrSocket.js).
 //
 // One sample: a `session.snapshot` request; the registry directory listed once and its `*.json` files read; then, one
-// claude agent at a time (so herdr is asked one thing at a time), a `pane.process_info` request, the transcript
+// claude agent at a time (so herdr is asked one thing at a time), the pane's claude process (below), the transcript
 // stat'ed (the exact path first, then the two search roots, each directory listed at most once per sample), and
 // /proc/<pid>/status read for the pane's claude process. The process start time, the idle age's fallback when no
 // transcript is found, comes from /proc/<pid>/stat's starttime and /proc/stat's btime: herdr's process_info carries
 // no start time.
 //
+// A pane's claude process is REMEMBERED across samples: herdr is asked (`pane.process_info`) for a pane that is new,
+// whose remembered process exited, whose pid now names another process (its /proc/<pid>/stat starttime differs),
+// whose process left its terminal's foreground group (its stat line's pgrp is no longer its tpgid), or whose answer
+// is PROCESS_INFO_MAX_AGE_SECONDS old; otherwise the remembered answer stands. Asking every pane at every sample was
+// 85 % of the cockpit service's CPU on 25 sessions (2026-11-13: about 2.2 ms of CPU per request).
+// After a sample, garbage is collected (collectGarbage) when GARBAGE_COLLECTION_INTERVAL_SECONDS have passed since the
+// last collection: herdr's replies arrive as GLib.Bytes, native memory that SpiderMonkey does not count towards a
+// collection, so without one the service's memory climbed by about 400 KB per sample until the unit's MemoryHigh
+// pushed it to swap. A collection costs about as much CPU as the rest of a sample (7 ms, 2026-11-13), so the watched
+// pace (10 s) collects every fifth sample, and the unwatched pace (60 s) after every sample.
+//
 // Which foreground process is the session follows `hreap` (zsh/zshrc.herdr): argv[0] (else argv0, else the name)
 // whose basename is `claude` or which is a path under `/claude/versions/` (the versioned binary teammates run), or a
 // process named `claude`. Its cwd, when herdr gives one, names the transcript's project directory, as in hreap.
 import GLib from 'gi://GLib';
+import System from 'system';
 
 import {COCKPIT_LOG_PREFIX, HERDR_REQUEST_TIMEOUT_MS, MICROSECONDS_PER_SECOND} from '../../lib/constants.js';
 import {RateLimitedLogger, describeError} from '../../lib/errorLog.js';
@@ -51,20 +63,38 @@ const PROC_PID_STATUS_FILE_NAME = 'status';
 const PROC_PID_STAT_FILE_NAME = 'stat';
 const BOOT_TIME_PATTERN = /^btime\s+(\d+)\s*$/m;
 /**
- * In /proc/<pid>/stat, the fields after the command's closing parenthesis start at field 3 (state); starttime is
- * field 22, so index 19 among them. The command can hold spaces and parentheses, so the fields are split after the
- * LAST closing parenthesis.
+ * In /proc/<pid>/stat, the fields after the command's closing parenthesis start at field 3 (state); pgrp is field 5,
+ * tpgid (the controlling terminal's foreground process group) field 8 and starttime field 22, so indexes 2, 5 and 19
+ * among them. The command can hold spaces and parentheses, so the fields are split after the LAST closing parenthesis.
  */
+const PROCESS_GROUP_INDEX_AFTER_COMMAND = 2;
+const TERMINAL_FOREGROUND_GROUP_INDEX_AFTER_COMMAND = 5;
 const START_TIME_INDEX_AFTER_COMMAND = 19;
 const PROC_PID_STAT_FIELD_SEPARATOR = /\s+/;
 /** The clock ticks per second of /proc/<pid>/stat's starttime: USER_HZ, 100 on every Linux this runs on. */
 const CLOCK_TICKS_PER_SECOND = 100;
+/**
+ * How old a pane's remembered claude process (its `pane.process_info` answer) may be before herdr is asked again even
+ * though that process still lives. It bounds how long the source can disagree with herdr about which process is the
+ * pane's foreground claude (a claude suspended to its shell keeps its pid and start time).
+ */
+export const PROCESS_INFO_MAX_AGE_SECONDS = 600;
+const PROCESS_INFO_MAX_AGE_USEC = PROCESS_INFO_MAX_AGE_SECONDS * MICROSECONDS_PER_SECOND;
+/**
+ * The least time between two of the source's garbage collections (see the header). Below the unwatched pace (60 s)
+ * by more than a sample's jitter, so that pace collects after every sample; the watched pace (10 s), every fifth.
+ */
+export const GARBAGE_COLLECTION_INTERVAL_SECONDS = 50;
+const GARBAGE_COLLECTION_INTERVAL_USEC = GARBAGE_COLLECTION_INTERVAL_SECONDS * MICROSECONDS_PER_SECOND;
+/** _claudeProcessOfPane's answer for a pane it cannot ask about: no process and so no start time. */
+const NO_CLAUDE_PROCESS = Object.freeze({claudeProcess: null, startTimeTicks: null});
 /** buildSessionsSource's interval input: the scheduler stamps the effective interval over it (ruling R2). */
 const PLACEHOLDER_INTERVAL_SECONDS = 0;
 /** Template keys of this source's log lines, so each logs once per ERROR_LOG_REPEAT_INTERVAL_USEC whatever its text. */
 const CONNECT_REFUSED_LOG_KEY = 'sessions: herdr: connect-refused';
 const REGISTRY_FILE_LOG_KEY = 'sessions: registry file';
 const REGISTRY_DIRECTORY_LOG_KEY = 'sessions: registry directory';
+const GARBAGE_COLLECTION_LOG_KEY = 'sessions: garbage collection';
 
 /**
  * @param {Array<object>} foregroundProcesses - process_info's `foreground_processes`.
@@ -112,15 +142,24 @@ function bootTimeSecondsFrom(procStatText) {
 
 /**
  * @param {string} pidStatText - The text of /proc/<pid>/stat.
- * @returns {number|null} The process's starttime in clock ticks after boot; null when the line is not that shape.
+ * @returns {{startTimeTicks: number, isInTerminalForeground: boolean}|null} The process's starttime in clock ticks
+ *     after boot, and whether its process group is its terminal's foreground group (the group herdr's
+ *     `foreground_processes` lists); null when the line is not that shape.
  */
-function startTimeTicksFrom(pidStatText) {
+function processIdentityFrom(pidStatText) {
     const commandEndIndex = pidStatText.lastIndexOf(')');
     if (commandEndIndex < 0)
         return null;
     const fieldsAfterCommand = pidStatText.slice(commandEndIndex + 1).trim().split(PROC_PID_STAT_FIELD_SEPARATOR);
     const startTimeTicks = Number(fieldsAfterCommand[START_TIME_INDEX_AFTER_COMMAND]);
-    return Number.isSafeInteger(startTimeTicks) && startTimeTicks >= 0 ? startTimeTicks : null;
+    if (!Number.isSafeInteger(startTimeTicks) || startTimeTicks < 0)
+        return null;
+    const processGroupId = Number(fieldsAfterCommand[PROCESS_GROUP_INDEX_AFTER_COMMAND]);
+    const terminalForegroundGroupId = Number(fieldsAfterCommand[TERMINAL_FOREGROUND_GROUP_INDEX_AFTER_COMMAND]);
+    // A process with no controlling terminal has tpgid -1, which no group id equals.
+    const isInTerminalForeground = Number.isSafeInteger(processGroupId) && processGroupId > 0 &&
+        processGroupId === terminalForegroundGroupId;
+    return {startTimeTicks, isInTerminalForeground};
 }
 
 /** The sessions source: the Claude sessions herdr runs, as lib/sessions.js builds them. */
@@ -139,6 +178,9 @@ export class SessionsSource {
      *     cannot list it.
      * @param {() => number} [dependencies.nowUsec] - Wall-clock microseconds since the epoch (transcript mtimes are).
      * @param {(line: string) => void} [dependencies.logWriter] - Where this source's own journal lines go.
+     * @param {() => void} [dependencies.collectGarbage] - Runs a full garbage collection; called after a sample at
+     *     most once per GARBAGE_COLLECTION_INTERVAL_SECONDS.
+     * @param {() => number} [dependencies.monotonicUsec] - Monotonic microseconds, which time the collections.
      */
     constructor({
         configHome = GLib.get_user_config_dir(),
@@ -152,8 +194,19 @@ export class SessionsSource {
         listDirectory = listEntryNames,
         nowUsec = () => GLib.get_real_time(),
         logWriter = line => console.warn(line),
+        collectGarbage = () => System.gc(),
+        monotonicUsec = () => GLib.get_monotonic_time(),
     } = {}) {
         this._registryDirectory = `${stateHome}/${HSPAWN_REGISTRY_DIRECTORY_NAME}`;
+        this._collectGarbage = collectGarbage;
+        this._monotonicUsec = monotonicUsec;
+        /** When the last collection ran, in monotonic microseconds; null before the first. */
+        this._lastCollectionMonotonicUsec = null;
+        /** Each pane's last claude process answer that can be recognised again: `{claudeProcess, startTimeTicks,
+         *  askedAtUsec}` by pane id. Pruned to the panes of each sample that gathers its facts to the end; a sample
+         *  that stops earlier (herdr not running, a rejected request) prunes nothing, which is safe because every
+         *  remembered answer is checked again before it is used. */
+        this._rememberedClaudeProcessByPaneId = new Map();
         this._homeDirectory = homeDirectory;
         this._herdrClient = herdrClient;
         this._readFile = readFile;
@@ -180,6 +233,43 @@ export class SessionsSource {
      *     that pane's process facts.
      */
     async sample() {
+        try {
+            return await this._sampleOnce();
+        } finally {
+            // After the sample, whatever it did: its replies' GLib.Bytes are garbage now (see the header).
+            this._collectGarbageWhenDue();
+        }
+    }
+
+    /**
+     * Collects the garbage when GARBAGE_COLLECTION_INTERVAL_SECONDS have passed since the last collection, or none
+     * ran yet. A collection that fails is logged (rate-limited) and never thrown, as the sampler's is: it runs after
+     * the sample, whose result or rejection must stand.
+     *
+     * @returns {void}
+     */
+    _collectGarbageWhenDue() {
+        const nowMonotonicUsec = this._monotonicUsec();
+        const isCollectionDue = this._lastCollectionMonotonicUsec === null ||
+            nowMonotonicUsec - this._lastCollectionMonotonicUsec >= GARBAGE_COLLECTION_INTERVAL_USEC;
+        if (!isCollectionDue)
+            return;
+        this._lastCollectionMonotonicUsec = nowMonotonicUsec;
+        try {
+            this._collectGarbage();
+        } catch (error) {
+            this._errorLog.log(`sessions: garbage collection failed: ${describeError(error)}`,
+                GARBAGE_COLLECTION_LOG_KEY);
+        }
+    }
+
+    /**
+     * One sample, as sample() describes it, without the collection after it.
+     *
+     * @returns {Promise<object>} sample()'s source.
+     * @throws {Error} (as a rejection) sample()'s rejections.
+     */
+    async _sampleOnce() {
         const nowUsec = this._nowUsec();
         let snapshot;
         try {
@@ -195,7 +285,7 @@ export class SessionsSource {
         }
         const agents = isPlainObject(snapshot) && Array.isArray(snapshot.agents) ? snapshot.agents : [];
         const claudeAgents = agents.filter(agent => isPlainObject(agent) && agent.agent === CLAUDE_AGENT_NAME);
-        const sampleFacts = await this._gatherSessionFacts(claudeAgents);
+        const sampleFacts = await this._gatherSessionFacts(claudeAgents, nowUsec);
         return buildSessionsSource({
             agents,
             registryEntriesByPaneId: this._readRegistryEntriesByPaneId(),
@@ -241,14 +331,16 @@ export class SessionsSource {
     }
 
     /**
-     * Asks herdr for each claude pane's processes, one pane at a time, and reads the rest of each session's facts.
+     * Finds each claude pane's process (remembered, or asked of herdr one pane at a time) and reads the rest of each
+     * session's facts; then forgets the remembered processes of panes this sample did not see.
      *
      * @param {Array<object>} claudeAgents - The snapshot's claude agents.
+     * @param {number} nowUsec - When the sample started.
      * @returns {Promise<object>} `{transcriptMtimeUsecBySessionId, processInfoByPaneId, memoryBytesByPaneId}`, as
      *     buildSessionsSource takes them.
      * @throws {Error} (as a rejection) A herdr failure other than a remote error.
      */
-    async _gatherSessionFacts(claudeAgents) {
+    async _gatherSessionFacts(claudeAgents, nowUsec) {
         const listingsByPath = new Map();
         const listOncePerSample = directoryPath => this._listDirectoryOnce(directoryPath, listingsByPath);
         const bootTime = {seconds: undefined};
@@ -259,7 +351,8 @@ export class SessionsSource {
             const paneId = stringOrNull(agent.pane_id);
             const sessionId = isPlainObject(agent.agent_session) ? stringOrNull(agent.agent_session.value) : null;
             // Awaited inside the loop on purpose: herdr is asked one thing at a time.
-            const claudeProcess = paneId === null ? null : await this._requestClaudeProcess(paneId);
+            const {claudeProcess, startTimeTicks} =
+                paneId === null ? NO_CLAUDE_PROCESS : await this._claudeProcessOfPane(paneId, nowUsec);
             const claudePid = isPid(claudeProcess?.pid) ? claudeProcess.pid : null;
             const cwd = stringOrNull(claudeProcess?.cwd) ?? stringOrNull(agent.cwd);
             const transcriptMtimeUsec = this._findTranscriptMtimeUsec({cwd, sessionId}, listOncePerSample);
@@ -267,13 +360,67 @@ export class SessionsSource {
                 transcriptMtimeUsecBySessionId[sessionId] = transcriptMtimeUsec;
             if (paneId === null)
                 continue;
-            // The start time is only the idle age's fallback, so it is read only when no transcript was found.
+            // The start time is only the idle age's fallback, so it is used only when no transcript was found.
             const startedAtUsec = claudePid !== null && transcriptMtimeUsec === null
-                ? this._processStartedAtUsec(claudePid, bootTime) : null;
+                ? this._processStartedAtUsec(startTimeTicks, bootTime) : null;
             processInfoByPaneId[paneId] = {pid: claudePid, startedAtUsec};
             memoryBytesByPaneId[paneId] = claudePid === null ? null : this._processMemoryBytes(claudePid);
         }
+        this._forgetPanesOtherThan(new Set(Object.keys(processInfoByPaneId)));
         return {transcriptMtimeUsecBySessionId, processInfoByPaneId, memoryBytesByPaneId};
+    }
+
+    /**
+     * The pane's claude process: the remembered answer while it is current (_isRememberedAnswerCurrent), otherwise
+     * herdr's, which is remembered when its process's start time could be read (so the next sample can recognise it).
+     *
+     * @param {string} paneId - A herdr pane.
+     * @param {number} nowUsec - When the sample started.
+     * @returns {Promise<{claudeProcess: object|null, startTimeTicks: number|null}>} The process (a process_info
+     *     foreground entry, null when the pane has none) and its start time in clock ticks after boot (null when it
+     *     has no pid or exited).
+     * @throws {Error} (as a rejection) A herdr failure other than a remote error.
+     */
+    async _claudeProcessOfPane(paneId, nowUsec) {
+        const rememberedAnswer = this._rememberedClaudeProcessByPaneId.get(paneId);
+        if (rememberedAnswer !== undefined && this._isRememberedAnswerCurrent(rememberedAnswer, nowUsec))
+            return rememberedAnswer;
+        this._rememberedClaudeProcessByPaneId.delete(paneId);
+        const claudeProcess = await this._requestClaudeProcess(paneId);
+        const identity = isPid(claudeProcess?.pid) ? this._readProcessIdentity(claudeProcess.pid) : null;
+        const startTimeTicks = identity?.startTimeTicks ?? null;
+        const answer = {claudeProcess, startTimeTicks, askedAtUsec: nowUsec};
+        if (startTimeTicks !== null)
+            this._rememberedClaudeProcessByPaneId.set(paneId, answer);
+        return answer;
+    }
+
+    /**
+     * @param {{claudeProcess: object, startTimeTicks: number, askedAtUsec: number}} rememberedAnswer - A remembered
+     *     answer (its process has a pid and had a start time).
+     * @param {number} nowUsec - When the sample started.
+     * @returns {boolean} Whether it still stands: younger than PROCESS_INFO_MAX_AGE_SECONDS; its pid still names the
+     *     process herdr named (the same start time: an exited process has none, a reused pid a later one); and that
+     *     process is still in its terminal's foreground group, where herdr found it.
+     */
+    _isRememberedAnswerCurrent({claudeProcess, startTimeTicks, askedAtUsec}, nowUsec) {
+        const answerAgeUsec = nowUsec - askedAtUsec;
+        // A wall clock that went back gives a negative age, which says nothing of how old the answer is.
+        if (answerAgeUsec < 0 || answerAgeUsec >= PROCESS_INFO_MAX_AGE_USEC)
+            return false;
+        const identity = this._readProcessIdentity(claudeProcess.pid);
+        return identity !== null && identity.startTimeTicks === startTimeTicks && identity.isInTerminalForeground;
+    }
+
+    /**
+     * @param {Set<string>} paneIdsSeen - The panes this sample found.
+     * @returns {void}
+     */
+    _forgetPanesOtherThan(paneIdsSeen) {
+        for (const paneId of [...this._rememberedClaudeProcessByPaneId.keys()]) {
+            if (!paneIdsSeen.has(paneId))
+                this._rememberedClaudeProcessByPaneId.delete(paneId);
+        }
     }
 
     /**
@@ -393,13 +540,32 @@ export class SessionsSource {
     }
 
     /**
-     * @param {number} pid - The Claude process.
+     * @param {number} pid - A process.
+     * @returns {{startTimeTicks: number, isInTerminalForeground: boolean}|null} processIdentityFrom of its
+     *     /proc/<pid>/stat; null when it exited or the line is not the expected shape.
+     */
+    _readProcessIdentity(pid) {
+        let pidStatText;
+        try {
+            pidStatText = this._readFile(procPidPath(pid, PROC_PID_STAT_FILE_NAME));
+        } catch {
+            // The process exited: it has no identity left to recognise.
+            return null;
+        }
+        return processIdentityFrom(pidStatText);
+    }
+
+    /**
+     * @param {number|null} startTimeTicks - The Claude process's start time in clock ticks after boot; null when
+     *     unknown.
      * @param {{seconds: number|null|undefined}} bootTime - This sample's boot time, read from /proc/stat on first
      *     use (undefined until then, null when it could not be read).
-     * @returns {number|null} When the process started, in microseconds since the epoch; null when it vanished or a
-     *     file is not the expected shape.
+     * @returns {number|null} When the process started, in microseconds since the epoch; null when its start time or
+     *     the boot time is unknown.
      */
-    _processStartedAtUsec(pid, bootTime) {
+    _processStartedAtUsec(startTimeTicks, bootTime) {
+        if (startTimeTicks === null)
+            return null;
         if (bootTime.seconds === undefined) {
             try {
                 bootTime.seconds = bootTimeSecondsFrom(this._readFile(PROC_STAT_PATH));
@@ -409,15 +575,6 @@ export class SessionsSource {
             }
         }
         if (bootTime.seconds === null)
-            return null;
-        let startTimeTicks;
-        try {
-            startTimeTicks = startTimeTicksFrom(this._readFile(procPidPath(pid, PROC_PID_STAT_FILE_NAME)));
-        } catch {
-            // The process exited meanwhile: its start time is unknown.
-            return null;
-        }
-        if (startTimeTicks === null)
             return null;
         return (bootTime.seconds + startTimeTicks / CLOCK_TICKS_PER_SECOND) * MICROSECONDS_PER_SECOND;
     }
