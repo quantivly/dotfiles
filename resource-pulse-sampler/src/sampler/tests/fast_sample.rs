@@ -140,6 +140,7 @@ struct BlockDeviceRecordingReader {
 }
 
 impl FileReader for BlockDeviceRecordingReader {
+    /// Records a read under `/sys/block/`, then reads as the real reader.
     fn read_to_text(&self, path: &Path) -> Result<String, ReadFailure> {
         if path
             .to_string_lossy()
@@ -160,6 +161,7 @@ struct BlockDeviceRefusingLister {
 }
 
 impl DirectoryLister for BlockDeviceRefusingLister {
+    /// Refuses and records a listing of `/sys/block`; lists as the real lister otherwise.
     fn subdirectory_names(&self, path: &Path) -> Result<Vec<String>, ReadFailure> {
         if path.to_string_lossy().ends_with(BLOCK_DEVICES_SUFFIX) {
             self.block_device_listings

@@ -66,10 +66,12 @@ struct TestClock {
 }
 
 impl Clock for TestClock {
+    /// The time the row set.
     fn monotonic_usec(&self) -> u64 {
         self.now_usec.get()
     }
 
+    /// The label the row's source gives.
     fn clock_label(&self) -> Result<String, String> {
         (self.clock_label)()
     }
@@ -146,6 +148,7 @@ impl SamplerSetup {
         }
     }
 
+    /// The same setup with another reader.
     fn with_reader(self, reader: impl FileReader + 'static) -> SamplerSetup {
         SamplerSetup {
             reader: Box::new(reader),
@@ -153,6 +156,7 @@ impl SamplerSetup {
         }
     }
 
+    /// The same setup with another lister.
     fn with_lister(self, lister: impl DirectoryLister + 'static) -> SamplerSetup {
         SamplerSetup {
             lister: Box::new(lister),
@@ -160,6 +164,7 @@ impl SamplerSetup {
         }
     }
 
+    /// The same setup with another clock label source.
     fn with_clock_label(
         self,
         clock_label: Box<dyn Fn() -> Result<String, String>>,
@@ -170,6 +175,7 @@ impl SamplerSetup {
         }
     }
 
+    /// The same setup with another name lookup.
     fn with_resolve_app_name(
         self,
         resolve_app_name: impl FnMut(&str) -> Option<String> + 'static,
@@ -210,6 +216,7 @@ struct ScanSpottingReader {
 }
 
 impl FileReader for ScanSpottingReader {
+    /// Counts a scan when the path is the root cgroup's cpu.stat, then reads as the real reader.
     fn read_to_text(&self, path: &Path) -> Result<String, ReadFailure> {
         if path
             .to_string_lossy()
@@ -241,6 +248,7 @@ impl FakeFileTree {
         Path::new(FAKE_ROOT_PATH).join(relative_path)
     }
 
+    /// Puts a file in the tree, replacing any there.
     fn write_file(&self, relative_path: &str, text: &str) {
         self.0
             .borrow_mut()
@@ -248,6 +256,7 @@ impl FakeFileTree {
             .insert(Self::absolute_path_of(relative_path), text.to_string());
     }
 
+    /// Makes a read or a listing of the path fail as given.
     fn fail_with(&self, relative_path: &str, failure: ReadFailure) {
         self.0
             .borrow_mut()
@@ -255,6 +264,7 @@ impl FakeFileTree {
             .insert(Self::absolute_path_of(relative_path), failure);
     }
 
+    /// Lets the path be read or listed again.
     fn clear_failure(&self, relative_path: &str) {
         self.0
             .borrow_mut()
@@ -269,6 +279,7 @@ impl FakeFileTree {
 }
 
 impl FileReader for FakeFileTree {
+    /// Records the read, then gives the failure set for the path, its text, or `NotFound`.
     fn read_to_text(&self, path: &Path) -> Result<String, ReadFailure> {
         let mut state = self.0.borrow_mut();
         state.read_paths.push(path.to_path_buf());
@@ -494,6 +505,7 @@ struct TwoScanOptions {
 }
 
 impl Default for TwoScanOptions {
+    /// The first scan's usual counters, and no change to the tree.
     fn default() -> Self {
         TwoScanOptions {
             first_scan_counters_usec: first_scan_counters_usec(),
@@ -582,6 +594,7 @@ struct ListingChildrenInOrder {
 }
 
 impl ListingChildrenInOrder {
+    /// A lister over the tree whose one directory lists the given names, in that order.
     fn new(tree: &FakeFileTree, directory_relative_path: &str, child_names: &[&str]) -> Self {
         ListingChildrenInOrder {
             tree: tree.clone(),
@@ -594,6 +607,7 @@ impl ListingChildrenInOrder {
 }
 
 impl DirectoryLister for ListingChildrenInOrder {
+    /// The given names for that directory; the tree's listing for any other.
     fn subdirectory_names(&self, path: &Path) -> Result<Vec<String>, ReadFailure> {
         if path == self.directory_path {
             return Ok(self.child_names.clone());

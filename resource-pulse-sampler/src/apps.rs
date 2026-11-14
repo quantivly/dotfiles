@@ -156,7 +156,7 @@ pub struct AppRanking {
 }
 
 /// A group's running total while a scan is summed.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct GroupTotal {
     group_key: String,
     name: String,

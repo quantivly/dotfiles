@@ -26,6 +26,7 @@ struct FailingEndingsReader {
 }
 
 impl FileReader for FailingEndingsReader {
+    /// The failure set for the path's ending, else the real reader's text.
     fn read_to_text(&self, path: &Path) -> Result<String, ReadFailure> {
         let path_text = path.to_string_lossy();
         for (path_ending, failure) in &self.failure_by_path_ending {

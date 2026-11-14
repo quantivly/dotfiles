@@ -1,9 +1,9 @@
-service sampler: collectGarbage runs once after each app scan (after its publish), never after a fast tick alone	not yet ported (task 10)
-service sampler: a throwing listener is logged and the next still runs; a removed one is not called	not yet ported (task 10)
-service sampler: start() twice adds one source; stop and destroy remove it; nothing after destroy	not yet ported (task 10)
-service sampler: start() ticks at once, so memory shows before the first interval and CPU after it; nothing ticks after destroy()	not yet ported (task 10)
-service sampler: the timer callback never throws: a tick that throws is logged and the source continues	not yet ported (task 10)
-service sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()	not yet ported (task 10)
+service sampler: collectGarbage runs once after each app scan (after its publish), never after a fast tick alone	no counterpart: Rust frees a scan's memory as the scan ends, so there is no garbage collector to run after it
+service sampler: a throwing listener is logged and the next still runs; a removed one is not called	no counterpart: the Rust sampler has no listeners; run_tick and set_detail_watched return their Publish to their one caller, the tick loop
+service sampler: start() twice adds one source; stop and destroy remove it; nothing after destroy	ported in task 12: the tick loop keeps one tick schedule however it is started, ends it when it stops, and runs no tick after
+service sampler: start() ticks at once, so memory shows before the first interval and CPU after it; nothing ticks after destroy()	ported in task 12: the tick loop runs its first tick at once, so memory shows before the first interval and CPU from the second tick, and none once stopped
+service sampler: the timer callback never throws: a tick that throws is logged and the source continues	ported in task 12: the tick loop runs each tick inside catch_unwind, logs a panic under "tick failed", and runs the next tick
+service sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()	ported in task 12: the tick loop publishes on a real interval, and publishes nothing once stopped
 service D-Bus: before any sample GetState answers protocol 1, sequence 0, the start time and the histories	not yet ported (task 11)
 service D-Bus: each publish sends one Sample (sequence from 1; a reveal appends nothing), and GetState follows	not yet ported (task 11)
 service D-Bus: GetState's latestSampledAtUsec is the real time of the latest publish, a reveal's included	not yet ported (task 11)

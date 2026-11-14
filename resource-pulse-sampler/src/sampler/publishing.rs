@@ -3,10 +3,7 @@
 
 use super::caught_panic::value_or_none;
 use super::snapshot::{AppendedHistory, Publish, Snapshot};
-use super::{Sampler, SAMPLE_FAILURE_LOG_KEY};
-
-/// The percentage a whole fraction is.
-const PERCENT_SCALE: f64 = 100.0;
+use super::{Sampler, PERCENT_SCALE, SAMPLE_FAILURE_LOG_KEY};
 
 impl Sampler {
     /// Publishes a fast tick's snapshot: appends it to the histories and makes it the latest.

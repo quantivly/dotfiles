@@ -13,8 +13,8 @@ impl Sampler {
             .log(self.clock.as_ref(), message, template_key);
     }
 
-    /// Logs a message whose text is its own template key.
-    pub(super) fn log_once_per_interval(&mut self, message: &str) {
+    /// Logs a message rate-limited by its own text, as gjs's `_logRateLimited` does without a key.
+    pub(super) fn log_keyed_by_its_text(&mut self, message: &str) {
         self.log_rate_limited(message, message);
     }
 
@@ -52,7 +52,7 @@ impl Sampler {
     ) -> Option<Parsed> {
         let parsed = parse(contents);
         if parsed.is_none() {
-            self.log_once_per_interval(&format!("cannot parse {}", path.display()));
+            self.log_keyed_by_its_text(&format!("cannot parse {}", path.display()));
         }
         parsed
     }

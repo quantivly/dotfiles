@@ -220,6 +220,7 @@ struct BreakableLister {
 }
 
 impl DirectoryLister for BreakableLister {
+    /// Panics while broken; lists as the real lister otherwise.
     fn subdirectory_names(&self, path: &Path) -> Result<Vec<String>, ReadFailure> {
         if self.is_listing_broken.get() {
             panic!("lister exploded");
@@ -340,6 +341,7 @@ struct BreakableReader {
 }
 
 impl FileReader for BreakableReader {
+    /// Panics while broken; reads as the real reader otherwise.
     fn read_to_text(&self, path: &Path) -> Result<String, ReadFailure> {
         if self.is_reading_broken.get() {
             panic!("fsRoot exploded");

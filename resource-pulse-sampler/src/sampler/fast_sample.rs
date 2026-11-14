@@ -11,7 +11,7 @@ use super::paths::{
     PROC_MEMINFO_PATH, PROC_STAT_PATH, PROC_SWAPS_PATH, ZRAM_MM_STAT_FILE,
 };
 use super::snapshot::{ClusterPercents, PressureAvg10, Snapshot};
-use super::Sampler;
+use super::{Sampler, PERCENT_SCALE};
 use crate::cpu::{cluster_busy_fraction, cpu_busy_fraction};
 use crate::memory::{
     memory_usage, swap_summary, zram_swap_device_names, MemoryUsage, SwapSummary, ZramDevice,
@@ -20,9 +20,6 @@ use crate::parsers::proc::{
     parse_meminfo, parse_pressure_some_avg10, parse_proc_stat, parse_proc_swaps,
     parse_zram_mm_stat, ProcStat, SwapArea,
 };
-
-/// The percentage a whole fraction is.
-const PERCENT_SCALE: f64 = 100.0;
 
 /// A fast sample: the snapshot without apps, and the `/proc/stat` reading to keep as the next CPU
 /// baseline.
@@ -167,7 +164,7 @@ impl Sampler {
         let memory = memory_usage(meminfo);
         if memory.is_none() {
             let path_text = meminfo_path.display();
-            self.log_once_per_interval(&format!(
+            self.log_keyed_by_its_text(&format!(
                 "cannot find MemTotal and MemAvailable in {path_text}"
             ));
         }

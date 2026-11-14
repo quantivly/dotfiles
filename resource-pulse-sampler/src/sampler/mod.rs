@@ -63,6 +63,8 @@ mod tests;
 /// choice on the page, not a panic; it keeps one sample.
 const FALLBACK_HISTORY_CAPACITY: NonZeroUsize = NonZeroUsize::MIN;
 
+/// The percentage a whole fraction is: a busy fraction 0 to 1 is published as 0 to 100.
+const PERCENT_SCALE: f64 = 100.0;
 /// The template key of a failed sample's journal line.
 const SAMPLE_FAILURE_LOG_KEY: &str = "sample failed";
 

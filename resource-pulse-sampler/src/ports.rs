@@ -101,7 +101,7 @@ pub trait Clock {
 /// A read that fails after a good open is `Error reading from file: <reason>` (GLib's
 /// `glocalfileinputstream.c`, and the text `service-sampler.test.js` builds for ENODEV). The reasons
 /// are glibc's `strerror` texts, which `g_strerror` gives under an English locale.
-pub mod gio_texts {
+mod gio_texts {
     use std::path::Path;
 
     /// `g_strerror(ENOENT)`.

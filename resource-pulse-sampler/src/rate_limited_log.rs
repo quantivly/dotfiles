@@ -85,10 +85,12 @@ mod tests {
     struct SetClock(Cell<u64>);
 
     impl Clock for SetClock {
+        /// The time the test set.
         fn monotonic_usec(&self) -> u64 {
             self.0.get()
         }
 
+        /// Never asked for by the log.
         fn clock_label(&self) -> Result<String, String> {
             Err("unused".to_string())
         }
@@ -98,10 +100,12 @@ mod tests {
     struct PanickingClock;
 
     impl Clock for PanickingClock {
+        /// Panics, as a broken clock port might.
         fn monotonic_usec(&self) -> u64 {
             panic!("clock exploded")
         }
 
+        /// Never asked for by the log.
         fn clock_label(&self) -> Result<String, String> {
             Err("unused".to_string())
         }

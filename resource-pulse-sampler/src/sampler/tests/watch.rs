@@ -20,6 +20,7 @@ struct SamplerPastItsWarmUp {
 }
 
 impl SamplerPastItsWarmUp {
+    /// The sampler, initialized and run through ticks 0 to 3.
     fn new() -> SamplerPastItsWarmUp {
         let scan_count = Rc::new(Cell::new(0));
         let test_sampler = SamplerSetup::at_fixture("root-a")

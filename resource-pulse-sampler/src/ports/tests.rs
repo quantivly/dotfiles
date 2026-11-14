@@ -45,6 +45,7 @@ impl TemporaryDirectory {
 }
 
 impl Drop for TemporaryDirectory {
+    /// Gives back every access it took away, then removes the directory.
     fn drop(&mut self) {
         if let Ok(entries) = fs::read_dir(&self.0) {
             for entry in entries.flatten() {

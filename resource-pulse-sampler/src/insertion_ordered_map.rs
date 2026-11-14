@@ -66,11 +66,6 @@ impl<Value> InsertionOrderedMap<Value> {
             .map(|(key, value)| (key.as_str(), value))
     }
 
-    /// `map.size`.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
     /// `map.size === 0`.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -95,7 +90,6 @@ mod tests {
         assert_eq!(entries, [("a", 3), ("b", 2), ("c", 4)]);
         assert_eq!(map.get("b"), Some(&2));
         assert_eq!(map.get("missing"), None);
-        assert_eq!(map.len(), 3);
         assert!(!map.is_empty());
     }
 }
