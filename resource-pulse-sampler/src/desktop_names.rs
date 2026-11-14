@@ -7,7 +7,8 @@
 //! `glib/gkeyfile.c` (`gkf`), `glib/gcharset.c` (`gcs`), `glib/gutils.c` (`gut`),
 //! `glib/gshell.c` (`gsh`) and `glib/gutf8.c`. A reference script
 //! (`gnome-shell/tests/desktop-names-reference.js`) runs the installed GLib against the same
-//! fixtures, and its answers are held in `tests/fixtures/desktop/expected-*.tsv`.
+//! fixtures, and its answers are held in `tests/fixtures/desktop/expected-*.tsv`. Those files
+//! are **GLib 2.88's answers**, which is the version the rules below were read from.
 //!
 //! # The rule
 //!
@@ -40,7 +41,9 @@
 //!    - a `key=value` line sits under a group, and in the first group an `Encoding` key
 //!      says `UTF-8` (any case) (`gkf: g_key_file_parse_key_value_pair`);
 //!    - the **first group** is `Desktop Entry`, and `Type` there is `Application` exactly;
-//!    - `Path`, `TryExec` and `Exec` are each absent or a good string (below);
+//!    - `Path`, `TryExec` and `Exec` are each absent or a good string (below). Refusing the file
+//!      for a bad one is **new in GLib 2.88** (`is_invalid_key_error`): 2.80 to 2.86 load such a
+//!      file and name it, so the expected files below are 2.88's and not those versions';
 //!    - `TryExec`, when not empty, names a program that exists (rule 7);
 //!    - `Exec`, when not empty, parses as a shell command line whose first word is a program
 //!      that exists (`gsh: g_shell_parse_argv`, rule 7); a blank command line does not parse.

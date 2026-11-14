@@ -345,6 +345,9 @@ for desktop_names_row in "${DESKTOP_NAMES_ROWS[@]}"; do
     ok "desktop names, $row_label: GLib's answers are exactly $row_expected_file"
   else
     diff <(printf '%s\n' "$REFERENCE_OUTPUT") "$DESKTOP_FIXTURES/$row_expected_file" | head -10
+    # The reference's first stderr line names the GLib it ran on: the expected files are 2.88's answers, so a differing
+    # row on another version reads as a change of runner image and not of the lookup.
+    cat "$WORK_DIR/reference.err"
     bad "desktop names, $row_label: GLib's answers differ from $row_expected_file"
   fi
 done

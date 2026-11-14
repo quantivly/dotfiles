@@ -1,5 +1,6 @@
 broken-falls-through.desktop	"Valid Behind Broken"
 deep-one-two.desktop	"Deep One Two"
+exec-bad-escape.desktop
 exec-bare-sh.desktop
 exec-cwd-tool.desktop	"Exec Tool In Cwd"
 exec-empty.desktop	"Exec Empty"
@@ -52,6 +53,7 @@ plain
 plain.desktop	"Plain App"
 Plain.desktop
 tryexec-absolute.desktop	"TryExec Absolute"
+tryexec-bad-escape.desktop
 tryexec-empty.desktop	"TryExec Empty"
 tryexec-missing.desktop
 tryexec-not-executable.desktop

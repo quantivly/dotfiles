@@ -70,7 +70,7 @@ enum SearchPath {
 
 /// The reference rows run with the fixtures directory as the current directory, because a
 /// relative program is looked for there; the current directory is the process's, so they take
-/// turns.
+/// turns. A test of a relative program, or of a `.` or empty `PATH` entry, must take the lock.
 static CURRENT_DIRECTORY_LOCK: Mutex<()> = Mutex::new(());
 
 fn fixtures() -> PathBuf {
@@ -381,6 +381,16 @@ fn exec_must_parse_and_start_with_an_executable_program_or_be_empty() {
 #[test]
 fn a_path_with_a_bad_escape_refuses_the_file() {
     assert_eq!(english_lookup().name_of("path-bad-escape.desktop"), None);
+}
+
+#[test]
+fn a_try_exec_with_a_bad_escape_refuses_the_file() {
+    assert_eq!(english_lookup().name_of("tryexec-bad-escape.desktop"), None);
+}
+
+#[test]
+fn an_exec_with_a_bad_escape_refuses_the_file() {
+    assert_eq!(english_lookup().name_of("exec-bad-escape.desktop"), None);
 }
 
 #[test]

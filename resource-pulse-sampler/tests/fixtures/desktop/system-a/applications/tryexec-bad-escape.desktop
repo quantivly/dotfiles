@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+TryExec=present-tool\q
+Name=TryExec Bad Escape

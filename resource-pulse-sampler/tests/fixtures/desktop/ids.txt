@@ -1,5 +1,6 @@
 broken-falls-through.desktop
 deep-one-two.desktop
+exec-bad-escape.desktop
 exec-bare-sh.desktop
 exec-cwd-tool.desktop
 exec-empty.desktop
@@ -52,6 +53,7 @@ plain
 plain.desktop
 Plain.desktop
 tryexec-absolute.desktop
+tryexec-bad-escape.desktop
 tryexec-empty.desktop
 tryexec-missing.desktop
 tryexec-not-executable.desktop
