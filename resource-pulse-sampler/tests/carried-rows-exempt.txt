@@ -51,8 +51,6 @@ service sampler: start() twice adds one source; stop and destroy remove it; noth
 service sampler: start() ticks at once, so memory shows before the first interval and CPU after it; nothing ticks after destroy()	not yet ported (task 10)
 service sampler: the timer callback never throws: a tick that throws is logged and the source continues	not yet ported (task 10)
 service sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()	not yet ported (task 10)
-readFileToEnd reads a /proc file whole although it reports a size of 0	not yet ported (task 10)
-listSubdirectoryNames names the subdirectories of a directory, and leaves its files out	not yet ported (task 10)
 service D-Bus: before any sample GetState answers protocol 1, sequence 0, the start time and the histories	not yet ported (task 11)
 service D-Bus: each publish sends one Sample (sequence from 1; a reveal appends nothing), and GetState follows	not yet ported (task 11)
 service D-Bus: GetState's latestSampledAtUsec is the real time of the latest publish, a reveal's included	not yet ported (task 11)
