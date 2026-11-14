@@ -389,6 +389,13 @@ golden_scenarios! {
     golden_unit_types => "unit-types",
     golden_vanished => "vanished",
     golden_watch_around_a_burst => "watch-around-a-burst",
+    golden_moving_counters => "moving-counters",
+    golden_one_cluster_offline => "one-cluster-offline",
+    golden_ranking_ties_and_truncation => "ranking-ties-and-truncation",
+    golden_memory_gap => "memory-gap",
+    golden_two_reveals => "two-reveals",
+    golden_history_wraps => "history-wraps",
+    golden_no_cgroup_directory => "no-cgroup-directory",
 }
 
 /// The names of the `.json` files in a directory, without the suffix.

@@ -1,0 +1,1223 @@
+{
+  "description": "Two minimal roots (/proc/stat and /proc/meminfo only) alternated for 152 ticks, more than a history holds (150): both histories keep the newest 150, the memory history alternating between the roots' fractions and the CPU history holding gaps wherever the counters went backwards.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {},
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 104006234,
+        "realUsec": 1794000004256235,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 106009351,
+        "realUsec": 1794000006259352,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 108012468,
+        "realUsec": 1794000008262469,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 110015585,
+        "realUsec": 1794000010265586,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 112018702,
+        "realUsec": 1794000012268703,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 114021819,
+        "realUsec": 1794000014271820,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 116024936,
+        "realUsec": 1794000016274937,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 118028053,
+        "realUsec": 1794000018278054,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 120031170,
+        "realUsec": 1794000020281171,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 122034287,
+        "realUsec": 1794000022284288,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 124037404,
+        "realUsec": 1794000024287405,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 126040521,
+        "realUsec": 1794000026290522,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 128043638,
+        "realUsec": 1794000028293639,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 130046755,
+        "realUsec": 1794000030296756,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 132049872,
+        "realUsec": 1794000032299873,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 134052989,
+        "realUsec": 1794000034302990,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 136056106,
+        "realUsec": 1794000036306107,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 138059223,
+        "realUsec": 1794000038309224,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 140062340,
+        "realUsec": 1794000040312341,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 142065457,
+        "realUsec": 1794000042315458,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 144068574,
+        "realUsec": 1794000044318575,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 146071691,
+        "realUsec": 1794000046321692,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 148074808,
+        "realUsec": 1794000048324809,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 150077925,
+        "realUsec": 1794000050327926,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 152081042,
+        "realUsec": 1794000052331043,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 154084159,
+        "realUsec": 1794000054334160,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 156087276,
+        "realUsec": 1794000056337277,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 158090393,
+        "realUsec": 1794000058340394,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 160093510,
+        "realUsec": 1794000060343511,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 162096627,
+        "realUsec": 1794000062346628,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 164099744,
+        "realUsec": 1794000064349745,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 166102861,
+        "realUsec": 1794000066352862,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 168105978,
+        "realUsec": 1794000068355979,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 170109095,
+        "realUsec": 1794000070359096,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 172112212,
+        "realUsec": 1794000072362213,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 174115329,
+        "realUsec": 1794000074365330,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 176118446,
+        "realUsec": 1794000076368447,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 178121563,
+        "realUsec": 1794000078371564,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 180124680,
+        "realUsec": 1794000080374681,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 182127797,
+        "realUsec": 1794000082377798,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 184130914,
+        "realUsec": 1794000084380915,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 186134031,
+        "realUsec": 1794000086384032,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 188137148,
+        "realUsec": 1794000088387149,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 190140265,
+        "realUsec": 1794000090390266,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 192143382,
+        "realUsec": 1794000092393383,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 194146499,
+        "realUsec": 1794000094396500,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 196149616,
+        "realUsec": 1794000096399617,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 198152733,
+        "realUsec": 1794000098402734,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 200155850,
+        "realUsec": 1794000100405851,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 202158967,
+        "realUsec": 1794000102408968,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 204162084,
+        "realUsec": 1794000104412085,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 206165201,
+        "realUsec": 1794000106415202,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 208168318,
+        "realUsec": 1794000108418319,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 210171435,
+        "realUsec": 1794000110421436,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 212174552,
+        "realUsec": 1794000112424553,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 214177669,
+        "realUsec": 1794000114427670,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 216180786,
+        "realUsec": 1794000116430787,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 218183903,
+        "realUsec": 1794000118433904,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 220187020,
+        "realUsec": 1794000120437021,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 222190137,
+        "realUsec": 1794000122440138,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 224193254,
+        "realUsec": 1794000124443255,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 226196371,
+        "realUsec": 1794000126446372,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 228199488,
+        "realUsec": 1794000128449489,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 230202605,
+        "realUsec": 1794000130452606,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 232205722,
+        "realUsec": 1794000132455723,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 234208839,
+        "realUsec": 1794000134458840,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 236211956,
+        "realUsec": 1794000136461957,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 238215073,
+        "realUsec": 1794000138465074,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 240218190,
+        "realUsec": 1794000140468191,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 242221307,
+        "realUsec": 1794000142471308,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 244224424,
+        "realUsec": 1794000144474425,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 246227541,
+        "realUsec": 1794000146477542,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 248230658,
+        "realUsec": 1794000148480659,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 250233775,
+        "realUsec": 1794000150483776,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 252236892,
+        "realUsec": 1794000152486893,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 254240009,
+        "realUsec": 1794000154490010,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 256243126,
+        "realUsec": 1794000156493127,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 258246243,
+        "realUsec": 1794000158496244,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 260249360,
+        "realUsec": 1794000160499361,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 262252477,
+        "realUsec": 1794000162502478,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 264255594,
+        "realUsec": 1794000164505595,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 266258711,
+        "realUsec": 1794000166508712,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 268261828,
+        "realUsec": 1794000168511829,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 270264945,
+        "realUsec": 1794000170514946,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 272268062,
+        "realUsec": 1794000172518063,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 274271179,
+        "realUsec": 1794000174521180,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 276274296,
+        "realUsec": 1794000176524297,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 278277413,
+        "realUsec": 1794000178527414,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 280280530,
+        "realUsec": 1794000180530531,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 282283647,
+        "realUsec": 1794000182533648,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 284286764,
+        "realUsec": 1794000184536765,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 286289881,
+        "realUsec": 1794000186539882,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 288292998,
+        "realUsec": 1794000188542999,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 290296115,
+        "realUsec": 1794000190546116,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 292299232,
+        "realUsec": 1794000192549233,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 294302349,
+        "realUsec": 1794000194552350,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 296305466,
+        "realUsec": 1794000196555467,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 298308583,
+        "realUsec": 1794000198558584,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 300311700,
+        "realUsec": 1794000200561701,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 302314817,
+        "realUsec": 1794000202564818,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 304317934,
+        "realUsec": 1794000204567935,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 306321051,
+        "realUsec": 1794000206571052,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 308324168,
+        "realUsec": 1794000208574169,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 310327285,
+        "realUsec": 1794000210577286,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 312330402,
+        "realUsec": 1794000212580403,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 314333519,
+        "realUsec": 1794000214583520,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 316336636,
+        "realUsec": 1794000216586637,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 318339753,
+        "realUsec": 1794000218589754,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 320342870,
+        "realUsec": 1794000220592871,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 322345987,
+        "realUsec": 1794000222595988,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 324349104,
+        "realUsec": 1794000224599105,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 326352221,
+        "realUsec": 1794000226602222,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 328355338,
+        "realUsec": 1794000228605339,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 330358455,
+        "realUsec": 1794000230608456,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 332361572,
+        "realUsec": 1794000232611573,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 334364689,
+        "realUsec": 1794000234614690,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 336367806,
+        "realUsec": 1794000236617807,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 338370923,
+        "realUsec": 1794000238620924,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 340374040,
+        "realUsec": 1794000240624041,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 342377157,
+        "realUsec": 1794000242627158,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 344380274,
+        "realUsec": 1794000244630275,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 346383391,
+        "realUsec": 1794000246633392,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 348386508,
+        "realUsec": 1794000248636509,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 350389625,
+        "realUsec": 1794000250639626,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 352392742,
+        "realUsec": 1794000252642743,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 354395859,
+        "realUsec": 1794000254645860,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 356398976,
+        "realUsec": 1794000256648977,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 358402093,
+        "realUsec": 1794000258652094,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 360405210,
+        "realUsec": 1794000260655211,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 362408327,
+        "realUsec": 1794000262658328,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 364411444,
+        "realUsec": 1794000264661445,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 366414561,
+        "realUsec": 1794000266664562,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 368417678,
+        "realUsec": 1794000268667679,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 370420795,
+        "realUsec": 1794000270670796,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 372423912,
+        "realUsec": 1794000272673913,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 374427029,
+        "realUsec": 1794000274677030,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 376430146,
+        "realUsec": 1794000276680147,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 378433263,
+        "realUsec": 1794000278683264,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 380436380,
+        "realUsec": 1794000280686381,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 382439497,
+        "realUsec": 1794000282689498,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 384442614,
+        "realUsec": 1794000284692615,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 386445731,
+        "realUsec": 1794000286695732,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 388448848,
+        "realUsec": 1794000288698849,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 390451965,
+        "realUsec": 1794000290701966,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 392455082,
+        "realUsec": 1794000292705083,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 394458199,
+        "realUsec": 1794000294708200,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 396461316,
+        "realUsec": 1794000296711317,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 398464433,
+        "realUsec": 1794000298714434,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-a",
+        "monotonicUsec": 400467550,
+        "realUsec": 1794000300717551,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-wrap-b",
+        "monotonicUsec": 402470667,
+        "realUsec": 1794000302720668,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

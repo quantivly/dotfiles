@@ -1,0 +1,513 @@
+{
+  "samples": [
+    {
+      "sequence": 1,
+      "sampledAtUsec": 1794000000250001,
+      "snapshot": {
+        "takenAtUsec": 100000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": null,
+        "cpuClusters": null,
+        "memory": {
+          "usedBytes": 11235183616,
+          "totalBytes": 16168255488
+        },
+        "swap": {
+          "zramUsedBytes": 1264196608,
+          "zramRamBytes": 345678901,
+          "diskBytes": 3410944
+        },
+        "pressureAvg10": {
+          "cpu": 3.07,
+          "memory": 0.41,
+          "io": 7.9
+        },
+        "apps": {
+          "topCpu": null,
+          "topMemory": {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 99351608
+          },
+          "cpuRanking": [],
+          "memoryRanking": [
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "memoryBytes": 99351608
+            },
+            {
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "memoryBytes": 87013706
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "memoryBytes": 74675804
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Example Browser",
+              "memoryBytes": 62337902
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Example Editor",
+              "memoryBytes": 50000000
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": null,
+        "memory": 0.6948915190224881
+      }
+    },
+    {
+      "sequence": 2,
+      "sampledAtUsec": 1794000002253118,
+      "snapshot": {
+        "takenAtUsec": 102003117,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": 22.22222222222222,
+        "cpuClusters": {
+          "performancePercent": 30.508474576271187,
+          "efficiencyPercent": 13.793103448275861
+        },
+        "memory": {
+          "usedBytes": 10925368320,
+          "totalBytes": 16168255488
+        },
+        "swap": {
+          "zramUsedBytes": 1274436608,
+          "zramRamBytes": 351278901,
+          "diskBytes": 3994624
+        },
+        "pressureAvg10": {
+          "cpu": 4.19,
+          "memory": 1.37,
+          "io": 0.06
+        },
+        "apps": {
+          "topCpu": {
+            "groupKey": "pseudo:kernel",
+            "name": "kernel",
+            "cpuPercent": 95.05262298707464
+          },
+          "topMemory": {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 100459388
+          },
+          "cpuRanking": [
+            {
+              "groupKey": "pseudo:kernel",
+              "name": "kernel",
+              "cpuPercent": 95.05262298707464
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Example Editor",
+              "cpuPercent": 15.40807401664506
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Example Browser",
+              "cpuPercent": 12.326464205535673
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "cpuPercent": 5.700977526524911
+            },
+            {
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "cpuPercent": 1.2326414283339415
+            },
+            {
+              "groupKey": "pseudo:short-jobs",
+              "name": "short jobs",
+              "cpuPercent": 0.4775058071994796
+            },
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "cpuPercent": 0.4160141419597557
+            }
+          ],
+          "memoryRanking": [
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "memoryBytes": 100459388
+            },
+            {
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "memoryBytes": 88121486
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "memoryBytes": 75783584
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Example Browser",
+              "memoryBytes": 63445682
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Example Editor",
+              "memoryBytes": 51107780
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": 0.2222222222222222,
+        "memory": 0.6757295694707914
+      }
+    },
+    {
+      "sequence": 3,
+      "sampledAtUsec": 1794000004256235,
+      "snapshot": {
+        "takenAtUsec": 104006234,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": 22.04724409448819,
+        "cpuClusters": {
+          "performancePercent": 32.20338983050847,
+          "efficiencyPercent": 13.23529411764706
+        },
+        "memory": {
+          "usedBytes": 12084941824,
+          "totalBytes": 16168255488
+        },
+        "swap": {
+          "zramUsedBytes": 1315396608,
+          "zramRamBytes": 359918901,
+          "diskBytes": 4516864
+        },
+        "pressureAvg10": {
+          "cpu": 0.83,
+          "memory": 2.5,
+          "io": 3.31
+        },
+        "apps": {
+          "topCpu": {
+            "groupKey": "pseudo:kernel",
+            "name": "kernel",
+            "cpuPercent": 95.05262298707464
+          },
+          "topMemory": {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 100459388
+          },
+          "cpuRanking": [
+            {
+              "groupKey": "pseudo:kernel",
+              "name": "kernel",
+              "cpuPercent": 95.05262298707464
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Example Editor",
+              "cpuPercent": 15.40807401664506
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Example Browser",
+              "cpuPercent": 12.326464205535673
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "cpuPercent": 5.700977526524911
+            },
+            {
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "cpuPercent": 1.2326414283339415
+            },
+            {
+              "groupKey": "pseudo:short-jobs",
+              "name": "short jobs",
+              "cpuPercent": 0.4775058071994796
+            },
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "cpuPercent": 0.4160141419597557
+            }
+          ],
+          "memoryRanking": [
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "memoryBytes": 100459388
+            },
+            {
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "memoryBytes": 88121486
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "memoryBytes": 75783584
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Example Browser",
+              "memoryBytes": 63445682
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Example Editor",
+              "memoryBytes": 51107780
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": 0.2204724409448819,
+        "memory": 0.7474487172081975
+      }
+    },
+    {
+      "sequence": 4,
+      "sampledAtUsec": 1794000006259352,
+      "snapshot": {
+        "takenAtUsec": 106009351,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": 22.55639097744361,
+        "cpuClusters": {
+          "performancePercent": 24.285714285714285,
+          "efficiencyPercent": 20.634920634920633
+        },
+        "memory": {
+          "usedBytes": 10011610112,
+          "totalBytes": 16168255488
+        },
+        "swap": {
+          "zramUsedBytes": 1243716608,
+          "zramRamBytes": 341118901,
+          "diskBytes": 3410944
+        },
+        "pressureAvg10": {
+          "cpu": 5.55,
+          "memory": 0.07,
+          "io": 9.12
+        },
+        "apps": {
+          "topCpu": {
+            "groupKey": "pseudo:kernel",
+            "name": "kernel",
+            "cpuPercent": 95.05262298707464
+          },
+          "topMemory": {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 100459388
+          },
+          "cpuRanking": [
+            {
+              "groupKey": "pseudo:kernel",
+              "name": "kernel",
+              "cpuPercent": 95.05262298707464
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Example Editor",
+              "cpuPercent": 15.40807401664506
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Example Browser",
+              "cpuPercent": 12.326464205535673
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "cpuPercent": 5.700977526524911
+            },
+            {
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "cpuPercent": 1.2326414283339415
+            },
+            {
+              "groupKey": "pseudo:short-jobs",
+              "name": "short jobs",
+              "cpuPercent": 0.4775058071994796
+            },
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "cpuPercent": 0.4160141419597557
+            }
+          ],
+          "memoryRanking": [
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "memoryBytes": 100459388
+            },
+            {
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "memoryBytes": 88121486
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "memoryBytes": 75783584
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Example Browser",
+              "memoryBytes": 63445682
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Example Editor",
+              "memoryBytes": 51107780
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": 0.22556390977443608,
+        "memory": 0.6192139974180002
+      }
+    }
+  ],
+  "state": {
+    "protocol": 1,
+    "serviceStartedAtUsec": 1793999995000000,
+    "latestSampledAtUsec": 1794000006259352,
+    "sequence": 4,
+    "snapshot": {
+      "takenAtUsec": 106009351,
+      "takenAtClockLabel": "14:02",
+      "cpuBusyPercent": 22.55639097744361,
+      "cpuClusters": {
+        "performancePercent": 24.285714285714285,
+        "efficiencyPercent": 20.634920634920633
+      },
+      "memory": {
+        "usedBytes": 10011610112,
+        "totalBytes": 16168255488
+      },
+      "swap": {
+        "zramUsedBytes": 1243716608,
+        "zramRamBytes": 341118901,
+        "diskBytes": 3410944
+      },
+      "pressureAvg10": {
+        "cpu": 5.55,
+        "memory": 0.07,
+        "io": 9.12
+      },
+      "apps": {
+        "topCpu": {
+          "groupKey": "pseudo:kernel",
+          "name": "kernel",
+          "cpuPercent": 95.05262298707464
+        },
+        "topMemory": {
+          "groupKey": "docker:docker",
+          "name": "docker",
+          "memoryBytes": 100459388
+        },
+        "cpuRanking": [
+          {
+            "groupKey": "pseudo:kernel",
+            "name": "kernel",
+            "cpuPercent": 95.05262298707464
+          },
+          {
+            "groupKey": "app:org.example.Editor",
+            "name": "Example Editor",
+            "cpuPercent": 15.40807401664506
+          },
+          {
+            "groupKey": "app:com.example.Browser",
+            "name": "Example Browser",
+            "cpuPercent": 12.326464205535673
+          },
+          {
+            "groupKey": "unit:herdr-server",
+            "name": "herdr agents",
+            "cpuPercent": 5.700977526524911
+          },
+          {
+            "groupKey": "unit:cron",
+            "name": "cron",
+            "cpuPercent": 1.2326414283339415
+          },
+          {
+            "groupKey": "pseudo:short-jobs",
+            "name": "short jobs",
+            "cpuPercent": 0.4775058071994796
+          },
+          {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "cpuPercent": 0.4160141419597557
+          }
+        ],
+        "memoryRanking": [
+          {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 100459388
+          },
+          {
+            "groupKey": "unit:cron",
+            "name": "cron",
+            "memoryBytes": 88121486
+          },
+          {
+            "groupKey": "unit:herdr-server",
+            "name": "herdr agents",
+            "memoryBytes": 75783584
+          },
+          {
+            "groupKey": "app:com.example.Browser",
+            "name": "Example Browser",
+            "memoryBytes": 63445682
+          },
+          {
+            "groupKey": "app:org.example.Editor",
+            "name": "Example Editor",
+            "memoryBytes": 51107780
+          }
+        ]
+      },
+      "isComplete": true
+    },
+    "histories": {
+      "cpu": [
+        null,
+        0.2222222222222222,
+        0.2204724409448819,
+        0.22556390977443608
+      ],
+      "memory": [
+        0.6948915190224881,
+        0.6757295694707914,
+        0.7474487172081975,
+        0.6192139974180002
+      ]
+    }
+  }
+}

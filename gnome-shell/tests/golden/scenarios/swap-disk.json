@@ -1,5 +1,5 @@
 {
-  "description": "Swap on a disk file beside two zram devices.",
+  "description": "Swap on a disk file beside two zram devices: the only scenario with disk swap bytes and a zram device that /proc/swaps does not list. The same root twice with no /proc/stat, pressure files or cgroups, so CPU, clusters and pressure stay null and both rankings stay empty; the samples are incomplete.",
   "serviceStartedAtUsec": 1793999995000000,
   "appNames": {},
   "steps": [

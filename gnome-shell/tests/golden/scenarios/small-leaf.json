@@ -1,5 +1,5 @@
 {
-  "description": "A leaf under the memory.stat threshold, ranked uncorrected.",
+  "description": "One leaf under the memory.stat threshold, ranked uncorrected, over a root holding only meminfo (zero used) and the cgroups. Pins the memory ranking of the small leaf. The same root twice: no /proc/stat, so CPU, clusters and the CPU ranking stay empty or null; no pressure or swap files, so those are null and every sample is incomplete.",
   "serviceStartedAtUsec": 1793999995000000,
   "appNames": {},
   "steps": [

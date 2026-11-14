@@ -1,0 +1,76 @@
+{
+  "description": "Two detail watches, each started between ticks over a root whose counters have moved, and ended: each start is a reveal Sample that appends nothing, the second after the reveal cooldown.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "org.example.Editor.desktop": "Example Editor",
+    "com.example.Browser.desktop": "Example Browser"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-moving-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-b",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "watchDetail": true,
+      "fsRoot": "root-moving-c",
+      "monotonicUsec": 103503120,
+      "realUsec": 1794000003753121
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-d",
+        "monotonicUsec": 104006234,
+        "realUsec": 1794000004256235,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "watchDetail": false
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-e",
+        "monotonicUsec": 106009351,
+        "realUsec": 1794000006259352,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-e",
+        "monotonicUsec": 108012468,
+        "realUsec": 1794000008262469,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "watchDetail": true,
+      "fsRoot": "root-moving-f",
+      "monotonicUsec": 109512471,
+      "realUsec": 1794000009762472
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-f",
+        "monotonicUsec": 110015585,
+        "realUsec": 1794000010265586,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "watchDetail": false
+    }
+  ]
+}

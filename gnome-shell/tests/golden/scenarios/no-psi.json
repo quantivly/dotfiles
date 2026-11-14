@@ -1,5 +1,5 @@
 {
-  "description": "No pressure files: the three pressures are null and the sample is incomplete.",
+  "description": "No pressure files: the three pressures are null and the samples are incomplete. The same root twice, so /proc/stat does not move and CPU and clusters stay null; the second sample's scan ranks five apps with zero CPU deltas.",
   "serviceStartedAtUsec": 1793999995000000,
   "appNames": {},
   "steps": [

@@ -1,0 +1,26 @@
+{
+  "description": "Twelve apps and two services whose counters move: ties in value that the name decides and, for two apps named Zulu and Alpha by their desktop files, ties that name and key order decide differently; more groups than a ranking holds, so each ranking is cut at ten.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "org.example.Aaa.desktop": "Zulu",
+    "org.example.Bbb.desktop": "Alpha"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-ranking-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-ranking-b",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

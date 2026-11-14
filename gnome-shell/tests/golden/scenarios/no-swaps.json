@@ -1,5 +1,5 @@
 {
-  "description": "No /proc/swaps: swap is null and the sample is incomplete.",
+  "description": "No /proc/swaps: swap is null and the samples are incomplete. Pins that one missing file nulls only its own field. The same root twice with no /proc/stat, pressure files or cgroups, so CPU, clusters, pressure stay null and both rankings stay empty.",
   "serviceStartedAtUsec": 1793999995000000,
   "appNames": {},
   "steps": [

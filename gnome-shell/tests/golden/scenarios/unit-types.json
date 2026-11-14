@@ -1,5 +1,5 @@
 {
-  "description": "Mount, socket and service units: only the service is a candidate.",
+  "description": "Mount, socket and service units under one slice: only the service reaches the memory ranking. Pins the unit-suffix skip. The same root twice with no /proc/stat, pressure or swap files, so CPU, clusters, pressure and swap stay null, the CPU ranking stays empty and the samples are incomplete.",
   "serviceStartedAtUsec": 1793999995000000,
   "appNames": {},
   "steps": [

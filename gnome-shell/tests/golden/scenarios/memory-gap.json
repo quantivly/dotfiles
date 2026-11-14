@@ -1,0 +1,34 @@
+{
+  "description": "A tick whose /proc/meminfo is gone between two good ones: memory is null for that sample and a gap in the memory history, and the sample is incomplete.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "org.example.Editor.desktop": "Example Editor",
+    "com.example.Browser.desktop": "Example Browser"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-moving-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-no-meminfo",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-c",
+        "monotonicUsec": 104006234,
+        "realUsec": 1794000004256235,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

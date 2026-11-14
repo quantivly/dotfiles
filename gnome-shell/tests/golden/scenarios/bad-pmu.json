@@ -1,5 +1,5 @@
 {
-  "description": "A cluster map that cannot be read: no cluster percentages, and the sample is still published.",
+  "description": "A cluster map that cannot be read (a CPU list with a part that is not a number) over two roots whose /proc/stat moves: the busy percent exists and the clusters are null for that reason; memory, swap, pressure and the rankings stay null because the roots hold no such files.",
   "serviceStartedAtUsec": 1793999995000000,
   "appNames": {},
   "steps": [
@@ -7,15 +7,15 @@
       "tick": {
         "fsRoot": "root-bad-pmu",
         "monotonicUsec": 100000000,
-        "realUsec": 1794000000250000,
+        "realUsec": 1794000000250001,
         "clockLabel": "14:02"
       }
     },
     {
       "tick": {
-        "fsRoot": "root-bad-pmu",
-        "monotonicUsec": 102000000,
-        "realUsec": 1794000002250000,
+        "fsRoot": "root-bad-pmu-b",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
         "clockLabel": "14:02"
       }
     }
