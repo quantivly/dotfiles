@@ -309,6 +309,14 @@ fn push_optional_integer(text: &mut String, value: Option<u64>) {
     }
 }
 
+/// The text a number is written as (see the module documentation), for the checks that hold the
+/// writer to the values the gjs sampler produced.
+pub fn number_text(value: f64) -> String {
+    let mut text = String::new();
+    push_number(&mut text, value);
+    text
+}
+
 /// Writes a number as the module documentation says: plain digits for a whole number, `0` for a
 /// negative zero, `null` when not finite, else the shortest digits that read back as the same
 /// double. Rust's `Display` for `f64` is exactly that: shortest round-trip digits, never an

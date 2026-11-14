@@ -25,13 +25,6 @@ const GJS_STATE_BEFORE_ANY_SAMPLE_TEXT: &str = r#"{"protocol":1,"serviceStartedA
 /// The gjs text of GetState after two publishes, with empty histories.
 const GJS_STATE_WITH_SNAPSHOT_TEXT: &str = r#"{"protocol":1,"serviceStartedAtUsec":1794000000000000,"latestSampledAtUsec":1794000004000000,"sequence":2,"snapshot":{"takenAtUsec":123000000,"takenAtClockLabel":"14:02","cpuBusyPercent":50,"cpuClusters":{"performancePercent":60.5,"efficiencyPercent":20},"memory":{"usedBytes":8000000000,"totalBytes":32000000000},"swap":{"zramUsedBytes":0,"zramRamBytes":0,"diskBytes":0},"pressureAvg10":{"cpu":0.5,"memory":0,"io":null},"apps":{"topCpu":{"groupKey":"app:org.example.Editor","name":"Editor","cpuPercent":31.25},"topMemory":{"groupKey":"app:org.example.Editor","name":"Editor","memoryBytes":2000000000},"cpuRanking":[{"groupKey":"app:org.example.Editor","name":"Editor","cpuPercent":31.25}],"memoryRanking":[{"groupKey":"app:org.example.Editor","name":"Editor","memoryBytes":2000000000}]},"isComplete":true},"histories":{"cpu":[],"memory":[]}}"#;
 
-/// The text a value is written as, for the number rules.
-fn number_text(value: f64) -> String {
-    let mut text = String::new();
-    push_number(&mut text, value);
-    text
-}
-
 /// The text of a name written as a JSON string.
 fn string_text(value: &str) -> String {
     let mut text = String::new();
