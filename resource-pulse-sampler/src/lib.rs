@@ -26,6 +26,7 @@ pub mod insertion_ordered_map;
 pub mod js_string;
 pub mod memory;
 pub mod parsers;
+pub mod payload;
 pub mod ports;
 pub mod pressure;
 #[cfg(test)]
