@@ -310,7 +310,8 @@ fn push_optional_integer(text: &mut String, value: Option<u64>) {
 }
 
 /// The text a number is written as (see the module documentation), for the checks that hold the
-/// writer to the values the gjs sampler produced.
+/// writer to the values the gjs sampler produced. For tests: only the golden test
+/// (`tests/golden.rs`) calls it, and the program never does.
 pub fn number_text(value: f64) -> String {
     let mut text = String::new();
     push_number(&mut text, value);

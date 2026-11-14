@@ -232,7 +232,7 @@ impl DirectoryLister for BreakableLister {
 /// row: service sampler: a scan that throws is logged, drops the ranking, and never costs the tick its sample
 #[test]
 fn a_scan_that_throws_is_logged_drops_the_ranking_and_never_costs_the_tick_its_sample() {
-    let _quiet_panics = QuietPanics::on_this_thread();
+    let quiet_panics = QuietPanics::on_this_thread();
     let is_listing_broken = Rc::new(Cell::new(false));
     let mut test_sampler = SamplerSetup::at_fixture("root-a")
         .with_lister(BreakableLister {
@@ -250,6 +250,8 @@ fn a_scan_that_throws_is_logged_drops_the_ranking_and_never_costs_the_tick_its_s
     test_sampler
         .sampler
         .run_tick(FIRST_UNWATCHED_INTERVAL_SCAN_TICK);
+    // The panics this row makes on purpose are over: a failing assertion below must print its message.
+    drop(quiet_panics);
     let logged = test_sampler.logged();
     assert_eq!(
         (
@@ -300,7 +302,7 @@ fn app_names_are_looked_up_once_per_desktop_id_and_kept_across_scans_misses_incl
 /// row: service sampler: a name lookup that throws is logged once, and the scan goes on with the name the unit gives
 #[test]
 fn a_name_lookup_that_throws_is_logged_once_and_the_scan_goes_on_with_the_name_the_unit_gives() {
-    let _quiet_panics = QuietPanics::on_this_thread();
+    let quiet_panics = QuietPanics::on_this_thread();
     let mut test_sampler = SamplerSetup::at_fixture("root-a")
         .with_resolve_app_name(|desktop_id: &str| {
             if desktop_id == CHROMIUM_DESKTOP_ID {
@@ -316,6 +318,8 @@ fn a_name_lookup_that_throws_is_logged_once_and_the_scan_goes_on_with_the_name_t
         .sampler
         .set_fs_root(fixture_root("root-vanished"));
     test_sampler.sampler.run_tick(1);
+    // The panics this row makes on purpose are over: a failing assertion below must print its message.
+    drop(quiet_panics);
     // root-vanished has no herdr, so Chromium tops memory, by the name its scope gives.
     let top_memory_name = test_sampler
         .sampler
@@ -353,7 +357,7 @@ impl FileReader for BreakableReader {
 /// row: service sampler: a throwing sample publishes an all-null, incomplete snapshot and a gap in both histories
 #[test]
 fn a_throwing_sample_publishes_an_all_null_incomplete_snapshot_and_a_gap_in_both_histories() {
-    let _quiet_panics = QuietPanics::on_this_thread();
+    let quiet_panics = QuietPanics::on_this_thread();
     let clock_labels = Rc::new(RefCell::new(VecDeque::from([
         FIXTURE_CLOCK_LABEL.to_string(),
         LATER_CLOCK_LABEL.to_string(),
@@ -376,6 +380,8 @@ fn a_throwing_sample_publishes_an_all_null_incomplete_snapshot_and_a_gap_in_both
     test_sampler.advance_clock(SAMPLE_SPACING_USEC);
     is_reading_broken.set(true);
     let publish = test_sampler.sampler.run_tick(1);
+    // The panics this row makes on purpose are over: a failing assertion below must print its message.
+    drop(quiet_panics);
     let logged = test_sampler.logged();
     let snapshot = &publish.snapshot;
     assert!(ranking.is_some());
@@ -578,7 +584,7 @@ fn five_thousand_leaves_scan_and_publish_ten_entries_and_the_name_cache_holds_at
 /// `new-rows.js`, row C).
 #[test]
 fn a_tick_whose_scan_panics_publishes_no_data_for_the_ranking_logs_once_and_the_next_tick_runs() {
-    let _quiet_panics = QuietPanics::on_this_thread();
+    let quiet_panics = QuietPanics::on_this_thread();
     let is_listing_broken = Rc::new(Cell::new(false));
     let mut test_sampler = SamplerSetup::at_fixture("root-a")
         .with_lister(BreakableLister {
@@ -594,6 +600,8 @@ fn a_tick_whose_scan_panics_publishes_no_data_for_the_ranking_logs_once_and_the_
     let failed_scan_publish = test_sampler
         .sampler
         .run_tick(FIRST_UNWATCHED_INTERVAL_SCAN_TICK);
+    // The panics this row makes on purpose are over: a failing assertion below must print its message.
+    drop(quiet_panics);
     let logged_after_failure = test_sampler.logged();
     assert_eq!(
         (

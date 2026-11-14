@@ -149,7 +149,7 @@ mod tests {
     /// and its key counts as written. Neither panic leaves `log`.
     #[test]
     fn a_panicking_clock_or_writer_loses_the_line_and_does_not_panic() {
-        let _quiet_panics = QuietPanics::on_this_thread();
+        let quiet_panics = QuietPanics::on_this_thread();
         let (mut log, written) = recording_log();
         log.log(&PanickingClock, "lost", "lost");
         let clock = SettableClock::with_fixed_label(Rc::new(Cell::new(0)));
@@ -160,6 +160,8 @@ mod tests {
         let attempts = Rc::clone(&write_attempts);
         panicking_log.write = Box::new(move |_| attempts.set(attempts.get() + 1));
         panicking_log.log(&clock, "dropped", "dropped");
+        // The panics this row makes on purpose are over: a failing assertion below must print its message.
+        drop(quiet_panics);
         assert_eq!(*written.borrow(), vec!["resource-pulse: lost".to_string()]);
         assert_eq!(write_attempts.get(), 0);
     }
