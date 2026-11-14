@@ -496,9 +496,9 @@ GOLDEN_OFF_BUS_EXIT=$?
 check "off the private bus it refuses before it connects: exit 2, \"refusing to run\", neither \"ok\" nor \"differs\"" \
   "$GOLDEN_OFF_BUS_EXIT/$(count_golden_lines 'refusing to run' "$GOLDEN_OFF_BUS_OUTPUT")/$(count_golden_lines '^GOLDEN-CHECK ' "$GOLDEN_OFF_BUS_OUTPUT")" "2/1/0"
 
-# 308 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
+# 316 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
 # string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence,
-# 30 of app names from `.desktop` files, 11 of the ports, 2 of the rate-limited log, 52 of the sampler, 13 of the payload writer, 10 of the service face, 19 of the golden test)
+# 30 of app names from `.desktop` files, 11 of the ports, 2 of the rate-limited log, 52 of the sampler, 13 of the payload writer, 11 of the service face, 26 of the golden test)
 # + 1 build + 1 zbus feature row + 6 program flag rows
 # + 26 constants + 1 comparison tally + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks
 # + 11 carried-check fixtures + 2 runner guards + 1 bus_link guard + 8 bus_link tests
@@ -507,7 +507,7 @@ check "off the private bus it refuses before it connects: exit 2, \"refusing to 
 # + 8 rows of the golden files against the gjs sampler (generate.js --check): it passes on the committed files, it wrote
 #   nothing, an edited copy really differs, the edited copy exits 1 and names its scenario, nothing is written into the
 #   copy, a missing expected file exits 1, a scenario it cannot read exits 2, and off the private bus it exits 2.
-EXPECTED_ROWS=578
+EXPECTED_ROWS=586
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then
