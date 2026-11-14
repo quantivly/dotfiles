@@ -397,6 +397,9 @@ golden_scenarios! {
     golden_history_wraps => "history-wraps",
     golden_no_cgroup_directory => "no-cgroup-directory",
     golden_single_cluster => "single-cluster",
+    golden_partly_null_pressure => "partly-null-pressure",
+    golden_performance_cluster_offline => "performance-cluster-offline",
+    golden_watch_inside_the_reveal_cooldown => "watch-inside-the-reveal-cooldown",
 }
 
 /// The names of the `.json` files in a directory, without the suffix.
