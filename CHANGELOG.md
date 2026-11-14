@@ -42,6 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     computed in doubles from the counters, as gjs computes them. The carried-rows check now matches its
     marker only as a doc comment, refuses a marker whose title is not in the list, and refuses a marker
     that is not on a test.
+  - **App names without GLib (pull request D).** `src/desktop_names.rs` reads an app's name from its
+    `.desktop` file by the rule of GLib 2.88.0's source (the directory order, ids formed from
+    subdirectories, hidden entries, `Type`, `TryExec` and `Exec`, the language order), from the file's own
+    `Name` keys only, with no gettext catalogue. `gnome-shell/tests/desktop-names-reference.js` asks the
+    real GLib about the same fixture files, and both must match committed files of expected names under
+    five environments. Bounded where GLib is not: a file over a size bound is a miss, and one lookup makes
+    at most 256 path probes.
+  - **The sampler core (pull request D).** `src/sampler/` is the gjs `ServiceSampler` without its timer: a
+    tick reads the fast files, scans the cgroup tree when the cadence says so, and returns what to publish.
+    Files, listings, the clock and app names come in through the ports of `src/ports.rs`, and
+    `src/rate_limited_log.rs` logs each failure at most once per ten minutes per key. A panic in a name
+    lookup, a sample or a scan is caught and costs that one thing. 172 of the 179 gjs titles are now
+    ported; the other seven stay exempt with their reasons (five wait for the program, two have no
+    counterpart).
   - **The payloads, the face and the golden files (pull request D).** `src/payload.rs` writes the text of a
     `Sample` and of `GetState` by hand, in `lib/protocol.js`'s shape and field order (the state's text is
     contract: `gnome-status` cuts it); `src/service.rs` is `ServiceFace`, the part of the D-Bus service with no

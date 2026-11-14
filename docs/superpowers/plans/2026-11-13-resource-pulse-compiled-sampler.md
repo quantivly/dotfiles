@@ -472,6 +472,14 @@ fail.
     each within 100 ms. (Review Focus 2.)
 - [ ] **Step 3 and 4: Implement, run. Step 5: Commit.**
 
+**As built (2026-11-14):** the two signatures above. The rule read from GLib 2.88.0 holds more than the
+clauses listed: a file with no usable `Name` gives "Unnamed", not a miss, and a file is refused when its
+`Exec` program is not found or is badly quoted, when its `Path` has a bad escape, or when any line is
+malformed. Bounded where GLib is not: a file over a size bound is a miss, and one lookup makes at most 256
+path probes over all the data directories. `locale.alias` is not read. The "reference agrees" row is two
+checks against committed files of expected names (a Rust test, and a state-table row that runs the real
+GLib through gjs), under five environments.
+
 ### Task 10: The sampler core
 
 **Files:**
@@ -522,6 +530,20 @@ fail.
 - [ ] **Step 2 to 4: Run, implement, run.** Everything that can fail is worked out before any state changes.
   The listing is sorted with `js_string_order` in the one place the gjs sampler sorts.
 - [ ] **Step 5: Remove the 55 titles from the exempt list, run the state table, commit.**
+
+**As built (2026-11-14):**
+
+- `ReadFailure` is `{ NotFound, NoSuchDevice, Other(String) }` with `is_vanished()` (the first two, and
+  nothing else): gjs is silent on a PMU list or `cpu_capacity` only for "not found" and logs "no such
+  device", so one merged case could not reproduce it.
+- `Sampler` also has `set_fs_root(PathBuf)` (rows and scenarios change the root between ticks; the program
+  never calls it) and two read-only getters, `last_good_clock_label()` and `last_app_scan_reason()`.
+- A port that panics stands in for a port that throws: each name lookup, the fast sample and the scan run
+  under their own catch. `initialize` has no catch of its own: Task 12 wraps it.
+- `sampler.rs` is a directory, `src/sampler/`, with one file per responsibility.
+- 49 of the 55 rows are ported. Six stay on the exempt list with a reason, as the design's "a row with no
+  counterpart must say why" requires: four about the timer, ported in Task 12, and two with no counterpart
+  (the Rust sampler has no listeners and no garbage collector).
 
 ### Task 11: The payloads, the face, and the scenario and golden files
 
@@ -588,8 +610,17 @@ fail.
   - in the state table, `'golden: the gjs sampler still produces the committed files'` (`generate.js --check`).
 - [ ] **Step 4: Implement `payload.rs`** as a hand-written writer (the shape is fixed, and the text is
   contract) and `service.rs`.
-- [ ] **Step 5: Remove the 9 titles from the exempt list, which is now empty; run everything; commit; open
-  pull request D.**
+- [ ] **Step 5: Remove the ported titles from the exempt list; run everything; commit; open pull request
+  D.** (Amended 2026-11-14: this step first said the list is then empty. It holds the rows that wait for
+  Tasks 12 and 13 and the two with no counterpart, each with its reason.)
+
+**As built (2026-11-14):** `WatchChange` has a third field, `sender_had_watches` (the sender's state
+before the change), so Task 12 can tell a first watch from a later one. A watch step in a scenario also
+carries `fsRoot`, `monotonicUsec` and `realUsec`, since a watch-start scan reads the root and the clock.
+The writer prints a number that is not finite as `null`, as `JSON.stringify` does. There are 20
+scenarios; the first twelve proved too round (a wrong CPU formula passed them all), so eight more hold
+uneven numbers, ties, truncation, a wrapped history, and a machine with no cluster map. Eight of the nine
+bus-face rows are ported; `destroy()` waits for Task 13.
 
 ---
 
@@ -632,6 +663,37 @@ fail.
   real clock label calls `tzset` and then `localtime_r` for each label.
 - [ ] **Step 5: Run the state table, commit.**
 
+**Carried into this task by the build (2026-11-14).** Each is a requirement:
+
+- **The four timer rows of the gjs sampler are ported here,** on the tick loop, each as a Rust test with its
+  `/// row:` marker, and leave `carried-rows-exempt.txt`:
+  - `service sampler: start() twice adds one source; stop and destroy remove it; nothing after destroy`;
+  - `service sampler: start() ticks at once, so memory shows before the first interval and CPU after it; nothing ticks after destroy()`;
+  - `service sampler: the timer callback never throws: a tick that throws is logged and the source continues`
+    (Step 1's third row is its counterpart: one test, with this marker);
+  - `service sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()`.
+- **`initialize` runs inside the catch too,** as each tick and each call do.
+- **A panic hook that writes nothing is installed before the first tick.** The sampler logs a caught panic
+  once per ten minutes per key; the default hook would also print every one to the journal.
+- **A caught call is still answered,** with an error reply, so "every call gets a reply" holds on the path
+  the catch exists for. `&BusLink` holds `RefCell`s, so the closure needs `AssertUnwindSafe`.
+- **A Sample that cannot be sent** is logged under one stable key and the loop goes on.
+- **Watches.** `WatchChange.sender_had_watches` gives the edges: a sender's first watch calls
+  `follow_name`, its last unwatch calls `unfollow_name`. `BusLink` keeps a set of followed names, not a
+  count; say so in `follow_name`'s doc.
+- **The bus link's round trips to the daemon** (`follow_name`, `RemoveMatch`, `request_name`) get a
+  time-out (`Builder::method_timeout`), generous enough that a slow daemon at login is not an exit 1.
+  `BusLink`'s doc says what dropping it does.
+- **What GDBus answers on every object is answered:** `Properties.GetAll`, `Peer.Ping`,
+  `Peer.GetMachineId`, and `Introspect` on `/` and on the intermediate nodes, as the gjs service's bus does
+  today. The rows of Task 3 that assert an error for those then assert the answer.
+- **Writing never panics.** The log writes with `let _ = writeln!(io::stderr().lock(), …)`;
+  `--print-constants` and `--print` go through a writer whose error they handle; clippy denies
+  `print_stdout` and `print_stderr`.
+- **The clocks.** The real clock is `CLOCK_MONOTONIC`, read several times a tick, and cannot panic. A real
+  clock label that fails becomes the sampler's `sample failed: <text>`.
+- **`tick_schedule.rs` replaces `main.rs`'s `next_tick_after`,** whose `None` branch is dead code.
+
 ### Task 13: The real program on a private bus, and its conformance with the gjs face
 
 **Files:**
@@ -658,6 +720,22 @@ fail.
   - The six rows of Task 3 stay, now against the real program.
 - [ ] **Step 2 to 4: Run, fix what they find, run three times in a row.**
 - [ ] **Step 5: Commit, open pull request E.**
+
+**Carried into this task by the build (2026-11-14).** Each is a requirement:
+
+- **The last exempt bus-face row is ported here,** with its `/// row:` marker where a Rust test can carry
+  it, or as a private-bus row whose title the exempt line names:
+  `service D-Bus: destroy() unexports the object and detaches from the sampler`. Its counterpart is the
+  program releasing the name and answering nothing once it stops.
+- **A caller's name really vanishing** drops its watches within 2 s (the brief's third row covers it; keep
+  the 2 s bound from the gjs row).
+- **Task 3's rows are eleven now, not six,** and all stay against the real program. The row that reads
+  `vanishedCallers` gives way to "a caller that disconnects loses its watches": only the placeholder had
+  that field.
+- **"The bus going away"** reuses `SecondBusDaemon` from `tests/bus_link.rs`, so it never stops the bus the
+  other rows share.
+- **The reply-order row's floor** (at least 400 of about 500 Samples at 20 ms ticks) is the likeliest row to
+  flake on a loaded CI runner: measure it there before trusting it.
 
 ---
 
