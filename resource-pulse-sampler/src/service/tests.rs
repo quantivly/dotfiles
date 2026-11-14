@@ -1,16 +1,20 @@
 //! `ServiceFace`'s rows: the rows of `gnome-shell/tests/service-dbus.test.js` that have a
 //! counterpart without a bus. A publish is `next_sample`, `GetState` is `state_text`, and a caller
-//! whose connection closed is `drop_sender`. The sampler is the real one, over the fixture roots, on
-//! a clock the row sets.
+//! whose connection closed is `drop_sender`. The rows that read the state hand it the snapshot and
+//! the histories (`state_text_from_parts`), as the gjs rows push them on a fake sampler; one more
+//! row holds `state_text` to the real sampler's own, over a fixture root.
 //!
 //! Not ported here: the last row, whose subject is the bus (an object exported, then unexported):
 //! it is carried by the program's rows on a private bus (`tests/carried-rows-exempt.txt`).
 
 use super::*;
+use crate::apps::{AppRanking, CpuRankEntry, MemoryRankEntry};
+use crate::memory::{MemoryUsage, SwapSummary};
 use crate::ports::{Clock, FileSystemLister, FileSystemReader};
-use crate::sampler::SamplerPorts;
+use crate::sampler::{AppendedHistory, ClusterPercents, PressureAvg10, SamplerPorts};
 use serde_json::{json, Value};
 use std::cell::Cell;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -19,9 +23,7 @@ const SAMPLED_AT_USEC: u64 = 1_794_000_002_000_000;
 /// How much later a second publish happens, in real microseconds.
 const LATER_PUBLISH_OFFSET_USEC: u64 = 2_000_000;
 const FIRST_TICK_USEC: u64 = 100_000_000;
-const TICK_SPACING_USEC: u64 = 2_000_000;
-/// A watch 1.5 s after the second tick: past the CPU ranking window, so its scan reveals.
-const WATCH_AFTER_SECOND_TICK_USEC: u64 = 1_500_000;
+const HISTORY_CAPACITY: usize = 150;
 const CLOCK_LABEL: &str = "14:02";
 /// The first sender of a row, and the second: unique bus names look like this.
 const FIRST_SENDER: &str = ":1.10";
@@ -78,21 +80,113 @@ fn parsed(text: &str) -> Value {
     serde_json::from_str(text).unwrap()
 }
 
+/// `TICK_SNAPSHOT` of `service-dbus.test.js`: a snapshot with every field set.
+fn tick_snapshot() -> Snapshot {
+    let editor_cpu = CpuRankEntry {
+        group_key: "app:org.example.Editor".to_string(),
+        name: "Editor".to_string(),
+        cpu_percent: 31.0,
+    };
+    let editor_memory = MemoryRankEntry {
+        group_key: "app:org.example.Editor".to_string(),
+        name: "Editor".to_string(),
+        memory_bytes: 2_000_000_000.0,
+    };
+    Snapshot {
+        taken_at_usec: Some(123_000_000),
+        taken_at_clock_label: Some("14:02".to_string()),
+        cpu_busy_percent: Some(50.0),
+        cpu_clusters: Some(ClusterPercents {
+            performance_percent: Some(60.0),
+            efficiency_percent: Some(20.0),
+        }),
+        memory: Some(MemoryUsage {
+            used_bytes: 8_000_000_000.0,
+            total_bytes: 32_000_000_000.0,
+        }),
+        swap: Some(SwapSummary {
+            zram_used_bytes: 0.0,
+            zram_ram_bytes: 0.0,
+            disk_bytes: 0.0,
+        }),
+        pressure_avg10: PressureAvg10 {
+            cpu: Some(0.5),
+            memory: Some(0.0),
+            io: Some(0.0),
+        },
+        apps: Some(AppRanking {
+            top_cpu: Some(editor_cpu.clone()),
+            top_memory: Some(editor_memory.clone()),
+            cpu_ranking: vec![editor_cpu],
+            memory_ranking: vec![editor_memory],
+        }),
+        is_complete: true,
+    }
+}
+
+/// `TICK_SNAPSHOT`'s JSON, as `service-dbus.test.js` expects it back.
+fn tick_snapshot_json() -> Value {
+    json!({
+        "takenAtUsec": 123_000_000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": 50,
+        "cpuClusters": {"performancePercent": 60, "efficiencyPercent": 20},
+        "memory": {"usedBytes": 8_000_000_000_u64, "totalBytes": 32_000_000_000_u64},
+        "swap": {"zramUsedBytes": 0, "zramRamBytes": 0, "diskBytes": 0},
+        "pressureAvg10": {"cpu": 0.5, "memory": 0, "io": 0},
+        "apps": {
+            "topCpu": {"groupKey": "app:org.example.Editor", "name": "Editor", "cpuPercent": 31},
+            "topMemory": {"groupKey": "app:org.example.Editor", "name": "Editor", "memoryBytes": 2_000_000_000_u64},
+            "cpuRanking": [{"groupKey": "app:org.example.Editor", "name": "Editor", "cpuPercent": 31}],
+            "memoryRanking": [{"groupKey": "app:org.example.Editor", "name": "Editor", "memoryBytes": 2_000_000_000_u64}],
+        },
+        "isComplete": true,
+    })
+}
+
+/// What a watch start's reveal publishes in `service-dbus.test.js`: the tick's values with a new
+/// top CPU entry.
+fn reveal_snapshot() -> Snapshot {
+    let mut snapshot = tick_snapshot();
+    if let Some(apps) = snapshot.apps.as_mut() {
+        apps.top_cpu = Some(CpuRankEntry {
+            group_key: "herdr-server".to_string(),
+            name: "herdr agents".to_string(),
+            cpu_percent: 40.0,
+        });
+    }
+    snapshot
+}
+
+/// `REVEAL_SNAPSHOT`'s JSON.
+fn reveal_snapshot_json() -> Value {
+    let mut snapshot = tick_snapshot_json();
+    snapshot["apps"]["topCpu"] =
+        json!({"groupKey": "herdr-server", "name": "herdr agents", "cpuPercent": 40});
+    snapshot
+}
+
+/// A history holding these values, oldest first.
+fn history_of(values: &[Option<f64>]) -> RingBuffer {
+    let mut history = RingBuffer::new(NonZeroUsize::new(HISTORY_CAPACITY).unwrap());
+    for value in values {
+        history.push(*value);
+    }
+    history
+}
+
 /// row: service D-Bus: before any sample GetState answers protocol 1, sequence 0, the start time and the histories
-///
-/// The gjs row pushes history values by hand on a fake sampler; the real sampler holds history only
-/// after a tick, so this one answers empty histories, and the histories' text is pinned by the
-/// payload rows and the golden files.
 #[test]
 fn before_any_sample_get_state_answers_protocol_1_sequence_0_the_start_time_and_the_histories() {
-    let (sampler, _) = fixture_sampler();
     let face = new_face();
+    let cpu_history = history_of(&[Some(0.25), None]);
+    let memory_history = history_of(&[Some(0.5), Some(0.6)]);
     assert_eq!(
-        parsed(&face.state_text(&sampler)),
+        parsed(&face.state_text_from_parts(None, &cpu_history, &memory_history)),
         json!({
             "protocol": 1,
             "snapshot": null,
-            "histories": {"cpu": [], "memory": []},
+            "histories": {"cpu": [0.25, null], "memory": [0.5, 0.6]},
             "serviceStartedAtUsec": SERVICE_STARTED_AT_USEC,
             "latestSampledAtUsec": null,
             "sequence": 0,
@@ -103,60 +197,113 @@ fn before_any_sample_get_state_answers_protocol_1_sequence_0_the_start_time_and_
 /// row: service D-Bus: each publish sends one Sample (sequence from 1; a reveal appends nothing), and GetState follows
 #[test]
 fn each_publish_sends_one_sample_sequence_from_1_a_reveal_appends_nothing_and_get_state_follows() {
-    let (mut sampler, clock) = fixture_sampler();
     let mut face = new_face();
-    let tick_publish = sampler.run_tick(0);
-    let first_text = face.next_sample(&tick_publish, SAMPLED_AT_USEC);
-    sampler.set_fs_root(fixture_root("root-b"));
-    clock.set(FIRST_TICK_USEC + TICK_SPACING_USEC);
-    let second_tick_publish = sampler.run_tick(1);
-    let second_text = face.next_sample(&second_tick_publish, SAMPLED_AT_USEC);
-    clock.set(FIRST_TICK_USEC + TICK_SPACING_USEC + WATCH_AFTER_SECOND_TICK_USEC);
-    let reveal_publish = sampler.set_detail_watched(true).unwrap();
+    let mut cpu_history = history_of(&[]);
+    let mut memory_history = history_of(&[]);
+    let tick_publish = Publish {
+        snapshot: tick_snapshot(),
+        appended_history: Some(AppendedHistory {
+            cpu: Some(0.5),
+            memory: Some(0.25),
+        }),
+    };
+    // As the sampler does: a tick appends to the histories before it publishes, a reveal does not.
+    cpu_history.push(Some(0.5));
+    memory_history.push(Some(0.25));
+    let tick_text = face.next_sample(&tick_publish, SAMPLED_AT_USEC);
+    let reveal_publish = Publish {
+        snapshot: reveal_snapshot(),
+        appended_history: None,
+    };
     let reveal_text = face.next_sample(&reveal_publish, SAMPLED_AT_USEC);
-
-    let [first, second, reveal] =
-        [&first_text, &second_text, &reveal_text].map(|text| parsed(text));
-    let state = parsed(&face.state_text(&sampler));
+    let reveal_snapshot_value = reveal_snapshot();
+    let state_text =
+        face.state_text_from_parts(Some(&reveal_snapshot_value), &cpu_history, &memory_history);
     assert_eq!(
-        [
-            first["sequence"].clone(),
-            second["sequence"].clone(),
-            reveal["sequence"].clone()
-        ],
-        [json!(1), json!(2), json!(3)]
-    );
-    assert!(first["appendedHistory"].is_object());
-    assert!(second["appendedHistory"].is_object());
-    assert_eq!(reveal["appendedHistory"], Value::Null);
-    assert_eq!(state["sequence"], json!(3));
-    assert_eq!(state["snapshot"], reveal["snapshot"]);
-    // The reveal appended nothing: two ticks, two history values.
-    assert_eq!(state["histories"]["cpu"].as_array().map(Vec::len), Some(2));
-    assert_eq!(
-        state["histories"]["memory"].as_array().map(Vec::len),
-        Some(2)
+        (
+            parsed(&tick_text),
+            parsed(&reveal_text),
+            parsed(&state_text)
+        ),
+        (
+            json!({
+                "snapshot": tick_snapshot_json(),
+                "appendedHistory": {"cpu": 0.5, "memory": 0.25},
+                "sequence": 1,
+                "sampledAtUsec": SAMPLED_AT_USEC,
+            }),
+            json!({
+                "snapshot": reveal_snapshot_json(),
+                "appendedHistory": null,
+                "sequence": 2,
+                "sampledAtUsec": SAMPLED_AT_USEC,
+            }),
+            json!({
+                "protocol": 1,
+                "snapshot": reveal_snapshot_json(),
+                "histories": {"cpu": [0.5], "memory": [0.25]},
+                "serviceStartedAtUsec": SERVICE_STARTED_AT_USEC,
+                "latestSampledAtUsec": SAMPLED_AT_USEC,
+                "sequence": 2,
+            })
+        )
     );
 }
 
 /// row: service D-Bus: GetState's latestSampledAtUsec is the real time of the latest publish, a reveal's included
 #[test]
 fn get_state_latest_sampled_at_usec_is_the_real_time_of_the_latest_publish_a_reveals_included() {
-    let (mut sampler, clock) = fixture_sampler();
     let mut face = new_face();
-    let tick_publish = sampler.run_tick(0);
-    face.next_sample(&tick_publish, SAMPLED_AT_USEC);
-    let after_tick = parsed(&face.state_text(&sampler))["latestSampledAtUsec"].clone();
-    sampler.run_tick(1);
-    clock.set(FIRST_TICK_USEC + TICK_SPACING_USEC + WATCH_AFTER_SECOND_TICK_USEC);
-    let reveal_publish = sampler.set_detail_watched(true).unwrap();
+    let (cpu_history, memory_history) = (history_of(&[]), history_of(&[]));
+    let latest_sampled_at_usec = |face: &ServiceFace| {
+        parsed(&face.state_text_from_parts(None, &cpu_history, &memory_history))
+            ["latestSampledAtUsec"]
+            .clone()
+    };
+    let tick_publish = Publish {
+        snapshot: tick_snapshot(),
+        appended_history: Some(AppendedHistory {
+            cpu: Some(0.5),
+            memory: Some(0.25),
+        }),
+    };
+    let reveal_publish = Publish {
+        snapshot: reveal_snapshot(),
+        appended_history: None,
+    };
     let reveal_real_usec = SAMPLED_AT_USEC + LATER_PUBLISH_OFFSET_USEC;
+    face.next_sample(&tick_publish, SAMPLED_AT_USEC);
+    let after_tick = latest_sampled_at_usec(&face);
     face.next_sample(&reveal_publish, reveal_real_usec);
-    let after_reveal = parsed(&face.state_text(&sampler))["latestSampledAtUsec"].clone();
+    let after_reveal = latest_sampled_at_usec(&face);
     assert_eq!(
         (after_tick, after_reveal),
         (json!(SAMPLED_AT_USEC), json!(reveal_real_usec))
     );
+}
+
+/// `state_text` reads the sampler's snapshot and both histories (and not the other way round):
+/// after a tick over a fixture, it writes what `state_text_from_parts` writes for the sampler's own.
+#[test]
+fn state_text_is_the_state_of_the_samplers_snapshot_and_histories() {
+    let (mut sampler, _) = fixture_sampler();
+    let mut face = new_face();
+    let publish = sampler.run_tick(0);
+    face.next_sample(&publish, SAMPLED_AT_USEC);
+    let from_sampler = face.state_text(&sampler);
+    let from_parts = face.state_text_from_parts(
+        sampler.latest_snapshot(),
+        sampler.cpu_history(),
+        sampler.memory_history(),
+    );
+    let state = parsed(&from_sampler);
+    assert_eq!(from_sampler, from_parts);
+    // root-a's first tick: no CPU yet (a gap), memory 20,000,000 of 32,000,000 KiB.
+    assert_eq!(
+        state["histories"],
+        json!({"cpu": [null], "memory": [0.625]})
+    );
+    assert_eq!(state["snapshot"]["takenAtUsec"], json!(FIRST_TICK_USEC));
 }
 
 /// row: service D-Bus: a caller that closes its connection holding a watch loses it: setDetailWatched(false) in 2 s
@@ -234,20 +381,22 @@ fn two_watches_from_one_caller_need_two_unwatches() {
 fn unwatch_detail_from_a_caller_holding_no_watch_is_a_no_op_not_an_error() {
     let mut face = new_face();
     let lone_unwatch = face.remove_watch(SECOND_SENDER);
-    face.add_watch(FIRST_SENDER);
+    let watch_taken = face.add_watch(FIRST_SENDER);
     let unwatch_beside_a_watch = face.remove_watch(SECOND_SENDER);
     let no_change = WatchChange {
         any_watch_changed: false,
         sender_has_watches: false,
         sender_had_watches: false,
     };
+    // The sampler is told once, of the one watch: the idle caller's unwatches say nothing.
     assert_eq!(
         (
             lone_unwatch,
+            watch_taken.any_watch_changed,
             unwatch_beside_a_watch,
             face.detail_watch_count()
         ),
-        (no_change, no_change, 1)
+        (no_change, true, no_change, 1)
     );
 }
 

@@ -5,8 +5,9 @@
 //! only changes. Exporting the object, answering calls and following senders' names belong to the
 //! program.
 
+use crate::history::RingBuffer;
 use crate::payload::{sample_payload, state_payload, PublishedState};
-use crate::sampler::{Publish, Sampler};
+use crate::sampler::{Publish, Sampler, Snapshot};
 use std::collections::HashMap;
 
 /// What a watch call did, for the caller to act on: whether the sampler is to be told, and what the
@@ -58,10 +59,25 @@ impl ServiceFace {
     /// `GetState`'s JSON (`_buildStatePayload`): the sampler's latest snapshot and both histories,
     /// the start time, the real time of the latest publish and the current sequence.
     pub fn state_text(&self, sampler: &Sampler) -> String {
+        self.state_text_from_parts(
+            sampler.latest_snapshot(),
+            sampler.cpu_history(),
+            sampler.memory_history(),
+        )
+    }
+
+    /// `GetState`'s JSON from the parts the sampler holds: what `state_text` writes, for a caller
+    /// (a row) that has a snapshot and histories without a sampler.
+    pub fn state_text_from_parts(
+        &self,
+        snapshot: Option<&Snapshot>,
+        cpu_history: &RingBuffer,
+        memory_history: &RingBuffer,
+    ) -> String {
         state_payload(&PublishedState {
-            snapshot: sampler.latest_snapshot(),
-            cpu_history: sampler.cpu_history(),
-            memory_history: sampler.memory_history(),
+            snapshot,
+            cpu_history,
+            memory_history,
             service_started_at_usec: self.service_started_at_usec,
             latest_sampled_at_usec: self.latest_sampled_at_usec,
             sequence: self.sequence,
