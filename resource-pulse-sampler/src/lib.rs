@@ -33,3 +33,4 @@ pub mod pressure;
 mod quiet_panics;
 pub mod rate_limited_log;
 pub mod sampler;
+pub mod service;

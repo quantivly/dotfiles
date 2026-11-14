@@ -437,15 +437,15 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
   bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
 fi
 
-# 279 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
+# 289 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
 # string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence,
-# 30 of app names from `.desktop` files, 11 of the ports, 2 of the rate-limited log, 52 of the sampler, 13 of the payload writer)
+# 30 of app names from `.desktop` files, 11 of the ports, 2 of the rate-limited log, 52 of the sampler, 13 of the payload writer, 10 of the service face)
 # + 1 build + 1 zbus feature row + 6 program flag rows
 # + 26 constants + 1 comparison tally + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks
 # + 11 carried-check fixtures + 2 runner guards + 1 bus_link guard + 8 bus_link tests
 # + 7 rows of the app names against the installed GLib (3 languages, 2 search paths, 1 that must differ, 1 that cannot run)
 # + 11 rows of the program on a private bus.
-EXPECTED_ROWS=541
+EXPECTED_ROWS=551
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

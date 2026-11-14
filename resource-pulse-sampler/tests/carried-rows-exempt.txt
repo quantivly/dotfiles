@@ -4,12 +4,4 @@ service sampler: start() twice adds one source; stop and destroy remove it; noth
 service sampler: start() ticks at once, so memory shows before the first interval and CPU after it; nothing ticks after destroy()	ported in task 12: the tick loop runs its first tick at once, so memory shows before the first interval and CPU from the second tick, and none once stopped
 service sampler: the timer callback never throws: a tick that throws is logged and the source continues	ported in task 12: the tick loop runs each tick inside catch_unwind, logs a panic under "tick failed", and runs the next tick
 service sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()	ported in task 12: the tick loop publishes on a real interval, and publishes nothing once stopped
-service D-Bus: before any sample GetState answers protocol 1, sequence 0, the start time and the histories	not yet ported (task 11)
-service D-Bus: each publish sends one Sample (sequence from 1; a reveal appends nothing), and GetState follows	not yet ported (task 11)
-service D-Bus: GetState's latestSampledAtUsec is the real time of the latest publish, a reveal's included	not yet ported (task 11)
-service D-Bus: a caller that closes its connection holding a watch loses it: setDetailWatched(false) in 2 s	not yet ported (task 11)
-service D-Bus: a caller holding two watches that vanishes drops both: setDetailWatched(false), count 0	not yet ported (task 11)
-service D-Bus: two watches from one caller need two unwatches	not yet ported (task 11)
-service D-Bus: UnwatchDetail from a caller holding no watch is a no-op, not an error	not yet ported (task 11)
-service D-Bus: one caller vanishing leaves another's watch, and the sampler hears only changes	not yet ported (task 11)
-service D-Bus: destroy() unexports the object and detaches from the sampler	not yet ported (task 11)
+service D-Bus: destroy() unexports the object and detaches from the sampler	ported in task 13: the program on a private bus unexports the object when it stops, and a caller that calls it after gets an unknown-object or unknown-method error; it holds no sampler listener, since it has none
