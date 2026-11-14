@@ -8,13 +8,14 @@ mod app_scan;
 mod cadence;
 mod cgroup_tree;
 mod fast_sample;
+mod watch;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
-use super::{Publish, ResolveAppName, Sampler, SamplerPorts};
+use super::{Publish, ResolveAppName, Sampler, SamplerPorts, Snapshot};
 use crate::apps::CpuRankEntry;
 use crate::ports::{
     Clock, DirectoryLister, FileReader, FileSystemLister, FileSystemReader, ReadFailure,

@@ -395,3 +395,82 @@ fn an_unparseable_pmu_list_falls_back_to_cpu_capacity_and_is_logged_not_thrown()
         )
     );
 }
+
+/// root-a's sample files without its PMU lists, in an in-memory tree.
+fn fake_tree_without_pmu_lists() -> FakeFileTree {
+    let tree = FakeFileTree::default();
+    for relative_path in SAMPLE_FIXTURE_FILES {
+        if relative_path.starts_with("sys/devices/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(fixture_root("root-a").join(relative_path)).unwrap();
+        tree.write_file(relative_path, &text);
+    }
+    tree
+}
+
+/// A PMU list that reads "no such device" is logged, as gjs's `_readPmuCpuList` logs every failure
+/// but "not found"; a missing one is silent; and the capacity fallback's listing is logged whatever
+/// failed it. Expected lines: the gjs `ServiceSampler`'s `initialize` on the same tree (the task's
+/// `pmu-row.js`).
+#[test]
+fn a_pmu_list_with_no_such_device_is_logged_and_only_a_missing_one_is_silent() {
+    let tree = fake_tree_without_pmu_lists();
+    tree.fail_with("sys/devices/cpu_core/cpus", ReadFailure::NoSuchDevice);
+    let mut test_sampler = SamplerSetup::on_tree(&tree).build();
+    test_sampler.sampler.initialize();
+    assert_eq!(
+        test_sampler.logged(),
+        [
+            "resource-pulse: cannot read /resource-pulse-fake-root/sys/devices/cpu_core/cpus: Error \
+             reading from file: No such device",
+            "resource-pulse: cannot list /resource-pulse-fake-root/sys/devices/system/cpu: Error \
+             opening directory '/resource-pulse-fake-root/sys/devices/system/cpu': No such file or \
+             directory",
+        ]
+    );
+}
+
+/// A `cpu<N>` device numbered above the bound a CPU list takes (65,535) is never read, so a garbage
+/// `cpu4294967294` cannot make the cluster map walk billions of CPU numbers, nor take part in the
+/// capacity split. The gjs sampler has no bound: it would read that device, and walk to it. Expected
+/// value: cpu0 (1024) is the performance core and cpu1 (512) the efficiency core, so root-a then
+/// root-b gives the 80 and 40 of the first row.
+#[test]
+fn a_cpu_device_numbered_above_the_cpu_list_bound_is_not_read() {
+    let tree = fake_tree_without_pmu_lists();
+    let capacity_by_device = [("cpu0", "1024"), ("cpu1", "512"), ("cpu4294967294", "2048")];
+    for (device_name, capacity) in capacity_by_device {
+        tree.write_file(
+            &format!("sys/devices/system/cpu/{device_name}/cpu_capacity"),
+            &format!("{capacity}\n"),
+        );
+    }
+    let mut test_sampler = SamplerSetup::on_tree(&tree).build();
+    test_sampler.sampler.initialize();
+    test_sampler.sampler.run_tick(0);
+    let root_b_stat = std::fs::read_to_string(fixture_root("root-b").join("proc/stat")).unwrap();
+    tree.write_file("proc/stat", &root_b_stat);
+    test_sampler.advance_clock(SAMPLE_SPACING_USEC);
+    test_sampler.sampler.run_tick(1);
+    let reads_of_the_garbage_device = tree
+        .read_paths()
+        .iter()
+        .filter(|path| path.to_string_lossy().contains("cpu4294967294"))
+        .count();
+    assert_eq!(
+        (
+            test_sampler.sampler.latest_snapshot().unwrap().cpu_clusters,
+            reads_of_the_garbage_device,
+            test_sampler.logged(),
+        ),
+        (
+            Some(ClusterPercents {
+                performance_percent: Some(80.0),
+                efficiency_percent: Some(40.0),
+            }),
+            0,
+            Vec::<String>::new(),
+        )
+    );
+}

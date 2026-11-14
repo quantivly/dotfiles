@@ -33,6 +33,7 @@ mod logged_reads;
 mod paths;
 mod publishing;
 mod snapshot;
+mod watch_start;
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -191,10 +192,20 @@ impl Sampler {
         self.publish_tick_snapshot(snapshot)
     }
 
-    /// A watch starting or ending. `Some(publish)` for a reveal.
+    /// A watch starting or ending (whether any client holds a detail watch), which sets the scan
+    /// cadence. A watch that starts scans at once, outside the tick, and returns the reveal: a
+    /// snapshot of the latest tick's values with the new ranking, appending nothing to the histories
+    /// (`Some(publish)`). It does not scan inside the reveal cooldown, nor less than
+    /// `MIN_CPU_RANKING_WINDOW_SECONDS` after the last scan, and reveals nothing after a tick that had
+    /// no data. A watch that ends only changes the cadence: the ranking stays. Never panics outward.
     pub fn set_detail_watched(&mut self, is_watched: bool) -> Option<Publish> {
-        let _ = is_watched;
-        None
+        let is_watch_starting = is_watched && !self.cadence.is_detail_watched;
+        self.cadence.is_detail_watched = is_watched;
+        if is_watch_starting {
+            self.scan_for_watch_start()
+        } else {
+            None
+        }
     }
 
     /// Changes the root the sampler reads under, and nothing else: no state is reset, as assigning

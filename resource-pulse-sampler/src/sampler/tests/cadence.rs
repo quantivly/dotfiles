@@ -6,7 +6,7 @@ use crate::cadence::ScanReason;
 /// Runs ticks 0 to `last_tick_number` two seconds apart, a watch held from before the first tick or
 /// not, and gives each scan's tick and reason; a scan outside a tick has tick `None` (gjs
 /// `scanTicksAndReasons`).
-fn scan_ticks_and_reasons(
+pub(super) fn scan_ticks_and_reasons(
     is_watched: bool,
     last_tick_number: u64,
 ) -> Vec<(Option<u64>, ScanReason)> {
