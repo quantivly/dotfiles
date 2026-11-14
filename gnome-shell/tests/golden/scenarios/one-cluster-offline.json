@@ -1,0 +1,23 @@
+{
+  "description": "The efficiency cluster names a CPU with no line in /proc/stat (an offline core): that cluster's percent is null while the performance cluster's and the busy percent are not.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {},
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-one-cluster-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-one-cluster-b",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

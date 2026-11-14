@@ -1,0 +1,23 @@
+{
+  "description": "Good fast files and no cgroup directory at all: no scan can read a cgroup, and the apps field holds a ranking with empty lists, not null. The same root twice, so /proc/stat does not move and CPU and clusters stay null.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {},
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-no-cgroup",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-no-cgroup",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

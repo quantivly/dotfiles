@@ -1,0 +1,42 @@
+{
+  "description": "Four roots whose counters move by amounts that are not round: /proc/stat on four CPUs with an uneven split between the two clusters, distinct pressures, memory and swap that are not short binary fractions, and cgroup counters, parents included, that give app percents that are not round. Pins the arithmetic of the busy and cluster percents, the pressures, the fractions and the rankings.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "org.example.Editor.desktop": "Example Editor",
+    "com.example.Browser.desktop": "Example Browser"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-moving-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-b",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-c",
+        "monotonicUsec": 104006234,
+        "realUsec": 1794000004256235,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-d",
+        "monotonicUsec": 106009351,
+        "realUsec": 1794000006259352,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

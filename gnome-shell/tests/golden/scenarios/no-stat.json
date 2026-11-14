@@ -1,0 +1,26 @@
+{
+  "description": "root-a, then a root whose /proc/stat cannot be read: the second sample has no CPU and leaves a gap in the CPU history.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "com.google.Chrome.desktop": "Google Chrome",
+    "org.chromium.Chromium.desktop": "Chromium"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-no-stat",
+        "monotonicUsec": 102000000,
+        "realUsec": 1794000002250000,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Exec=bin/present-tool
+Name=Exec Relative Subdir

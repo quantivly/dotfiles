@@ -1,0 +1,102 @@
+{
+  "samples": [
+    {
+      "sequence": 1,
+      "sampledAtUsec": 1794000000250001,
+      "snapshot": {
+        "takenAtUsec": 100000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": null,
+        "cpuClusters": null,
+        "memory": null,
+        "swap": null,
+        "pressureAvg10": {
+          "cpu": null,
+          "memory": null,
+          "io": null
+        },
+        "apps": {
+          "topCpu": null,
+          "topMemory": null,
+          "cpuRanking": [],
+          "memoryRanking": []
+        },
+        "isComplete": false
+      },
+      "appendedHistory": {
+        "cpu": null,
+        "memory": null
+      }
+    },
+    {
+      "sequence": 2,
+      "sampledAtUsec": 1794000002253118,
+      "snapshot": {
+        "takenAtUsec": 102003117,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": 32.8125,
+        "cpuClusters": {
+          "performancePercent": 32.432432432432435,
+          "efficiencyPercent": 33.33333333333333
+        },
+        "memory": null,
+        "swap": null,
+        "pressureAvg10": {
+          "cpu": null,
+          "memory": null,
+          "io": null
+        },
+        "apps": {
+          "topCpu": null,
+          "topMemory": null,
+          "cpuRanking": [],
+          "memoryRanking": []
+        },
+        "isComplete": false
+      },
+      "appendedHistory": {
+        "cpu": 0.328125,
+        "memory": null
+      }
+    }
+  ],
+  "state": {
+    "protocol": 1,
+    "serviceStartedAtUsec": 1793999995000000,
+    "latestSampledAtUsec": 1794000002253118,
+    "sequence": 2,
+    "snapshot": {
+      "takenAtUsec": 102003117,
+      "takenAtClockLabel": "14:02",
+      "cpuBusyPercent": 32.8125,
+      "cpuClusters": {
+        "performancePercent": 32.432432432432435,
+        "efficiencyPercent": 33.33333333333333
+      },
+      "memory": null,
+      "swap": null,
+      "pressureAvg10": {
+        "cpu": null,
+        "memory": null,
+        "io": null
+      },
+      "apps": {
+        "topCpu": null,
+        "topMemory": null,
+        "cpuRanking": [],
+        "memoryRanking": []
+      },
+      "isComplete": false
+    },
+    "histories": {
+      "cpu": [
+        null,
+        0.328125
+      ],
+      "memory": [
+        null,
+        null
+      ]
+    }
+  }
+}

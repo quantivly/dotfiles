@@ -1,0 +1,34 @@
+{
+  "description": "root-a then root-b twice: the first CPU deltas, rankings with a name from a desktop file, and the histories growing.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "com.google.Chrome.desktop": "Google Chrome",
+    "org.chromium.Chromium.desktop": "Chromium"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-b",
+        "monotonicUsec": 102000000,
+        "realUsec": 1794000002250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-b",
+        "monotonicUsec": 104000000,
+        "realUsec": 1794000004250000,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

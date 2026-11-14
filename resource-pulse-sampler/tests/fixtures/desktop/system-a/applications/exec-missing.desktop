@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Exec=no-such-tool-xyz --flag
+Name=Exec Missing

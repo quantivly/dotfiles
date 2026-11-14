@@ -18,11 +18,22 @@
 pub mod apps;
 pub mod bus;
 pub mod cadence;
+mod caught_panic;
 pub mod constants;
 pub mod cpu;
+pub mod desktop_names;
 pub mod history;
 pub mod insertion_ordered_map;
 pub mod js_string;
 pub mod memory;
 pub mod parsers;
+pub mod payload;
+pub mod ports;
 pub mod pressure;
+#[cfg(test)]
+mod quiet_panics;
+pub mod rate_limited_log;
+pub mod sampler;
+pub mod service;
+#[cfg(test)]
+mod test_support;

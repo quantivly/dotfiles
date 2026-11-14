@@ -490,3 +490,67 @@ test('protocol: a ranking that is not a list reads as null', () => {
         {...FULL_SNAPSHOT.apps, cpuRanking: 'Editor', memoryRanking: {0: FULL_SNAPSHOT.apps.topMemory}});
     assertEqual([parsed.cpuRanking, parsed.memoryRanking], [null, null]);
 });
+
+/** Where the golden files are: what the gjs service sent for each scenario (tests/golden/generate.js). */
+const GOLDEN_EXPECTED_DIRECTORY = GLib.build_filenamev([GLib.path_get_dirname(TEST_FILE_PATH), 'golden', 'expected']);
+
+/**
+ * Reads every golden file.
+ *
+ * @returns {Array<{name: string, recording: {samples: object[], state: object}}>} Each file's name and its parsed
+ *     content, in name order.
+ */
+function readGoldenFiles() {
+    const enumerator = Gio.File.new_for_path(GOLDEN_EXPECTED_DIRECTORY)
+        .enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+    const names = [];
+    for (let info = enumerator.next_file(null); info !== null; info = enumerator.next_file(null))
+        names.push(info.get_name());
+    enumerator.close(null);
+    return names.sort().map(name => {
+        const [, contents] = GLib.file_get_contents(GLib.build_filenamev([GOLDEN_EXPECTED_DIRECTORY, name]));
+        return {name, recording: JSON.parse(new TextDecoder().decode(contents))};
+    });
+}
+
+/**
+ * Lists where a parsed value has null although the raw one holds a value, at any depth. A list the parser filtered
+ * (a ranking entry it dropped) or cut short is reported too, since its entries are values the reader lost.
+ *
+ * @param {*} rawValue - What the file holds.
+ * @param {*} parsedValue - What a parser read from it.
+ * @param {string} path - Where the pair is, for the report.
+ * @param {{valueCount: number, lostPaths: string[]}} tally - Counts every value looked at and collects the paths lost.
+ * @returns {void}
+ */
+function collectLostValues(rawValue, parsedValue, path, tally) {
+    if (rawValue === null)
+        return;
+    tally.valueCount += 1;
+    if (parsedValue === null || parsedValue === undefined) {
+        tally.lostPaths.push(path);
+    } else if (Array.isArray(rawValue)) {
+        if (!Array.isArray(parsedValue) || parsedValue.length !== rawValue.length)
+            tally.lostPaths.push(`${path} (a list of ${rawValue.length})`);
+        else
+            rawValue.forEach((item, index) => collectLostValues(item, parsedValue[index], `${path}[${index}]`, tally));
+    } else if (typeof rawValue === 'object') {
+        for (const [key, fieldValue] of Object.entries(rawValue))
+            collectLostValues(fieldValue, parsedValue[key], `${path}.${key}`, tally);
+    }
+}
+
+test('protocol: the parsers read every golden file', () => {
+    const tally = {valueCount: 0, lostPaths: []};
+    const goldenFiles = readGoldenFiles();
+    for (const {name, recording} of goldenFiles) {
+        recording.samples.forEach((sample, index) => {
+            const sampleText = JSON.stringify(sample);
+            collectLostValues(sample, parseSamplePayload(sampleText), `${name} samples[${index}]`, tally);
+        });
+        collectLostValues(recording.state, parseStatePayload(JSON.stringify(recording.state)), `${name} state`, tally);
+    }
+    // A directory that held no files, or files with nothing in them, would pass with nothing looked at.
+    assertEqual({hasFiles: goldenFiles.length > 0, hasValues: tally.valueCount > 1000, lostPaths: tally.lostPaths},
+        {hasFiles: true, hasValues: true, lostPaths: []});
+});

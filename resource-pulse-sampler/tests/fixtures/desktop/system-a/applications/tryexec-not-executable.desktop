@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+TryExec=not-executable-tool
+Name=TryExec Not Executable

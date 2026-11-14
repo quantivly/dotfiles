@@ -1,0 +1,26 @@
+{
+  "description": "A second reading whose root has no proc/pressure/io while cpu and memory pressure are there: pressureAvg10 holds two numbers and a null in the same snapshot (the first snapshot has all three).",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "org.example.Editor.desktop": "Example Editor",
+    "com.example.Browser.desktop": "Example Browser"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-moving-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-no-io-pressure",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

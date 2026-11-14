@@ -1,0 +1,60 @@
+{
+  "description": "A detail watch that starts one tick after another watch's reveal scan, with no warm-up pending and more than the minimum ranking window after the last scan: it falls inside the reveal cooldown, so it reveals nothing and no Sample is added for it (the first watch reveals one, for contrast).",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "org.example.Editor.desktop": "Example Editor",
+    "com.example.Browser.desktop": "Example Browser"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-moving-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-b",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "watchDetail": true,
+      "fsRoot": "root-moving-c",
+      "monotonicUsec": 103503120,
+      "realUsec": 1794000003753121
+    },
+    {
+      "watchDetail": false
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-d",
+        "monotonicUsec": 105006234,
+        "realUsec": 1794000005256235,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "watchDetail": true,
+      "fsRoot": "root-moving-e",
+      "monotonicUsec": 106506240,
+      "realUsec": 1794000006756241
+    },
+    {
+      "watchDetail": false
+    },
+    {
+      "tick": {
+        "fsRoot": "root-moving-f",
+        "monotonicUsec": 108009351,
+        "realUsec": 1794000008259352,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

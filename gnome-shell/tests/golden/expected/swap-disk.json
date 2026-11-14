@@ -1,0 +1,117 @@
+{
+  "samples": [
+    {
+      "sequence": 1,
+      "sampledAtUsec": 1794000000250000,
+      "snapshot": {
+        "takenAtUsec": 100000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": null,
+        "cpuClusters": null,
+        "memory": {
+          "usedBytes": 20480000000,
+          "totalBytes": 32768000000
+        },
+        "swap": {
+          "zramUsedBytes": 1073741824,
+          "zramRamBytes": 209715200,
+          "diskBytes": 536870912
+        },
+        "pressureAvg10": {
+          "cpu": null,
+          "memory": null,
+          "io": null
+        },
+        "apps": {
+          "topCpu": null,
+          "topMemory": null,
+          "cpuRanking": [],
+          "memoryRanking": []
+        },
+        "isComplete": false
+      },
+      "appendedHistory": {
+        "cpu": null,
+        "memory": 0.625
+      }
+    },
+    {
+      "sequence": 2,
+      "sampledAtUsec": 1794000002250000,
+      "snapshot": {
+        "takenAtUsec": 102000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": null,
+        "cpuClusters": null,
+        "memory": {
+          "usedBytes": 20480000000,
+          "totalBytes": 32768000000
+        },
+        "swap": {
+          "zramUsedBytes": 1073741824,
+          "zramRamBytes": 209715200,
+          "diskBytes": 536870912
+        },
+        "pressureAvg10": {
+          "cpu": null,
+          "memory": null,
+          "io": null
+        },
+        "apps": {
+          "topCpu": null,
+          "topMemory": null,
+          "cpuRanking": [],
+          "memoryRanking": []
+        },
+        "isComplete": false
+      },
+      "appendedHistory": {
+        "cpu": null,
+        "memory": 0.625
+      }
+    }
+  ],
+  "state": {
+    "protocol": 1,
+    "serviceStartedAtUsec": 1793999995000000,
+    "latestSampledAtUsec": 1794000002250000,
+    "sequence": 2,
+    "snapshot": {
+      "takenAtUsec": 102000000,
+      "takenAtClockLabel": "14:02",
+      "cpuBusyPercent": null,
+      "cpuClusters": null,
+      "memory": {
+        "usedBytes": 20480000000,
+        "totalBytes": 32768000000
+      },
+      "swap": {
+        "zramUsedBytes": 1073741824,
+        "zramRamBytes": 209715200,
+        "diskBytes": 536870912
+      },
+      "pressureAvg10": {
+        "cpu": null,
+        "memory": null,
+        "io": null
+      },
+      "apps": {
+        "topCpu": null,
+        "topMemory": null,
+        "cpuRanking": [],
+        "memoryRanking": []
+      },
+      "isComplete": false
+    },
+    "histories": {
+      "cpu": [
+        null,
+        null
+      ],
+      "memory": [
+        0.625,
+        0.625
+      ]
+    }
+  }
+}

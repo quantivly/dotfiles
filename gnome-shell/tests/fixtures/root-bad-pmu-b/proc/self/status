@@ -1,0 +1,8 @@
+Name:	gnome-shell
+Umask:	0002
+State:	S (sleeping)
+Tgid:	4242
+Pid:	4242
+PPid:	4200
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000

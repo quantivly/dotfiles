@@ -1,0 +1,23 @@
+{
+  "description": "No pressure files: the three pressures are null and the samples are incomplete. The same root twice, so /proc/stat does not move and CPU and clusters stay null; the second sample's scan ranks five apps with zero CPU deltas.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {},
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-no-psi",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-no-psi",
+        "monotonicUsec": 102000000,
+        "realUsec": 1794000002250000,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

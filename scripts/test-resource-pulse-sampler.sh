@@ -21,7 +21,15 @@
 #     resource-pulse-sampler/tests/bus_link.rs, each run with --ignored in a process
 #     and on a private bus of its own (one row per test, as cargo's others), and a
 #     row proving they refuse off it;
-#   - a row that fails if zbus is built with its object server (`service`).
+#   - a row that fails if zbus is built with its object server (`service`);
+#   - the golden files (gnome-shell/tests/golden/): generate.js --check runs the real gjs sampler and D-Bus service on
+#     a private bus and says whether the committed expected files are still what it produces (exit 0, 1 or 2, told
+#     apart), the files the Rust golden test (tests/golden.rs, counted with cargo's) holds the compiled sampler to;
+#   - the app names (src/desktop_names.rs): GLib's own answers, from the installed GLib through
+#     gnome-shell/tests/desktop-names-reference.js under gjs, for every id in the fixtures, once per
+#     language setting, each against the file of answers the Rust tests hold the lookup to, and rows
+#     proving the comparison fails when the language changes and that a reference that cannot run is
+#     exit 2.
 # Nothing here touches the live session bus. Every run of the program outside
 # `dbus-run-session` gets BUS_BARRIER (a session bus address nobody listens on,
 # in this run's directory, and a runtime directory of its own), so a program that
@@ -48,10 +56,16 @@ DOTFILES="$(cd "$HERE/.." && pwd -P)"
 CRATE_DIR="$DOTFILES/resource-pulse-sampler"
 MANIFEST_PATH="$CRATE_DIR/Cargo.toml"
 CONSTANTS_COMPARISON="$DOTFILES/gnome-shell/tests/sampler-constants.js"
+DESKTOP_NAMES_REFERENCE="$DOTFILES/gnome-shell/tests/desktop-names-reference.js"
+DESKTOP_FIXTURES="$CRATE_DIR/tests/fixtures/desktop"
 CARRIED_ROWS_CHECK="$HERE/resource-pulse-sampler-carried-rows.sh"
 CARRIED_ROWS_GENERATOR="$HERE/resource-pulse-sampler-carried-rows-generate.py"
 CARRIED_ROWS_LIST_FILE="$CRATE_DIR/tests/carried-rows.txt"
 PRIVATE_BUS_RUNNER="$DOTFILES/gnome-shell/tests/run-sampler-program.js"
+GOLDEN_DIR="$DOTFILES/gnome-shell/tests/golden"
+GOLDEN_GENERATOR="$GOLDEN_DIR/generate.js"
+# The language the golden files are generated under: fixed by the caller, as generate.js's header says.
+GOLDEN_LOCALE=C.UTF-8
 # The bus rows take about 15 s; the cap ends a hang, and KILL follows TERM for whatever outlives it.
 PRIVATE_BUS_TIMEOUT_SECONDS=300
 PRIVATE_BUS_KILL_AFTER_SECONDS=10
@@ -72,9 +86,12 @@ for required_tool in cargo gjs dbus-run-session setsid timeout rg python3 awk; d
 done
 [[ -r "$MANIFEST_PATH" ]] || fatal "cannot read $MANIFEST_PATH"
 [[ -r "$CONSTANTS_COMPARISON" ]] || fatal "cannot read $CONSTANTS_COMPARISON"
+[[ -r "$DESKTOP_NAMES_REFERENCE" ]] || fatal "cannot read $DESKTOP_NAMES_REFERENCE"
+[[ -r "$DESKTOP_FIXTURES/ids.txt" ]] || fatal "cannot read $DESKTOP_FIXTURES/ids.txt"
 [[ -x "$CARRIED_ROWS_CHECK" ]] || fatal "cannot run $CARRIED_ROWS_CHECK"
 [[ -r "$CARRIED_ROWS_GENERATOR" ]] || fatal "cannot read $CARRIED_ROWS_GENERATOR"
 [[ -r "$PRIVATE_BUS_RUNNER" ]] || fatal "cannot read $PRIVATE_BUS_RUNNER"
+[[ -r "$GOLDEN_GENERATOR" ]] || fatal "cannot read $GOLDEN_GENERATOR"
 
 # Workers for cargo's build and its tests when the caller's environment sets neither. The interactive cap comes from
 # zsh/zshrc.buildlimits (which exports both variables); this is only the fallback for a non-interactive run.
@@ -289,6 +306,59 @@ check "a list with no titles: exit 2, no pass line" "$FIXTURE_EXIT:$(printf '%s\
 "$CARRIED_ROWS_CHECK" --no-such-flag >/dev/null 2>&1
 check "an unknown flag: exit 2" "$?" 2
 
+printf '\nthe app names against the installed GLib (gnome-shell/tests/desktop-names-reference.js)\n'
+# run_desktop_names_reference <ids file> <LANGUAGE> <LC_ALL> <LC_MESSAGES> <LANG> [<PATH>] runs the reference under gjs and sets
+# REFERENCE_EXIT and REFERENCE_OUTPUT. Its environment is built here and not inherited: the fixture directories (the
+# fixture "home" is the data home, "system-a" then "system-b" the system directories), a PATH of the fixtures' own bin
+# (for TryExec and Exec; the word "unset" leaves it out of the environment), a HOME that does not exist, and the four
+# language variables as given, with the fixtures directory as the current one (a relative program is looked for there). Behind the barrier, so
+# nothing of it can reach a live bus. These language values are the ones LanguageSet holds in
+# resource-pulse-sampler/src/desktop_names/tests.rs, which holds the Rust lookup to the same expected files.
+GJS_PATH="$(command -v gjs)"
+run_desktop_names_reference() {
+  local search_path_setting=("PATH=${6:-$DESKTOP_FIXTURES/bin}")
+  [[ "${6:-}" != unset ]] || search_path_setting=()
+  REFERENCE_OUTPUT="$(cd "$DESKTOP_FIXTURES" && env -i "${BUS_BARRIER[@]}" GIO_USE_VFS=local \
+    "HOME=$DESKTOP_FIXTURES/home-dir" "${search_path_setting[@]}" \
+    "XDG_DATA_HOME=$DESKTOP_FIXTURES/home" "XDG_DATA_DIRS=$DESKTOP_FIXTURES/system-a:$DESKTOP_FIXTURES/system-b" \
+    "LANGUAGE=$2" "LC_ALL=$3" "LC_MESSAGES=$4" "LANG=$5" \
+    "$GJS_PATH" -m "$DESKTOP_NAMES_REFERENCE" "$1" 2>"$WORK_DIR/reference.err")"
+  REFERENCE_EXIT=$?
+}
+# Each row: a label, the four language values, PATH ("default" is the fixtures' bin), and the file of answers the Rust
+# lookup is held to.
+DESKTOP_NAMES_ROWS=(
+  "English|en|en_US.UTF-8|en_US.UTF-8|en_US.UTF-8|default|expected-english.tsv"
+  "a translated name must win|zz:xx_YY|en_US.UTF-8|en_US.UTF-8|en_US.UTF-8|default|expected-zz-xx-yy.tsv"
+  "a codeset and a modifier in the language|xx_YY.UTF-8@mod|en_US.UTF-8|en_US.UTF-8|en_US.UTF-8|default|expected-xx-yy-utf8-mod.tsv"
+  "PATH unset, so the default search path applies|en|en_US.UTF-8|en_US.UTF-8|en_US.UTF-8|unset|expected-english-no-path.tsv"
+  "PATH with an empty entry, the current directory|en|en_US.UTF-8|en_US.UTF-8|en_US.UTF-8|:|expected-english-empty-path-entry.tsv"
+)
+for desktop_names_row in "${DESKTOP_NAMES_ROWS[@]}"; do
+  IFS='|' read -r row_label row_language row_lc_all row_lc_messages row_lang row_path row_expected_file <<<"$desktop_names_row"
+  [[ "$row_path" != default ]] || row_path="$DESKTOP_FIXTURES/bin"
+  run_desktop_names_reference "$DESKTOP_FIXTURES/ids.txt" "$row_language" "$row_lc_all" "$row_lc_messages" "$row_lang" "$row_path"
+  if (( REFERENCE_EXIT != 0 )); then
+    cat "$WORK_DIR/reference.err"
+    bad "desktop names, $row_label: the reference could not run (exit $REFERENCE_EXIT), which is not a pass"
+  elif [[ "$REFERENCE_OUTPUT" == "$(<"$DESKTOP_FIXTURES/$row_expected_file")" ]]; then
+    ok "desktop names, $row_label: GLib's answers are exactly $row_expected_file"
+  else
+    diff <(printf '%s\n' "$REFERENCE_OUTPUT") "$DESKTOP_FIXTURES/$row_expected_file" | head -10
+    # The reference's first stderr line names the GLib it ran on: the expected files are 2.88's answers, so a differing
+    # row on another version reads as a change of runner image and not of the lookup.
+    cat "$WORK_DIR/reference.err"
+    bad "desktop names, $row_label: GLib's answers differ from $row_expected_file"
+  fi
+done
+# The comparison can fail: the English answers are not the answers under another language.
+run_desktop_names_reference "$DESKTOP_FIXTURES/ids.txt" zz:xx_YY en_US.UTF-8 en_US.UTF-8 en_US.UTF-8
+check "the reference under another language does not print the English answers: exit 0, and they differ" \
+  "$REFERENCE_EXIT/$([[ "$REFERENCE_OUTPUT" == "$(<"$DESKTOP_FIXTURES/expected-english.tsv")" ]] && echo same || echo different)" "0/different"
+run_desktop_names_reference "$WORK_DIR/no-such-ids.txt" en en_US.UTF-8 en_US.UTF-8 en_US.UTF-8
+check "a reference that cannot read its list of ids is exit 2 with nothing printed, never a pass" \
+  "$REFERENCE_EXIT/${#REFERENCE_OUTPUT}" "2/0"
+
 printf '\nthe program on a private bus (gnome-shell/tests/run-sampler-program.js)\n'
 # The bus is this run's own: a path socket in a 0700 directory, and no service directory, so nothing on it can be
 # activated. The runner refuses to start unless DBUS_SESSION_BUS_ADDRESS is that socket, and it all runs behind
@@ -378,12 +448,70 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
   bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
 fi
 
-# 171 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
-# string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence) + 1 build + 1 zbus feature row + 6 program flag rows
+printf '\nthe golden files against the gjs sampler (gnome-shell/tests/golden/generate.js --check)\n'
+# count_golden_lines <rg pattern> <text> prints how many lines of the text match, 0 for none (rg -c prints nothing for none).
+count_golden_lines() { printf '%s\n' "$2" | rg -e "$1" | wc -l | tr -d ' '; }
+# run_golden_check <generate.js arguments...> runs the generator in its check mode on the private bus, under a fixed
+# locale, and sets GOLDEN_EXIT and GOLDEN_OUTPUT (stdout and stderr together). Its outcomes are told apart by exit
+# status and by lines no other outcome prints: 0 and "GOLDEN-CHECK ok", 1 and "GOLDEN-CHECK differs", 2 and neither.
+run_golden_check() {
+  GOLDEN_OUTPUT="$(on_private_bus env "LC_ALL=$GOLDEN_LOCALE" gjs -m "$GOLDEN_GENERATOR" --check "$@" 2>&1)"
+  GOLDEN_EXIT=$?
+}
+# golden_verdict says what a --check run did, from its exit status and its own lines.
+golden_verdict() {
+  printf '%s/%s ok/%s differs' "$GOLDEN_EXIT" "$(count_golden_lines '^GOLDEN-CHECK ok: ' "$GOLDEN_OUTPUT")" \
+    "$(count_golden_lines '^GOLDEN-CHECK differs: ' "$GOLDEN_OUTPUT")"
+}
+GOLDEN_SCENARIO_COUNT="$(find "$GOLDEN_DIR/scenarios" -name '*.json' | wc -l | tr -d ' ')"
+GOLDEN_FILES_BEFORE="$(find "$GOLDEN_DIR/expected" -type f -exec cksum {} + | sort)"
+run_golden_check
+check "golden: the gjs sampler still produces the committed files: exit 0, \"GOLDEN-CHECK ok\" for all $GOLDEN_SCENARIO_COUNT scenarios, no \"differs\"" \
+  "$(golden_verdict) $(count_golden_lines "^GOLDEN-CHECK ok: $GOLDEN_SCENARIO_COUNT scenarios\$" "$GOLDEN_OUTPUT")" "0/1 ok/0 differs 1"
+check "the check wrote nothing: the committed files are byte for byte what they were" \
+  "$(find "$GOLDEN_DIR/expected" -type f -exec cksum {} + | sort)" "$GOLDEN_FILES_BEFORE"
+# The check can fail: one number of one committed file is changed, in a copy, and exactly that scenario is named.
+GOLDEN_EDITED_EXPECTED="$WORK_DIR/golden-edited-expected"
+cp -r "$GOLDEN_DIR/expected" "$GOLDEN_EDITED_EXPECTED"
+sed -i '0,/"cpuBusyPercent": [0-9]/s//"cpuBusyPercent": 9/' "$GOLDEN_EDITED_EXPECTED/a-then-b.json"
+check "the copy's a-then-b.json really differs from the committed one" \
+  "$(cmp -s "$GOLDEN_EDITED_EXPECTED/a-then-b.json" "$GOLDEN_DIR/expected/a-then-b.json" && echo same || echo different)" different
+GOLDEN_EDITED_BEFORE="$(find "$GOLDEN_EDITED_EXPECTED" -type f -exec cksum {} + | sort)"
+run_golden_check --expected-dir "$GOLDEN_EDITED_EXPECTED"
+check "a committed file that differs: exit 1, one \"differs\" line naming a-then-b, no \"ok\"" \
+  "$(golden_verdict) $(count_golden_lines '^GOLDEN-CHECK differs: a-then-b: ' "$GOLDEN_OUTPUT")" "1/0 ok/1 differs 1"
+check "the check wrote nothing into the directory it was pointed at" \
+  "$(find "$GOLDEN_EDITED_EXPECTED" -type f -exec cksum {} + | sort)" "$GOLDEN_EDITED_BEFORE"
+rm -f "$GOLDEN_EDITED_EXPECTED/vanished.json"
+run_golden_check --expected-dir "$GOLDEN_EDITED_EXPECTED"
+check "an expected file missing: exit 1, named" \
+  "$(golden_verdict) $(count_golden_lines '^GOLDEN-CHECK differs: vanished: ' "$GOLDEN_OUTPUT")" "1/0 ok/2 differs 1"
+# Could not run is exit 2 and neither line, never a pass: a scenario file it cannot read as a scenario, and no private bus.
+GOLDEN_BROKEN_SCENARIOS="$WORK_DIR/golden-broken-scenarios"
+mkdir -p "$GOLDEN_BROKEN_SCENARIOS"
+printf '{"not": "a scenario"}\n' >"$GOLDEN_BROKEN_SCENARIOS/broken.json"
+run_golden_check --scenarios-dir "$GOLDEN_BROKEN_SCENARIOS"
+check "a scenario it cannot read: exit 2, \"could not run\", neither \"ok\" nor \"differs\"" \
+  "$(golden_verdict) $(count_golden_lines '^could not run: ' "$GOLDEN_OUTPUT")" "2/0 ok/0 differs 1"
+GOLDEN_OFF_BUS_OUTPUT="$(off_bus RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" "LC_ALL=$GOLDEN_LOCALE" \
+  timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" gjs -m "$GOLDEN_GENERATOR" --check 2>&1)"
+GOLDEN_OFF_BUS_EXIT=$?
+check "off the private bus it refuses before it connects: exit 2, \"refusing to run\", neither \"ok\" nor \"differs\"" \
+  "$GOLDEN_OFF_BUS_EXIT/$(count_golden_lines 'refusing to run' "$GOLDEN_OFF_BUS_OUTPUT")/$(count_golden_lines '^GOLDEN-CHECK ' "$GOLDEN_OFF_BUS_OUTPUT")" "2/1/0"
+
+# 325 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
+# string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence,
+# 32 of app names from `.desktop` files, 11 of the ports, 2 of the rate-limited log, 2 of the panic-to-text step,
+# 53 of the sampler, 13 of the payload writer, 11 of the service face, 30 of the golden test)
+# + 1 build + 1 zbus feature row + 6 program flag rows
 # + 26 constants + 1 comparison tally + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks
 # + 11 carried-check fixtures + 2 runner guards + 1 bus_link guard + 8 bus_link tests
-# + 11 rows of the program on a private bus.
-EXPECTED_ROWS=426
+# + 7 rows of the app names against the installed GLib (3 languages, 2 search paths, 1 that must differ, 1 that cannot run)
+# + 11 rows of the program on a private bus
+# + 8 rows of the golden files against the gjs sampler (generate.js --check): it passes on the committed files, it wrote
+#   nothing, an edited copy really differs, the edited copy exits 1 and names its scenario, nothing is written into the
+#   copy, a missing expected file exits 1, a scenario it cannot read exits 2, and off the private bus it exits 2.
+EXPECTED_ROWS=595
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

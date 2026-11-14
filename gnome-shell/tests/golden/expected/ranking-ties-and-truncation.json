@@ -1,0 +1,398 @@
+{
+  "samples": [
+    {
+      "sequence": 1,
+      "sampledAtUsec": 1794000000250001,
+      "snapshot": {
+        "takenAtUsec": 100000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": null,
+        "cpuClusters": null,
+        "memory": {
+          "usedBytes": 11235183616,
+          "totalBytes": 16168255488
+        },
+        "swap": {
+          "zramUsedBytes": 1264196608,
+          "zramRamBytes": 345678901,
+          "diskBytes": 3410944
+        },
+        "pressureAvg10": {
+          "cpu": 3.07,
+          "memory": 0.41,
+          "io": 7.9
+        },
+        "apps": {
+          "topCpu": null,
+          "topMemory": {
+            "groupKey": "unit:svc-one",
+            "name": "svc-one",
+            "memoryBytes": 770000003
+          },
+          "cpuRanking": [],
+          "memoryRanking": [
+            {
+              "groupKey": "unit:svc-one",
+              "name": "svc-one",
+              "memoryBytes": 770000003
+            },
+            {
+              "groupKey": "app:org.example.A05",
+              "name": "A05",
+              "memoryBytes": 380000001
+            },
+            {
+              "groupKey": "app:org.example.A03",
+              "name": "A03",
+              "memoryBytes": 270000000
+            },
+            {
+              "groupKey": "app:org.example.A04",
+              "name": "A04",
+              "memoryBytes": 270000000
+            },
+            {
+              "groupKey": "app:org.example.Bbb",
+              "name": "Alpha",
+              "memoryBytes": 270000000
+            },
+            {
+              "groupKey": "app:org.example.Aaa",
+              "name": "Zulu",
+              "memoryBytes": 270000000
+            },
+            {
+              "groupKey": "app:org.example.A06",
+              "name": "A06",
+              "memoryBytes": 90000007
+            },
+            {
+              "groupKey": "app:org.example.A07",
+              "name": "A07",
+              "memoryBytes": 69999999
+            },
+            {
+              "groupKey": "app:org.example.A09",
+              "name": "A09",
+              "memoryBytes": 66666667
+            },
+            {
+              "groupKey": "app:org.example.A12",
+              "name": "A12",
+              "memoryBytes": 60000001
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": null,
+        "memory": 0.6948915190224881
+      }
+    },
+    {
+      "sequence": 2,
+      "sampledAtUsec": 1794000002253118,
+      "snapshot": {
+        "takenAtUsec": 102003117,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": 22.22222222222222,
+        "cpuClusters": {
+          "performancePercent": 30.508474576271187,
+          "efficiencyPercent": 13.793103448275861
+        },
+        "memory": {
+          "usedBytes": 10925368320,
+          "totalBytes": 16168255488
+        },
+        "swap": {
+          "zramUsedBytes": 1274436608,
+          "zramRamBytes": 351278901,
+          "diskBytes": 3994624
+        },
+        "pressureAvg10": {
+          "cpu": 4.19,
+          "memory": 1.37,
+          "io": 0.06
+        },
+        "apps": {
+          "topCpu": {
+            "groupKey": "app:org.example.A07",
+            "name": "A07",
+            "cpuPercent": 29.275349368009955
+          },
+          "topMemory": {
+            "groupKey": "unit:svc-one",
+            "name": "svc-one",
+            "memoryBytes": 771000006
+          },
+          "cpuRanking": [
+            {
+              "groupKey": "app:org.example.A07",
+              "name": "A07",
+              "cpuPercent": 29.275349368009955
+            },
+            {
+              "groupKey": "unit:svc-one",
+              "name": "svc-one",
+              "cpuPercent": 24.961085648017566
+            },
+            {
+              "groupKey": "unit:svc-two",
+              "name": "svc-two",
+              "cpuPercent": 24.961085648017566
+            },
+            {
+              "groupKey": "app:org.example.A05",
+              "name": "A05",
+              "cpuPercent": 13.728641412358838
+            },
+            {
+              "groupKey": "app:org.example.A08",
+              "name": "A08",
+              "cpuPercent": 8.73647170884177
+            },
+            {
+              "groupKey": "app:org.example.A03",
+              "name": "A03",
+              "cpuPercent": 6.240274532141657
+            },
+            {
+              "groupKey": "app:org.example.A04",
+              "name": "A04",
+              "cpuPercent": 6.240274532141657
+            },
+            {
+              "groupKey": "app:org.example.Bbb",
+              "name": "Alpha",
+              "cpuPercent": 6.240274532141657
+            },
+            {
+              "groupKey": "app:org.example.Aaa",
+              "name": "Zulu",
+              "cpuPercent": 6.240274532141657
+            },
+            {
+              "groupKey": "app:org.example.A09",
+              "name": "A09",
+              "cpuPercent": 3.8728266995886913
+            }
+          ],
+          "memoryRanking": [
+            {
+              "groupKey": "unit:svc-one",
+              "name": "svc-one",
+              "memoryBytes": 771000006
+            },
+            {
+              "groupKey": "app:org.example.A05",
+              "name": "A05",
+              "memoryBytes": 381000004
+            },
+            {
+              "groupKey": "app:org.example.A03",
+              "name": "A03",
+              "memoryBytes": 271000003
+            },
+            {
+              "groupKey": "app:org.example.A04",
+              "name": "A04",
+              "memoryBytes": 271000003
+            },
+            {
+              "groupKey": "app:org.example.Bbb",
+              "name": "Alpha",
+              "memoryBytes": 271000003
+            },
+            {
+              "groupKey": "app:org.example.Aaa",
+              "name": "Zulu",
+              "memoryBytes": 271000003
+            },
+            {
+              "groupKey": "app:org.example.A06",
+              "name": "A06",
+              "memoryBytes": 91000010
+            },
+            {
+              "groupKey": "app:org.example.A07",
+              "name": "A07",
+              "memoryBytes": 71000002
+            },
+            {
+              "groupKey": "app:org.example.A12",
+              "name": "A12",
+              "memoryBytes": 61000004
+            },
+            {
+              "groupKey": "unit:svc-two",
+              "name": "svc-two",
+              "memoryBytes": 61000003
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": 0.2222222222222222,
+        "memory": 0.6757295694707914
+      }
+    }
+  ],
+  "state": {
+    "protocol": 1,
+    "serviceStartedAtUsec": 1793999995000000,
+    "latestSampledAtUsec": 1794000002253118,
+    "sequence": 2,
+    "snapshot": {
+      "takenAtUsec": 102003117,
+      "takenAtClockLabel": "14:02",
+      "cpuBusyPercent": 22.22222222222222,
+      "cpuClusters": {
+        "performancePercent": 30.508474576271187,
+        "efficiencyPercent": 13.793103448275861
+      },
+      "memory": {
+        "usedBytes": 10925368320,
+        "totalBytes": 16168255488
+      },
+      "swap": {
+        "zramUsedBytes": 1274436608,
+        "zramRamBytes": 351278901,
+        "diskBytes": 3994624
+      },
+      "pressureAvg10": {
+        "cpu": 4.19,
+        "memory": 1.37,
+        "io": 0.06
+      },
+      "apps": {
+        "topCpu": {
+          "groupKey": "app:org.example.A07",
+          "name": "A07",
+          "cpuPercent": 29.275349368009955
+        },
+        "topMemory": {
+          "groupKey": "unit:svc-one",
+          "name": "svc-one",
+          "memoryBytes": 771000006
+        },
+        "cpuRanking": [
+          {
+            "groupKey": "app:org.example.A07",
+            "name": "A07",
+            "cpuPercent": 29.275349368009955
+          },
+          {
+            "groupKey": "unit:svc-one",
+            "name": "svc-one",
+            "cpuPercent": 24.961085648017566
+          },
+          {
+            "groupKey": "unit:svc-two",
+            "name": "svc-two",
+            "cpuPercent": 24.961085648017566
+          },
+          {
+            "groupKey": "app:org.example.A05",
+            "name": "A05",
+            "cpuPercent": 13.728641412358838
+          },
+          {
+            "groupKey": "app:org.example.A08",
+            "name": "A08",
+            "cpuPercent": 8.73647170884177
+          },
+          {
+            "groupKey": "app:org.example.A03",
+            "name": "A03",
+            "cpuPercent": 6.240274532141657
+          },
+          {
+            "groupKey": "app:org.example.A04",
+            "name": "A04",
+            "cpuPercent": 6.240274532141657
+          },
+          {
+            "groupKey": "app:org.example.Bbb",
+            "name": "Alpha",
+            "cpuPercent": 6.240274532141657
+          },
+          {
+            "groupKey": "app:org.example.Aaa",
+            "name": "Zulu",
+            "cpuPercent": 6.240274532141657
+          },
+          {
+            "groupKey": "app:org.example.A09",
+            "name": "A09",
+            "cpuPercent": 3.8728266995886913
+          }
+        ],
+        "memoryRanking": [
+          {
+            "groupKey": "unit:svc-one",
+            "name": "svc-one",
+            "memoryBytes": 771000006
+          },
+          {
+            "groupKey": "app:org.example.A05",
+            "name": "A05",
+            "memoryBytes": 381000004
+          },
+          {
+            "groupKey": "app:org.example.A03",
+            "name": "A03",
+            "memoryBytes": 271000003
+          },
+          {
+            "groupKey": "app:org.example.A04",
+            "name": "A04",
+            "memoryBytes": 271000003
+          },
+          {
+            "groupKey": "app:org.example.Bbb",
+            "name": "Alpha",
+            "memoryBytes": 271000003
+          },
+          {
+            "groupKey": "app:org.example.Aaa",
+            "name": "Zulu",
+            "memoryBytes": 271000003
+          },
+          {
+            "groupKey": "app:org.example.A06",
+            "name": "A06",
+            "memoryBytes": 91000010
+          },
+          {
+            "groupKey": "app:org.example.A07",
+            "name": "A07",
+            "memoryBytes": 71000002
+          },
+          {
+            "groupKey": "app:org.example.A12",
+            "name": "A12",
+            "memoryBytes": 61000004
+          },
+          {
+            "groupKey": "unit:svc-two",
+            "name": "svc-two",
+            "memoryBytes": 61000003
+          }
+        ]
+      },
+      "isComplete": true
+    },
+    "histories": {
+      "cpu": [
+        null,
+        0.2222222222222222
+      ],
+      "memory": [
+        0.6948915190224881,
+        0.6757295694707914
+      ]
+    }
+  }
+}

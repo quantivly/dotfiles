@@ -18,7 +18,7 @@ use crate::parsers::proc::CpuTimes;
 /// The highest CPU number a kernel CPU list may name. No kernel has such a CPU (it builds with
 /// at most 8192); the gjs `parseCpuList` has no limit and would build a list of billions of
 /// numbers for a range such as `0-4000000000`, where this refuses it.
-const MAX_CPU_NUMBER_IN_LIST: u64 = 65_535;
+pub(crate) const MAX_CPU_NUMBER_IN_LIST: u64 = 65_535;
 
 /// A kernel CPU list that [`parse_cpu_list`] cannot read.
 #[derive(Debug, Clone, PartialEq, Eq)]

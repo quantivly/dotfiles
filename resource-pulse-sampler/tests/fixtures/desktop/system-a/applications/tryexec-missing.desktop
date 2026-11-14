@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+TryExec=no-such-tool-xyz
+Name=TryExec Missing

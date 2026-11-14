@@ -1,0 +1,25 @@
+{
+  "description": "Unit and app-scope directories named as systemd writes a non-ASCII byte today, caf\\xc3\\xa9 with a literal backslash, x and two hex digits per byte: the sampler turns each escape into one character, so the unit is published as unit:cafÃ© and cafÃ© (the garbled name, not café), and the app scope's desktop id is cafÃ©.desktop, which appNames names Café Reader.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "cafÃ©.desktop": "Café Reader"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-escaped-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-escaped-b",
+        "monotonicUsec": 102000000,
+        "realUsec": 1794000002250000,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

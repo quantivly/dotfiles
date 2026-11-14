@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Exec=present-tool\q %U
+Name=Exec Bad Escape

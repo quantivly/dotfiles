@@ -575,12 +575,12 @@ fn scan_of(leaves: &[LeafSpec]) -> RankingScan {
     };
     for (path, previous, current, memory) in leaves {
         if let Some(previous_usec) = previous {
-            scan.previous_usage_usec
-                .insert(path.to_string(), *previous_usec);
+            scan.previous_usage_usec.insert(path, *previous_usec);
         }
         scan.current_usage_usec.insert(path, *current);
         if let Some(memory_bytes) = memory {
-            scan.memory_bytes_by_cgroup.insert(path, *memory_bytes);
+            scan.memory_bytes_by_cgroup
+                .insert(path, *memory_bytes as f64);
         }
     }
     scan
@@ -1011,11 +1011,11 @@ fn scan_with_more_groups_than_the_ranking_holds() -> RankingScan {
     };
     for group_index in 0..APP_RANKING_LENGTH + EXTRA_GROUP_COUNT {
         let path = format!("app-{group_index}");
-        scan.previous_usage_usec.insert(path.clone(), 0);
+        scan.previous_usage_usec.insert(&path, 0);
         scan.current_usage_usec
             .insert(&path, (group_index + 1) * 100_000);
         scan.memory_bytes_by_cgroup
-            .insert(&path, (group_index + 1) * GIB);
+            .insert(&path, ((group_index + 1) * GIB) as f64);
     }
     scan
 }
@@ -1125,8 +1125,8 @@ fn maps_iterate_in_insertion_order() {
         ("x2", Some(0), 1_000_000, None),
         ("x1", Some(0), 1_000_000, None),
     ]);
-    scan.memory_bytes_by_cgroup.insert("x1", 3);
-    scan.memory_bytes_by_cgroup.insert("x2", 4);
+    scan.memory_bytes_by_cgroup.insert("x1", 3.0);
+    scan.memory_bytes_by_cgroup.insert("x2", 4.0);
     let ranking = rank_apps(&scan, &mut |path| one_group_named_by_leaf(path));
     assert_eq!(top_cpu_name(&ranking), "x2");
     assert_eq!(top_memory_name(&ranking), "x1");
@@ -1284,9 +1284,9 @@ fn names_are_asked_for_in_the_cpu_loop_then_the_memory_loop() {
         &[],
         &[],
     );
-    scan.memory_bytes_by_cgroup.insert("c", 3);
-    scan.memory_bytes_by_cgroup.insert("b", 2);
-    scan.memory_bytes_by_cgroup.insert("a", 1);
+    scan.memory_bytes_by_cgroup.insert("c", 3.0);
+    scan.memory_bytes_by_cgroup.insert("b", 2.0);
+    scan.memory_bytes_by_cgroup.insert("a", 1.0);
     let mut asked_paths = Vec::new();
     rank_apps(&scan, &mut |path| {
         asked_paths.push(path.to_string());

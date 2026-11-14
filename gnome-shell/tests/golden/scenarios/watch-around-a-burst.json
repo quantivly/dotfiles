@@ -1,0 +1,59 @@
+{
+  "description": "A detail watch started 1.5 s after the second tick, over a root whose counters have moved, and ended after two more ticks: its reveal is a Sample with no appended history, and the scan cadence follows the watch.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "com.google.Chrome.desktop": "Google Chrome",
+    "org.chromium.Chromium.desktop": "Chromium"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-a",
+        "monotonicUsec": 102000000,
+        "realUsec": 1794000002250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "watchDetail": true,
+      "fsRoot": "root-b",
+      "monotonicUsec": 103500000,
+      "realUsec": 1794000003750000
+    },
+    {
+      "tick": {
+        "fsRoot": "root-b",
+        "monotonicUsec": 104000000,
+        "realUsec": 1794000004250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-b",
+        "monotonicUsec": 106000000,
+        "realUsec": 1794000006250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "watchDetail": false
+    },
+    {
+      "tick": {
+        "fsRoot": "root-b",
+        "monotonicUsec": 108000000,
+        "realUsec": 1794000008250000,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}
