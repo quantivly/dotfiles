@@ -407,7 +407,8 @@ fail.
 
 **As built (2026-11-14):** `CgroupDescription`'s `kind` is an enum that carries the app ids. In
 `RankingScan` the root and parent CPU deltas are `f64` (from `counter_delta_usec`), the elapsed time is
-`i64`, and usage and memory are `u64`. The insertion-ordered map is
+`i64`, usage is `u64`, and memory is `f64` (a leaf's memory net of page cache, computed on doubles as
+gjs's `Math.max(0, current − reclaimable)`). The insertion-ordered map is
 `src/insertion_ordered_map.rs`.
 
 ### Task 8: The scan cadence
@@ -478,7 +479,8 @@ clauses listed: a file with no usable `Name` gives "Unnamed", not a miss, and a 
 malformed. Bounded where GLib is not: a file over a size bound is a miss, and one lookup makes at most 256
 path probes over all the data directories. `locale.alias` is not read. The "reference agrees" row is two
 checks against committed files of expected names (a Rust test, and a state-table row that runs the real
-GLib through gjs), under five environments.
+GLib through gjs), under five environments. Those files are GLib 2.88's answers: refusing a file whose
+`Path`, `TryExec` or `Exec` is a bad value is new in 2.88, which CI's runner also has.
 
 ### Task 10: The sampler core
 
@@ -617,10 +619,12 @@ GLib through gjs), under five environments.
 **As built (2026-11-14):** `WatchChange` has a third field, `sender_had_watches` (the sender's state
 before the change), so Task 12 can tell a first watch from a later one. A watch step in a scenario also
 carries `fsRoot`, `monotonicUsec` and `realUsec`, since a watch-start scan reads the root and the clock.
-The writer prints a number that is not finite as `null`, as `JSON.stringify` does. There are 20
-scenarios; the first twelve proved too round (a wrong CPU formula passed them all), so eight more hold
-uneven numbers, ties, truncation, a wrapped history, and a machine with no cluster map. Eight of the nine
-bus-face rows are ported; `destroy()` waits for Task 13.
+The writer prints a number that is not finite as `null`, as `JSON.stringify` does. There are 23
+scenarios; the first twelve proved too round (a wrong CPU formula passed them all), so the rest hold
+uneven numbers, ties, truncation, a wrapped history, a machine with no cluster map, a watch inside the
+reveal cooldown, a partly missing pressure reading, and an offline performance cluster. The unit name
+with an escaped byte is a directory really named `caf\xc3\xa9.service`. Eight of the nine bus-face rows
+are ported; `destroy()` waits for Task 13.
 
 ---
 
@@ -673,14 +677,38 @@ bus-face rows are ported; `destroy()` waits for Task 13.
     (Step 1's third row is its counterpart: one test, with this marker);
   - `service sampler: a real 1 s timer calls listeners, and none fire for 1.5 s after stop()`.
 - **`initialize` runs inside the catch too,** as each tick and each call do.
-- **A panic hook that writes nothing is installed before the first tick.** The sampler logs a caught panic
-  once per ten minutes per key; the default hook would also print every one to the journal.
+- **The panic hook is quiet only inside a catch.** `src/caught_panic.rs` holds `catching_panic` and
+  `panic_text` at crate level; the tick loop's catches use them. A hook installed before the first tick
+  writes nothing while a catch is active on the panicking thread (a thread-local flag that
+  `catching_panic` sets around its step) and records the panic's location there, which the catch appends
+  to its text (`sample failed: <payload> at src/x.rs:12:5`), since gjs logs a stack and the payload alone
+  says less. Outside a catch (the receiving thread, `main` before the loop) the hook writes its line as
+  the default hook does, so a panic nothing caught is never silent. Without the hook every caught panic
+  would also be printed to the journal each time, outside the ten-minute limit.
 - **A caught call is still answered,** with an error reply, so "every call gets a reply" holds on the path
   the catch exists for. `&BusLink` holds `RefCell`s, so the closure needs `AssertUnwindSafe`.
 - **A Sample that cannot be sent** is logged under one stable key and the loop goes on.
 - **Watches.** `WatchChange.sender_had_watches` gives the edges: a sender's first watch calls
   `follow_name`, its last unwatch calls `unfollow_name`. `BusLink` keeps a set of followed names, not a
   count; say so in `follow_name`'s doc.
+- **A `follow_name` that fails undoes the watch.** gjs counts a watch only after it is following the
+  sender; `add_watch` counts first. If `follow_name` then fails, call `remove_watch` (telling the sampler
+  again if `any_watch_changed`) and answer the call with an error. Otherwise the face holds a watch for a
+  sender nobody follows, and the sampler stays on the watched cadence for the life of the program.
+- **The reveal goes out before the reply.** For a `WatchDetail` that starts a watch, send the reveal's
+  Sample first and reply second, as gjs emits inside `setDetailWatched` before it returns the call.
+- **A tick's number counts ticks run, not schedule slots.** gjs adds one per tick it runs, and runs one
+  tick after a stall. `next_tick_at_usec` skips missed slots, so the number is a counter that rises by
+  one per `run_tick`, never derived from the slot. A row: after a 7 s stall the next tick's number is
+  the previous one plus one.
+- **The first tick runs after the name is owned,** in the order `service/main.js` has it.
+- **One row composes the real `DesktopNameLookup` with the sampler:** a fixture root with an app scope and
+  fixture data directories holding its `.desktop` file; the published name is the file's `Name`. The
+  golden files hand names in, so nothing else checks that the id the sampler forms is the id the lookup
+  searches for.
+- **The real ports live in one file.** `real_ports.rs` takes `FileSystemReader`, `FileSystemLister` and
+  their Gio texts from `ports.rs` (a pure move), beside the real clock and label; `ports.rs` keeps the
+  traits and `ReadFailure`.
 - **The bus link's round trips to the daemon** (`follow_name`, `RemoveMatch`, `request_name`) get a
   time-out (`Builder::method_timeout`), generous enough that a slow daemon at login is not an exit 1.
   `BusLink`'s doc says what dropping it does.
@@ -736,6 +764,15 @@ bus-face rows are ported; `destroy()` waits for Task 13.
   other rows share.
 - **The reply-order row's floor** (at least 400 of about 500 Samples at 20 ms ticks) is the likeliest row to
   flake on a loaded CI runner: measure it there before trusting it.
+- **The state's text is checked on the real program.** The golden files hold parsed values, so the compact
+  text that `gnome-status` cuts is pinned only on hand-made snapshots. One row: the program's `GetState`
+  text on `root-a` matches
+  `^\{"protocol":1,"serviceStartedAtUsec":\d+,"latestSampledAtUsec":(\d+|null),"sequence":\d+,"snapshot":`,
+  once before the first tick (`null`) and once after.
+- **"stderr holds no `panicked`" must be able to fail.** With Task 12's hook, a panic outside a catch
+  writes its line. Show the row red with a panic planted in the receiving thread, in a copy of the tree.
+- **The conformance transcript records order,** so that a reveal sent after its `WatchDetail` reply
+  differs from one sent before it.
 
 ---
 
@@ -797,6 +834,11 @@ bus-face rows are ported; `destroy()` waits for Task 13.
   listings pass; one differing name fails and the summary names the leaf; a tree with snaps where no snap
   resolves a name fails on the floor; an unreadable environment is exit 2.
 - [ ] **Step 2 to 4: Run, implement, run. Step 5: Commit.**
+
+**Carried into this task by the build (2026-11-14):** `--list-leaf-names` needs a public entry point in
+the sampler that names every leaf of one scan (the path, the group key, the name, the desktop id and
+whether the lookup hit); a publish carries ten. Add it there, on the code the scan already runs, not as a
+second naming path.
 
 ### Task 16: The sweep, the documents and the gate report
 
