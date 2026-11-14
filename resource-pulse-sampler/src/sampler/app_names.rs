@@ -3,9 +3,9 @@
 
 use std::collections::HashMap;
 
-use super::caught_panic::catching_panic;
 use super::ResolveAppName;
 use crate::apps::{describe_cgroup, display_name_for, AppGroup};
+use crate::caught_panic::catching_panic;
 use crate::ports::Clock;
 use crate::rate_limited_log::RateLimitedLog;
 

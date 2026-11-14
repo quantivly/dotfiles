@@ -5,13 +5,13 @@
 use std::collections::{HashMap, HashSet};
 
 use super::app_names::group_of_cgroup;
-use super::caught_panic::catching_panic;
 use super::cgroup_tree::{CgroupReadFailures, CgroupTree, ROOT_CGROUP_RELATIVE_PATH};
 use super::paths::{join_under, CGROUP_ROOT_PATH};
 use super::snapshot::Snapshot;
 use super::Sampler;
 use crate::apps::{counter_delta_usec, rank_apps, AppRanking, RankingScan};
 use crate::cadence::ScanReason;
+use crate::caught_panic::catching_panic;
 use crate::insertion_ordered_map::InsertionOrderedMap;
 
 /// The template key of a failed scan's journal line.

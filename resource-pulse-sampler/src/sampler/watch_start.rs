@@ -1,9 +1,9 @@
 //! A watch start's own scan, outside the tick (`_scanForWatchStart`).
 
-use super::caught_panic::value_or_none;
 use super::snapshot::{Publish, Snapshot};
 use super::Sampler;
 use crate::cadence::{decide_app_scan, ScanReason};
+use crate::caught_panic::value_or_none;
 
 /// The scan reasons a watch start acts on at once, outside the tick. A warm-up, burst or interval
 /// scan is paced by the ticks: run here, a warm-up would follow the watch-start scan by milliseconds

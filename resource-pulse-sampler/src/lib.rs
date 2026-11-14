@@ -18,6 +18,7 @@
 pub mod apps;
 pub mod bus;
 pub mod cadence;
+mod caught_panic;
 pub mod constants;
 pub mod cpu;
 pub mod desktop_names;

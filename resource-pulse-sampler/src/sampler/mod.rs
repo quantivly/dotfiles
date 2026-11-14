@@ -24,7 +24,6 @@
 mod app_names;
 mod app_scan;
 mod cadence_bookkeeping;
-mod caught_panic;
 mod cgroup_readings;
 mod cgroup_tree;
 mod cluster_map_reading;
@@ -40,6 +39,7 @@ use std::path::PathBuf;
 
 use crate::apps::AppRanking;
 use crate::cadence::ScanReason;
+use crate::caught_panic::catching_panic;
 use crate::constants::CARD_HISTORY_SAMPLES;
 use crate::cpu::ClusterMap;
 use crate::history::RingBuffer;
@@ -49,7 +49,6 @@ use crate::rate_limited_log::RateLimitedLog;
 use app_names::AppNameCache;
 use app_scan::AppScanReadings;
 use cadence_bookkeeping::CadenceBookkeeping;
-use caught_panic::catching_panic;
 use fast_sample::parse_usable_proc_stat;
 use paths::{join_under, PROC_SELF_STATUS_PATH, PROC_STAT_PATH};
 

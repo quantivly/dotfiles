@@ -1,9 +1,9 @@
 //! Publishing a tick: the histories, the latest snapshot and the last good clock label
 //! (`_publishTickSnapshot`, `_recordHistory`, `_publishNoDataSnapshot`).
 
-use super::caught_panic::value_or_none;
 use super::snapshot::{AppendedHistory, Publish, Snapshot};
 use super::{Sampler, PERCENT_SCALE, SAMPLE_FAILURE_LOG_KEY};
+use crate::caught_panic::value_or_none;
 
 impl Sampler {
     /// Publishes a fast tick's snapshot: appends it to the histories and makes it the latest.
