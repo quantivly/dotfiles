@@ -1,0 +1,59 @@
+broken-falls-through.desktop	"Valid Behind Broken"
+deep-one-two.desktop	"Deep One Two"
+exec-empty.desktop	"Exec Empty"
+exec-missing.desktop
+exec-present.desktop	"Exec Present"
+exec-quoted.desktop	"Exec Quoted"
+exec-unbalanced.desktop
+gettext-domain.desktop	"Own Name In Xx"
+ghost.desktop
+ghost.desktop-x.desktop
+hidden-false.desktop	"Hidden False"
+hidden-garbage.desktop	"Hidden Garbage"
+hidden-mask.desktop
+hidden-one.desktop
+mixed-name-x.desktop	"Mixed Name X"
+name-bad-escape.desktop	"Unnamed"
+name-duplicate.desktop	"Second"
+name-empty.desktop	""
+name-escapes.desktop	"A B\\C"
+name-invalid-utf8.desktop	"Unnamed"
+name-localized-bad.desktop	"Good Xx"
+name-localized.desktop	"Name In Xx YY"
+name-localized-modifier.desktop	"Modified"
+name-localized-no-plain.desktop	"Only Localized"
+name-localized-only-xx.desktop	"Only Xx"
+name-missing.desktop	"Unnamed"
+name-nul.desktop	"Plain Nul"
+name-other-group.desktop	"Unnamed"
+name-spaced.desktop	"Spaced Out"
+name-trailing-backslash.desktop	"Unnamed"
+name-utf8.desktop	"Café ☕"
+no-such-app.desktop
+only-in-b.desktop	"Only In B"
+order.desktop	"Order Home"
+parse-bad-key-name.desktop
+parse-comments.desktop	"With Comments"
+parse-empty-key.desktop
+parse-encoding-latin1.desktop
+parse-encoding-utf8.desktop	"Utf Eight"
+parse-garbage-line.desktop
+parse-group-twice.desktop	"Group Twice Again"
+parse-no-group.desktop
+parse-wrong-start-group.desktop
+path-bad-escape.desktop
+plain
+../plain.desktop
+plain.desktop	"Plain App"
+Plain.desktop
+tryexec-absolute.desktop	"TryExec Absolute"
+tryexec-empty.desktop	"TryExec Empty"
+tryexec-missing.desktop
+tryexec-not-executable.desktop
+tryexec-present.desktop	"TryExec Present"
+type-link.desktop
+type-lowercase.desktop
+type-missing.desktop
+vendor-.desktop
+vendor-sub.desktop	"Vendor Sub"
+vendor/sub.desktop

@@ -20,6 +20,7 @@ pub mod bus;
 pub mod cadence;
 pub mod constants;
 pub mod cpu;
+pub mod desktop_names;
 pub mod history;
 pub mod insertion_ordered_map;
 pub mod js_string;

@@ -21,7 +21,12 @@
 #     resource-pulse-sampler/tests/bus_link.rs, each run with --ignored in a process
 #     and on a private bus of its own (one row per test, as cargo's others), and a
 #     row proving they refuse off it;
-#   - a row that fails if zbus is built with its object server (`service`).
+#   - a row that fails if zbus is built with its object server (`service`);
+#   - the app names (src/desktop_names.rs): GLib's own answers, from the installed GLib through
+#     gnome-shell/tests/desktop-names-reference.js under gjs, for every id in the fixtures, once per
+#     language setting, each against the file of answers the Rust tests hold the lookup to, and rows
+#     proving the comparison fails when the language changes and that a reference that cannot run is
+#     exit 2.
 # Nothing here touches the live session bus. Every run of the program outside
 # `dbus-run-session` gets BUS_BARRIER (a session bus address nobody listens on,
 # in this run's directory, and a runtime directory of its own), so a program that
@@ -48,6 +53,8 @@ DOTFILES="$(cd "$HERE/.." && pwd -P)"
 CRATE_DIR="$DOTFILES/resource-pulse-sampler"
 MANIFEST_PATH="$CRATE_DIR/Cargo.toml"
 CONSTANTS_COMPARISON="$DOTFILES/gnome-shell/tests/sampler-constants.js"
+DESKTOP_NAMES_REFERENCE="$DOTFILES/gnome-shell/tests/desktop-names-reference.js"
+DESKTOP_FIXTURES="$CRATE_DIR/tests/fixtures/desktop"
 CARRIED_ROWS_CHECK="$HERE/resource-pulse-sampler-carried-rows.sh"
 CARRIED_ROWS_GENERATOR="$HERE/resource-pulse-sampler-carried-rows-generate.py"
 CARRIED_ROWS_LIST_FILE="$CRATE_DIR/tests/carried-rows.txt"
@@ -72,6 +79,8 @@ for required_tool in cargo gjs dbus-run-session setsid timeout rg python3 awk; d
 done
 [[ -r "$MANIFEST_PATH" ]] || fatal "cannot read $MANIFEST_PATH"
 [[ -r "$CONSTANTS_COMPARISON" ]] || fatal "cannot read $CONSTANTS_COMPARISON"
+[[ -r "$DESKTOP_NAMES_REFERENCE" ]] || fatal "cannot read $DESKTOP_NAMES_REFERENCE"
+[[ -r "$DESKTOP_FIXTURES/ids.txt" ]] || fatal "cannot read $DESKTOP_FIXTURES/ids.txt"
 [[ -x "$CARRIED_ROWS_CHECK" ]] || fatal "cannot run $CARRIED_ROWS_CHECK"
 [[ -r "$CARRIED_ROWS_GENERATOR" ]] || fatal "cannot read $CARRIED_ROWS_GENERATOR"
 [[ -r "$PRIVATE_BUS_RUNNER" ]] || fatal "cannot read $PRIVATE_BUS_RUNNER"
@@ -289,6 +298,49 @@ check "a list with no titles: exit 2, no pass line" "$FIXTURE_EXIT:$(printf '%s\
 "$CARRIED_ROWS_CHECK" --no-such-flag >/dev/null 2>&1
 check "an unknown flag: exit 2" "$?" 2
 
+printf '\nthe app names against the installed GLib (gnome-shell/tests/desktop-names-reference.js)\n'
+# run_desktop_names_reference <ids file> <LANGUAGE> <LC_ALL> <LC_MESSAGES> <LANG> runs the reference under gjs and sets
+# REFERENCE_EXIT and REFERENCE_OUTPUT. Its environment is built here and not inherited: the fixture directories (the
+# fixture "home" is the data home, "system-a" then "system-b" the system directories), a PATH of the fixtures' own bin
+# (for TryExec and Exec), a HOME that does not exist, and the four language variables as given. Behind the barrier, so
+# nothing of it can reach a live bus. These language values are the ones LanguageSet holds in
+# resource-pulse-sampler/src/desktop_names/tests.rs, which holds the Rust lookup to the same expected files.
+GJS_PATH="$(command -v gjs)"
+run_desktop_names_reference() {
+  REFERENCE_OUTPUT="$(env -i "${BUS_BARRIER[@]}" GIO_USE_VFS=local \
+    "HOME=$DESKTOP_FIXTURES/home-dir" "PATH=$DESKTOP_FIXTURES/bin" \
+    "XDG_DATA_HOME=$DESKTOP_FIXTURES/home" "XDG_DATA_DIRS=$DESKTOP_FIXTURES/system-a:$DESKTOP_FIXTURES/system-b" \
+    "LANGUAGE=$2" "LC_ALL=$3" "LC_MESSAGES=$4" "LANG=$5" \
+    "$GJS_PATH" -m "$DESKTOP_NAMES_REFERENCE" "$1" 2>"$WORK_DIR/reference.err")"
+  REFERENCE_EXIT=$?
+}
+# Each row: a label, the four language values, and the file of answers the Rust lookup is held to.
+DESKTOP_NAMES_ROWS=(
+  "English|en|en_US.UTF-8|en_US.UTF-8|en_US.UTF-8|expected-english.tsv"
+  "a translated name must win|zz:xx_YY|en_US.UTF-8|en_US.UTF-8|en_US.UTF-8|expected-zz-xx-yy.tsv"
+  "a codeset and a modifier in the language|xx_YY.UTF-8@mod|en_US.UTF-8|en_US.UTF-8|en_US.UTF-8|expected-xx-yy-utf8-mod.tsv"
+)
+for desktop_names_row in "${DESKTOP_NAMES_ROWS[@]}"; do
+  IFS='|' read -r row_label row_language row_lc_all row_lc_messages row_lang row_expected_file <<<"$desktop_names_row"
+  run_desktop_names_reference "$DESKTOP_FIXTURES/ids.txt" "$row_language" "$row_lc_all" "$row_lc_messages" "$row_lang"
+  if (( REFERENCE_EXIT != 0 )); then
+    cat "$WORK_DIR/reference.err"
+    bad "desktop names, $row_label: the reference could not run (exit $REFERENCE_EXIT), which is not a pass"
+  elif [[ "$REFERENCE_OUTPUT" == "$(<"$DESKTOP_FIXTURES/$row_expected_file")" ]]; then
+    ok "desktop names, $row_label: GLib's answers are exactly $row_expected_file"
+  else
+    diff <(printf '%s\n' "$REFERENCE_OUTPUT") "$DESKTOP_FIXTURES/$row_expected_file" | head -10
+    bad "desktop names, $row_label: GLib's answers differ from $row_expected_file"
+  fi
+done
+# The comparison can fail: the English answers are not the answers under another language.
+run_desktop_names_reference "$DESKTOP_FIXTURES/ids.txt" zz:xx_YY en_US.UTF-8 en_US.UTF-8 en_US.UTF-8
+check "the reference under another language does not print the English answers: exit 0, and they differ" \
+  "$REFERENCE_EXIT/$([[ "$REFERENCE_OUTPUT" == "$(<"$DESKTOP_FIXTURES/expected-english.tsv")" ]] && echo same || echo different)" "0/different"
+run_desktop_names_reference "$WORK_DIR/no-such-ids.txt" en en_US.UTF-8 en_US.UTF-8 en_US.UTF-8
+check "a reference that cannot read its list of ids is exit 2 with nothing printed, never a pass" \
+  "$REFERENCE_EXIT/${#REFERENCE_OUTPUT}" "2/0"
+
 printf '\nthe program on a private bus (gnome-shell/tests/run-sampler-program.js)\n'
 # The bus is this run's own: a path socket in a 0700 directory, and no service directory, so nothing on it can be
 # activated. The runner refuses to start unless DBUS_SESSION_BUS_ADDRESS is that socket, and it all runs behind
@@ -378,12 +430,14 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
   bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
 fi
 
-# 171 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
-# string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence) + 1 build + 1 zbus feature row + 6 program flag rows
+# 198 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
+# string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence,
+# 27 of app names from `.desktop` files) + 1 build + 1 zbus feature row + 6 program flag rows
 # + 26 constants + 1 comparison tally + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks
 # + 11 carried-check fixtures + 2 runner guards + 1 bus_link guard + 8 bus_link tests
+# + 5 rows of the app names against the installed GLib (3 languages, 1 that must differ, 1 that cannot run)
 # + 11 rows of the program on a private bus.
-EXPECTED_ROWS=426
+EXPECTED_ROWS=458
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then
