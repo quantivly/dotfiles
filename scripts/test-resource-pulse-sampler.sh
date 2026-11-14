@@ -22,6 +22,9 @@
 #     and on a private bus of its own (one row per test, as cargo's others), and a
 #     row proving they refuse off it;
 #   - a row that fails if zbus is built with its object server (`service`);
+#   - the golden files (gnome-shell/tests/golden/): generate.js --check runs the real gjs sampler and D-Bus service on
+#     a private bus and says whether the committed expected files are still what it produces (exit 0, 1 or 2, told
+#     apart), the files the Rust golden test (tests/golden.rs, counted with cargo's) holds the compiled sampler to;
 #   - the app names (src/desktop_names.rs): GLib's own answers, from the installed GLib through
 #     gnome-shell/tests/desktop-names-reference.js under gjs, for every id in the fixtures, once per
 #     language setting, each against the file of answers the Rust tests hold the lookup to, and rows
@@ -59,6 +62,10 @@ CARRIED_ROWS_CHECK="$HERE/resource-pulse-sampler-carried-rows.sh"
 CARRIED_ROWS_GENERATOR="$HERE/resource-pulse-sampler-carried-rows-generate.py"
 CARRIED_ROWS_LIST_FILE="$CRATE_DIR/tests/carried-rows.txt"
 PRIVATE_BUS_RUNNER="$DOTFILES/gnome-shell/tests/run-sampler-program.js"
+GOLDEN_DIR="$DOTFILES/gnome-shell/tests/golden"
+GOLDEN_GENERATOR="$GOLDEN_DIR/generate.js"
+# The language the golden files are generated under: fixed by the caller, as generate.js's header says.
+GOLDEN_LOCALE=C.UTF-8
 # The bus rows take about 15 s; the cap ends a hang, and KILL follows TERM for whatever outlives it.
 PRIVATE_BUS_TIMEOUT_SECONDS=300
 PRIVATE_BUS_KILL_AFTER_SECONDS=10
@@ -84,6 +91,7 @@ done
 [[ -x "$CARRIED_ROWS_CHECK" ]] || fatal "cannot run $CARRIED_ROWS_CHECK"
 [[ -r "$CARRIED_ROWS_GENERATOR" ]] || fatal "cannot read $CARRIED_ROWS_GENERATOR"
 [[ -r "$PRIVATE_BUS_RUNNER" ]] || fatal "cannot read $PRIVATE_BUS_RUNNER"
+[[ -r "$GOLDEN_GENERATOR" ]] || fatal "cannot read $GOLDEN_GENERATOR"
 
 # Workers for cargo's build and its tests when the caller's environment sets neither. The interactive cap comes from
 # zsh/zshrc.buildlimits (which exports both variables); this is only the fallback for a non-interactive run.
@@ -437,6 +445,57 @@ if (( PROGRAM_BUS_EXIT != 0 && PROGRAM_BUS_FAIL == 0 )); then
   bad "the program's bus runner exited $PROGRAM_BUS_EXIT with no failing row"
 fi
 
+printf '\nthe golden files against the gjs sampler (gnome-shell/tests/golden/generate.js --check)\n'
+# count_golden_lines <rg pattern> <text> prints how many lines of the text match, 0 for none (rg -c prints nothing for none).
+count_golden_lines() { printf '%s\n' "$2" | rg -e "$1" | wc -l | tr -d ' '; }
+# run_golden_check <generate.js arguments...> runs the generator in its check mode on the private bus, under a fixed
+# locale, and sets GOLDEN_EXIT and GOLDEN_OUTPUT (stdout and stderr together). Its outcomes are told apart by exit
+# status and by lines no other outcome prints: 0 and "GOLDEN-CHECK ok", 1 and "GOLDEN-CHECK differs", 2 and neither.
+run_golden_check() {
+  GOLDEN_OUTPUT="$(on_private_bus env "LC_ALL=$GOLDEN_LOCALE" gjs -m "$GOLDEN_GENERATOR" --check "$@" 2>&1)"
+  GOLDEN_EXIT=$?
+}
+# golden_verdict says what a --check run did, from its exit status and its own lines.
+golden_verdict() {
+  printf '%s/%s ok/%s differs' "$GOLDEN_EXIT" "$(count_golden_lines '^GOLDEN-CHECK ok: ' "$GOLDEN_OUTPUT")" \
+    "$(count_golden_lines '^GOLDEN-CHECK differs: ' "$GOLDEN_OUTPUT")"
+}
+GOLDEN_SCENARIO_COUNT="$(find "$GOLDEN_DIR/scenarios" -name '*.json' | wc -l | tr -d ' ')"
+GOLDEN_FILES_BEFORE="$(find "$GOLDEN_DIR/expected" -type f -exec cksum {} + | sort)"
+run_golden_check
+check "golden: the gjs sampler still produces the committed files: exit 0, \"GOLDEN-CHECK ok\" for all $GOLDEN_SCENARIO_COUNT scenarios, no \"differs\"" \
+  "$(golden_verdict) $(count_golden_lines "^GOLDEN-CHECK ok: $GOLDEN_SCENARIO_COUNT scenarios\$" "$GOLDEN_OUTPUT")" "0/1 ok/0 differs 1"
+check "the check wrote nothing: the committed files are byte for byte what they were" \
+  "$(find "$GOLDEN_DIR/expected" -type f -exec cksum {} + | sort)" "$GOLDEN_FILES_BEFORE"
+# The check can fail: one number of one committed file is changed, in a copy, and exactly that scenario is named.
+GOLDEN_EDITED_EXPECTED="$WORK_DIR/golden-edited-expected"
+cp -r "$GOLDEN_DIR/expected" "$GOLDEN_EDITED_EXPECTED"
+sed -i '0,/"cpuBusyPercent": [0-9]/s//"cpuBusyPercent": 9/' "$GOLDEN_EDITED_EXPECTED/a-then-b.json"
+check "the copy's a-then-b.json really differs from the committed one" \
+  "$(cmp -s "$GOLDEN_EDITED_EXPECTED/a-then-b.json" "$GOLDEN_DIR/expected/a-then-b.json" && echo same || echo different)" different
+GOLDEN_EDITED_BEFORE="$(find "$GOLDEN_EDITED_EXPECTED" -type f -exec cksum {} + | sort)"
+run_golden_check --expected-dir "$GOLDEN_EDITED_EXPECTED"
+check "a committed file that differs: exit 1, one \"differs\" line naming a-then-b, no \"ok\"" \
+  "$(golden_verdict) $(count_golden_lines '^GOLDEN-CHECK differs: a-then-b: ' "$GOLDEN_OUTPUT")" "1/0 ok/1 differs 1"
+check "the check wrote nothing into the directory it was pointed at" \
+  "$(find "$GOLDEN_EDITED_EXPECTED" -type f -exec cksum {} + | sort)" "$GOLDEN_EDITED_BEFORE"
+rm -f "$GOLDEN_EDITED_EXPECTED/vanished.json"
+run_golden_check --expected-dir "$GOLDEN_EDITED_EXPECTED"
+check "an expected file missing: exit 1, named" \
+  "$(golden_verdict) $(count_golden_lines '^GOLDEN-CHECK differs: vanished: ' "$GOLDEN_OUTPUT")" "1/0 ok/2 differs 1"
+# Could not run is exit 2 and neither line, never a pass: a scenario file it cannot read as a scenario, and no private bus.
+GOLDEN_BROKEN_SCENARIOS="$WORK_DIR/golden-broken-scenarios"
+mkdir -p "$GOLDEN_BROKEN_SCENARIOS"
+printf '{"not": "a scenario"}\n' >"$GOLDEN_BROKEN_SCENARIOS/broken.json"
+run_golden_check --scenarios-dir "$GOLDEN_BROKEN_SCENARIOS"
+check "a scenario it cannot read: exit 2, \"could not run\", neither \"ok\" nor \"differs\"" \
+  "$(golden_verdict) $(count_golden_lines '^could not run: ' "$GOLDEN_OUTPUT")" "2/0 ok/0 differs 1"
+GOLDEN_OFF_BUS_OUTPUT="$(off_bus RESOURCE_PULSE_TEST_BUS_DIR="$PRIVATE_BUS_DIR" "LC_ALL=$GOLDEN_LOCALE" \
+  timeout "$PRIVATE_BUS_TIMEOUT_SECONDS" gjs -m "$GOLDEN_GENERATOR" --check 2>&1)"
+GOLDEN_OFF_BUS_EXIT=$?
+check "off the private bus it refuses before it connects: exit 2, \"refusing to run\", neither \"ok\" nor \"differs\"" \
+  "$GOLDEN_OFF_BUS_EXIT/$(count_golden_lines 'refusing to run' "$GOLDEN_OFF_BUS_OUTPUT")/$(count_golden_lines '^GOLDEN-CHECK ' "$GOLDEN_OFF_BUS_OUTPUT")" "2/1/0"
+
 # 308 cargo unit tests (2 of the constants, 24 of the parsers, 36 of the arithmetic, 4 of JavaScript's
 # string order, 1 of the insertion-ordered map, 67 of app naming and ranking, 37 of the scan cadence,
 # 30 of app names from `.desktop` files, 11 of the ports, 2 of the rate-limited log, 52 of the sampler, 13 of the payload writer, 10 of the service face, 19 of the golden test)
@@ -444,8 +503,11 @@ fi
 # + 26 constants + 1 comparison tally + 5 comparison-fails rows + 179 carried titles + 3 carried-list checks
 # + 11 carried-check fixtures + 2 runner guards + 1 bus_link guard + 8 bus_link tests
 # + 7 rows of the app names against the installed GLib (3 languages, 2 search paths, 1 that must differ, 1 that cannot run)
-# + 11 rows of the program on a private bus.
-EXPECTED_ROWS=570
+# + 11 rows of the program on a private bus
+# + 8 rows of the golden files against the gjs sampler (generate.js --check): it passes on the committed files, it wrote
+#   nothing, an edited copy really differs, the edited copy exits 1 and names its scenario, nothing is written into the
+#   copy, a missing expected file exits 1, a scenario it cannot read exits 2, and off the private bus it exits 2.
+EXPECTED_ROWS=578
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if (( PASS + FAIL != EXPECTED_ROWS )); then

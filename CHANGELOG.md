@@ -42,6 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     computed in doubles from the counters, as gjs computes them. The carried-rows check now matches its
     marker only as a doc comment, refuses a marker whose title is not in the list, and refuses a marker
     that is not on a test.
+  - **The payloads, the face and the golden files (pull request D).** `src/payload.rs` writes the text of a
+    `Sample` and of `GetState` by hand, in `lib/protocol.js`'s shape and field order (the state's text is
+    contract: `gnome-status` cuts it); `src/service.rs` is `ServiceFace`, the part of the D-Bus service with no
+    bus in it (the sequence, the latest sampled time, watch counts by sender). Eight of the nine rows of
+    `service-dbus.test.js` run on it. Twelve scenarios under `gnome-shell/tests/golden/scenarios/`, run by
+    `generate.js` through the real gjs sampler and service on a private bus, give the expected files; the Rust
+    sampler, face and writer must produce the same values (`tests/golden.rs`: the same keys, `null` where
+    `null`, every number the same double bit for bit), and the state table runs `generate.js --check`
+    (exit 0, 1 or 2, told apart). `protocol.test.js` gains a row (the parsers read every golden file), so
+    `scripts/test-resource-pulse.sh` asserts 1216 rows.
 
 - **The fingerprint reader, without ever putting a fingerprint wait in front of a password:
   `fingerprint-setup` (`--check`, `--remove`).**
