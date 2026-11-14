@@ -68,7 +68,7 @@ impl ServiceFace {
 
     /// `GetState`'s JSON from the parts the sampler holds: what `state_text` writes, for a caller
     /// (a row) that has a snapshot and histories without a sampler.
-    pub fn state_text_from_parts(
+    pub(crate) fn state_text_from_parts(
         &self,
         snapshot: Option<&Snapshot>,
         cpu_history: &RingBuffer,

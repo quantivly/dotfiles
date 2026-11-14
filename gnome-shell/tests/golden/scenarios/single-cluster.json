@@ -1,0 +1,26 @@
+{
+  "description": "A machine with no PMU lists and no cpu_capacity, so no cluster map can be built (a single-cluster machine), over two roots with moving counters: the busy percent is present and cpuClusters is null for that reason, with memory, swap, pressure and the rankings real around it.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "org.example.Editor.desktop": "Example Editor",
+    "com.example.Browser.desktop": "Example Browser"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-single-cluster-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250001,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-single-cluster-b",
+        "monotonicUsec": 102003117,
+        "realUsec": 1794000002253118,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

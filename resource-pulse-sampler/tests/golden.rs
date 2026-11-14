@@ -396,6 +396,7 @@ golden_scenarios! {
     golden_two_reveals => "two-reveals",
     golden_history_wraps => "history-wraps",
     golden_no_cgroup_directory => "no-cgroup-directory",
+    golden_single_cluster => "single-cluster",
 }
 
 /// The names of the `.json` files in a directory, without the suffix.

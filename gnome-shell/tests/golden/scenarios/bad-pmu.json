@@ -1,5 +1,5 @@
 {
-  "description": "A cluster map that cannot be read (a CPU list with a part that is not a number) over two roots whose /proc/stat moves: the busy percent exists and the clusters are null for that reason; memory, swap, pressure and the rankings stay null because the roots hold no such files.",
+  "description": "A CPU list that cannot be parsed (a part that is not a number) in the PMU files, over two roots whose /proc/stat moves: the cluster map is built from cpu_capacity instead (1024 and 600), so the busy percent and both cluster percents are present; memory, swap, pressure and the rankings stay null or empty because the roots hold no such files.",
   "serviceStartedAtUsec": 1793999995000000,
   "appNames": {},
   "steps": [
