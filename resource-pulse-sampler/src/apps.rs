@@ -101,8 +101,9 @@ pub struct AppGroup {
 /// [`compare_largest_first`]).
 #[derive(Debug, Clone, Default)]
 pub struct RankingScan {
-    /// `cpu.stat` `usage_usec` by cgroup path, last scan.
-    pub previous_usage_usec: HashMap<String, u64>,
+    /// `cpu.stat` `usage_usec` by cgroup path, last scan: the same type as this scan's, since the
+    /// sampler keeps this scan's map as the next scan's previous one, unchanged.
+    pub previous_usage_usec: InsertionOrderedMap<u64>,
     /// The same, this scan; the order the leaves are counted in.
     pub current_usage_usec: InsertionOrderedMap<u64>,
     /// Non-cache memory by cgroup path; the order the leaves are counted in.

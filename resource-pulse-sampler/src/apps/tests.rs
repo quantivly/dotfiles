@@ -575,8 +575,7 @@ fn scan_of(leaves: &[LeafSpec]) -> RankingScan {
     };
     for (path, previous, current, memory) in leaves {
         if let Some(previous_usec) = previous {
-            scan.previous_usage_usec
-                .insert(path.to_string(), *previous_usec);
+            scan.previous_usage_usec.insert(path, *previous_usec);
         }
         scan.current_usage_usec.insert(path, *current);
         if let Some(memory_bytes) = memory {
@@ -1011,7 +1010,7 @@ fn scan_with_more_groups_than_the_ranking_holds() -> RankingScan {
     };
     for group_index in 0..APP_RANKING_LENGTH + EXTRA_GROUP_COUNT {
         let path = format!("app-{group_index}");
-        scan.previous_usage_usec.insert(path.clone(), 0);
+        scan.previous_usage_usec.insert(&path, 0);
         scan.current_usage_usec
             .insert(&path, (group_index + 1) * 100_000);
         scan.memory_bytes_by_cgroup

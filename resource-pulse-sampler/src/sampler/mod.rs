@@ -21,7 +21,12 @@
 //!   arithmetic on it, in the order the JavaScript writes it, and no difference of two readings or
 //!   two tick numbers is an unsigned subtraction.
 
+mod app_names;
+mod app_scan;
+mod cadence_bookkeeping;
 mod caught_panic;
+mod cgroup_readings;
+mod cgroup_tree;
 mod cluster_map_reading;
 mod fast_sample;
 mod logged_reads;
@@ -40,6 +45,9 @@ use crate::history::RingBuffer;
 use crate::parsers::proc::{parse_uid, ProcStat};
 use crate::ports::{Clock, DirectoryLister, FileReader};
 use crate::rate_limited_log::RateLimitedLog;
+use app_names::AppNameCache;
+use app_scan::AppScanReadings;
+use cadence_bookkeeping::CadenceBookkeeping;
 use caught_panic::catching_panic;
 use fast_sample::parse_usable_proc_stat;
 use paths::{join_under, PROC_SELF_STATUS_PATH, PROC_STAT_PATH};
@@ -57,6 +65,9 @@ const FALLBACK_HISTORY_CAPACITY: NonZeroUsize = NonZeroUsize::MIN;
 /// The template key of a failed sample's journal line.
 const SAMPLE_FAILURE_LOG_KEY: &str = "sample failed";
 
+/// The name of a `.desktop` id, `None` for an unknown one: the `resolve_app_name` port.
+pub type ResolveAppName = Box<dyn FnMut(&str) -> Option<String>>;
+
 /// What the sampler reads, tells time and logs through, and how it names apps.
 pub struct SamplerPorts {
     pub reader: Box<dyn FileReader>,
@@ -64,7 +75,7 @@ pub struct SamplerPorts {
     pub clock: Box<dyn Clock>,
     /// The name of a `.desktop` id, `None` for an unknown one. A panic counts as gjs's throw: logged,
     /// and a miss.
-    pub resolve_app_name: Box<dyn FnMut(&str) -> Option<String>>,
+    pub resolve_app_name: ResolveAppName,
     /// Where the rate-limited journal lines go.
     pub log: Box<dyn FnMut(&str)>,
 }
@@ -77,6 +88,8 @@ pub struct Sampler {
     lister: Box<dyn DirectoryLister>,
     clock: Box<dyn Clock>,
     error_log: RateLimitedLog,
+    /// App names by desktop id, looked up through the `resolve_app_name` port.
+    app_names: AppNameCache,
     /// The uid whose user manager's slices are scanned; `None` when unknown.
     uid: Option<u32>,
     /// CPUs counted as 100% of the machine: the per-CPU lines of the latest `/proc/stat`.
@@ -85,6 +98,9 @@ pub struct Sampler {
     cluster_map: Option<ClusterMap>,
     /// The latest `/proc/stat`, the next CPU baseline.
     previous_proc_stat: Option<ProcStat>,
+    /// The latest app scan's readings, the next scan's baseline; `None` before the first and after a
+    /// scan that failed.
+    previous_app_scan: Option<AppScanReadings>,
     /// The latest app scan's ranking; `None` before the first and after a scan that failed.
     latest_app_ranking: Option<AppRanking>,
     latest_snapshot: Option<Snapshot>,
@@ -95,6 +111,8 @@ pub struct Sampler {
     /// Whether the latest snapshot is a no-data one (its sample failed): a watch start then
     /// publishes nothing.
     is_latest_snapshot_no_data: bool,
+    /// What `lib/cadence.js` reads to decide a scan.
+    cadence: CadenceBookkeeping,
 }
 
 impl Sampler {
@@ -104,23 +122,25 @@ impl Sampler {
             .ok()
             .and_then(NonZeroUsize::new)
             .unwrap_or(FALLBACK_HISTORY_CAPACITY);
-        let _ = ports.resolve_app_name;
         Sampler {
             fs_root,
             reader: ports.reader,
             lister: ports.lister,
             clock: ports.clock,
             error_log: RateLimitedLog::new(ports.log),
+            app_names: AppNameCache::new(ports.resolve_app_name),
             uid: None,
             cpu_count: None,
             cluster_map: None,
             previous_proc_stat: None,
+            previous_app_scan: None,
             latest_app_ranking: None,
             latest_snapshot: None,
             last_good_clock_label: None,
             cpu_history: RingBuffer::new(history_capacity),
             memory_history: RingBuffer::new(history_capacity),
             is_latest_snapshot_no_data: false,
+            cadence: CadenceBookkeeping::default(),
         }
     }
 
@@ -152,7 +172,7 @@ impl Sampler {
     ///     The tick count, rising by one per tick: the cadence counts ticks as the difference of two
     ///     tick numbers.
     pub fn run_tick(&mut self, tick_number: u64) -> Publish {
-        let _ = tick_number;
+        self.cadence.latest_tick_number = Some(tick_number);
         let fast_sample = match catching_panic(|| self.take_fast_sample()) {
             Ok(Ok(fast_sample)) => fast_sample,
             Ok(Err(failure_text)) | Err(failure_text) => {
@@ -162,6 +182,7 @@ impl Sampler {
         if let Some(proc_stat) = fast_sample.proc_stat {
             self.record_proc_stat(proc_stat);
         }
+        self.scan_apps_if_due(tick_number, &fast_sample.snapshot_without_apps);
         self.is_latest_snapshot_no_data = false;
         let snapshot = Snapshot {
             apps: self.latest_app_ranking.clone(),
@@ -207,7 +228,7 @@ impl Sampler {
     /// Why the latest app scan ran, `None` before the first. Nothing in the protocol carries it; the
     /// rows and diagnosis read it.
     pub fn last_app_scan_reason(&self) -> Option<ScanReason> {
-        None
+        self.cadence.last_app_scan_reason
     }
 
     /// Keeps a `/proc/stat` reading as the next CPU baseline and refreshes the CPU count from it.

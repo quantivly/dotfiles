@@ -4,6 +4,9 @@
 //! are `run_tick`'s returned `Publish`. A test that is not a gjs row says where its expected values
 //! came from.
 
+mod app_scan;
+mod cadence;
+mod cgroup_tree;
 mod fast_sample;
 
 use std::cell::{Cell, RefCell};
@@ -11,7 +14,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
-use super::{Publish, Sampler, SamplerPorts};
+use super::{Publish, ResolveAppName, Sampler, SamplerPorts};
+use crate::apps::CpuRankEntry;
 use crate::ports::{
     Clock, DirectoryLister, FileReader, FileSystemLister, FileSystemReader, ReadFailure,
 };
@@ -46,9 +50,6 @@ const SAMPLE_FIXTURE_FILES: [&str; 10] = [
 ];
 /// The tick of the first interval scan with no watch held: the warm-up at tick 1, then 30 ticks.
 const FIRST_UNWATCHED_INTERVAL_SCAN_TICK: u64 = 31;
-/// The last tick `make_sampler_past_its_warm_up` runs: ticks 0 (first scan), 1 (warm-up scan), 2
-/// and 3 (no scan).
-const WARM_UP_SETUP_LAST_TICK: u64 = 3;
 
 /// The absolute path of a fixture root.
 fn fixture_root(root_name: &str) -> PathBuf {
@@ -119,7 +120,7 @@ struct SamplerSetup {
     reader: Box<dyn FileReader>,
     lister: Box<dyn DirectoryLister>,
     clock_label: Box<dyn Fn() -> Result<String, String>>,
-    resolve_app_name: Box<dyn FnMut(&str) -> Option<String>>,
+    resolve_app_name: ResolveAppName,
 }
 
 impl SamplerSetup {
@@ -332,4 +333,270 @@ fn run_ticks(
         publishes.push(test_sampler.sampler.run_tick(tick_number));
     }
     publishes
+}
+
+const USER_SERVICE_PATH: &str = "user.slice/user-1000.slice/user@1000.service";
+const APP_SLICE: &str = "user.slice/user-1000.slice/user@1000.service/app.slice";
+const SESSION_SLICE: &str = "user.slice/user-1000.slice/user@1000.service/session.slice";
+const BACKGROUND_SLICE: &str = "user.slice/user-1000.slice/user@1000.service/background.slice";
+const SYSTEM_SLICE: &str = "system.slice";
+/// The slice every user's session lives in, and this user's: never scanned parents themselves
+/// (ruling R22).
+const USER_SLICE: &str = "user.slice";
+const USER_1000_SLICE: &str = "user.slice/user-1000.slice";
+/// Where systemd-machined puts VMs and containers, a top-level slice like system.slice.
+const MACHINE_SLICE: &str = "machine.slice";
+/// A libvirt VM's scope, named as machined escapes it.
+const VM_LEAF: &str = "machine.slice/machine-qemu\\x2d1\\x2dwin11.scope";
+/// The name the VM's scope ranks under.
+const VM_NAME: &str = "machine-qemu-1-win11";
+/// The slice a `systemd-run --user --slice=build` job runs in, beside app.slice, and the job's unit.
+const BUILD_SLICE: &str = "user.slice/user-1000.slice/user@1000.service/build.slice";
+const BUILD_JOB_LEAF: &str =
+    "user.slice/user-1000.slice/user@1000.service/build.slice/run-u42.service";
+const BUILD_JOB_NAME: &str = "run-u42";
+const EDITOR_LEAF: &str =
+    "user.slice/user-1000.slice/user@1000.service/app.slice/app-org.example.Editor-1.scope";
+const BUILDER_LEAF: &str =
+    "user.slice/user-1000.slice/user@1000.service/app.slice/app-org.example.Builder-7.scope";
+const SHELL_LEAF: &str =
+    "user.slice/user-1000.slice/user@1000.service/session.slice/org.gnome.Shell@ubuntu.service";
+const DAEMON_LEAF: &str = "system.slice/example-daemon.service";
+/// The root cgroup's key in a set of counters: its path relative to the cgroup root.
+const ROOT_CGROUP_KEY: &str = "";
+const SLICE_SUFFIX: &str = ".slice";
+/// The memory.current of every leaf `write_cgroup_counters` writes.
+const LEAF_MEMORY_BYTES: u64 = 1_000_000;
+/// The parents' 1,000,000 µs of `STEADY_DELTAS_USEC`, in all.
+const STEADY_PARENTS_DELTA_USEC: u64 = 1_000_000;
+/// What the root spends beyond every parent in the R22 rows: kernel, at 2.5%.
+const KERNEL_ONLY_DELTA_USEC: u64 = 100_000;
+/// What the VM under machine.slice spends between the scans: 40% of the machine.
+const VM_DELTA_USEC: u64 = 1_600_000;
+/// What the job under build.slice spends between the scans: 30% of the machine.
+const BUILD_JOB_DELTA_USEC: u64 = 1_200_000;
+/// What user.slice and user-1000.slice spend between the scans: the user's slices' 700,000 µs and
+/// a login's 50,000.
+const USER_SLICE_DELTA_USEC: u64 = 750_000;
+/// A new app leaf's whole usage, and what its parent spends with it: Editor 300,000, Builder this,
+/// short 100,000.
+const BUILDER_USAGE_USEC: u64 = 1_500_000;
+const APP_SLICE_DELTA_WITH_BUILDER_USEC: u64 = 1_900_000;
+/// An hour of CPU: a long-lived leaf's usage_usec, which no scan may ever count as one interval's.
+const LONG_LIVED_LEAF_USAGE_USEC: u64 = 3_600_000_000;
+/// The text of the in-memory tree's "permission denied" for a directory.
+const DIRECTORY_DENIED_TEXT: &str = "Error opening directory: Permission denied";
+/// The text of the in-memory tree's "permission denied" for a file.
+const FILE_DENIED_TEXT: &str = "Error opening file: Permission denied";
+
+/// usage_usec by cgroup path relative to the cgroup root (the gjs rows' counter objects).
+type CounterSet = BTreeMap<String, u64>;
+
+/// A counter set from pairs.
+fn counters(pairs: &[(&str, u64)]) -> CounterSet {
+    pairs
+        .iter()
+        .map(|(cgroup_path, usage_usec)| (cgroup_path.to_string(), *usage_usec))
+        .collect()
+}
+
+/// Counters of the first of two scans in the in-memory tree; the second adds a row's deltas.
+fn first_scan_counters_usec() -> CounterSet {
+    counters(&[
+        (ROOT_CGROUP_KEY, 10_000_000),
+        (APP_SLICE, 1_000_000),
+        (SESSION_SLICE, 1_000_000),
+        (BACKGROUND_SLICE, 1_000_000),
+        (SYSTEM_SLICE, 1_000_000),
+        (EDITOR_LEAF, 500_000),
+        (SHELL_LEAF, 500_000),
+        (DAEMON_LEAF, 500_000),
+    ])
+}
+
+/// What each parent and leaf spends between the two scans (2 s on 2 CPUs: 4,000,000 µs is the
+/// whole machine). The parents spend 1,000,000 in all, 400,000 of it beyond their leaves: 100,000
+/// in app.slice, 100,000 in a background.slice with no leaf, and 200,000 in system.slice. That is
+/// short jobs at 10%.
+fn steady_deltas_usec() -> CounterSet {
+    counters(&[
+        (APP_SLICE, 400_000),
+        (EDITOR_LEAF, 300_000),
+        (SESSION_SLICE, 200_000),
+        (SHELL_LEAF, 200_000),
+        (BACKGROUND_SLICE, 100_000),
+        (SYSTEM_SLICE, 300_000),
+        (DAEMON_LEAF, 100_000),
+    ])
+}
+
+/// A counter set with more pairs set (gjs `{...base, [key]: value}`).
+fn with_counters(base: &CounterSet, pairs: &[(&str, u64)]) -> CounterSet {
+    let mut combined = base.clone();
+    combined.extend(counters(pairs));
+    combined
+}
+
+/// Writes cgroup counters into an in-memory tree: a cpu.stat for each cgroup, and a memory.current
+/// for each one that is neither the root nor a slice (a leaf).
+fn write_cgroup_counters(tree: &FakeFileTree, usage_usec_by_cgroup: &CounterSet) {
+    for (cgroup_path, usage_usec) in usage_usec_by_cgroup {
+        let cgroup_directory = cgroup_relative_path(cgroup_path);
+        tree.write_file(
+            &format!("{cgroup_directory}/cpu.stat"),
+            &format!("usage_usec {usage_usec}\n"),
+        );
+        let is_leaf = cgroup_path != ROOT_CGROUP_KEY && !cgroup_path.ends_with(SLICE_SUFFIX);
+        if is_leaf {
+            tree.write_file(
+                &format!("{cgroup_directory}/memory.current"),
+                &format!("{LEAF_MEMORY_BYTES}\n"),
+            );
+        }
+    }
+}
+
+/// A cgroup's directory relative to the fs root.
+fn cgroup_relative_path(cgroup_path: &str) -> String {
+    if cgroup_path.is_empty() {
+        CGROUP_ROOT_RELATIVE_PATH.to_string()
+    } else {
+        format!("{CGROUP_ROOT_RELATIVE_PATH}/{cgroup_path}")
+    }
+}
+
+/// Adds deltas to counters; a cgroup with no earlier count starts from 0 (a new leaf).
+fn counters_after(counters_usec: &CounterSet, deltas_usec: &CounterSet) -> CounterSet {
+    let mut later_counters_usec = counters_usec.clone();
+    for (cgroup_path, delta_usec) in deltas_usec {
+        *later_counters_usec.entry(cgroup_path.clone()).or_insert(0) += delta_usec;
+    }
+    later_counters_usec
+}
+
+/// Counters or deltas without one cgroup, as if it did not exist.
+fn without_cgroup(usec_by_cgroup: &CounterSet, cgroup_path: &str) -> CounterSet {
+    let mut remaining_usec_by_cgroup = usec_by_cgroup.clone();
+    remaining_usec_by_cgroup.remove(cgroup_path);
+    remaining_usec_by_cgroup
+}
+
+/// A change made to the in-memory tree at one point of `top_cpu_after_two_scans`.
+type TreeChange = Box<dyn FnOnce(&FakeFileTree)>;
+
+/// What `top_cpu_after_two_scans` changes, and the first scan's counters.
+struct TwoScanOptions {
+    first_scan_counters_usec: CounterSet,
+    before_initialize: TreeChange,
+    before_first_scan: TreeChange,
+    before_second_scan: TreeChange,
+}
+
+impl Default for TwoScanOptions {
+    fn default() -> Self {
+        TwoScanOptions {
+            first_scan_counters_usec: first_scan_counters_usec(),
+            before_initialize: Box::new(|_| {}),
+            before_first_scan: Box::new(|_| {}),
+            before_second_scan: Box::new(|_| {}),
+        }
+    }
+}
+
+/// Scans an in-memory tree twice, two seconds apart (the first tick, then the warm-up tick): the
+/// first scan's counters, then those plus the deltas (gjs `topCpuAfterTwoScans`). Returns the second
+/// scan's top CPU entry, what was logged, and the tree.
+fn top_cpu_after_two_scans(
+    deltas_usec: &CounterSet,
+    options: TwoScanOptions,
+) -> (Option<CpuRankEntry>, Vec<String>, FakeFileTree) {
+    let tree = fake_tree_with_sample_files();
+    write_cgroup_counters(&tree, &options.first_scan_counters_usec);
+    let mut test_sampler = SamplerSetup::on_tree(&tree).build();
+    (options.before_initialize)(&tree);
+    test_sampler.sampler.initialize();
+    (options.before_first_scan)(&tree);
+    test_sampler.sampler.run_tick(0);
+    test_sampler.advance_clock(SAMPLE_SPACING_USEC);
+    write_cgroup_counters(
+        &tree,
+        &counters_after(&options.first_scan_counters_usec, deltas_usec),
+    );
+    (options.before_second_scan)(&tree);
+    test_sampler.sampler.run_tick(1);
+    let top_cpu = test_sampler
+        .sampler
+        .latest_snapshot()
+        .and_then(|snapshot| snapshot.apps.as_ref())
+        .and_then(|apps| apps.top_cpu.clone());
+    (top_cpu, test_sampler.logged(), tree)
+}
+
+/// A CPU ranking entry.
+fn cpu_entry(group_key: &str, name: &str, cpu_percent: f64) -> CpuRankEntry {
+    CpuRankEntry {
+        group_key: group_key.to_string(),
+        name: name.to_string(),
+        cpu_percent,
+    }
+}
+
+/// A line as the sampler logs it.
+fn logged_line(message: &str) -> String {
+    format!("{} {message}", crate::constants::LOG_PREFIX)
+}
+
+/// Runs two app scans six seconds apart through the cadence: the first tick's scan on root-a, then
+/// the warm-up tick's on the given root (gjs `scanTwice`). Returns the second tick's two winners and
+/// what was logged.
+fn scan_twice(
+    second_root_name: &str,
+) -> (
+    Option<CpuRankEntry>,
+    Option<crate::apps::MemoryRankEntry>,
+    Vec<String>,
+) {
+    let mut test_sampler = SamplerSetup::at_fixture("root-a").build();
+    test_sampler.sampler.initialize();
+    test_sampler.sampler.run_tick(0);
+    test_sampler.advance_clock(APP_SCAN_SPACING_USEC);
+    test_sampler
+        .sampler
+        .set_fs_root(fixture_root(second_root_name));
+    test_sampler.sampler.run_tick(1);
+    let apps = test_sampler
+        .sampler
+        .latest_snapshot()
+        .and_then(|snapshot| snapshot.apps.clone())
+        .unwrap();
+    (apps.top_cpu, apps.top_memory, test_sampler.logged())
+}
+
+/// An in-memory tree's lister, except that one cgroup lists its children in a given order, as a real
+/// directory may (gjs `listingChildrenInOrder`).
+struct ListingChildrenInOrder {
+    tree: FakeFileTree,
+    directory_path: PathBuf,
+    child_names: Vec<String>,
+}
+
+impl ListingChildrenInOrder {
+    fn new(tree: &FakeFileTree, directory_relative_path: &str, child_names: &[&str]) -> Self {
+        ListingChildrenInOrder {
+            tree: tree.clone(),
+            directory_path: Path::new(FAKE_ROOT_PATH)
+                .join(CGROUP_ROOT_RELATIVE_PATH)
+                .join(directory_relative_path),
+            child_names: child_names.iter().map(|name| name.to_string()).collect(),
+        }
+    }
+}
+
+impl DirectoryLister for ListingChildrenInOrder {
+    fn subdirectory_names(&self, path: &Path) -> Result<Vec<String>, ReadFailure> {
+        if path == self.directory_path {
+            return Ok(self.child_names.clone());
+        }
+        self.tree.subdirectory_names(path)
+    }
 }
