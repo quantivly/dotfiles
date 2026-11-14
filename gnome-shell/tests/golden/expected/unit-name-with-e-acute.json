@@ -1,0 +1,192 @@
+{
+  "samples": [
+    {
+      "sequence": 1,
+      "sampledAtUsec": 1794000000250000,
+      "snapshot": {
+        "takenAtUsec": 100000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": null,
+        "cpuClusters": null,
+        "memory": {
+          "usedBytes": 8192000000,
+          "totalBytes": 16384000000
+        },
+        "swap": {
+          "zramUsedBytes": 0,
+          "zramRamBytes": 0,
+          "diskBytes": 0
+        },
+        "pressureAvg10": {
+          "cpu": 12.5,
+          "memory": 0,
+          "io": 0
+        },
+        "apps": {
+          "topCpu": null,
+          "topMemory": {
+            "groupKey": "snap:firefox",
+            "name": "firefox",
+            "memoryBytes": 40000000
+          },
+          "cpuRanking": [],
+          "memoryRanking": [
+            {
+              "groupKey": "snap:firefox",
+              "name": "firefox",
+              "memoryBytes": 40000000
+            },
+            {
+              "groupKey": "unit:café",
+              "name": "café",
+              "memoryBytes": 5000000
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": null,
+        "memory": 0.5
+      }
+    },
+    {
+      "sequence": 2,
+      "sampledAtUsec": 1794000002250000,
+      "snapshot": {
+        "takenAtUsec": 102000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": 100,
+        "cpuClusters": null,
+        "memory": {
+          "usedBytes": 8192000000,
+          "totalBytes": 16384000000
+        },
+        "swap": {
+          "zramUsedBytes": 0,
+          "zramRamBytes": 0,
+          "diskBytes": 0
+        },
+        "pressureAvg10": {
+          "cpu": 12.5,
+          "memory": 0,
+          "io": 0
+        },
+        "apps": {
+          "topCpu": {
+            "groupKey": "snap:firefox",
+            "name": "firefox",
+            "cpuPercent": 75
+          },
+          "topMemory": {
+            "groupKey": "snap:firefox",
+            "name": "firefox",
+            "memoryBytes": 40000000
+          },
+          "cpuRanking": [
+            {
+              "groupKey": "snap:firefox",
+              "name": "firefox",
+              "cpuPercent": 75
+            },
+            {
+              "groupKey": "unit:café",
+              "name": "café",
+              "cpuPercent": 25
+            }
+          ],
+          "memoryRanking": [
+            {
+              "groupKey": "snap:firefox",
+              "name": "firefox",
+              "memoryBytes": 40000000
+            },
+            {
+              "groupKey": "unit:café",
+              "name": "café",
+              "memoryBytes": 7000000
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": 1,
+        "memory": 0.5
+      }
+    }
+  ],
+  "state": {
+    "protocol": 1,
+    "serviceStartedAtUsec": 1793999995000000,
+    "latestSampledAtUsec": 1794000002250000,
+    "sequence": 2,
+    "snapshot": {
+      "takenAtUsec": 102000000,
+      "takenAtClockLabel": "14:02",
+      "cpuBusyPercent": 100,
+      "cpuClusters": null,
+      "memory": {
+        "usedBytes": 8192000000,
+        "totalBytes": 16384000000
+      },
+      "swap": {
+        "zramUsedBytes": 0,
+        "zramRamBytes": 0,
+        "diskBytes": 0
+      },
+      "pressureAvg10": {
+        "cpu": 12.5,
+        "memory": 0,
+        "io": 0
+      },
+      "apps": {
+        "topCpu": {
+          "groupKey": "snap:firefox",
+          "name": "firefox",
+          "cpuPercent": 75
+        },
+        "topMemory": {
+          "groupKey": "snap:firefox",
+          "name": "firefox",
+          "memoryBytes": 40000000
+        },
+        "cpuRanking": [
+          {
+            "groupKey": "snap:firefox",
+            "name": "firefox",
+            "cpuPercent": 75
+          },
+          {
+            "groupKey": "unit:café",
+            "name": "café",
+            "cpuPercent": 25
+          }
+        ],
+        "memoryRanking": [
+          {
+            "groupKey": "snap:firefox",
+            "name": "firefox",
+            "memoryBytes": 40000000
+          },
+          {
+            "groupKey": "unit:café",
+            "name": "café",
+            "memoryBytes": 7000000
+          }
+        ]
+      },
+      "isComplete": true
+    },
+    "histories": {
+      "cpu": [
+        null,
+        1
+      ],
+      "memory": [
+        0.5,
+        0.5
+      ]
+    }
+  }
+}

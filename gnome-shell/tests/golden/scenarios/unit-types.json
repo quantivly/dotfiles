@@ -1,0 +1,23 @@
+{
+  "description": "Mount, socket and service units: only the service is a candidate.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {},
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-unit-types",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-unit-types",
+        "monotonicUsec": 102000000,
+        "realUsec": 1794000002250000,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}

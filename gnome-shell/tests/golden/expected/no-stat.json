@@ -1,0 +1,267 @@
+{
+  "samples": [
+    {
+      "sequence": 1,
+      "sampledAtUsec": 1794000000250000,
+      "snapshot": {
+        "takenAtUsec": 100000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": null,
+        "cpuClusters": null,
+        "memory": {
+          "usedBytes": 20480000000,
+          "totalBytes": 32768000000
+        },
+        "swap": {
+          "zramUsedBytes": 1638400000,
+          "zramRamBytes": 400000000,
+          "diskBytes": 0
+        },
+        "pressureAvg10": {
+          "cpu": 12.5,
+          "memory": 0,
+          "io": 0
+        },
+        "apps": {
+          "topCpu": null,
+          "topMemory": {
+            "groupKey": "unit:herdr-server",
+            "name": "herdr agents",
+            "memoryBytes": 15000000000
+          },
+          "cpuRanking": [],
+          "memoryRanking": [
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "memoryBytes": 15000000000
+            },
+            {
+              "groupKey": "app:org.chromium.Chromium",
+              "name": "Chromium",
+              "memoryBytes": 4000000000
+            },
+            {
+              "groupKey": "app:com.google.Chrome",
+              "name": "Google Chrome",
+              "memoryBytes": 1000000000
+            },
+            {
+              "groupKey": "unit:org.gnome.Shell",
+              "name": "GNOME Shell",
+              "memoryBytes": 300000000
+            },
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "memoryBytes": 300000000
+            }
+          ]
+        },
+        "isComplete": true
+      },
+      "appendedHistory": {
+        "cpu": null,
+        "memory": 0.625
+      }
+    },
+    {
+      "sequence": 2,
+      "sampledAtUsec": 1794000002250000,
+      "snapshot": {
+        "takenAtUsec": 102000000,
+        "takenAtClockLabel": "14:02",
+        "cpuBusyPercent": null,
+        "cpuClusters": null,
+        "memory": {
+          "usedBytes": 20480000000,
+          "totalBytes": 32768000000
+        },
+        "swap": {
+          "zramUsedBytes": 1638400000,
+          "zramRamBytes": 400000000,
+          "diskBytes": 0
+        },
+        "pressureAvg10": {
+          "cpu": 12.5,
+          "memory": 0,
+          "io": 0
+        },
+        "apps": {
+          "topCpu": {
+            "groupKey": "app:org.chromium.Chromium",
+            "name": "Chromium",
+            "cpuPercent": 0
+          },
+          "topMemory": {
+            "groupKey": "unit:herdr-server",
+            "name": "herdr agents",
+            "memoryBytes": 15000000000
+          },
+          "cpuRanking": [
+            {
+              "groupKey": "app:org.chromium.Chromium",
+              "name": "Chromium",
+              "cpuPercent": 0
+            },
+            {
+              "groupKey": "unit:org.gnome.Shell",
+              "name": "GNOME Shell",
+              "cpuPercent": 0
+            },
+            {
+              "groupKey": "app:com.google.Chrome",
+              "name": "Google Chrome",
+              "cpuPercent": 0
+            },
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "cpuPercent": 0
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "cpuPercent": 0
+            }
+          ],
+          "memoryRanking": [
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "memoryBytes": 15000000000
+            },
+            {
+              "groupKey": "app:org.chromium.Chromium",
+              "name": "Chromium",
+              "memoryBytes": 4000000000
+            },
+            {
+              "groupKey": "app:com.google.Chrome",
+              "name": "Google Chrome",
+              "memoryBytes": 1000000000
+            },
+            {
+              "groupKey": "unit:org.gnome.Shell",
+              "name": "GNOME Shell",
+              "memoryBytes": 300000000
+            },
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "memoryBytes": 300000000
+            }
+          ]
+        },
+        "isComplete": false
+      },
+      "appendedHistory": {
+        "cpu": null,
+        "memory": 0.625
+      }
+    }
+  ],
+  "state": {
+    "protocol": 1,
+    "serviceStartedAtUsec": 1793999995000000,
+    "latestSampledAtUsec": 1794000002250000,
+    "sequence": 2,
+    "snapshot": {
+      "takenAtUsec": 102000000,
+      "takenAtClockLabel": "14:02",
+      "cpuBusyPercent": null,
+      "cpuClusters": null,
+      "memory": {
+        "usedBytes": 20480000000,
+        "totalBytes": 32768000000
+      },
+      "swap": {
+        "zramUsedBytes": 1638400000,
+        "zramRamBytes": 400000000,
+        "diskBytes": 0
+      },
+      "pressureAvg10": {
+        "cpu": 12.5,
+        "memory": 0,
+        "io": 0
+      },
+      "apps": {
+        "topCpu": {
+          "groupKey": "app:org.chromium.Chromium",
+          "name": "Chromium",
+          "cpuPercent": 0
+        },
+        "topMemory": {
+          "groupKey": "unit:herdr-server",
+          "name": "herdr agents",
+          "memoryBytes": 15000000000
+        },
+        "cpuRanking": [
+          {
+            "groupKey": "app:org.chromium.Chromium",
+            "name": "Chromium",
+            "cpuPercent": 0
+          },
+          {
+            "groupKey": "unit:org.gnome.Shell",
+            "name": "GNOME Shell",
+            "cpuPercent": 0
+          },
+          {
+            "groupKey": "app:com.google.Chrome",
+            "name": "Google Chrome",
+            "cpuPercent": 0
+          },
+          {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "cpuPercent": 0
+          },
+          {
+            "groupKey": "unit:herdr-server",
+            "name": "herdr agents",
+            "cpuPercent": 0
+          }
+        ],
+        "memoryRanking": [
+          {
+            "groupKey": "unit:herdr-server",
+            "name": "herdr agents",
+            "memoryBytes": 15000000000
+          },
+          {
+            "groupKey": "app:org.chromium.Chromium",
+            "name": "Chromium",
+            "memoryBytes": 4000000000
+          },
+          {
+            "groupKey": "app:com.google.Chrome",
+            "name": "Google Chrome",
+            "memoryBytes": 1000000000
+          },
+          {
+            "groupKey": "unit:org.gnome.Shell",
+            "name": "GNOME Shell",
+            "memoryBytes": 300000000
+          },
+          {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 300000000
+          }
+        ]
+      },
+      "isComplete": false
+    },
+    "histories": {
+      "cpu": [
+        null,
+        null
+      ],
+      "memory": [
+        0.625,
+        0.625
+      ]
+    }
+  }
+}

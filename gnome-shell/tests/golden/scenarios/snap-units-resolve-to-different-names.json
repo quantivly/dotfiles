@@ -1,0 +1,26 @@
+{
+  "description": "One snap, two units whose desktop files give different names: the group is named by the first unit in name order.",
+  "serviceStartedAtUsec": 1793999995000000,
+  "appNames": {
+    "firefox_firefox.desktop": "Firefox",
+    "firefox_geckodriver.desktop": "Firefox Driver"
+  },
+  "steps": [
+    {
+      "tick": {
+        "fsRoot": "root-names-a",
+        "monotonicUsec": 100000000,
+        "realUsec": 1794000000250000,
+        "clockLabel": "14:02"
+      }
+    },
+    {
+      "tick": {
+        "fsRoot": "root-names-b",
+        "monotonicUsec": 102000000,
+        "realUsec": 1794000002250000,
+        "clockLabel": "14:02"
+      }
+    }
+  ]
+}
