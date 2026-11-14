@@ -106,8 +106,9 @@ pub struct RankingScan {
     pub previous_usage_usec: InsertionOrderedMap<u64>,
     /// The same, this scan; the order the leaves are counted in.
     pub current_usage_usec: InsertionOrderedMap<u64>,
-    /// Non-cache memory by cgroup path; the order the leaves are counted in.
-    pub memory_bytes_by_cgroup: InsertionOrderedMap<u64>,
+    /// Non-cache memory by cgroup path, as the gjs sampler holds it (a double); the order the
+    /// leaves are counted in.
+    pub memory_bytes_by_cgroup: InsertionOrderedMap<f64>,
     /// Time between the two readings, in microseconds.
     pub elapsed_usec: i64,
     /// CPUs counted as 100%.
@@ -390,7 +391,7 @@ pub fn rank_apps(
         add_to_group(
             &mut memory_by_group,
             &name_of_cgroup(cgroup_path),
-            memory_bytes as f64,
+            memory_bytes,
         );
     }
     if let Some(unattributed) = unattributed_cpu_usec(scan, &leaf_delta_usec_by_parent) {

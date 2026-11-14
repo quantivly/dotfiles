@@ -34,7 +34,7 @@ pub(super) struct AppScanReadings {
 struct RankingInputs {
     current_scan: AppScanReadings,
     parent_of_leaf: HashMap<String, String>,
-    memory_bytes_by_cgroup: InsertionOrderedMap<u64>,
+    memory_bytes_by_cgroup: InsertionOrderedMap<f64>,
     is_every_parent_fully_listed: bool,
 }
 

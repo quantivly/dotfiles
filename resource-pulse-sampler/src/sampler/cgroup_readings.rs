@@ -23,8 +23,8 @@ const NO_USAGE_USEC_LINE_TEXT: &str = "no usage_usec line";
 /// Every leaf a scan read, in the order listed.
 pub(super) struct LeafReadings {
     pub(super) usage_usec_by_cgroup: InsertionOrderedMap<u64>,
-    /// Memory net of page cache.
-    pub(super) memory_bytes_by_cgroup: InsertionOrderedMap<u64>,
+    /// Memory net of page cache, a double as in gjs.
+    pub(super) memory_bytes_by_cgroup: InsertionOrderedMap<f64>,
     /// The leaves that exist but could not be read.
     pub(super) unread_leaf_paths: Vec<String>,
 }
@@ -32,7 +32,7 @@ pub(super) struct LeafReadings {
 /// One leaf's readings.
 struct LeafReading {
     usage_usec: u64,
-    memory_bytes: u64,
+    memory_bytes: f64,
 }
 
 /// Why a leaf could not be read.
@@ -60,13 +60,24 @@ fn read_leaf_file<Parsed>(
     parse(&text).ok_or_else(|| LeafReadFailure::Counted(format!("cannot parse {}", path.display())))
 }
 
+/// `Math.max(0, memoryCurrentBytes - reclaimableBytes)`: each count becomes a double first (as the
+/// number gjs parses it is one), then the difference is taken on doubles, then a result that is not
+/// above 0 is 0. Differs from a `u64` subtraction only above 2^53 bytes, where the doubles round.
+/// Two finite doubles cannot make a `NaN`, which is the one input `Math.max` would not turn to 0.
+fn memory_net_of_page_cache(memory_current_bytes: u64, reclaimable_bytes: u64) -> f64 {
+    let difference_bytes = memory_current_bytes as f64 - reclaimable_bytes as f64;
+    if difference_bytes > 0.0 {
+        difference_bytes
+    } else {
+        0.0
+    }
+}
+
 /// One leaf's CPU usage and its memory net of page cache. `memory.stat` is read only when
 /// `memory.current` exceeds `APP_MEMORY_STAT_MIN_BYTES`; a smaller leaf is ranked uncorrected.
 ///
-/// The memory net of page cache is gjs's `Math.max(0, current - reclaimable)`, here a `u64`
-/// `saturating_sub` that the ranking converts to `f64`. The two agree for every count below 2^53
-/// bytes (8 PiB): gjs's doubles hold such counts exactly, so its subtraction is exact, a negative
-/// difference becomes 0 in both, and an exact difference converts to the same double.
+/// The memory net of page cache is gjs's `Math.max(0, current - reclaimable)`, computed on doubles
+/// as gjs computes it (see [`memory_net_of_page_cache`]).
 fn read_cgroup_leaf(
     reader: &dyn FileReader,
     leaf_path: &Path,
@@ -84,7 +95,7 @@ fn read_cgroup_leaf(
     if memory_current_bytes <= APP_MEMORY_STAT_MIN_BYTES {
         return Ok(LeafReading {
             usage_usec,
-            memory_bytes: memory_current_bytes,
+            memory_bytes: memory_current_bytes as f64,
         });
     }
     let reclaimable_bytes = read_leaf_file(
@@ -94,7 +105,7 @@ fn read_cgroup_leaf(
     )?;
     Ok(LeafReading {
         usage_usec,
-        memory_bytes: memory_current_bytes.saturating_sub(reclaimable_bytes),
+        memory_bytes: memory_net_of_page_cache(memory_current_bytes, reclaimable_bytes),
     })
 }
 
@@ -180,5 +191,28 @@ impl Sampler {
             }
         }
         leaf_readings
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory_net_of_page_cache;
+
+    /// `Math.max(0, parseInt(current, 10) - parseInt(reclaimable, 10))` run under gjs 1.88 (a probe
+    /// in the task's scratch directory) for each pair: 2^53 + 2 and 1 gives 2^53, and 2^53 + 3 and 1
+    /// gives 2^53 + 4, where a `u64` subtraction converted afterwards gives 2^53 + 2.
+    #[test]
+    fn the_difference_is_taken_on_doubles_as_gjs_takes_it() {
+        const GJS_RESULTS: [(u64, u64, f64); 2] = [
+            (9_007_199_254_740_994, 1, 9_007_199_254_740_992.0),
+            (9_007_199_254_740_995, 1, 9_007_199_254_740_996.0),
+        ];
+        for (current_bytes, reclaimable_bytes, gjs_bytes) in GJS_RESULTS {
+            assert_eq!(
+                memory_net_of_page_cache(current_bytes, reclaimable_bytes).to_bits(),
+                gjs_bytes.to_bits(),
+                "{current_bytes} - {reclaimable_bytes}"
+            );
+        }
     }
 }
