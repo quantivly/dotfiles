@@ -9,36 +9,61 @@
         "cpuBusyPercent": null,
         "cpuClusters": null,
         "memory": {
-          "usedBytes": 8192000000,
-          "totalBytes": 16384000000
+          "usedBytes": 11235183616,
+          "totalBytes": 16168255488
         },
         "swap": {
-          "zramUsedBytes": 0,
-          "zramRamBytes": 0,
-          "diskBytes": 0
+          "zramUsedBytes": 1264196608,
+          "zramRamBytes": 345678901,
+          "diskBytes": 3410944
         },
         "pressureAvg10": {
-          "cpu": 12.5,
-          "memory": 0,
-          "io": 0
+          "cpu": 3.07,
+          "memory": 0.41,
+          "io": 7.9
         },
         "apps": {
           "topCpu": null,
           "topMemory": {
-            "groupKey": "snap:firefox",
-            "name": "firefox",
-            "memoryBytes": 40000000
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 99351608
           },
           "cpuRanking": [],
           "memoryRanking": [
             {
-              "groupKey": "snap:firefox",
-              "name": "firefox",
-              "memoryBytes": 40000000
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "memoryBytes": 99351608
             },
             {
-              "groupKey": "unit:café",
-              "name": "café",
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "memoryBytes": 87013706
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "memoryBytes": 74675804
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Browser",
+              "memoryBytes": 62337902
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Editor",
+              "memoryBytes": 50000000
+            },
+            {
+              "groupKey": "app:cafÃ©",
+              "name": "Café Reader",
+              "memoryBytes": 15000000
+            },
+            {
+              "groupKey": "unit:cafÃ©",
+              "name": "cafÃ©",
               "memoryBytes": 5000000
             }
           ]
@@ -47,7 +72,7 @@
       },
       "appendedHistory": {
         "cpu": null,
-        "memory": 0.5
+        "memory": 0.6948915190224881
       }
     },
     {
@@ -56,63 +81,126 @@
       "snapshot": {
         "takenAtUsec": 102000000,
         "takenAtClockLabel": "14:02",
-        "cpuBusyPercent": 100,
-        "cpuClusters": null,
+        "cpuBusyPercent": 22.22222222222222,
+        "cpuClusters": {
+          "performancePercent": 30.508474576271187,
+          "efficiencyPercent": 13.793103448275861
+        },
         "memory": {
-          "usedBytes": 8192000000,
-          "totalBytes": 16384000000
+          "usedBytes": 10925368320,
+          "totalBytes": 16168255488
         },
         "swap": {
-          "zramUsedBytes": 0,
-          "zramRamBytes": 0,
-          "diskBytes": 0
+          "zramUsedBytes": 1274436608,
+          "zramRamBytes": 351278901,
+          "diskBytes": 3994624
         },
         "pressureAvg10": {
-          "cpu": 12.5,
-          "memory": 0,
-          "io": 0
+          "cpu": 4.19,
+          "memory": 1.37,
+          "io": 0.06
         },
         "apps": {
           "topCpu": {
-            "groupKey": "snap:firefox",
-            "name": "firefox",
-            "cpuPercent": 75
+            "groupKey": "pseudo:kernel",
+            "name": "kernel",
+            "cpuPercent": 95.2007625
           },
           "topMemory": {
-            "groupKey": "snap:firefox",
-            "name": "firefox",
-            "memoryBytes": 40000000
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 100459388
           },
           "cpuRanking": [
             {
-              "groupKey": "snap:firefox",
-              "name": "firefox",
-              "cpuPercent": 75
+              "groupKey": "pseudo:kernel",
+              "name": "kernel",
+              "cpuPercent": 95.2007625
             },
             {
-              "groupKey": "unit:café",
-              "name": "café",
-              "cpuPercent": 25
+              "groupKey": "app:cafÃ©",
+              "name": "Café Reader",
+              "cpuPercent": 27.500000000000004
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Editor",
+              "cpuPercent": 15.4320875
+            },
+            {
+              "groupKey": "unit:cafÃ©",
+              "name": "cafÃ©",
+              "cpuPercent": 13.750000000000002
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Browser",
+              "cpuPercent": 12.345675
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "cpuPercent": 5.7098625
+            },
+            {
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "cpuPercent": 1.2345625
+            },
+            {
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "cpuPercent": 0.41666250000000005
+            },
+            {
+              "groupKey": "pseudo:short-jobs",
+              "name": "short jobs",
+              "cpuPercent": 0
             }
           ],
           "memoryRanking": [
             {
-              "groupKey": "snap:firefox",
-              "name": "firefox",
-              "memoryBytes": 40000000
+              "groupKey": "docker:docker",
+              "name": "docker",
+              "memoryBytes": 100459388
             },
             {
-              "groupKey": "unit:café",
-              "name": "café",
-              "memoryBytes": 7000000
+              "groupKey": "unit:cron",
+              "name": "cron",
+              "memoryBytes": 88121486
+            },
+            {
+              "groupKey": "unit:herdr-server",
+              "name": "herdr agents",
+              "memoryBytes": 75783584
+            },
+            {
+              "groupKey": "app:com.example.Browser",
+              "name": "Browser",
+              "memoryBytes": 63445682
+            },
+            {
+              "groupKey": "app:org.example.Editor",
+              "name": "Editor",
+              "memoryBytes": 51107780
+            },
+            {
+              "groupKey": "app:cafÃ©",
+              "name": "Café Reader",
+              "memoryBytes": 15600000
+            },
+            {
+              "groupKey": "unit:cafÃ©",
+              "name": "cafÃ©",
+              "memoryBytes": 5200000
             }
           ]
         },
         "isComplete": true
       },
       "appendedHistory": {
-        "cpu": 1,
-        "memory": 0.5
+        "cpu": 0.2222222222222222,
+        "memory": 0.6757295694707914
       }
     }
   ],
@@ -124,55 +212,118 @@
     "snapshot": {
       "takenAtUsec": 102000000,
       "takenAtClockLabel": "14:02",
-      "cpuBusyPercent": 100,
-      "cpuClusters": null,
+      "cpuBusyPercent": 22.22222222222222,
+      "cpuClusters": {
+        "performancePercent": 30.508474576271187,
+        "efficiencyPercent": 13.793103448275861
+      },
       "memory": {
-        "usedBytes": 8192000000,
-        "totalBytes": 16384000000
+        "usedBytes": 10925368320,
+        "totalBytes": 16168255488
       },
       "swap": {
-        "zramUsedBytes": 0,
-        "zramRamBytes": 0,
-        "diskBytes": 0
+        "zramUsedBytes": 1274436608,
+        "zramRamBytes": 351278901,
+        "diskBytes": 3994624
       },
       "pressureAvg10": {
-        "cpu": 12.5,
-        "memory": 0,
-        "io": 0
+        "cpu": 4.19,
+        "memory": 1.37,
+        "io": 0.06
       },
       "apps": {
         "topCpu": {
-          "groupKey": "snap:firefox",
-          "name": "firefox",
-          "cpuPercent": 75
+          "groupKey": "pseudo:kernel",
+          "name": "kernel",
+          "cpuPercent": 95.2007625
         },
         "topMemory": {
-          "groupKey": "snap:firefox",
-          "name": "firefox",
-          "memoryBytes": 40000000
+          "groupKey": "docker:docker",
+          "name": "docker",
+          "memoryBytes": 100459388
         },
         "cpuRanking": [
           {
-            "groupKey": "snap:firefox",
-            "name": "firefox",
-            "cpuPercent": 75
+            "groupKey": "pseudo:kernel",
+            "name": "kernel",
+            "cpuPercent": 95.2007625
           },
           {
-            "groupKey": "unit:café",
-            "name": "café",
-            "cpuPercent": 25
+            "groupKey": "app:cafÃ©",
+            "name": "Café Reader",
+            "cpuPercent": 27.500000000000004
+          },
+          {
+            "groupKey": "app:org.example.Editor",
+            "name": "Editor",
+            "cpuPercent": 15.4320875
+          },
+          {
+            "groupKey": "unit:cafÃ©",
+            "name": "cafÃ©",
+            "cpuPercent": 13.750000000000002
+          },
+          {
+            "groupKey": "app:com.example.Browser",
+            "name": "Browser",
+            "cpuPercent": 12.345675
+          },
+          {
+            "groupKey": "unit:herdr-server",
+            "name": "herdr agents",
+            "cpuPercent": 5.7098625
+          },
+          {
+            "groupKey": "unit:cron",
+            "name": "cron",
+            "cpuPercent": 1.2345625
+          },
+          {
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "cpuPercent": 0.41666250000000005
+          },
+          {
+            "groupKey": "pseudo:short-jobs",
+            "name": "short jobs",
+            "cpuPercent": 0
           }
         ],
         "memoryRanking": [
           {
-            "groupKey": "snap:firefox",
-            "name": "firefox",
-            "memoryBytes": 40000000
+            "groupKey": "docker:docker",
+            "name": "docker",
+            "memoryBytes": 100459388
           },
           {
-            "groupKey": "unit:café",
-            "name": "café",
-            "memoryBytes": 7000000
+            "groupKey": "unit:cron",
+            "name": "cron",
+            "memoryBytes": 88121486
+          },
+          {
+            "groupKey": "unit:herdr-server",
+            "name": "herdr agents",
+            "memoryBytes": 75783584
+          },
+          {
+            "groupKey": "app:com.example.Browser",
+            "name": "Browser",
+            "memoryBytes": 63445682
+          },
+          {
+            "groupKey": "app:org.example.Editor",
+            "name": "Editor",
+            "memoryBytes": 51107780
+          },
+          {
+            "groupKey": "app:cafÃ©",
+            "name": "Café Reader",
+            "memoryBytes": 15600000
+          },
+          {
+            "groupKey": "unit:cafÃ©",
+            "name": "cafÃ©",
+            "memoryBytes": 5200000
           }
         ]
       },
@@ -181,11 +332,11 @@
     "histories": {
       "cpu": [
         null,
-        1
+        0.2222222222222222
       ],
       "memory": [
-        0.5,
-        0.5
+        0.6948915190224881,
+        0.6757295694707914
       ]
     }
   }
