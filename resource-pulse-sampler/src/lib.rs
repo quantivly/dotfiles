@@ -31,3 +31,4 @@ pub mod pressure;
 #[cfg(test)]
 mod quiet_panics;
 pub mod rate_limited_log;
+pub mod sampler;
