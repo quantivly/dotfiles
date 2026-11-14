@@ -9,6 +9,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::test_support::fixture_root;
 
 /// A text larger than a pipe's buffer (64 KiB), so a reader that stopped at a reported size, or at
 /// one buffer, would come back short.
@@ -68,13 +69,6 @@ fn assert_not_root() {
         0,
         "this row needs an unreadable file: do not run it as root"
     );
-}
-
-/// The fixture roots the gjs rows read.
-fn fixture_root(root_name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../gnome-shell/tests/fixtures")
-        .join(root_name)
 }
 
 /// The real reader's text of a file holding these bytes.

@@ -35,3 +35,5 @@ mod quiet_panics;
 pub mod rate_limited_log;
 pub mod sampler;
 pub mod service;
+#[cfg(test)]
+mod test_support;

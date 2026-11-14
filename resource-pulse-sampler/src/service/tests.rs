@@ -10,12 +10,11 @@
 use super::*;
 use crate::apps::{AppRanking, CpuRankEntry, MemoryRankEntry};
 use crate::memory::{MemoryUsage, SwapSummary};
-use crate::ports::{Clock, FileSystemLister, FileSystemReader};
+use crate::ports::{FileSystemLister, FileSystemReader};
 use crate::sampler::{AppendedHistory, ClusterPercents, PressureAvg10, SamplerPorts};
+use crate::test_support::{fixture_root, history_of, SettableClock};
 use serde_json::{json, Value};
 use std::cell::Cell;
-use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 const SERVICE_STARTED_AT_USEC: u64 = 1_794_000_000_000_000;
@@ -23,35 +22,9 @@ const SAMPLED_AT_USEC: u64 = 1_794_000_002_000_000;
 /// How much later a second publish happens, in real microseconds.
 const LATER_PUBLISH_OFFSET_USEC: u64 = 2_000_000;
 const FIRST_TICK_USEC: u64 = 100_000_000;
-const HISTORY_CAPACITY: usize = 150;
-const CLOCK_LABEL: &str = "14:02";
 /// The first sender of a row, and the second: unique bus names look like this.
 const FIRST_SENDER: &str = ":1.10";
 const SECOND_SENDER: &str = ":1.11";
-
-/// A clock a row moves, shared with the sampler that reads it.
-struct SharedClock {
-    monotonic_usec: Rc<Cell<u64>>,
-}
-
-impl Clock for SharedClock {
-    /// The time the row set.
-    fn monotonic_usec(&self) -> u64 {
-        self.monotonic_usec.get()
-    }
-
-    /// The same label always.
-    fn clock_label(&self) -> Result<String, String> {
-        Ok(CLOCK_LABEL.to_string())
-    }
-}
-
-/// The fixture roots the gjs rows read.
-fn fixture_root(root_name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../gnome-shell/tests/fixtures")
-        .join(root_name)
-}
 
 /// A sampler over `root-a` on a clock the row moves, and that clock.
 fn fixture_sampler() -> (Sampler, Rc<Cell<u64>>) {
@@ -59,9 +32,7 @@ fn fixture_sampler() -> (Sampler, Rc<Cell<u64>>) {
     let ports = SamplerPorts {
         reader: Box::new(FileSystemReader),
         lister: Box::new(FileSystemLister),
-        clock: Box::new(SharedClock {
-            monotonic_usec: Rc::clone(&monotonic_usec),
-        }),
+        clock: Box::new(SettableClock::with_fixed_label(Rc::clone(&monotonic_usec))),
         resolve_app_name: Box::new(|_| None),
         log: Box::new(|_| {}),
     };
@@ -164,15 +135,6 @@ fn reveal_snapshot_json() -> Value {
     snapshot["apps"]["topCpu"] =
         json!({"groupKey": "herdr-server", "name": "herdr agents", "cpuPercent": 40});
     snapshot
-}
-
-/// A history holding these values, oldest first.
-fn history_of(values: &[Option<f64>]) -> RingBuffer {
-    let mut history = RingBuffer::new(NonZeroUsize::new(HISTORY_CAPACITY).unwrap());
-    for value in values {
-        history.push(*value);
-    }
-    history
 }
 
 /// row: service D-Bus: before any sample GetState answers protocol 1, sequence 0, the start time and the histories

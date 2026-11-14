@@ -80,21 +80,7 @@ mod tests {
 
     use super::*;
     use crate::quiet_panics::QuietPanics;
-
-    /// A clock that reads what the test sets; its label is never asked for.
-    struct SetClock(Cell<u64>);
-
-    impl Clock for SetClock {
-        /// The time the test set.
-        fn monotonic_usec(&self) -> u64 {
-            self.0.get()
-        }
-
-        /// Never asked for by the log.
-        fn clock_label(&self) -> Result<String, String> {
-            Err("unused".to_string())
-        }
-    }
+    use crate::test_support::SettableClock;
 
     /// A clock that panics, as a broken port might.
     struct PanickingClock;
@@ -144,10 +130,10 @@ mod tests {
             (1, "x", None, Some("resource-pulse: x")),
             (1, "y", None, None),
         ];
-        let clock = SetClock(Cell::new(0));
+        let clock = SettableClock::with_fixed_label(Rc::new(Cell::new(0)));
         let (mut log, written) = recording_log();
         for (now_usec, message, template_key, expected_line) in steps {
-            clock.0.set(now_usec);
+            clock.set(now_usec);
             let lines_before = written.borrow().len();
             log.log(&clock, message, template_key.unwrap_or(message));
             let new_line = written.borrow().get(lines_before).cloned();
@@ -166,7 +152,7 @@ mod tests {
         let _quiet_panics = QuietPanics::on_this_thread();
         let (mut log, written) = recording_log();
         log.log(&PanickingClock, "lost", "lost");
-        let clock = SetClock(Cell::new(0));
+        let clock = SettableClock::with_fixed_label(Rc::new(Cell::new(0)));
         log.log(&clock, "lost", "lost");
         let mut panicking_log = RateLimitedLog::new(Box::new(|_| panic!("writer exploded")));
         panicking_log.log(&clock, "dropped", "dropped");

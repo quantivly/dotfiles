@@ -9,12 +9,11 @@ use super::*;
 use crate::apps::{AppRanking, CpuRankEntry, MemoryRankEntry};
 use crate::memory::{MemoryUsage, SwapSummary};
 use crate::sampler::{AppendedHistory, ClusterPercents, PressureAvg10};
-use std::num::NonZeroUsize;
+use crate::test_support::history_of;
 
 const SEQUENCE: u64 = 1;
 const SAMPLED_AT_USEC: u64 = 1_794_000_002_000_000;
 const SERVICE_STARTED_AT_USEC: u64 = 1_794_000_000_000_000;
-const HISTORY_CAPACITY: usize = 150;
 
 /// The gjs text of a Sample holding `tick_snapshot`, sequence 1, and an appended history.
 const GJS_TICK_SAMPLE_TEXT: &str = r#"{"sequence":1,"sampledAtUsec":1794000002000000,"snapshot":{"takenAtUsec":123000000,"takenAtClockLabel":"14:02","cpuBusyPercent":50,"cpuClusters":{"performancePercent":60.5,"efficiencyPercent":20},"memory":{"usedBytes":8000000000,"totalBytes":32000000000},"swap":{"zramUsedBytes":0,"zramRamBytes":0,"diskBytes":0},"pressureAvg10":{"cpu":0.5,"memory":0,"io":null},"apps":{"topCpu":{"groupKey":"app:org.example.Editor","name":"Editor","cpuPercent":31.25},"topMemory":{"groupKey":"app:org.example.Editor","name":"Editor","memoryBytes":2000000000},"cpuRanking":[{"groupKey":"app:org.example.Editor","name":"Editor","cpuPercent":31.25}],"memoryRanking":[{"groupKey":"app:org.example.Editor","name":"Editor","memoryBytes":2000000000}]},"isComplete":true},"appendedHistory":{"cpu":0.5,"memory":0.25}}"#;
@@ -100,14 +99,6 @@ fn no_data_snapshot() -> Snapshot {
         apps: None,
         is_complete: false,
     }
-}
-
-fn history_of(values: &[Option<f64>]) -> RingBuffer {
-    let mut history = RingBuffer::new(NonZeroUsize::new(HISTORY_CAPACITY).unwrap());
-    for value in values {
-        history.push(*value);
-    }
-    history
 }
 
 /// The text of the state of a service with the given snapshot and histories.

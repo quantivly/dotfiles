@@ -17,9 +17,8 @@ use std::rc::Rc;
 
 use super::{Publish, ResolveAppName, Sampler, SamplerPorts, Snapshot};
 use crate::apps::CpuRankEntry;
-use crate::ports::{
-    Clock, DirectoryLister, FileReader, FileSystemLister, FileSystemReader, ReadFailure,
-};
+use crate::ports::{DirectoryLister, FileReader, FileSystemLister, FileSystemReader, ReadFailure};
+use crate::test_support::{fixture_root, SettableClock};
 
 /// The clock label every row's clock gives unless the row says otherwise.
 const FIXTURE_CLOCK_LABEL: &str = "14:02";
@@ -51,31 +50,6 @@ const SAMPLE_FIXTURE_FILES: [&str; 10] = [
 ];
 /// The tick of the first interval scan with no watch held: the warm-up at tick 1, then 30 ticks.
 const FIRST_UNWATCHED_INTERVAL_SCAN_TICK: u64 = 31;
-
-/// The absolute path of a fixture root.
-fn fixture_root(root_name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../gnome-shell/tests/fixtures")
-        .join(root_name)
-}
-
-/// A clock whose time the row sets and whose label comes from the row.
-struct TestClock {
-    now_usec: Rc<Cell<u64>>,
-    clock_label: Box<dyn Fn() -> Result<String, String>>,
-}
-
-impl Clock for TestClock {
-    /// The time the row set.
-    fn monotonic_usec(&self) -> u64 {
-        self.now_usec.get()
-    }
-
-    /// The label the row's source gives.
-    fn clock_label(&self) -> Result<String, String> {
-        (self.clock_label)()
-    }
-}
 
 /// A label source that always gives the fixture's label.
 fn fixture_clock_label() -> Box<dyn Fn() -> Result<String, String>> {
@@ -194,10 +168,7 @@ impl SamplerSetup {
         let ports = SamplerPorts {
             reader: self.reader,
             lister: self.lister,
-            clock: Box::new(TestClock {
-                now_usec: Rc::clone(&now_usec),
-                clock_label: self.clock_label,
-            }),
+            clock: Box::new(SettableClock::new(Rc::clone(&now_usec), self.clock_label)),
             resolve_app_name: self.resolve_app_name,
             log: Box::new(move |line| log_sink.borrow_mut().push(line.to_string())),
         };
