@@ -1,9 +1,12 @@
 broken-falls-through.desktop	"Valid Behind Broken"
 deep-one-two.desktop	"Deep One Two"
+exec-bare-sh.desktop
+exec-cwd-tool.desktop
 exec-empty.desktop	"Exec Empty"
 exec-missing.desktop
 exec-present.desktop	"Exec Present"
 exec-quoted.desktop	"Exec Quoted"
+exec-relative-subdir.desktop	"Exec Relative Subdir"
 exec-unbalanced.desktop
 gettext-domain.desktop	"Own Name In Xx"
 ghost.desktop
@@ -42,6 +45,8 @@ parse-group-twice.desktop	"Group Twice Again"
 parse-no-group.desktop
 parse-wrong-start-group.desktop
 path-bad-escape.desktop
+path-falls-back-to-path.desktop	"Path Falls Back To PATH"
+path-sh-relative.desktop	"Path Relative Exec"
 plain
 ../plain.desktop
 plain.desktop	"Plain App"

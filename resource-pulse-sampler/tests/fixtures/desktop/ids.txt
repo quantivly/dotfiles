@@ -1,9 +1,12 @@
 broken-falls-through.desktop
 deep-one-two.desktop
+exec-bare-sh.desktop
+exec-cwd-tool.desktop
 exec-empty.desktop
 exec-missing.desktop
 exec-present.desktop
 exec-quoted.desktop
+exec-relative-subdir.desktop
 exec-unbalanced.desktop
 gettext-domain.desktop
 ghost.desktop
@@ -42,6 +45,8 @@ parse-group-twice.desktop
 parse-no-group.desktop
 parse-wrong-start-group.desktop
 path-bad-escape.desktop
+path-falls-back-to-path.desktop
+path-sh-relative.desktop
 plain
 ../plain.desktop
 plain.desktop

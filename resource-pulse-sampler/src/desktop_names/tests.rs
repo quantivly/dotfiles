@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::{DesktopNameLookup, MAX_DESKTOP_FILE_BYTES};
@@ -18,6 +19,8 @@ use super::{DesktopNameLookup, MAX_DESKTOP_FILE_BYTES};
 const LOOKUP_TIME_LIMIT: Duration = Duration::from_millis(100);
 /// The size of the largest odd file: 20 MiB.
 const HUGE_FILE_BYTES: u64 = 20 * 1024 * 1024;
+/// The dash-separated segments of the id that probes a layout of symlinks to itself.
+const SYMLINK_ID_SEGMENT_COUNT: usize = 60;
 /// What `get_name` answers for a file with no usable `Name`.
 const UNNAMED: &str = "Unnamed";
 /// A valid file's text, to which the bound rows add bytes.
@@ -54,6 +57,22 @@ const XX_YY_WITH_CODESET_AND_MODIFIER: LanguageSet = LanguageSet {
     expected_file: "expected-xx-yy-utf8-mod.tsv",
 };
 
+/// What `PATH` is in a reference row.
+#[derive(Clone, Copy)]
+enum SearchPath {
+    /// The fixtures' own `bin` directory.
+    FixtureBin,
+    /// Not set: GLib then searches `/bin:/usr/bin:.`.
+    Unset,
+    /// One empty entry: GLib then looks in the current directory.
+    EmptyEntry,
+}
+
+/// The reference rows run with the fixtures directory as the current directory, because a
+/// relative program is looked for there; the current directory is the process's, so they take
+/// turns.
+static CURRENT_DIRECTORY_LOCK: Mutex<()> = Mutex::new(());
+
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/desktop")
 }
@@ -65,7 +84,10 @@ fn environment_of(table: HashMap<String, String>) -> impl Fn(&str) -> Option<Str
 
 /// The environment the fixtures are read under: the fixture directories, a `PATH` of the
 /// fixtures' `bin`, and the language variables of `language_set`.
-fn fixture_environment(language_set: &LanguageSet) -> HashMap<String, String> {
+fn fixture_environment(
+    language_set: &LanguageSet,
+    search_path: SearchPath,
+) -> HashMap<String, String> {
     let fixtures = fixtures();
     let mut table = HashMap::new();
     table.insert(
@@ -80,7 +102,15 @@ fn fixture_environment(language_set: &LanguageSet) -> HashMap<String, String> {
             fixtures.join("system-b").display()
         ),
     );
-    table.insert("PATH".into(), fixtures.join("bin").display().to_string());
+    match search_path {
+        SearchPath::FixtureBin => {
+            table.insert("PATH".into(), fixtures.join("bin").display().to_string());
+        }
+        SearchPath::Unset => {}
+        SearchPath::EmptyEntry => {
+            table.insert("PATH".into(), ":".into());
+        }
+    }
     for (variable, value) in LANGUAGE_VARIABLES.iter().zip(language_set.values) {
         table.insert((*variable).into(), value.into());
     }
@@ -88,7 +118,11 @@ fn fixture_environment(language_set: &LanguageSet) -> HashMap<String, String> {
 }
 
 fn fixture_lookup(language_set: &LanguageSet) -> DesktopNameLookup {
-    let table = fixture_environment(language_set);
+    fixture_lookup_with(language_set, SearchPath::FixtureBin)
+}
+
+fn fixture_lookup_with(language_set: &LanguageSet, search_path: SearchPath) -> DesktopNameLookup {
+    let table = fixture_environment(language_set, search_path);
     DesktopNameLookup::from_environment(&environment_of(table), &fixtures().join("home-dir"))
 }
 
@@ -113,8 +147,28 @@ fn printed_answers(lookup: &DesktopNameLookup) -> String {
 }
 
 fn assert_reference_agrees(language_set: &LanguageSet) {
-    let expected = fs::read_to_string(fixtures().join(language_set.expected_file)).unwrap();
-    assert_eq!(printed_answers(&fixture_lookup(language_set)), expected);
+    assert_reference_agrees_with(
+        language_set,
+        SearchPath::FixtureBin,
+        language_set.expected_file,
+    );
+}
+
+/// Asserts the lookup prints the file of answers, from the fixtures directory as the current one.
+fn assert_reference_agrees_with(
+    language_set: &LanguageSet,
+    search_path: SearchPath,
+    expected_file: &str,
+) {
+    let expected = fs::read_to_string(fixtures().join(expected_file)).unwrap();
+    let _turn = CURRENT_DIRECTORY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(fixtures()).unwrap();
+    let printed = printed_answers(&fixture_lookup_with(language_set, search_path));
+    std::env::set_current_dir(original_directory).unwrap();
+    assert_eq!(printed, expected);
 }
 
 /// A temporary directory removed on drop, for the odd files a repository cannot hold.
@@ -738,4 +792,33 @@ fn the_first_word_of_a_command_line_is_read_as_the_shell_reads_it() {
     assert_eq!(first_word(""), None);
     assert_eq!(first_word("   \t "), None);
     assert_eq!(first_word("# only a comment"), None);
+}
+
+#[test]
+fn an_id_of_many_dashes_over_symlinked_directories_is_a_miss_in_time() {
+    let directory = TemporaryDirectory::new("dash-symlinks");
+    let applications = directory.applications();
+    // Two links to the directory itself: every dash can be read as a step into either of them.
+    symlink(".", applications.join("a")).unwrap();
+    symlink(".", applications.join("a-a")).unwrap();
+    let many_segments = "a-".repeat(SYMLINK_ID_SEGMENT_COUNT);
+    assert_miss_in_time(&directory.lookup(), &format!("{many_segments}x.desktop"));
+}
+
+#[test]
+fn the_reference_agrees_when_path_is_unset_and_the_default_search_path_applies() {
+    // `exec-bare-sh.desktop` (`Exec=sh`) is found only through `/bin:/usr/bin:.`, and the entries
+    // that need the fixtures' bin are not found.
+    assert_reference_agrees_with(&ENGLISH, SearchPath::Unset, "expected-english-no-path.tsv");
+}
+
+#[test]
+fn the_reference_agrees_when_path_has_an_empty_entry_that_means_the_current_directory() {
+    // `exec-cwd-tool.desktop` (`Exec=cwd-tool`) is found only by the empty entry, in the
+    // fixtures directory.
+    assert_reference_agrees_with(
+        &ENGLISH,
+        SearchPath::EmptyEntry,
+        "expected-english-empty-path-entry.tsv",
+    );
 }

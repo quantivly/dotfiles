@@ -75,6 +75,9 @@
 //! - **Bounded work** (the design's "bounded" rule, not GLib's): no directory is listed and no
 //!   tree is walked; at most one file is opened per data directory; and a file longer than
 //!   [`MAX_DESKTOP_FILE_BYTES`] is a miss where GLib would read it all.
+//! - **Bounded probes**: one lookup makes at most [`MAX_PATH_PROBES`] `stat` calls looking for
+//!   the id's file, over all directories; at the bound it is a miss. GLib lists each
+//!   directory once and cannot run away, but a search by id can, on symlinked directories.
 //! - **Which of two files wins** when one directory holds both `a-b.desktop` and `a/b.desktop`
 //!   is, in GLib, whichever its directory listing gave last. Here the file with the whole id
 //!   for a name wins, then the subdirectory with the shortest prefix.
@@ -101,6 +104,13 @@ use shell::first_word;
 
 /// The most bytes of one `.desktop` file that are read; a longer file is a miss.
 pub const MAX_DESKTOP_FILE_BYTES: u64 = 1024 * 1024;
+/// The most `stat` calls one [`DesktopNameLookup::name_of`] call may make looking for files,
+/// across all data directories. An id such as `a-b-c.desktop` needs a handful (one per dash, per
+/// directory level, and GLib's layouts nest ids one or two directories deep), so 256 leaves
+/// room for ids of a dozen dashes in a dozen data directories. Symlinks to a directory from
+/// inside itself can make every dash a branch, which without this bound takes minutes; at the
+/// bound the lookup is a miss.
+const MAX_PATH_PROBES: usize = 256;
 /// What GLib searches when `XDG_DATA_DIRS` is unset or empty.
 const DEFAULT_SYSTEM_DATA_DIRS: &str = "/usr/local/share/:/usr/share/";
 /// Where under `$HOME` the user's data directory is when `XDG_DATA_HOME` is unset or empty.
@@ -168,8 +178,10 @@ impl DesktopNameLookup {
         if !is_possible_desktop_id(desktop_id) {
             return None;
         }
+        let mut probes_left = MAX_PATH_PROBES;
         for data_directory in &self.data_directories {
-            let Some(file_path) = find_file_for_id(data_directory, desktop_id) else {
+            let Some(file_path) = find_file_for_id(data_directory, desktop_id, &mut probes_left)
+            else {
                 continue;
             };
             // A file that does not load does not mask the next directory (rule 3).
@@ -238,11 +250,15 @@ fn is_possible_desktop_id(desktop_id: &str) -> bool {
 /// The file `remaining` names under `directory` (rule 2): an entry of that name when it ends
 /// in `.desktop` (whatever it is), else the same search in each subdirectory whose name is a
 /// prefix of `remaining` up to a `-`, shortest prefix first. A name ending in `.desktop` is
-/// never a subdirectory to enter.
-fn find_file_for_id(directory: &Path, remaining: &str) -> Option<PathBuf> {
+/// never a subdirectory to enter. Every `stat` spends one of `probes_left`; with none left the
+/// search ends and finds nothing.
+fn find_file_for_id(directory: &Path, remaining: &str, probes_left: &mut usize) -> Option<PathBuf> {
     let whole_name = directory.join(remaining);
-    if remaining.ends_with(DESKTOP_FILE_SUFFIX) && fs::symlink_metadata(&whole_name).is_ok() {
-        return Some(whole_name);
+    if remaining.ends_with(DESKTOP_FILE_SUFFIX) {
+        spend_probe(probes_left)?;
+        if fs::symlink_metadata(&whole_name).is_ok() {
+            return Some(whole_name);
+        }
     }
     remaining.match_indices('-').find_map(|(dash_position, _)| {
         let subdirectory_name = remaining.get(..dash_position)?;
@@ -250,15 +266,23 @@ fn find_file_for_id(directory: &Path, remaining: &str) -> Option<PathBuf> {
         let is_enterable = !subdirectory_name.is_empty()
             && !matches!(subdirectory_name, "." | "..")
             && !subdirectory_name.ends_with(DESKTOP_FILE_SUFFIX);
+        if !is_enterable {
+            return None;
+        }
         let subdirectory = directory.join(subdirectory_name);
-        let is_directory =
-            is_enterable && fs::metadata(&subdirectory).is_ok_and(|metadata| metadata.is_dir());
-        if is_directory {
-            find_file_for_id(&subdirectory, rest)
+        spend_probe(probes_left)?;
+        if fs::metadata(&subdirectory).is_ok_and(|metadata| metadata.is_dir()) {
+            find_file_for_id(&subdirectory, rest, probes_left)
         } else {
             None
         }
     })
+}
+
+/// Takes one probe from `probes_left`; `None` when none is left.
+fn spend_probe(probes_left: &mut usize) -> Option<()> {
+    *probes_left = probes_left.checked_sub(1)?;
+    Some(())
 }
 
 /// The bytes of a regular file of at most [`MAX_DESKTOP_FILE_BYTES`], else `None`: a file that
