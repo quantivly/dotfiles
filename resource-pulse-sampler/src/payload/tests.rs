@@ -181,38 +181,86 @@ fn payload_the_state_is_compact_with_its_four_top_level_numbers_before_the_snaps
     }
 }
 
+/// Every key of a Sample whose snapshot is `tick_snapshot` with an appended history, in the order
+/// of the typedefs in `lib/protocol.js` and `service/sampler.js`: the Sample's own, the snapshot's,
+/// then each nested object's (`cpuClusters`, `memory`, `swap`, `pressureAvg10`, the ranking and
+/// its entries, `appendedHistory`), each nested object's keys straight after its own.
+const SAMPLE_KEYS_IN_TYPEDEF_ORDER: [&str; 39] = [
+    "sequence",
+    "sampledAtUsec",
+    "snapshot",
+    "takenAtUsec",
+    "takenAtClockLabel",
+    "cpuBusyPercent",
+    "cpuClusters",
+    "performancePercent",
+    "efficiencyPercent",
+    "memory",
+    "usedBytes",
+    "totalBytes",
+    "swap",
+    "zramUsedBytes",
+    "zramRamBytes",
+    "diskBytes",
+    "pressureAvg10",
+    "cpu",
+    "memory",
+    "io",
+    "apps",
+    "topCpu",
+    "groupKey",
+    "name",
+    "cpuPercent",
+    "topMemory",
+    "groupKey",
+    "name",
+    "memoryBytes",
+    "cpuRanking",
+    "groupKey",
+    "name",
+    "cpuPercent",
+    "memoryRanking",
+    "groupKey",
+    "name",
+    "memoryBytes",
+    "isComplete",
+    "appendedHistory",
+];
+/// What follows the last of [`SAMPLE_KEYS_IN_TYPEDEF_ORDER`]: the appended history's own two keys.
+const APPENDED_HISTORY_KEYS: [&str; 2] = ["cpu", "memory"];
+
 #[test]
-fn the_snapshots_keys_are_in_the_typedefs_order() {
+fn every_key_of_a_sample_is_in_the_typedefs_order() {
     let text = sample_payload(
         &Publish {
             snapshot: tick_snapshot(),
-            appended_history: None,
+            appended_history: Some(AppendedHistory {
+                cpu: Some(0.5),
+                memory: Some(0.25),
+            }),
         },
         SEQUENCE,
         SAMPLED_AT_USEC,
     );
-    let key_order = [
-        r#""sequence":"#,
-        r#""sampledAtUsec":"#,
-        r#""snapshot":"#,
-        r#""takenAtUsec":"#,
-        r#""takenAtClockLabel":"#,
-        r#""cpuBusyPercent":"#,
-        r#""cpuClusters":"#,
-        r#""memory":"#,
-        r#""swap":"#,
-        r#""pressureAvg10":"#,
-        r#""apps":"#,
-        r#""isComplete":"#,
-        r#""appendedHistory":"#,
-    ];
-    let positions: Vec<usize> = key_order
-        .iter()
-        .map(|key| text.find(key).unwrap())
+    let expected_keys: Vec<&str> = SAMPLE_KEYS_IN_TYPEDEF_ORDER
+        .into_iter()
+        .chain(APPENDED_HISTORY_KEYS)
         .collect();
-    let mut sorted_positions = positions.clone();
-    sorted_positions.sort_unstable();
-    assert_eq!(positions, sorted_positions, "keys out of order in {text}");
+    // Each key is looked for after the one before it, so a key written earlier than its place finds
+    // nothing after its predecessor, and one written twice or not at all changes the count below.
+    let mut search_from = 0;
+    for key in &expected_keys {
+        let quoted_key = format!("\"{key}\":");
+        let offset = text[search_from..].find(&quoted_key).unwrap_or_else(|| {
+            panic!("{key} is missing or out of order after byte {search_from} in {text}")
+        });
+        search_from += offset + quoted_key.len();
+    }
+    assert_eq!(
+        text.matches("\":").count(),
+        expected_keys.len(),
+        "the Sample has keys the typedefs do not list: {text}"
+    );
 }
 
 #[test]
